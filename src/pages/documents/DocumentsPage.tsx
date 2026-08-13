@@ -15,7 +15,11 @@ import {
 } from "@/components/sci/icons";
 import dayjs from "dayjs";
 import "dayjs/locale/uk";
-import { api, type BackendPersonDocument } from "../../api";
+import {
+  api,
+  type BackendPersonDocument,
+  type BackendPersonnelOverviewRow,
+} from "../../api";
 import { buildDocumentRoute } from "../../app/navigation";
 import type { EjournalPreviewRow } from "../ejournal/ejournalTypes";
 import {
@@ -79,6 +83,11 @@ type DocumentFiles = {
   ubdScans?: UbdScanFile[];
 };
 
+type PersonStatusSnapshot = {
+  label: string;
+  detail: string;
+};
+
 type DocumentRouteState = {
   requestedPersonId: string;
   requestedDocumentType: string;
@@ -116,6 +125,53 @@ const salaryWorkflowSteps = [
   {
     key: "sent",
     title: "Відправили",
+  },
+  {
+    key: "received",
+    title: "Отримали",
+  },
+  {
+    key: "handed",
+    title: "Вручили",
+  },
+];
+
+const ubdWorkflowSteps = [
+  {
+    key: "account",
+    title: "Фото 3x4 та ІНН",
+  },
+  {
+    key: "document",
+    title: "Заповнили рапорт",
+  },
+  {
+    key: "print",
+    title: "Роздрукували рапорт",
+  },
+  {
+    key: "sign",
+    title: "Надали підпис службовцю та командиру",
+  },
+  {
+    key: "scan",
+    title: "Скани паспорта, ІНН та статусу",
+  },
+  {
+    key: "ready",
+    title: "Готово до відправки",
+  },
+  {
+    key: "sent",
+    title: "Відправили",
+  },
+  {
+    key: "received",
+    title: "Отримали",
+  },
+  {
+    key: "handed",
+    title: "Вручили",
   },
 ];
 
@@ -282,6 +338,62 @@ const mergeDocumentFiles = (value: unknown): DocumentFiles =>
     ? { ...(value as DocumentFiles) }
     : {};
 
+const compactText = (value: unknown) =>
+  String(value ?? "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+const createPersonStatusSnapshot = (
+  row: EjournalPreviewRow | null,
+  summary: ReturnType<typeof buildPersonSummary>,
+): PersonStatusSnapshot => {
+  const rawStatus =
+    getPersonFieldValue(row, ["статус"]) ||
+    getPersonFieldValue(row, ["причина", "статус"]) ||
+    getPersonFieldValue(row, ["в", "якому", "статусі"]) ||
+    "";
+  const detail =
+    summary.location ||
+    getPersonFieldValue(row, ["примітка"]) ||
+    getPersonFieldValue(row, ["коментар"]) ||
+    "";
+
+  return {
+    label: compactText(rawStatus || detail || "—"),
+    detail: compactText(detail),
+  };
+};
+
+const overviewStatusSnapshot = (
+  row: BackendPersonnelOverviewRow,
+): PersonStatusSnapshot => ({
+  label: compactText(row.place || row.statusLabel || row.unit || "—"),
+  detail: compactText(
+    [
+      row.statusLabel,
+      row.place,
+      row.plannedReturn ? `до ${row.plannedReturn}` : "",
+    ]
+      .filter(Boolean)
+      .join(" · "),
+  ),
+});
+
+const readDocumentPersonStatus = (
+  document: BackendPersonDocument,
+  overviewById: Record<string, PersonStatusSnapshot>,
+) => {
+  const fields = document.fields || {};
+  const fromFields =
+    typeof fields.personStatus === "string"
+      ? fields.personStatus
+      : typeof fields.serviceStatus === "string"
+        ? fields.serviceStatus
+        : "";
+  const fromOverview = overviewById[document.personExternalId];
+  return compactText(fromOverview?.label || fromFields || "—");
+};
+
 const salaryDocumentTypeLabel = (type: string) =>
   type === "salaryPowerAttorney"
     ? "Довіреність зарплати"
@@ -294,13 +406,22 @@ const workflowStatusLabel = (status?: string | null) =>
   status ||
   "статус не заданий";
 
+const documentWorkflowSteps = (type?: string | null) =>
+  type === "ubdReport" ? ubdWorkflowSteps : salaryWorkflowSteps;
+
+const documentWorkflowStatusLabel = (document: BackendPersonDocument) =>
+  documentWorkflowSteps(document.type).find(
+    (step) => step.key === document.status,
+  )?.title || workflowStatusLabel(document.status);
+
 const getDocumentProgressPercent = (document: BackendPersonDocument) => {
   const workflow = mergeSalaryWorkflow(document.workflow);
-  const index = salaryWorkflowSteps.findIndex(
+  const steps = documentWorkflowSteps(document.type);
+  const index = steps.findIndex(
     (step) => step.key === (document.status || workflow.currentStatus),
   );
   const resolvedIndex = Math.max(0, index);
-  return Math.round(((resolvedIndex + 1) / salaryWorkflowSteps.length) * 100);
+  return Math.round(((resolvedIndex + 1) / steps.length) * 100);
 };
 
 const getDocumentPersonName = (document: BackendPersonDocument) => {
@@ -532,6 +653,9 @@ export function DocumentsPage({
   const [allPersonDocuments, setAllPersonDocuments] = useState<
     BackendPersonDocument[]
   >([]);
+  const [personStatusById, setPersonStatusById] = useState<
+    Record<string, PersonStatusSnapshot>
+  >({});
   const [isLoadingDocumentJournal, setIsLoadingDocumentJournal] =
     useState(false);
 
@@ -592,6 +716,9 @@ export function DocumentsPage({
   const workflowKey = useMemo(
     () => personWorkflowKey(selectedPerson, summary),
     [selectedPerson, summary],
+  );
+  const activeWorkflowSteps = documentWorkflowSteps(
+    selectedDocument?.type || mode,
   );
   const targetDocumentType: DocumentMode =
     requestedDocumentType === "ubd-report"
@@ -674,8 +801,18 @@ export function DocumentsPage({
     setIsLoadingDocumentJournal(true);
     setDocumentMessage(message);
     try {
-      const documents = await api.listAllPersonDocuments();
+      const [documents, overview] = await Promise.all([
+        api.listAllPersonDocuments(),
+        api.getPersonnelOverview().catch(() => null),
+      ]);
       setAllPersonDocuments(documents);
+      setPersonStatusById(
+        Object.fromEntries(
+          (overview?.rows ?? [])
+            .filter((row) => row.externalId)
+            .map((row) => [row.externalId, overviewStatusSnapshot(row)]),
+        ),
+      );
       setDocumentMessage(`Документів у журналі: ${documents.length}.`);
     } catch (error) {
       setDocumentMessage(
@@ -695,11 +832,13 @@ export function DocumentsPage({
   }, [isPersonDocumentMode, loadDocumentJournal]);
   const currentStepIndex = Math.max(
     0,
-    salaryWorkflowSteps.findIndex((step) => step.key === workflow.currentStatus),
+    activeWorkflowSteps.findIndex(
+      (step) => step.key === workflow.currentStatus,
+    ),
   );
   const completedCount = currentStepIndex + 1;
   const progressPercent = Math.round(
-    (completedCount / salaryWorkflowSteps.length) * 100,
+    (completedCount / activeWorkflowSteps.length) * 100,
   );
 
   const updateDefaultField = (key: DefaultDocumentFieldKey, value: string) => {
@@ -730,6 +869,10 @@ export function DocumentsPage({
   const createSalaryPowerAttorneyDocument = async () => {
     if (!personExternalId) return;
     const defaults = createSalaryFields(selectedPerson, summary);
+    const fieldPayload = {
+      ...defaults,
+      personStatus: createPersonStatusSnapshot(selectedPerson, summary).label,
+    };
     const nextWorkflow = createEmptyWorkflow();
     setIsSavingDocument(true);
     setDocumentMessage("Створюю документ службовця...");
@@ -738,7 +881,7 @@ export function DocumentsPage({
         type: "salaryPowerAttorney",
         title: `Довіреність зарплати · ${dayjs().format("DD.MM.YYYY HH:mm")}`,
         status: nextWorkflow.currentStatus,
-        fields: defaults as unknown as Record<string, unknown>,
+        fields: fieldPayload as unknown as Record<string, unknown>,
         workflow: nextWorkflow as unknown as Record<string, unknown>,
       });
       setPersonDocuments((current) => [created, ...current]);
@@ -762,6 +905,10 @@ export function DocumentsPage({
   const createUbdReportDocument = async () => {
     if (!personExternalId) return;
     const defaults = createUbdFields(selectedPerson, summary);
+    const fieldPayload = {
+      ...defaults,
+      personStatus: createPersonStatusSnapshot(selectedPerson, summary).label,
+    };
     const nextWorkflow = { ...createEmptyWorkflow(), currentStatus: "document" };
     setIsSavingDocument(true);
     setDocumentMessage("Створюю УБД рапорт...");
@@ -770,7 +917,7 @@ export function DocumentsPage({
         type: "ubdReport",
         title: `Рапорт на УБД · ${dayjs().format("DD.MM.YYYY HH:mm")}`,
         status: "document",
-        fields: defaults as unknown as Record<string, unknown>,
+        fields: fieldPayload as unknown as Record<string, unknown>,
         workflow: nextWorkflow as unknown as Record<string, unknown>,
         files: { ubdScans: [] },
       });
@@ -846,13 +993,17 @@ export function DocumentsPage({
 
     setIsSavingDocument(true);
     try {
+      const fieldPayload = {
+        ...nextFields,
+        personStatus: createPersonStatusSnapshot(selectedPerson, summary).label,
+      };
       const updated = await api.updatePersonDocument(
         personExternalId,
         selectedDocumentId,
         {
           title: selectedDocument?.title || "Довіреність зарплати",
           status: nextWorkflow.currentStatus,
-          fields: nextFields as unknown as Record<string, unknown>,
+          fields: fieldPayload as unknown as Record<string, unknown>,
           workflow: nextWorkflow as unknown as Record<string, unknown>,
         },
       );
@@ -879,19 +1030,24 @@ export function DocumentsPage({
   const saveUbdDocument = async (
     nextFields: UbdReportFields,
     nextFiles = documentFiles,
+    nextWorkflow = workflow,
   ) => {
     if (!personExternalId || !selectedDocumentId) return;
 
     setIsSavingDocument(true);
     try {
+      const fieldPayload = {
+        ...nextFields,
+        personStatus: createPersonStatusSnapshot(selectedPerson, summary).label,
+      };
       const updated = await api.updatePersonDocument(
         personExternalId,
         selectedDocumentId,
         {
           title: selectedDocument?.title || "Рапорт на УБД",
-          status: "document",
-          fields: nextFields as unknown as Record<string, unknown>,
-          workflow: workflow as unknown as Record<string, unknown>,
+          status: nextWorkflow.currentStatus,
+          fields: fieldPayload as unknown as Record<string, unknown>,
+          workflow: nextWorkflow as unknown as Record<string, unknown>,
           files: nextFiles as unknown as Record<string, unknown>,
         },
       );
@@ -955,19 +1111,35 @@ export function DocumentsPage({
     });
   };
 
+  const saveActiveDocumentWorkflow = (
+    nextFields: SalaryDocumentFields | UbdReportFields,
+    nextWorkflow: SalaryWorkflowState,
+    nextFiles = documentFiles,
+  ) => {
+    if (selectedDocument?.type === "ubdReport" || mode === "ubdReport") {
+      void saveUbdDocument(nextFields as UbdReportFields, nextFiles, nextWorkflow);
+      return;
+    }
+
+    void saveSalaryDocument(nextFields as SalaryDocumentFields, nextWorkflow);
+  };
+
   const updateWorkflow = (next: SalaryWorkflowState) => {
     setWorkflow(next);
     saveWorkflowForPerson(workflowKey, next);
-    void saveSalaryDocument(salaryFields, next);
+    saveActiveDocumentWorkflow(
+      mode === "ubdReport" ? ubdFields : salaryFields,
+      next,
+    );
   };
 
   const setWorkflowStep = (stepKey: string) => {
-    const selectedIndex = salaryWorkflowSteps.findIndex(
+    const selectedIndex = activeWorkflowSteps.findIndex(
       (step) => step.key === stepKey,
     );
     if (selectedIndex < 0) return;
     const completed = Object.fromEntries(
-      salaryWorkflowSteps.map((step, index) => [
+      activeWorkflowSteps.map((step, index) => [
         step.key,
         index <= selectedIndex,
       ]),
@@ -1018,6 +1190,42 @@ export function DocumentsPage({
     printWindow.print();
     void saveUbdDocument(ubdFields);
   };
+
+  const documentStepProgress = selectedDocument ? (
+    <div className="salary-step-progress-header">
+      <div className="salary-progress">
+        <span>{progressPercent}%</span>
+        <div>
+          <i style={{ width: `${progressPercent}%` }} />
+        </div>
+      </div>
+      <div className="salary-step-bar">
+        {activeWorkflowSteps.map((step, index) => {
+          const isDone = index <= currentStepIndex;
+          const isCurrent = index === currentStepIndex;
+          return (
+            <button
+              className={[
+                "salary-step-node",
+                isDone ? "done" : "",
+                isCurrent ? "current" : "",
+              ]
+                .filter(Boolean)
+                .join(" ")}
+              key={step.key}
+              type="button"
+              onClick={() => setWorkflowStep(step.key)}
+              title={step.title}
+            >
+              <span>{index + 1}</span>
+              <i />
+              <strong>{step.title}</strong>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  ) : null;
 
   const deleteDocument = async (document: BackendPersonDocument) => {
     const confirmed = window.confirm(
@@ -1099,6 +1307,7 @@ export function DocumentsPage({
             <div className="documents-journal-row header">
               <span>Службовець</span>
               <span>ID</span>
+              <span>Статус службовця</span>
               <span>Документ</span>
               <span>Прогрес</span>
               <span>Статус</span>
@@ -1130,12 +1339,21 @@ export function DocumentsPage({
                   >
                     <strong>{getDocumentPersonName(document)}</strong>
                     <span>{document.personExternalId}</span>
+                    <span
+                      className="documents-journal-person-status"
+                      title={readDocumentPersonStatus(
+                        document,
+                        personStatusById,
+                      )}
+                    >
+                      {readDocumentPersonStatus(document, personStatusById)}
+                    </span>
                     <span>{salaryDocumentTypeLabel(document.type)}</span>
                     <span className="documents-journal-progress">
                       <i style={{ width: `${progress}%` }} />
                       <b>{progress}%</b>
                     </span>
-                    <span>{workflowStatusLabel(document.status)}</span>
+                    <span>{documentWorkflowStatusLabel(document)}</span>
                     <span>{getDocumentFileSummary(document)}</span>
                     <span>
                       {new Date(document.updatedAt).toLocaleString("uk-UA")}
@@ -1201,6 +1419,7 @@ export function DocumentsPage({
               </Stack>
             ) : null}
           </div>
+          {documentStepProgress}
         </header>
 
         <section
@@ -1234,7 +1453,7 @@ export function DocumentsPage({
                     >
                       <strong>{document.title}</strong>
                       <span>{salaryDocumentTypeLabel(document.type)}</span>
-                      <em>{workflowStatusLabel(document.status)}</em>
+                      <em>{documentWorkflowStatusLabel(document)}</em>
                       <small>
                         {new Date(document.updatedAt).toLocaleString("uk-UA")}
                       </small>
@@ -1451,41 +1670,7 @@ export function DocumentsPage({
               </Stack>
             ) : null}
           </div>
-          {selectedDocument ? (
-            <div className="salary-step-progress-header">
-              <div className="salary-progress">
-                <span>{progressPercent}%</span>
-                <div>
-                  <i style={{ width: `${progressPercent}%` }} />
-                </div>
-              </div>
-              <div className="salary-step-bar">
-                {salaryWorkflowSteps.map((step, index) => {
-                  const isDone = index <= currentStepIndex;
-                  const isCurrent = index === currentStepIndex;
-                  return (
-                    <button
-                      className={[
-                        "salary-step-node",
-                        isDone ? "done" : "",
-                        isCurrent ? "current" : "",
-                      ]
-                        .filter(Boolean)
-                        .join(" ")}
-                      key={step.key}
-                      type="button"
-                      onClick={() => setWorkflowStep(step.key)}
-                      title={step.title}
-                    >
-                      <span>{index + 1}</span>
-                      <i />
-                      <strong>{step.title}</strong>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          ) : null}
+          {documentStepProgress}
         </header>
 
         <section
