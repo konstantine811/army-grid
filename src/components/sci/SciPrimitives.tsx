@@ -377,10 +377,12 @@ export function MenuItem({
   value: _value,
   children: _children,
   disabled: _disabled,
+  className: _className,
 }: {
   value?: string | number;
   children?: ReactNode;
   disabled?: boolean;
+  className?: string;
 }) {
   return null;
 }
@@ -409,9 +411,21 @@ export function Select({ value, onChange, children, disabled, className, sx, ren
       <SelectContent>
         {options.map((child, index) => {
           if (!child || typeof child !== "object" || !("props" in child)) return child;
-          const item = child as { props: { value?: string; children?: ReactNode; disabled?: boolean } };
+          const item = child as {
+            props: {
+              value?: string;
+              children?: ReactNode;
+              disabled?: boolean;
+              className?: string;
+            };
+          };
           return (
-            <SelectItem key={`${item.props.value ?? index}`} value={String(item.props.value ?? "")} disabled={item.props.disabled}>
+            <SelectItem
+              key={`${item.props.value ?? index}`}
+              value={String(item.props.value ?? "")}
+              disabled={item.props.disabled}
+              className={item.props.className}
+            >
               {item.props.children}
             </SelectItem>
           );

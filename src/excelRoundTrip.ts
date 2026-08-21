@@ -1,3 +1,6 @@
+import JSZip from "jszip";
+import { formatUkDate, tryParseExcelSerialDate } from "./shared/format";
+
 export type CellValue = string | number | boolean | Date | null | undefined;
 
 type RawCellValue =
@@ -27,6 +30,8 @@ export type ExcelSheetSnapshot = {
   columnCount: number;
   columnIndexes: number[];
   dataStartRow: number;
+  /** Excel row number → ARGB fill of column N (ПІБ), when read from workbook styles. */
+  pibFillByExcelRow?: Record<number, string>;
 };
 
 export type ExcelWorkbookSnapshot = {
@@ -71,6 +76,293 @@ const loadXlsxPopulate = async () => {
   const module =
     await import("xlsx-populate/browser/xlsx-populate-no-encryption");
   return module.default;
+};
+
+const BCHS_ROSTER_PIB_COLUMN = 14;
+/** Office theme accents — theme 9 is the standard green (70AD47). */
+const OFFICE_THEME_RGB = [
+  "000000",
+  "FFFFFF",
+  "44546A",
+  "E7E6E6",
+  "5B9BD5",
+  "ED7D31",
+  "A5A5A5",
+  "FFC000",
+  "4472C4",
+  "70AD47",
+];
+
+const applyExcelTint = (hex: string, tint: number) => {
+  const raw = hex.replace(/^FF/i, "").replace(/^#/, "");
+  if (raw.length !== 6 || !Number.isFinite(tint) || tint === 0) {
+    return raw.toUpperCase();
+  }
+  const apply = (channel: number) => {
+    const next =
+      tint < 0 ? channel * (1 + tint) : channel * (1 - tint) + 255 * tint;
+    return Math.max(0, Math.min(255, Math.round(next)));
+  };
+  const r = apply(Number.parseInt(raw.slice(0, 2), 16));
+  const g = apply(Number.parseInt(raw.slice(2, 4), 16));
+  const b = apply(Number.parseInt(raw.slice(4, 6), 16));
+  return [r, g, b]
+    .map((value) => value.toString(16).padStart(2, "0"))
+    .join("")
+    .toUpperCase();
+};
+
+const EMPTY_FILL_RGB = new Set(["FFFFFFFF", "FFFFFF", "00000000", "000000"]);
+
+const columnNumberToLetter = (columnNumber: number) => {
+  let label = "";
+  let value = columnNumber;
+  while (value > 0) {
+    const remainder = (value - 1) % 26;
+    label = String.fromCharCode(65 + remainder) + label;
+    value = Math.floor((value - 1) / 26);
+  }
+  return label;
+};
+
+const parseXmlThemeRgbByIndex = (themeXml: string): string[] => {
+  const scheme = themeXml.match(/<a:clrScheme\b[^>]*>([\s\S]*?)<\/a:clrScheme>/i);
+  if (!scheme) return [...OFFICE_THEME_RGB];
+  const values = [...scheme[1].matchAll(/val="([0-9A-Fa-f]{6})"/g)].map((match) =>
+    match[1].toUpperCase(),
+  );
+  return values.length >= 10 ? values.slice(0, 10) : [...OFFICE_THEME_RGB];
+};
+
+const parseFgColorRgb = (attributes: string, themeRgb: string[]): string | null => {
+  const rgb = attributes.match(/\brgb="([0-9A-Fa-f]{6,8})"/i)?.[1];
+  if (rgb)
+    return rgb.replace(/^FF/i, "").toUpperCase().padStart(6, "0").slice(-6);
+  const theme = attributes.match(/\btheme="(\d+)"/i)?.[1];
+  if (theme == null) return null;
+  const base = themeRgb[Number(theme)];
+  if (!base) return null;
+  const tintRaw = attributes.match(/\btint="(-?[\d.]+)"/i)?.[1];
+  const tint = tintRaw == null ? 0 : Number(tintRaw);
+  return applyExcelTint(base, tint);
+};
+
+const parseStylesFillRgbs = (stylesXml: string, themeRgb: string[]) => {
+  const fillsBlock =
+    stylesXml.match(/<fills\b[^>]*>([\s\S]*?)<\/fills>/i)?.[1] ?? "";
+  const fills = [...fillsBlock.matchAll(/<fill\b[\s\S]*?<\/fill>/gi)].map(
+    (match) => {
+      const fg = match[0].match(/<fgColor\b([^/>]*)/i)?.[1];
+      return fg ? parseFgColorRgb(fg, themeRgb) : null;
+    },
+  );
+  const xfsBlock =
+    stylesXml.match(/<cellXfs\b[^>]*>([\s\S]*?)<\/cellXfs>/i)?.[1] ?? "";
+  const xfFillIds = [...xfsBlock.matchAll(/<xf\b([^>]*)>/gi)].map((match) => {
+    const fillId = match[1].match(/\bfillId="(\d+)"/i)?.[1];
+    return fillId == null ? 0 : Number(fillId);
+  });
+  return { fills, xfFillIds };
+};
+
+const parseWorksheetColumnFills = (
+  sheetXml: string,
+  columnLetter: string,
+  fills: Array<string | null>,
+  xfFillIds: number[],
+) => {
+  const result: Record<number, string> = {};
+  for (const match of sheetXml.matchAll(/<c\b([^>]*)>/gi)) {
+    const attrs = match[1];
+    const ref = attrs.match(/\br="([A-Z]+)(\d+)"/i);
+    if (!ref || ref[1].toUpperCase() !== columnLetter) continue;
+    const styleId = attrs.match(/\bs="(\d+)"/i)?.[1];
+    if (styleId == null) continue;
+    const fillId = xfFillIds[Number(styleId)];
+    if (fillId == null) continue;
+    const rgb = fills[fillId];
+    if (!rgb) continue;
+    const argb = rgb.length === 6 ? `FF${rgb}` : rgb.toUpperCase();
+    if (EMPTY_FILL_RGB.has(argb) || EMPTY_FILL_RGB.has(rgb.toUpperCase())) {
+      continue;
+    }
+    result[Number(ref[2])] = argb;
+  }
+  return result;
+};
+
+const readXlsxSheetColumnFills = async (
+  file: File,
+  columnNumber: number,
+): Promise<{
+  byName: Map<string, Record<number, string>>;
+  byIndex: Array<Record<number, string>>;
+}> => {
+  const byName = new Map<string, Record<number, string>>();
+  const byIndex: Array<Record<number, string>> = [];
+  if (columnNumber < 1) return { byName, byIndex };
+  try {
+    const zip = await JSZip.loadAsync(await file.arrayBuffer());
+    const workbookXml = await zip.file("xl/workbook.xml")?.async("string");
+    const relsXml = await zip.file("xl/_rels/workbook.xml.rels")?.async("string");
+    const stylesXml = await zip.file("xl/styles.xml")?.async("string");
+    if (!workbookXml || !relsXml || !stylesXml) return { byName, byIndex };
+
+    const themeXml =
+      (await zip.file("xl/theme/theme1.xml")?.async("string")) ?? "";
+    const themeRgb = parseXmlThemeRgbByIndex(themeXml);
+    const { fills, xfFillIds } = parseStylesFillRgbs(stylesXml, themeRgb);
+    const columnLetter = columnNumberToLetter(columnNumber);
+
+    const ridToTarget = new Map<string, string>();
+    for (const rel of relsXml.matchAll(
+      /\bId="([^"]+)"[^>]*\bTarget="([^"]+)"/g,
+    )) {
+      ridToTarget.set(rel[1], rel[2]);
+    }
+    for (const rel of relsXml.matchAll(
+      /\bTarget="([^"]+)"[^>]*\bId="([^"]+)"/g,
+    )) {
+      if (!ridToTarget.has(rel[2])) ridToTarget.set(rel[2], rel[1]);
+    }
+
+    for (const sheet of workbookXml.matchAll(/<sheet\b([^>]*)>/gi)) {
+      const name = sheet[1].match(/\bname="([^"]+)"/)?.[1];
+      const rid =
+        sheet[1].match(/\br:id="([^"]+)"/)?.[1] ??
+        sheet[1].match(/\bid="([^"]+)"/)?.[1];
+      if (!name || !rid) {
+        byIndex.push({});
+        continue;
+      }
+      const target = ridToTarget.get(rid);
+      if (!target) {
+        byIndex.push({});
+        continue;
+      }
+      const path = target.startsWith("/")
+        ? target.slice(1)
+        : target.startsWith("xl/")
+          ? target
+          : `xl/${target.replace(/^\.\//, "")}`;
+      const sheetXml = await zip.file(path)?.async("string");
+      if (!sheetXml) {
+        byIndex.push({});
+        continue;
+      }
+      const fillsByRow = parseWorksheetColumnFills(
+        sheetXml,
+        columnLetter,
+        fills,
+        xfFillIds,
+      );
+      byName.set(name, fillsByRow);
+      byIndex.push(fillsByRow);
+    }
+  } catch {
+    return { byName, byIndex };
+  }
+  return { byName, byIndex };
+};
+
+const colorObjectToRgb = (color: unknown): string | null => {
+  if (!color) return null;
+  if (typeof color === "string") {
+    const hex = color.replace(/^#/, "").toUpperCase();
+    return hex || null;
+  }
+  if (typeof color !== "object") return null;
+  const rec = color as {
+    rgb?: string;
+    theme?: number | string;
+    tint?: number | string;
+    indexed?: number | string;
+  };
+  if (rec.rgb) return rec.rgb.replace(/^#/, "").toUpperCase();
+  if (rec.theme != null && rec.theme !== "") {
+    const themeIndex = Number(rec.theme);
+    const base = OFFICE_THEME_RGB[themeIndex];
+    if (!base) return null;
+    const tint = rec.tint == null || rec.tint === "" ? 0 : Number(rec.tint);
+    return applyExcelTint(base, tint);
+  }
+  return null;
+};
+
+export const extractCellFillRgb = (fill: unknown): string | null => {
+  if (!fill) return null;
+  if (typeof fill === "string") {
+    const normalized = fill.replace(/^#/, "").toUpperCase();
+    return normalized || null;
+  }
+  if (typeof fill !== "object") return null;
+  const rec = fill as {
+    type?: string;
+    color?: unknown;
+    rgb?: string;
+    foreground?: unknown;
+    fgColor?: unknown;
+    background?: unknown;
+    bgColor?: unknown;
+    theme?: number | string;
+    tint?: number | string;
+    stops?: Array<{ color?: unknown }>;
+  };
+  return (
+    colorObjectToRgb(rec.color) ||
+    colorObjectToRgb(rec.foreground) ||
+    colorObjectToRgb(rec.fgColor) ||
+    colorObjectToRgb(rec.background) ||
+    colorObjectToRgb(rec.bgColor) ||
+    colorObjectToRgb(rec.stops?.[0]?.color) ||
+    colorObjectToRgb(rec)
+  );
+};
+
+const findBchsRosterPibColumnNumber = (rows: CellValue[][]) => {
+  const scanLimit = Math.min(5, rows.length);
+  for (let rowIndex = 0; rowIndex < scanLimit; rowIndex += 1) {
+    const row = rows[rowIndex] ?? [];
+    for (let columnIndex = 0; columnIndex < row.length; columnIndex += 1) {
+      const header = valueToDisplay(row[columnIndex]).toLowerCase();
+      if (header.includes("піб") || header.includes("п.і.б")) {
+        return columnIndex + 1;
+      }
+    }
+  }
+  return 0;
+};
+
+const readBchsRosterPibFills = (
+  sheet: {
+    cell: (row: number, column: number) => { style: (name: string) => unknown };
+  },
+  rowCount: number,
+  pibColumnNumber = BCHS_ROSTER_PIB_COLUMN,
+): Record<number, string> => {
+  const fills: Record<number, string> = {};
+
+  for (let rowNumber = 2; rowNumber <= rowCount; rowNumber += 1) {
+    try {
+      const rgb = extractCellFillRgb(
+        sheet.cell(rowNumber, pibColumnNumber).style("fill"),
+      );
+      if (
+        !rgb ||
+        rgb === "FFFFFFFF" ||
+        rgb === "FFFFFF" ||
+        rgb === "00000000" ||
+        rgb === "000000"
+      ) {
+        continue;
+      }
+      fills[rowNumber] = rgb;
+    } catch {
+      // Skip cells whose style cannot be read.
+    }
+  }
+
+  return fills;
 };
 
 const isEmptyValue = (value: CellValue) =>
@@ -192,13 +484,17 @@ const sanitizeCellValue = (value: RawCellValue): CellValue => {
 };
 
 const normalizeDateDisplay = (value: CellValue) => {
-  if (!(value instanceof Date)) return value ?? "";
+  if (value instanceof Date) return formatUkDate(value);
 
-  return new Intl.DateTimeFormat("uk-UA", {
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric",
-  }).format(value);
+  const parsedSerial = tryParseExcelSerialDate(value);
+  if (parsedSerial) return formatUkDate(parsedSerial);
+
+  if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}T/.test(value)) {
+    const parsedIso = new Date(value);
+    if (!Number.isNaN(parsedIso.getTime())) return formatUkDate(parsedIso);
+  }
+
+  return value ?? "";
 };
 
 export const valueToDisplay = (value: CellValue) =>
@@ -262,7 +558,22 @@ export async function readWorkbookSnapshot(
 ): Promise<ExcelWorkbookSnapshot> {
   const XlsxPopulate = await loadXlsxPopulate();
   const workbook = await XlsxPopulate.fromDataAsync(file);
-  const sheets = workbook.sheets().map((sheet, sheetIndex) => {
+  const zipFillsByColumn = new Map<
+    number,
+    Awaited<ReturnType<typeof readXlsxSheetColumnFills>>
+  >();
+  const loadZipFills = async (columnNumber: number) => {
+    const cached = zipFillsByColumn.get(columnNumber);
+    if (cached) return cached;
+    const loaded = await readXlsxSheetColumnFills(file, columnNumber);
+    zipFillsByColumn.set(columnNumber, loaded);
+    return loaded;
+  };
+
+  const workbookSheets = workbook.sheets();
+  const sheets: ExcelWorkbookSnapshot["sheets"] = [];
+  for (let sheetIndex = 0; sheetIndex < workbookSheets.length; sheetIndex += 1) {
+    const sheet = workbookSheets[sheetIndex];
     const values = (sheet.usedRange()?.value() ?? []) as RawCellValue[][];
     const rawColumnCount = Math.max(
       FALLBACK_COLUMN_COUNT,
@@ -301,8 +612,18 @@ export async function readWorkbookSnapshot(
       pickColumns(row, columnIndexes),
     );
     const columnCount = columnIndexes.length;
+    const pibColumnNumber = findBchsRosterPibColumnNumber(fullRows);
+    const fromPopulate =
+      pibColumnNumber > 0
+        ? readBchsRosterPibFills(sheet, fullRows.length, pibColumnNumber)
+        : {};
+    const zipFills =
+      pibColumnNumber > 0 ? await loadZipFills(pibColumnNumber) : null;
+    const fromZip =
+      zipFills?.byName.get(sheet.name()) ?? zipFills?.byIndex[sheetIndex] ?? {};
+    const pibFillByExcelRow = { ...fromPopulate, ...fromZip };
 
-    return {
+    sheets.push({
       sheetIndex,
       sheetName: sheet.name(),
       rawRows: normalizedRows,
@@ -316,8 +637,10 @@ export async function readWorkbookSnapshot(
       columnCount,
       columnIndexes,
       dataStartRow,
-    };
-  });
+      pibFillByExcelRow:
+        Object.keys(pibFillByExcelRow).length > 0 ? pibFillByExcelRow : undefined,
+    });
+  }
 
   const activeSheet = sheets[0] ?? {
     sheetIndex: 0,

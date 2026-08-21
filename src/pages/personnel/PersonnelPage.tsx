@@ -16,14 +16,24 @@ import { AddPhotoAlternateOutlinedIcon } from "@/components/sci/icons";
 import { ArticleOutlinedIcon } from "@/components/sci/icons";
 import { DeleteOutlineOutlinedIcon } from "@/components/sci/icons";
 import { FileUploadOutlinedIcon } from "@/components/sci/icons";
+import { FileDownloadOutlinedIcon } from "@/components/sci/icons";
 import { PersonSearchOutlinedIcon } from "@/components/sci/icons";
 import { PictureAsPdfOutlinedIcon } from "@/components/sci/icons";
 import { SearchOutlinedIcon } from "@/components/sci/icons";
 import {
   api,
   type BackendEjournalImport,
+  type BackendPersonDocument,
   type BackendPersonQuestionnaire,
 } from "../../api";
+import {
+  buildFighterStatusAdditions,
+  extractFighterStatusFieldRows,
+  FIGHTER_STATUS_FIELDS,
+  findFighterStatusAddition,
+  findFighterStatusSheet,
+  normalizeRosterMatchText,
+} from "./fighterStatusImport";
 import {
   hasRowData,
   readWorkbookSnapshot,
@@ -34,33 +44,69 @@ import type { DbPreviewState, EjournalPreviewRow } from "../ejournal/ejournalTyp
 import { buildImportColumns, parseDbColumns } from "../ejournal/ejournalUtils";
 import { PhotoCropDialog, type CropRect } from "./PhotoCropDialog";
 import { FloatingQuestionnairePreview } from "./FloatingQuestionnairePreview";
+import { QuestionnaireShareButton } from "./QuestionnaireShareButton";
 import { PersonnelVirtualList } from "./PersonnelVirtualList";
 import { QuestionnaireDiskSearchDialog } from "./QuestionnaireDiskSearchDialog";
 import {
   PERSON_CARD_FIELDS,
   PERSON_SECTION_LABELS,
+  buildPersonListSummary,
   buildPersonSummary,
+  buildQuestionnaireExportFileName,
+  collectPersonCallSignFieldValues,
   createDefaultActionForm,
   dataUrlToFile,
   dataUrlToObjectUrl,
+  downloadQuestionnairePdf,
   extractPersonCallSign,
   extractPhones,
   findEjournalPersonnelSheet,
   formatPersonFieldValue,
   formatUaPhoneDisplay,
+  buildSelfAttachmentMigrationPairs,
+  buildOrphanAttachmentMigrationPairs,
+  collectPersonExternalIdCandidates,
+  getPersonDisplayName,
   getPersonExternalId,
+  getPersonFieldValue,
+  inferRosterFieldLabel,
   isLikelyPersonnelRow,
+  migratePersonAttachmentsBetweenIds,
+  normalizePersonBirthKey,
+  normalizeUaPhone,
+  resolveMorningGeneralListColumnLabel,
+  resolvePersonIdentityKey,
+  resolvePersonRankTitle,
   isPositionIndexField,
   loadAllEjournalSheetRows,
   personActions,
+  renameQuestionnaireFile,
+  revokeQuestionnairePreviewUrl,
   resolvePersonFieldKey,
   type PersonAction,
   type PersonActionForm,
   type PersonFieldDef,
   type PersonnelRecord,
 } from "./personnelUtils";
+import { downloadBlob, sanitizeFileName } from "../../shared/browserExport";
+import type { QuestionnairePdfSource } from "./questionnaireShare";
+import {
+  extractPhonesFromDocuments,
+  migrateStoredPersonPhones,
+  readStoredPersonPhones,
+  uniqueNormalizedPhones,
+  upsertPersonPhonesDocument,
+  writeStoredPersonPhones,
+} from "./personPhonesStore";
+import {
+  applyEnrichmentToPreviewRow,
+  syncEnrichmentToPerson,
+} from "./personEnrichment";
+import { migrateStoredPersonSignatures } from "./personSignatureStore";
+import { parseQuestionnairePdf } from "../questionnaire-parser/questionnairePdfParser";
 
 const PERSONNEL_FOCUS_KEY = "army-grid:focus-personnel";
+const ATTACHMENT_HEAL_SESSION_KEY = "army-grid:attachments-healed";
 const MAX_QUESTIONNAIRE_FILE_BYTES = 350 * 1024 * 1024;
 
 const formatFileSize = (bytes: number) => {
@@ -70,15 +116,7 @@ const formatFileSize = (bytes: number) => {
 };
 
 const ROSTER_FIELD_PREFIX = "roster__";
-
-const normalizeRosterText = (value: unknown) =>
-  valueToDisplay(value as Parameters<typeof valueToDisplay>[0])
-    .replace(/[ʼ’']/g, "")
-    .replace(/\([^)]*\)/g, " ")
-    .replace(/[.,;:№#"/\\|()[\]{}]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .toLocaleLowerCase("uk-UA");
+const normalizeRosterText = normalizeRosterMatchText;
 
 const getRosterValue = (row: EjournalPreviewRow, keyParts: string[]) => {
   const key = Object.keys(row).find((item) =>
@@ -86,6 +124,16 @@ const getRosterValue = (row: EjournalPreviewRow, keyParts: string[]) => {
   );
   return key ? valueToDisplay(row[key] as Parameters<typeof valueToDisplay>[0]).trim() : "";
 };
+
+const normalizePersonnelSearchText = (value: unknown) =>
+  valueToDisplay(value as Parameters<typeof valueToDisplay>[0])
+    .replace(/[ʼ’']/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLocaleLowerCase("uk-UA");
+
+const getRawCallSignSearchValues = (row: EjournalPreviewRow) =>
+  collectPersonCallSignFieldValues(row);
 
 const getRosterAdditions = (rosterRow: EjournalPreviewRow) =>
   Object.fromEntries(
@@ -98,20 +146,24 @@ const getRosterAdditions = (rosterRow: EjournalPreviewRow) =>
   );
 
 const buildRosterOnlyPersonnelRow = (rosterRow: EjournalPreviewRow) => {
-  const externalId = getRosterValue(rosterRow, ["id"]);
   const name =
     getRosterValue(rosterRow, ["піб"]) ||
     getRosterValue(rosterRow, ["прізвище"]);
-  const rowKey = externalId || normalizeRosterText(name);
+  const identityKey = resolvePersonIdentityKey({
+    ...rosterRow,
+    прізвище: name,
+    ПІБ: name,
+  });
+  const rowKey = identityKey || normalizeRosterText(name);
 
   return {
     __dbRowId: `roster:${rowKey}`,
     __rowNumber: rosterRow.__rowNumber,
-    id: externalId,
+    id: identityKey,
     "прізвище": name,
     "ПІБ": name,
-    "звання": getRosterValue(rosterRow, ["звання"]),
-    "Звання": getRosterValue(rosterRow, ["звання"]),
+    "звання": resolvePersonRankTitle(rosterRow),
+    "Звання": resolvePersonRankTitle(rosterRow),
     "позивний": getRosterValue(rosterRow, ["позив"]),
     "Позивний": getRosterValue(rosterRow, ["позив"]),
     "індекс_посади": getRosterValue(rosterRow, ["індекс", "посади"]),
@@ -132,32 +184,132 @@ const mergeRosterRowsIntoPreview = (
   const rosterByName = new Map<string, EjournalPreviewRow>();
   const usedRosterRows = new Set<EjournalPreviewRow>();
   rosterRows.forEach((row) => {
-    const id = getRosterValue(row, ["id"]);
+    const id = getPersonExternalId(row);
     const name = getRosterValue(row, ["піб"]) || getRosterValue(row, ["прізвище"]);
-    if (id && id !== "0") rosterById.set(id, row);
+    if (id) rosterById.set(id, row);
     if (name) rosterByName.set(normalizeRosterText(name), row);
   });
 
   const mergedRows = preview.rows.map((row) => {
-    const externalId = getPersonExternalId(row);
-    const name = buildPersonSummary(row).name;
-    const rosterRow =
-      (externalId && rosterById.get(externalId)) ||
-      rosterByName.get(normalizeRosterText(name));
+    try {
+      const spreadsheetId = getPersonExternalId(row);
+      const name = getPersonDisplayName(row);
+      const rosterRow =
+        (spreadsheetId && rosterById.get(spreadsheetId)) ||
+        rosterByName.get(normalizeRosterText(name));
 
-    if (!rosterRow) return row;
-    usedRosterRows.add(rosterRow);
-    return { ...row, ...getRosterAdditions(rosterRow) };
+      if (!rosterRow) return row;
+      usedRosterRows.add(rosterRow);
+      return { ...row, ...getRosterAdditions(rosterRow) };
+    } catch {
+      return row;
+    }
   });
   const rosterOnlyRows = rosterRows
     .filter((row) => !usedRosterRows.has(row))
     .filter((row) => getRosterValue(row, ["піб"]) || getRosterValue(row, ["прізвище"]))
-    .map(buildRosterOnlyPersonnelRow);
+    .flatMap((row) => {
+      try {
+        return [buildRosterOnlyPersonnelRow(row)];
+      } catch {
+        return [];
+      }
+    });
 
   return {
     ...preview,
     rows: [...mergedRows, ...rosterOnlyRows],
   };
+};
+
+const personRecordMatchKeys = (record: PersonnelRecord) => {
+  const nameKey = normalizeRosterText(record.summary.name);
+  const birthKey = normalizePersonBirthKey(record.summary.birthDate);
+  const callSignKey = normalizeRosterText(record.summary.callSign);
+  const keys: string[] = [];
+  if (nameKey && birthKey) keys.push(`name-birth:${nameKey}:${birthKey}`);
+  if (callSignKey) keys.push(`call:${callSignKey}`);
+  if (nameKey) keys.push(`name:${nameKey}`);
+  return keys;
+};
+
+const mapUniqueRecordsByMatchKey = (
+  records: PersonnelRecord[],
+  prefix: string,
+) => {
+  const buckets = new Map<string, PersonnelRecord[]>();
+  records.forEach((record) => {
+    if (!record.summary.externalId) return;
+    for (const key of personRecordMatchKeys(record)) {
+      if (!key.startsWith(prefix)) continue;
+      buckets.set(key, [...(buckets.get(key) ?? []), record]);
+    }
+  });
+
+  return new Map(
+    [...buckets.entries()]
+      .filter(([, items]) => items.length === 1)
+      .map(([key, items]) => [key, items[0] as PersonnelRecord]),
+  );
+};
+
+const buildAttachmentMigrationPairs = (
+  previousRecords: PersonnelRecord[],
+  nextRows: EjournalPreviewRow[],
+) => {
+  const nextRecords = nextRows
+    .filter(isLikelyPersonnelRow)
+    .map((row) => ({ row, summary: buildPersonSummary(row) }));
+
+  const usedPrevious = new Set<string>();
+  const usedNext = new Set<string>();
+  const pairs: Array<{
+    name: string;
+    fromExternalId: string;
+    toExternalId: string;
+  }> = [];
+
+  const matchByPrefix = (prefix: string) => {
+    const previousByKey = mapUniqueRecordsByMatchKey(previousRecords, prefix);
+    const nextByKey = mapUniqueRecordsByMatchKey(nextRecords, prefix);
+    for (const [key, nextRecord] of nextByKey.entries()) {
+      const previousRecord = previousByKey.get(key);
+      if (!previousRecord) continue;
+      const fromExternalId = previousRecord.summary.externalId;
+      const toExternalId = nextRecord.summary.externalId;
+      if (
+        !fromExternalId ||
+        !toExternalId ||
+        fromExternalId === toExternalId ||
+        usedPrevious.has(fromExternalId) ||
+        usedNext.has(toExternalId)
+      ) {
+        continue;
+      }
+      usedPrevious.add(fromExternalId);
+      usedNext.add(toExternalId);
+      pairs.push({
+        name: nextRecord.summary.name,
+        fromExternalId,
+        toExternalId,
+      });
+      for (const candidateId of collectPersonExternalIdCandidates(
+        previousRecord.row,
+      )) {
+        pairs.push({
+          name: nextRecord.summary.name,
+          fromExternalId: candidateId,
+          toExternalId,
+        });
+      }
+    }
+  };
+
+  matchByPrefix("name-birth:");
+  matchByPrefix("call:");
+  matchByPrefix("name:");
+
+  return pairs;
 };
 
 const readPersonnelFocusTarget = () => {
@@ -207,7 +359,14 @@ export function PersonnelPage({
 }: {
   onOpenDocuments: (
     row: EjournalPreviewRow,
-    mode?: "default" | "salaryPowerAttorney" | "ubdReport",
+    mode?:
+      | "default"
+      | "salaryPowerAttorney"
+      | "ubdReport"
+      | "form6Report"
+      | "form12Report"
+      | "ubdRestoreReport"
+      | "temporaryMilitaryId",
   ) => void;
 }) {
   const [imports, setImports] = useState<BackendEjournalImport[]>([]);
@@ -223,6 +382,16 @@ export function PersonnelPage({
     () => createDefaultActionForm(),
   );
   const [photoByExternalId, setPhotoByExternalId] = useState<Record<string, string>>({});
+  const [phonesByExternalId, setPhonesByExternalId] = useState<
+    Record<string, string[]>
+  >(() => readStoredPersonPhones());
+  const [phoneDocByExternalId, setPhoneDocByExternalId] = useState<
+    Record<string, BackendPersonDocument>
+  >({});
+  const [phoneDraft, setPhoneDraft] = useState("");
+  const [isSavingPhone, setIsSavingPhone] = useState(false);
+  const [isPullingFromQuestionnaire, setIsPullingFromQuestionnaire] =
+    useState(false);
   const [questionnaireByExternalId, setQuestionnaireByExternalId] = useState<
     Record<string, true>
   >({});
@@ -230,6 +399,9 @@ export function PersonnelPage({
   const [isPhotoCropOpen, setIsPhotoCropOpen] = useState(false);
   const [questionnaire, setQuestionnaire] =
     useState<BackendPersonQuestionnaire | null>(null);
+  const [personRelatedDocuments, setPersonRelatedDocuments] = useState<
+    BackendPersonDocument[]
+  >([]);
   const [pendingQuestionnaireFile, setPendingQuestionnaireFile] =
     useState<File | null>(null);
   const [questionnairePreviewUrl, setQuestionnairePreviewUrl] = useState("");
@@ -249,31 +421,38 @@ export function PersonnelPage({
     () =>
       (dbPreview?.rows ?? [])
         .filter(isLikelyPersonnelRow)
-        .map((row) => ({ row, summary: buildPersonSummary(row) })),
+        .map((row) => ({ row, summary: buildPersonListSummary(row) })),
     [dbPreview],
   );
   const filteredPersonnel = useMemo(() => {
-    const normalizedQuery = query.trim().toLowerCase();
+    const normalizedQuery = normalizePersonnelSearchText(query);
 
     if (!normalizedQuery) return personnelRows;
 
-    return personnelRows.filter((record) =>
-      [
+    return personnelRows.filter((record) => {
+      const searchableText = normalizePersonnelSearchText(
+        [
         record.summary.name,
+        record.summary.callSign,
+        getPersonFieldValue(record.row, ["позивний"]),
+        getPersonFieldValue(record.row, ["позив"]),
+        ...getRawCallSignSearchValues(record.row),
         record.summary.rank,
         record.summary.externalId,
-        record.summary.positionIndex,
-        record.summary.location,
-        record.summary.rnokpp,
-        record.summary.phones.join(" "),
-        record.summary.additionalInfo,
-        record.summary.militaryId,
+        getPersonFieldValue(record.row, ["індекс", "посади"]),
+        getPersonFieldValue(record.row, ["місце_дислокації"]),
+        getPersonFieldValue(record.row, ["рнокпп_за_наявності"]),
+        getPersonFieldValue(record.row, ["додаткова_інформація"]),
+        getPersonFieldValue(record.row, ["військового", "квитка"]),
+        ...(phonesByExternalId[record.summary.externalId] ?? []),
       ]
-        .join(" ")
-        .toLowerCase()
-        .includes(normalizedQuery),
-    );
-  }, [personnelRows, query]);
+          .filter(Boolean)
+          .join(" "),
+      );
+
+      return searchableText.includes(normalizedQuery);
+    });
+  }, [personnelRows, phonesByExternalId, query]);
   const selectedRecord = useMemo(
     () =>
       personnelRows.find((record) => record.row.__dbRowId === selectedRowId) ??
@@ -281,15 +460,18 @@ export function PersonnelPage({
       null,
     [filteredPersonnel, personnelRows, selectedRowId],
   );
-  const selectedSummary = selectedRecord?.summary ?? buildPersonSummary(null);
   const selectedRow = selectedRecord?.row ?? null;
+  const selectedSummary = useMemo(
+    () => buildPersonSummary(selectedRow),
+    [selectedRow],
+  );
   const selectedPhoto =
     (selectedSummary.externalId && photoByExternalId[selectedSummary.externalId]) ||
     "";
   const selectedCallSign = useMemo(
     () =>
+      selectedSummary.callSign?.trim() ||
       extractPersonCallSign(
-        selectedSummary.callSign,
         questionnaire?.fileName ?? undefined,
         selectedSummary.name,
         selectedSummary.additionalInfo,
@@ -301,6 +483,19 @@ export function PersonnelPage({
       selectedSummary.name,
     ],
   );
+  const questionnaireExportFileName = useMemo(
+    () =>
+      sanitizeFileName(
+        buildQuestionnaireExportFileName(selectedSummary.name, selectedCallSign),
+      ),
+    [selectedCallSign, selectedSummary.name],
+  );
+  const currentQuestionnaireShareSource = useMemo((): QuestionnairePdfSource | null => {
+    if (pendingQuestionnaireFile) return { file: pendingQuestionnaireFile };
+    if (diskPreviewFile) return { file: diskPreviewFile };
+    if (questionnaire?.fileData) return { fileData: questionnaire.fileData };
+    return null;
+  }, [diskPreviewFile, pendingQuestionnaireFile, questionnaire?.fileData]);
   const editableFields = useMemo(
     () =>
       PERSON_CARD_FIELDS.map((field) => ({
@@ -331,29 +526,50 @@ export function PersonnelPage({
       Object.entries(selectedRow ?? {})
         .filter(([key, value]) =>
           key.startsWith(ROSTER_FIELD_PREFIX) &&
+          !key.includes("fighter_status_") &&
           valueToDisplay(value as Parameters<typeof valueToDisplay>[0]).trim(),
         )
         .map(([key, value]) => {
           const sourceKey = key.slice(ROSTER_FIELD_PREFIX.length);
+          const displayed = valueToDisplay(value as Parameters<typeof valueToDisplay>[0]).trim();
           return {
             key,
-            label: rosterLabels[sourceKey] || sourceKey,
-            value: valueToDisplay(value as Parameters<typeof valueToDisplay>[0]).trim(),
+            label: inferRosterFieldLabel(sourceKey, displayed, rosterLabels),
+            value: displayed,
           };
         }),
+    [rosterLabels, selectedRow],
+  );
+  const fighterStatusFieldRows = useMemo(
+    () => extractFighterStatusFieldRows(selectedRow, rosterLabels),
     [rosterLabels, selectedRow],
   );
   const additionalInfoKey = useMemo(
     () => resolvePersonFieldKey(selectedRow, ["додаткова_інформація"]),
     [selectedRow],
   );
-  /** Live-parsed separate property from «Додаткова інформація» (including draft edits). */
+  /** Live-parsed from «Додаткова інформація», plus phones saved separately from imports. */
+  const savedPhones =
+    (selectedSummary.externalId &&
+      phonesByExternalId[selectedSummary.externalId]) ||
+    [];
   const parsedPhones = useMemo(() => {
     const draft =
       (additionalInfoKey && editValues[additionalInfoKey]) ||
       selectedSummary.additionalInfo;
-    return extractPhones(draft);
-  }, [additionalInfoKey, editValues, selectedSummary.additionalInfo]);
+    return uniqueNormalizedPhones([
+      ...extractPhones(draft),
+      ...((selectedSummary.externalId &&
+        phonesByExternalId[selectedSummary.externalId]) ||
+        []),
+    ]);
+  }, [
+    additionalInfoKey,
+    editValues,
+    phonesByExternalId,
+    selectedSummary.additionalInfo,
+    selectedSummary.externalId,
+  ]);
 
   useEffect(() => {
     setEditValues(
@@ -364,6 +580,7 @@ export function PersonnelPage({
         ]),
       ),
     );
+    setPhoneDraft("");
   }, [editableFields, selectedRow]);
 
   useEffect(() => {
@@ -371,6 +588,116 @@ export function PersonnelPage({
       setSelectedRowId(selectedRecord.row.__dbRowId);
     }
   }, [selectedRecord, selectedRowId]);
+
+  useEffect(() => {
+    if (!selectedRowId || !selectedRow) return;
+
+    const externalId = selectedSummary.externalId;
+    const fullName = selectedSummary.name;
+    if (!externalId && !fullName) return;
+
+    let isCancelled = false;
+
+    void (async () => {
+      try {
+        const profile = externalId
+          ? await api.getPersonnelProfile(externalId, fullName)
+          : null;
+
+        if (isCancelled) return;
+
+        if (externalId) {
+          const { document, phones } = extractPhonesFromDocuments(
+            profile?.documents,
+          );
+          if (document) {
+            setPhoneDocByExternalId((current) => ({
+              ...current,
+              [externalId]: document,
+            }));
+          }
+          const localPhones = uniqueNormalizedPhones([
+            ...(readStoredPersonPhones()[externalId] ?? []),
+            ...phones,
+          ]);
+          if (phones.length) {
+            setPhonesByExternalId((current) => {
+              const merged = uniqueNormalizedPhones([
+                ...(current[externalId] ?? []),
+                ...phones,
+              ]);
+              if (
+                merged.length === (current[externalId] ?? []).length &&
+                merged.every(
+                  (phone, index) => phone === current[externalId]?.[index],
+                )
+              ) {
+                return current;
+              }
+              const next = { ...current, [externalId]: merged };
+              writeStoredPersonPhones(next);
+              return next;
+            });
+          }
+          if (localPhones.length && !document) {
+            void upsertPersonPhonesDocument(externalId, localPhones, null)
+              .then((saved) => {
+                if (isCancelled || !saved) return;
+                setPhoneDocByExternalId((current) => ({
+                  ...current,
+                  [externalId]: saved,
+                }));
+              })
+              .catch(() => {
+                // Local numbers still remain if the backend rejects this document type.
+              });
+          }
+        }
+
+        const label = fullName || externalId || selectedRowId;
+        console.group(`[Особовий склад] ${label}`);
+
+        console.log("Рядок ООС (staging):", selectedRow);
+        console.log("Профіль з БД:", profile);
+
+        if (profile?.exitPeriods) {
+          console.log("Періоди виходу / відсутності:", profile.exitPeriods);
+
+          if (profile.exitPeriods.hasAny) {
+            console.log("Знайдено періоди виходу:", {
+              absences: profile.exitPeriods.absences.length,
+              openAbsences: profile.exitPeriods.openAbsences.length,
+              locationPeriods: profile.exitPeriods.locationPeriods.length,
+              servicePeriods: profile.exitPeriods.servicePeriods.length,
+              rosterEvents: profile.exitPeriods.rosterEvents.length,
+              absentSheetRows: profile.exitPeriods.absentSheetRows.length,
+              fighterStatusExitDate: profile.exitPeriods.fighterStatus?.exitDate ?? null,
+              oosExitFields: profile.exitPeriods.oosExitFields,
+            });
+          } else {
+            console.warn(
+              "Періодів виходу в БД не знайдено (absences, locationPeriods, absent sheet, fighter status).",
+            );
+          }
+        }
+
+        if (!profile?.person) {
+          console.warn(
+            "Запис Person у таблиці persons відсутній — періоди зʼявляться після статусних дій з ЕЖООС.",
+          );
+        }
+
+        console.groupEnd();
+      } catch (error) {
+        if (isCancelled) return;
+        console.error("[Особовий склад] не вдалося завантажити профіль з БД:", error);
+      }
+    })();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [selectedRow, selectedRowId, selectedSummary.externalId, selectedSummary.name]);
 
   useEffect(() => {
     const externalId = selectedSummary.externalId;
@@ -399,6 +726,7 @@ export function PersonnelPage({
     const externalId = selectedSummary.externalId;
     if (!externalId) {
       setQuestionnaire(null);
+      setPersonRelatedDocuments([]);
       return;
     }
 
@@ -412,6 +740,14 @@ export function PersonnelPage({
       .catch(() => {
         if (!isCancelled) setQuestionnaire(null);
       });
+    void api
+      .listPersonDocuments(externalId)
+      .then((documents) => {
+        if (!isCancelled) setPersonRelatedDocuments(documents);
+      })
+      .catch(() => {
+        if (!isCancelled) setPersonRelatedDocuments([]);
+      });
 
     return () => {
       isCancelled = true;
@@ -420,9 +756,69 @@ export function PersonnelPage({
 
   useEffect(() => {
     return () => {
-      if (questionnairePreviewUrl) URL.revokeObjectURL(questionnairePreviewUrl);
+      if (questionnairePreviewUrl) {
+        revokeQuestionnairePreviewUrl(questionnairePreviewUrl);
+      }
     };
   }, [questionnairePreviewUrl]);
+
+  const exportCurrentQuestionnaire = async () => {
+    const externalId = selectedSummary.externalId;
+    if (
+      externalId &&
+      questionnaire?.fileData &&
+      !pendingQuestionnaireFile &&
+      !diskPreviewFile
+    ) {
+      try {
+        const response = await fetch(
+          api.getPersonQuestionnaireFileUrl(
+            externalId,
+            questionnaireExportFileName,
+            true,
+          ),
+        );
+        if (!response.ok) {
+          throw new Error("Не вдалося завантажити PDF з сервера.");
+        }
+        downloadBlob(await response.blob(), questionnaireExportFileName);
+        setMessage(`Експортовано: ${questionnaireExportFileName}`);
+        return;
+      } catch (error) {
+        setMessage(
+          error instanceof Error
+            ? error.message
+            : "Не вдалося експортувати анкету.",
+        );
+        return;
+      }
+    }
+
+    downloadCurrentQuestionnaire();
+    if (pendingQuestionnaireFile || diskPreviewFile || questionnaire?.fileData) {
+      setMessage(`Експортовано: ${questionnaireExportFileName}`);
+    }
+  };
+
+  const downloadCurrentQuestionnaire = () => {
+    if (pendingQuestionnaireFile) {
+      downloadQuestionnairePdf(questionnaireExportFileName, {
+        file: pendingQuestionnaireFile,
+      });
+      return;
+    }
+    if (diskPreviewFile) {
+      downloadQuestionnairePdf(questionnaireExportFileName, {
+        file: diskPreviewFile,
+      });
+      return;
+    }
+    if (questionnaire?.fileData) {
+      downloadQuestionnairePdf(questionnaireExportFileName, {
+        fileData: questionnaire.fileData,
+      });
+    }
+  };
 
   const loadPersonnelPhotos = async () => {
     try {
@@ -435,8 +831,9 @@ export function PersonnelPage({
         ),
         ...current,
       }));
+      return photos;
     } catch {
-      // List previews stay as placeholders if the bulk endpoint is unavailable.
+      return [];
     }
   };
 
@@ -450,8 +847,9 @@ export function PersonnelPage({
             .map((item) => [item.personExternalId, true as const]),
         ),
       );
+      return items;
     } catch {
-      // Missing list endpoint should not block the page.
+      return [];
     }
   };
 
@@ -473,10 +871,110 @@ export function PersonnelPage({
     })) as EjournalPreviewRow[];
 
     setRosterLabels(
-      Object.fromEntries(columns.map((column) => [column.key, column.label || column.key])),
+      Object.fromEntries(
+        columns.map((column) => [
+          column.key,
+          column.label?.trim() ||
+            resolveMorningGeneralListColumnLabel(column.key) ||
+            column.key,
+        ]),
+      ),
     );
     setRosterImportName(latest.sourceFileName || latest.importName);
     return rows;
+  };
+
+  const migrateAttachmentsToNewExternalIds = async (
+    pairs: Array<{
+      name: string;
+      fromExternalId: string;
+      toExternalId: string;
+    }>,
+    includeDocuments = true,
+  ) => {
+    try {
+      const nextPhones = migrateStoredPersonPhones(pairs);
+      setPhonesByExternalId(nextPhones);
+      migrateStoredPersonSignatures(pairs);
+      const migrated = await migratePersonAttachmentsBetweenIds(pairs, {
+        includeDocuments,
+      });
+      if (migrated > 0) {
+        await Promise.all([
+          loadPersonnelPhotos(),
+          loadPersonnelQuestionnaireIds(),
+        ]);
+      }
+      return migrated;
+    } catch {
+      return 0;
+    }
+  };
+
+  const healOrphanAttachmentsInBackground = async (
+    rows: EjournalPreviewRow[],
+    isCancelled: (() => boolean) | undefined,
+    photosPromise: Promise<Array<{ personExternalId: string; photoData: string }>>,
+    questionnairesPromise: Promise<Array<{ personExternalId: string }>>,
+  ) => {
+    try {
+      if (sessionStorage.getItem(ATTACHMENT_HEAL_SESSION_KEY) === "1") return;
+      await new Promise<void>((resolve) => {
+        window.setTimeout(resolve, 0);
+      });
+      if (isCancelled?.()) return;
+
+      const [photos, questionnaires] = await Promise.all([
+        photosPromise,
+        questionnairesPromise,
+      ]);
+      if (isCancelled?.()) return;
+
+      const currentIds = new Set<string>();
+      for (const row of rows) {
+        if (!isLikelyPersonnelRow(row)) continue;
+        const id = resolvePersonIdentityKey(row);
+        if (id) currentIds.add(id);
+      }
+
+      const orphanIds = new Set<string>();
+      for (const photo of photos) {
+        const id = photo.personExternalId?.trim();
+        if (id && !currentIds.has(id)) orphanIds.add(id);
+      }
+      for (const item of questionnaires) {
+        const id = item.personExternalId?.trim();
+        if (id && !currentIds.has(id)) orphanIds.add(id);
+      }
+      const storedPhones = readStoredPersonPhones();
+      for (const id of Object.keys(storedPhones)) {
+        if (id && !currentIds.has(id) && storedPhones[id]?.length) {
+          orphanIds.add(id);
+        }
+      }
+
+      sessionStorage.setItem(ATTACHMENT_HEAL_SESSION_KEY, "1");
+      const pairs = buildOrphanAttachmentMigrationPairs(rows, orphanIds);
+      if (!isCancelled?.()) {
+        setPhonesByExternalId(migrateStoredPersonPhones(pairs));
+        migrateStoredPersonSignatures(pairs);
+      }
+      if (!orphanIds.size) return;
+
+      const migrated = await migratePersonAttachmentsBetweenIds(pairs, {
+        includeDocuments: false,
+        photos,
+        questionnaires,
+      });
+      if (migrated > 0 && !isCancelled?.()) {
+        await Promise.all([
+          loadPersonnelPhotos(),
+          loadPersonnelQuestionnaireIds(),
+        ]);
+      }
+    } catch {
+      // Background heal must never block the personnel list.
+    }
   };
 
   const filteredWithQuestionnaireCount = useMemo(
@@ -538,17 +1036,22 @@ export function PersonnelPage({
       ]);
       if (isCancelled?.()) return;
 
-      const mergedPreview = mergeRosterRowsIntoPreview(preview, latestRosterRows);
+      let mergedPreview = preview;
+      try {
+        mergedPreview = mergeRosterRowsIntoPreview(preview, latestRosterRows);
+      } catch {
+        mergedPreview = preview;
+      }
       const rows = mergedPreview.rows.filter(isLikelyPersonnelRow);
-      // Read focus only after data is ready so a cancelled StrictMode pass
-      // cannot clear the target before the active mount applies it.
+
+      // Show the roster immediately — photos and rematch must not block first paint.
       const focusTarget = readPersonnelFocusTarget();
       const focusedRow =
         (focusTarget.rowId &&
           rows.find((row) => row.__dbRowId === focusTarget.rowId)) ||
         (focusTarget.externalId &&
           rows.find(
-            (row) => getPersonExternalId(row) === focusTarget.externalId,
+            (row) => resolvePersonIdentityKey(row) === focusTarget.externalId,
           )) ||
         null;
 
@@ -559,13 +1062,27 @@ export function PersonnelPage({
         clearPersonnelFocusTarget();
       }
 
-      void loadPersonnelPhotos();
-      void loadPersonnelQuestionnaireIds();
       setMessage(
         focusedRow
-          ? `Відкрито картку: ${buildPersonSummary(focusedRow).name}.`
+          ? `Відкрито картку: ${getPersonDisplayName(focusedRow) || "особу"}.`
           : `Завантажено особовий склад з БД: ${rows.length} записів · ${sheet.name}.`,
       );
+      if (!isCancelled?.()) setIsLoading(false);
+
+      const startAttachments = () => {
+        if (isCancelled?.()) return;
+        const photosPromise = loadPersonnelPhotos();
+        const questionnairesPromise = loadPersonnelQuestionnaireIds();
+        void healOrphanAttachmentsInBackground(
+          mergedPreview.rows,
+          isCancelled,
+          photosPromise,
+          questionnairesPromise,
+        );
+      };
+      window.requestAnimationFrame(() => {
+        window.setTimeout(startAttachments, 0);
+      });
     } catch (error) {
       if (isCancelled?.()) return;
       setMessage(
@@ -583,6 +1100,7 @@ export function PersonnelPage({
 
     setIsLoading(true);
     try {
+      const previousRecords = personnelRows;
       const snapshot = await readWorkbookSnapshot(file);
       const rosterSheet = snapshot.sheets.find((sheet) =>
         /загальний\s*список/i.test(sheet.sheetName),
@@ -592,18 +1110,45 @@ export function PersonnelPage({
         return;
       }
 
-      const columns = buildImportColumns(rosterSheet);
+      const fighterStatusSheet = findFighterStatusSheet(snapshot.sheets);
+      const fighterStatusAdditions = fighterStatusSheet
+        ? buildFighterStatusAdditions(fighterStatusSheet)
+        : new Map<string, Record<string, unknown>>();
+      const columns = [
+        ...buildImportColumns(rosterSheet),
+        ...FIGHTER_STATUS_FIELDS.map((field, index) => ({
+          key: field.key,
+          label: field.label,
+          order: rosterSheet.columnCount + index,
+          originalIndex: rosterSheet.columnCount + index,
+          letter: "",
+        })),
+      ];
+      const rosterColumns = buildImportColumns(rosterSheet);
+      let matchedFighterStatusCount = 0;
       const rows = rosterSheet.rows
         .filter((row) => hasRowData(row.values))
-        .map((row) => ({
-          excelRowNumber: row.excelRowNumber,
-          values: Object.fromEntries(
-            columns.map((column, index) => [
+        .map((row) => {
+          const values = Object.fromEntries(
+            rosterColumns.map((column, index) => [
               column.key,
               cellValueToJson(row.values[index]),
             ]),
-          ),
-        }));
+          );
+          const statusAddition = findFighterStatusAddition(
+            values,
+            fighterStatusAdditions,
+          );
+          if (statusAddition) matchedFighterStatusCount += 1;
+
+          return {
+            excelRowNumber: row.excelRowNumber,
+            values: {
+              ...values,
+              ...(statusAddition ?? {}),
+            },
+          };
+        });
 
       const created = await api.importPersonnelRoster({
         name: snapshot.fileName.replace(/\.(xlsx|xlsm)$/i, ""),
@@ -620,11 +1165,34 @@ export function PersonnelPage({
       });
 
       const latestRosterRows = await loadLatestPersonnelRoster();
-      setDbPreview((current) =>
-        current ? mergeRosterRowsIntoPreview(current, latestRosterRows) : current,
+      let nextPreview = dbPreview;
+      try {
+        nextPreview = dbPreview
+          ? mergeRosterRowsIntoPreview(dbPreview, latestRosterRows)
+          : null;
+      } catch {
+        nextPreview = dbPreview;
+      }
+      setDbPreview(nextPreview);
+      setIsLoading(false);
+      await new Promise<void>((resolve) => {
+        window.setTimeout(resolve, 0);
+      });
+
+      const migrationPairs = nextPreview
+        ? [
+            ...buildAttachmentMigrationPairs(previousRecords, nextPreview.rows),
+            ...buildSelfAttachmentMigrationPairs(nextPreview.rows),
+          ]
+        : [];
+      const migrationResult = await migrateAttachmentsToNewExternalIds(
+        migrationPairs,
+        true,
       );
+      sessionStorage.removeItem(ATTACHMENT_HEAL_SESSION_KEY);
+
       setMessage(
-        `Імпортовано Загальний список: ${created.totalRows} рядків · ${snapshot.fileName}.`,
+        `Імпортовано Загальний список: ${created.totalRows} рядків · ${snapshot.fileName}. Статус бійців: ${fighterStatusSheet ? `аркуш «${fighterStatusSheet.sheetName.trim()}», ${fighterStatusAdditions.size} записів, привʼязано ${matchedFighterStatusCount}` : "аркуш не знайдено"}. Перенесено привʼязок: ${migrationResult}.`,
       );
     } catch (error) {
       setMessage(
@@ -763,7 +1331,7 @@ export function PersonnelPage({
         ...photos,
         [externalId]: savedPhoto?.photoData || dataUrl,
       }));
-      setMessage(`Фото збережено в БД: ${selectedSummary.name} · ID ${externalId}.`);
+      setMessage(`Фото збережено в БД: ${selectedSummary.name}.`);
     } catch (error) {
       setMessage(
         error instanceof Error
@@ -787,13 +1355,185 @@ export function PersonnelPage({
         delete next[externalId];
         return next;
       });
-      setMessage(`Фото видалено: ${selectedSummary.name} · ID ${externalId}.`);
+      setMessage(`Фото видалено: ${selectedSummary.name}.`);
     } catch (error) {
       setMessage(
         error instanceof Error
           ? error.message
           : "Не вдалося видалити фото з БД.",
       );
+    }
+  };
+
+  const persistPersonPhones = async (externalId: string, phones: string[]) => {
+    const next = uniqueNormalizedPhones(phones);
+    setPhonesByExternalId((current) => {
+      const updated = { ...current, [externalId]: next };
+      writeStoredPersonPhones(updated);
+      return updated;
+    });
+    try {
+      const saved = await upsertPersonPhonesDocument(
+        externalId,
+        next,
+        phoneDocByExternalId[externalId] ?? null,
+      );
+      setPhoneDocByExternalId((current) => {
+        if (saved) return { ...current, [externalId]: saved };
+        const updated = { ...current };
+        delete updated[externalId];
+        return updated;
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const addSelectedPersonPhone = async () => {
+    const externalId = selectedSummary.externalId;
+    const normalized = normalizeUaPhone(phoneDraft);
+    if (!selectedRow || !externalId) {
+      setMessage("Спочатку виберіть особу зі списку.");
+      return;
+    }
+    if (!normalized) {
+      setMessage("Вкажіть український номер, наприклад 063 123 45 67.");
+      return;
+    }
+    if (savedPhones.includes(normalized)) {
+      setPhoneDraft("");
+      setMessage(`Цей номер уже збережено: ${formatUaPhoneDisplay(normalized)}.`);
+      return;
+    }
+
+    setIsSavingPhone(true);
+    const savedToDb = await persistPersonPhones(externalId, [
+      ...savedPhones,
+      normalized,
+    ]);
+    setIsSavingPhone(false);
+    setPhoneDraft("");
+    setMessage(
+      savedToDb
+        ? `Телефон збережено: ${formatUaPhoneDisplay(normalized)}. Номер не затреться при оновленні списку.`
+        : `Телефон збережено локально: ${formatUaPhoneDisplay(normalized)}. Не вдалося записати в БД.`,
+    );
+  };
+
+  const removeSelectedPersonPhone = async (phone: string) => {
+    const externalId = selectedSummary.externalId;
+    if (!externalId) return;
+    setIsSavingPhone(true);
+    const savedToDb = await persistPersonPhones(
+      externalId,
+      savedPhones.filter((item) => item !== phone),
+    );
+    setIsSavingPhone(false);
+    setMessage(
+      savedToDb
+        ? `Телефон видалено: ${formatUaPhoneDisplay(phone)}.`
+        : `Телефон прибрано локально: ${formatUaPhoneDisplay(phone)}. Не вдалося оновити БД.`,
+    );
+  };
+
+  const pullContactsFromQuestionnaire = async () => {
+    const externalId = selectedSummary.externalId;
+    const rowId = selectedRow?.__dbRowId ? String(selectedRow.__dbRowId) : "";
+    if (!selectedRow || !externalId || !rowId) {
+      setMessage("Спочатку виберіть особу зі списку.");
+      return;
+    }
+
+    setIsPullingFromQuestionnaire(true);
+    try {
+      let file: File | null = pendingQuestionnaireFile || diskPreviewFile || null;
+      if (!file) {
+        const full = await api.getPersonQuestionnaire(externalId);
+        if (!full?.fileData) {
+          setMessage("Немає збереженої анкети — спочатку додайте PDF анкети.");
+          return;
+        }
+        file = dataUrlToFile(
+          full.fileData,
+          full.fileName || "anketa.pdf",
+        );
+      }
+
+      setMessage("Читаю анкету…");
+      const parsed = await parseQuestionnairePdf(file, { useOcr: false });
+      const byKey = Object.fromEntries(
+        parsed.fields.map((field) => [field.key, field.value.trim()]),
+      );
+      const enrichment = await syncEnrichmentToPerson({
+        personExternalId: externalId,
+        rowId,
+        row: selectedRow,
+        patch: {
+          rnokpp: byKey.rnokpp,
+          address: byKey.actualAddress || byKey.registrationAddress,
+          phones: extractPhones(byKey.phones || ""),
+        },
+        existingPhones: phonesByExternalId[externalId] ?? [],
+        phoneDocument: phoneDocByExternalId[externalId] ?? null,
+      });
+
+      setPhonesByExternalId((current) => {
+        const next = { ...current, [externalId]: enrichment.phones };
+        writeStoredPersonPhones(next);
+        return next;
+      });
+      if (enrichment.phoneDocument) {
+        setPhoneDocByExternalId((current) => ({
+          ...current,
+          [externalId]: enrichment.phoneDocument!,
+        }));
+      }
+
+      if (Object.keys(enrichment.fieldUpdates).length) {
+        setDbPreview((currentPreview) => {
+          if (!currentPreview) return currentPreview;
+          return {
+            ...currentPreview,
+            rows: currentPreview.rows.map((row) =>
+              row.__dbRowId === selectedRow.__dbRowId
+                ? applyEnrichmentToPreviewRow(row, enrichment.fieldUpdates)
+                : row,
+            ),
+          };
+        });
+        setEditValues((current) => ({
+          ...current,
+          ...enrichment.fieldUpdates,
+        }));
+      }
+
+      const fieldKeys = Object.keys(enrichment.fieldUpdates);
+      const parts = [
+        enrichment.phonesAdded.length
+          ? `телефони +${enrichment.phonesAdded.length}`
+          : "",
+        fieldKeys.some((key) => key.toLocaleLowerCase("uk-UA").includes("рнокпп"))
+          ? "РНОКПП"
+          : "",
+        fieldKeys.some((key) => key.toLocaleLowerCase("uk-UA").includes("адрес"))
+          ? "адреса"
+          : "",
+      ].filter(Boolean);
+
+      setMessage(
+        parts.length
+          ? `З анкети додано (без перезапису наявного): ${parts.join(", ")}.`
+          : "У анкеті немає нових даних для порожніх полів — наявне не змінено.",
+      );
+    } catch (error) {
+      setMessage(
+        error instanceof Error
+          ? `Не вдалося підтягнути з анкети: ${error.message}`
+          : "Не вдалося підтягнути дані з анкети.",
+      );
+    } finally {
+      setIsPullingFromQuestionnaire(false);
     }
   };
 
@@ -813,7 +1553,7 @@ export function PersonnelPage({
         return next;
       });
       closeQuestionnairePreview();
-      setMessage(`Анкету видалено: ${selectedSummary.name} · ID ${externalId}.`);
+      setMessage(`Анкету видалено: ${selectedSummary.name}.`);
     } catch (error) {
       setMessage(
         error instanceof Error
@@ -837,7 +1577,7 @@ export function PersonnelPage({
     setQuestionnairePreviewTitle(title);
     setIsDiskFloatingPreview(true);
     setQuestionnairePreviewUrl((current) => {
-      if (current) URL.revokeObjectURL(current);
+      if (current) revokeQuestionnairePreviewUrl(current);
       return nextUrl;
     });
     setIsQuestionnairePreviewOpen(true);
@@ -856,27 +1596,62 @@ export function PersonnelPage({
     setPendingQuestionnaireFile(null);
     setQuestionnairePreviewTitle("");
     setQuestionnairePreviewUrl((current) => {
-      if (current) URL.revokeObjectURL(current);
+      if (current) revokeQuestionnairePreviewUrl(current);
       return "";
     });
   };
 
   const openQuestionnairePreview = (fileData = questionnaire?.fileData) => {
-    if (!fileData) return;
-    const nextUrl = dataUrlToObjectUrl(fileData);
+    const externalId = selectedSummary.externalId;
+    let nextUrl = "";
+
+    if (
+      externalId &&
+      fileData &&
+      !pendingQuestionnaireFile &&
+      !diskPreviewFile
+    ) {
+      nextUrl = api.getPersonQuestionnaireFileUrl(
+        externalId,
+        questionnaireExportFileName,
+      );
+    } else if (fileData) {
+      nextUrl = dataUrlToObjectUrl(fileData);
+    } else {
+      return;
+    }
+
     setPendingQuestionnaireFile(null);
     setDiskPreviewFile(null);
     setIsDiskFloatingPreview(false);
     setQuestionnairePreviewTitle(
       `Анкета · ${selectedSummary.name}${
-        questionnaire?.fileName ? ` · ${questionnaire.fileName}` : ""
+        questionnaireExportFileName ? ` · ${questionnaireExportFileName}` : ""
       }`,
     );
     setQuestionnairePreviewUrl((current) => {
-      if (current) URL.revokeObjectURL(current);
+      if (current) revokeQuestionnairePreviewUrl(current);
       return nextUrl;
     });
     setIsQuestionnairePreviewOpen(true);
+  };
+
+  const openQuestionnaireInNewTab = () => {
+    const externalId = selectedSummary.externalId;
+    if (
+      externalId &&
+      questionnaire?.fileData &&
+      !pendingQuestionnaireFile &&
+      !diskPreviewFile
+    ) {
+      window.open(
+        api.getPersonQuestionnaireFileUrl(externalId, questionnaireExportFileName),
+        "_blank",
+        "noopener,noreferrer",
+      );
+      return;
+    }
+    downloadCurrentQuestionnaire();
   };
 
   const beginQuestionnaireReview = (file: File | undefined) => {
@@ -904,7 +1679,7 @@ export function PersonnelPage({
       `Перегляд анкети перед збереженням · ${selectedSummary.name} · ${file.name}`,
     );
     setQuestionnairePreviewUrl((current) => {
-      if (current) URL.revokeObjectURL(current);
+      if (current) revokeQuestionnairePreviewUrl(current);
       return nextUrl;
     });
     setIsQuestionnairePreviewOpen(true);
@@ -919,14 +1694,24 @@ export function PersonnelPage({
 
     setIsUploadingQuestionnaire(true);
     try {
-      const saved = await api.upsertPersonQuestionnaireFile(externalId, file);
+      const exportFileName = sanitizeFileName(
+        buildQuestionnaireExportFileName(
+          selectedSummary.name,
+          selectedSummary.callSign,
+        ),
+      );
+      const fileToSave = renameQuestionnaireFile(file, exportFileName);
+      const saved = await api.upsertPersonQuestionnaireFile(
+        externalId,
+        fileToSave,
+      );
       setQuestionnaire(saved);
       setQuestionnaireByExternalId((current) => ({
         ...current,
         [externalId]: true,
       }));
       setMessage(
-        `Анкету збережено в БД: ${selectedSummary.name} · ${file.name}.`,
+        `Анкету збережено в БД: ${selectedSummary.name} · ${exportFileName}.`,
       );
       setPendingQuestionnaireFile(null);
     } catch (error) {
@@ -1006,14 +1791,6 @@ export function PersonnelPage({
           <Button variant="outlined" onClick={() => void loadPersonnel()}>
             Оновити з БД
           </Button>
-          <Button
-            disabled={!selectedRow}
-            variant="contained"
-            onClick={() => selectedRow && onOpenDocuments(selectedRow)}
-            sx={{ color: "#1a1a14" }}
-          >
-            Сформувати документ
-          </Button>
         </Stack>
       </header>
       {isLoading && <LinearProgress color="primary" />}
@@ -1035,7 +1812,7 @@ export function PersonnelPage({
             <input
               value={query}
               onChange={(event) => setQuery(event.target.value)}
-              placeholder="ПІБ, ID, звання, посада"
+              placeholder="ПІБ, позивний, звання, посада"
             />
           </label>
           <PersonnelVirtualList
@@ -1112,9 +1889,6 @@ export function PersonnelPage({
                 {selectedSummary.rank && (
                   <Chip label={selectedSummary.rank} size="small" />
                 )}
-                {selectedSummary.externalId && (
-                  <Chip label={`ID: ${selectedSummary.externalId}`} size="small" />
-                )}
                 {selectedSummary.positionIndex && (
                   <Chip
                     label={`Посада: ${selectedSummary.positionIndex}`}
@@ -1134,19 +1908,75 @@ export function PersonnelPage({
                 <strong>Телефони</strong>
                 {parsedPhones.length > 0 ? (
                   <span className="person-phones-list">
-                    {parsedPhones.map((phone, phoneIndex) => (
-                      <Chip
-                        key={`${phone}-${phoneIndex}`}
-                        label={formatUaPhoneDisplay(phone)}
-                        size="small"
-                        color="primary"
-                        variant="outlined"
-                      />
-                    ))}
+                    {parsedPhones.map((phone) => {
+                      const isSaved = savedPhones.includes(phone);
+                      return (
+                        <span className="person-phone-chip" key={phone}>
+                          <Chip
+                            label={formatUaPhoneDisplay(phone)}
+                            size="small"
+                            color="primary"
+                            variant="outlined"
+                          />
+                          {isSaved ? (
+                            <button
+                              aria-label={`Видалити ${formatUaPhoneDisplay(phone)}`}
+                              disabled={isSavingPhone}
+                              type="button"
+                              onClick={() => void removeSelectedPersonPhone(phone)}
+                            >
+                              <DeleteOutlineOutlinedIcon fontSize="small" />
+                            </button>
+                          ) : null}
+                        </span>
+                      );
+                    })}
                   </span>
                 ) : (
-                  "—"
+                  <span className="person-phones-empty">Номерів ще немає</span>
                 )}
+                <div className="person-phones-editor">
+                  <input
+                    aria-label="Номер телефону"
+                    autoComplete="off"
+                    disabled={!selectedRow || isSavingPhone}
+                    inputMode="tel"
+                    placeholder="063 123 45 67"
+                    value={phoneDraft}
+                    onChange={(event) => setPhoneDraft(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key !== "Enter") return;
+                      event.preventDefault();
+                      void addSelectedPersonPhone();
+                    }}
+                  />
+                  <Button
+                    disabled={!selectedRow || isSavingPhone}
+                    size="small"
+                    type="button"
+                    variant="contained"
+                    sx={{ color: "#1a1a14" }}
+                    onClick={() => void addSelectedPersonPhone()}
+                  >
+                    Додати
+                  </Button>
+                </div>
+                <Button
+                  disabled={
+                    !selectedRow ||
+                    !selectedSummary.externalId ||
+                    isPullingFromQuestionnaire
+                  }
+                  size="small"
+                  type="button"
+                  variant="outlined"
+                  sx={{ mt: 1, alignSelf: "flex-start" }}
+                  onClick={() => void pullContactsFromQuestionnaire()}
+                >
+                  {isPullingFromQuestionnaire
+                    ? "Читаю анкету…"
+                    : "Підтягнути з анкети"}
+                </Button>
               </span>
               <span>
                 <strong>Дата народження</strong>
@@ -1175,6 +2005,20 @@ export function PersonnelPage({
                 {selectedSummary.arrivedFrom || "—"}
               </span>
             </div>
+
+            {fighterStatusFieldRows.length > 0 ? (
+              <div className="person-edit-section">
+                <div className="panel-heading">Статус бійців</div>
+                <div className="person-roster-grid">
+                  {fighterStatusFieldRows.map((field) => (
+                    <span key={field.key}>
+                      <strong>{field.label.replace(/^Статус бійців · /, "")}</strong>
+                      {field.value}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            ) : null}
 
             {rosterFieldRows.length > 0 ? (
               <div className="person-edit-section">
@@ -1334,9 +2178,14 @@ export function PersonnelPage({
             </div>
             <div className="person-document-list">
               {questionnaire ? (
-                <article className="person-document-shell">
+                <article
+                  className={[
+                    "person-document-shell",
+                    "is-ready",
+                  ].join(" ")}
+                >
                   <button
-                    className="person-document-item"
+                    className="person-document-item is-ready"
                     type="button"
                     onClick={() => openQuestionnairePreview()}
                   >
@@ -1344,10 +2193,19 @@ export function PersonnelPage({
                     <span>
                       <strong>Анкета (PDF)</strong>
                       <small>
-                        {questionnaire.fileName || "questionnaire.pdf"} · натисніть,
-                        щоб переглянути
+                        {questionnaireExportFileName} · переглянути
                       </small>
                     </span>
+                  </button>
+                  <button
+                    aria-label="Експорт анкети"
+                    className="person-document-delete"
+                    disabled={!selectedRow}
+                    onClick={() => void exportCurrentQuestionnaire()}
+                    title={`Експорт: ${questionnaireExportFileName}`}
+                    type="button"
+                  >
+                    <FileDownloadOutlinedIcon />
                   </button>
                   <button
                     aria-label="Видалити анкету"
@@ -1375,7 +2233,16 @@ export function PersonnelPage({
                 ),
               )}
               <button
-                className="person-document-item"
+                className={[
+                  "person-document-item",
+                  personRelatedDocuments.some(
+                    (document) => document.type === "salaryPowerAttorney",
+                  )
+                    ? "is-ready"
+                    : "",
+                ]
+                  .filter(Boolean)
+                  .join(" ")}
                 disabled={!selectedRow}
                 type="button"
                 onClick={() =>
@@ -1390,7 +2257,16 @@ export function PersonnelPage({
                 </span>
               </button>
               <button
-                className="person-document-item"
+                className={[
+                  "person-document-item",
+                  personRelatedDocuments.some(
+                    (document) => document.type === "ubdReport",
+                  )
+                    ? "is-ready"
+                    : "",
+                ]
+                  .filter(Boolean)
+                  .join(" ")}
                 disabled={!selectedRow}
                 type="button"
                 onClick={() =>
@@ -1402,6 +2278,99 @@ export function PersonnelPage({
                 <span>
                   <strong>Рапорт на УБД</strong>
                   <small>рапорт, скани документів, статус</small>
+                </span>
+              </button>
+              <button
+                className={[
+                  "person-document-item",
+                  personRelatedDocuments.some(
+                    (document) => document.type === "ubdRestoreReport",
+                  )
+                    ? "is-ready"
+                    : "",
+                ]
+                  .filter(Boolean)
+                  .join(" ")}
+                disabled={!selectedRow}
+                type="button"
+                onClick={() =>
+                  selectedRow && onOpenDocuments(selectedRow, "ubdRestoreReport")
+                }
+              >
+                <ArticleOutlinedIcon />
+                <span>
+                  <strong>Рапорт на відновлення УБД</strong>
+                  <small>пошкоджене посвідчення, клопотання, скани</small>
+                </span>
+              </button>
+              <button
+                className={[
+                  "person-document-item",
+                  personRelatedDocuments.some(
+                    (document) => document.type === "form6Report",
+                  )
+                    ? "is-ready"
+                    : "",
+                ]
+                  .filter(Boolean)
+                  .join(" ")}
+                disabled={!selectedRow}
+                type="button"
+                onClick={() =>
+                  selectedRow && onOpenDocuments(selectedRow, "form6Report")
+                }
+              >
+                <ArticleOutlinedIcon />
+                <span>
+                  <strong>Форма 6</strong>
+                  <small>рапорт для довідки УБД, персональні дані, скани</small>
+                </span>
+              </button>
+              <button
+                className={[
+                  "person-document-item",
+                  personRelatedDocuments.some(
+                    (document) => document.type === "form12Report",
+                  )
+                    ? "is-ready"
+                    : "",
+                ]
+                  .filter(Boolean)
+                  .join(" ")}
+                disabled={!selectedRow}
+                type="button"
+                onClick={() =>
+                  selectedRow && onOpenDocuments(selectedRow, "form12Report")
+                }
+              >
+                <ArticleOutlinedIcon />
+                <span>
+                  <strong>Форма 12</strong>
+                  <small>рапорт Ф-12, дані бійця, підпис PNG</small>
+                </span>
+              </button>
+              <button
+                className={[
+                  "person-document-item",
+                  personRelatedDocuments.some(
+                    (document) => document.type === "temporaryMilitaryId",
+                  )
+                    ? "is-ready"
+                    : "",
+                ]
+                  .filter(Boolean)
+                  .join(" ")}
+                disabled={!selectedRow}
+                type="button"
+                onClick={() =>
+                  selectedRow &&
+                  onOpenDocuments(selectedRow, "temporaryMilitaryId")
+                }
+              >
+                <ArticleOutlinedIcon />
+                <span>
+                  <strong>Тимчасовий військовий квиток</strong>
+                  <small>фото, рядок для замовлення, прогрес</small>
                 </span>
               </button>
             </div>
@@ -1596,10 +2565,12 @@ export function PersonnelPage({
         placement="left"
         onClose={closeQuestionnairePreview}
         onCrop={() => openPhotoCropFromQuestionnaire()}
-        onOpenTab={() =>
-          questionnairePreviewUrl &&
-          window.open(questionnairePreviewUrl, "_blank", "noopener,noreferrer")
-        }
+        onOpenTab={openQuestionnaireInNewTab}
+        onDownload={() => void exportCurrentQuestionnaire()}
+        shareFileName={questionnaireExportFileName}
+        sharePersonName={selectedSummary.name}
+        shareSource={currentQuestionnaireShareSource}
+        onShareNotify={setMessage}
       />
 
       <Dialog
@@ -1615,8 +2586,8 @@ export function PersonnelPage({
             : `Анкета · ${selectedSummary.name}`}
           {pendingQuestionnaireFile
             ? ` · ${pendingQuestionnaireFile.name}`
-            : questionnaire?.fileName
-              ? ` · ${questionnaire.fileName}`
+            : questionnaireExportFileName
+              ? ` · ${questionnaireExportFileName}`
               : ""}
         </DialogTitle>
         <DialogContent>
@@ -1624,6 +2595,11 @@ export function PersonnelPage({
             <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
               Перевірте, що це потрібна анкета. Можна одразу вирізати фото з PDF,
               потім зберегти анкету в БД.
+            </Typography>
+          ) : questionnairePreviewUrl ? (
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+              Для збереження на диск натисніть «Експорт PDF». Збереження через Cmd+S
+              у переглядачі може дати випадкову назву файлу.
             </Typography>
           ) : null}
           {questionnairePreviewUrl ? (
@@ -1648,15 +2624,29 @@ export function PersonnelPage({
             Вирізати фото
           </Button>
           <Button
-            variant="outlined"
+            variant="contained"
             disabled={!questionnairePreviewUrl}
-            onClick={() =>
-              questionnairePreviewUrl &&
-              window.open(questionnairePreviewUrl, "_blank", "noopener,noreferrer")
-            }
+            onClick={() => void exportCurrentQuestionnaire()}
+            sx={{ color: "#1a1a14" }}
           >
-            Відкрити в новій вкладці
+            Експорт PDF
           </Button>
+          <QuestionnaireShareButton
+            disabled={!questionnairePreviewUrl}
+            fileName={questionnaireExportFileName}
+            personName={selectedSummary.name}
+            source={currentQuestionnaireShareSource}
+            onNotify={setMessage}
+          />
+          {!pendingQuestionnaireFile && !diskPreviewFile ? (
+            <Button
+              variant="outlined"
+              disabled={!questionnairePreviewUrl}
+              onClick={openQuestionnaireInNewTab}
+            >
+              Відкрити в новій вкладці
+            </Button>
+          ) : null}
           {pendingQuestionnaireFile ? (
             <>
               <Button variant="outlined" onClick={closeQuestionnairePreview}>

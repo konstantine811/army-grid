@@ -20,6 +20,9 @@ export type BchsAnalyticsRow = {
   shortage: number;
   shortagePercent: CellValue;
   absent: number;
+  absentOfficers: number;
+  absentSergeants: number;
+  absentSoldiers: number;
   businessTrip: number;
   training: number;
   hospitalWounded: number;
@@ -50,6 +53,8 @@ export type BchsComparisonRow = BchsAnalyticsRow & {
   attachedSoldiers: number;
   attachedSourcesText: string;
   unassignedNewcomers: number;
+  /** Excel AV — «Ведеться пошук». */
+  searchInProgress: number;
   noBzvp: number;
   levelPercent: number;
   balanceActual: number;
@@ -151,12 +156,20 @@ export type BchsDataIssue = {
   rosterUnit: string;
   status: string;
   destination?: string;
+  rankTitle?: string;
+  rankCategory?: string;
+  /** status | destination | rank */
+  kind?: "status" | "destination" | "rank";
   reason: string;
 };
 
 export type BchsPersonnelAwayPerson = {
   battalion: string;
   rosterUnit: string;
+  /** Excel E — посада; «ПРИБУВ…» або порожньо = без посади. */
+  position: string;
+  /** Excel H — «ШПК факт» (звання за штатом на посаді). */
+  shpkFact: string;
   rankCategory: string;
   rankTitle: string;
   fullName: string;
@@ -165,8 +178,26 @@ export type BchsPersonnelAwayPerson = {
   combatReadiness: string;
   bzvpStatus: string;
   destination: string;
+  /** Excel T — примітки для «Командування» (AB/AH поранення). */
+  treatmentNote: string;
+  /** Excel L — мобілізація/контракт (fallback для резерву командира без стилів). */
+  mobilizationContract: string;
   medicalPlace: string;
   medicalNote: string;
+  /** ARGB заливки клітинки ПІБ (column N), якщо зчитано з Excel. */
+  pibHighlightRgb?: string | null;
+};
+
+export type BchsUnitAbsenceCategoryStats = {
+  training: number;
+  hospitalWounded: number;
+  hospitalIllness: number;
+  vacation: number;
+  awol: number;
+  missing: number;
+  killed: number;
+  medWounded: number;
+  medIllness: number;
 };
 
 export type BchsUnitAwayStats = {
@@ -185,6 +216,21 @@ export type BchsUnitAttachedStats = {
   total: number;
   sources: Map<string, number>;
   sourcesText: string;
+};
+
+/** Excel BB–BL «Бойова складова» per unit row. */
+export type BchsUnitCombatComponentStats = {
+  assaultReady: number;
+  assaultRecovery: number;
+  assaultExecution: number;
+  noBzvp: number;
+  assaultTotal: number;
+  vehicleCrew: number;
+  droneCrew: number;
+  crewServedWeapons: number;
+  commandCombat: number;
+  supportCombat: number;
+  combatComponent: number;
 };
 
 export type GeneratedWorkbook = any;

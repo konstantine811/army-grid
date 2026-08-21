@@ -109,6 +109,62 @@ export type BackendPersonDocument = {
   updatedAt: string
 }
 
+export type DocumentSignatoryBlockType = 'SIGNER' | 'APPROVAL'
+
+export type BackendDocumentSignatoryPreset = {
+  id: string
+  label: string
+  blockType: DocumentSignatoryBlockType
+  title: string
+  rank: string
+  fullName: string
+  signatureData?: string | null
+  signatureFileName?: string | null
+  signatureMimeType?: string | null
+  showDate: boolean
+  documentTypes: string[]
+  sortOrder: number
+  createdAt: string
+  updatedAt: string
+}
+
+export type SaveDocumentSignatoryPreset = Omit<
+  BackendDocumentSignatoryPreset,
+  'id' | 'createdAt' | 'updatedAt'
+>
+
+export type BackendPersonnelProfile = {
+  externalId: string | null
+  fullName: string | null
+  person: JsonRecord | null
+  ejournal: {
+    importId: string | null
+    oosRow: JsonRecord | null
+    absentRows: JsonRecord[]
+  }
+  roster: {
+    importId: string
+    row: JsonRecord
+  } | null
+  photo: JsonRecord | null
+  questionnaire: JsonRecord | null
+  documents: BackendPersonDocument[]
+  changeLogs: JsonRecord[]
+  exitPeriods: {
+    absences: JsonRecord[]
+    openAbsences: JsonRecord[]
+    closedAbsences: JsonRecord[]
+    locationPeriods: JsonRecord[]
+    servicePeriods: JsonRecord[]
+    rosterEvents: JsonRecord[]
+    temporaryArrivals: JsonRecord[]
+    fighterStatus: JsonRecord | null
+    absentSheetRows: JsonRecord[]
+    oosExitFields: JsonRecord
+    hasAny: boolean
+  }
+}
+
 export type AiQuestionnaireOcrField = {
   key: string
   label: string
@@ -167,6 +223,12 @@ export type BackendPersonnelOverviewRow = {
   unit: string
   status: OverviewStatus | string
   statusLabel: string
+  fighterDirection?: string
+  fighterEntryDate?: string
+  fighterExitDate?: string
+  fighterReturnDate?: string
+  fighterTotalDays?: string
+  fighterStatus?: string
   validFrom: string | null
   days: number | null
   plannedReturn: string | null
@@ -358,6 +420,20 @@ export const api = {
     )
   },
 
+  getPersonQuestionnaireFileUrl(
+    personExternalId: string,
+    fileName?: string,
+    download = false,
+  ) {
+    const params = new URLSearchParams()
+    if (fileName) params.set('fileName', fileName)
+    if (download) params.set('download', '1')
+    const query = params.toString()
+    return `${API_BASE_URL}/ejournals/personnel/questionnaires/${encodeURIComponent(personExternalId)}/file${
+      query ? `?${query}` : ''
+    }`
+  },
+
   listPersonQuestionnaires() {
     return request<BackendPersonQuestionnaireMeta[]>('/ejournals/personnel/questionnaires')
   },
@@ -404,12 +480,19 @@ export const api = {
     return response.blob()
   },
 
-  confirmDiskQuestionnaire(personExternalId: string, relativePath: string) {
+  confirmDiskQuestionnaire(
+    personExternalId: string,
+    relativePath: string,
+    fileName?: string,
+  ) {
     return request<BackendPersonQuestionnaire>(
       `/ejournals/personnel/questionnaire-disk/${encodeURIComponent(personExternalId)}/confirm`,
       {
         method: 'POST',
-        body: JSON.stringify({ relativePath }),
+        body: JSON.stringify({
+          relativePath,
+          ...(fileName ? { fileName } : {}),
+        }),
       },
     )
   },
@@ -455,6 +538,15 @@ export const api = {
     )
   },
 
+  getPersonnelProfile(personExternalId: string, fullName?: string) {
+    const params = new URLSearchParams()
+    if (fullName?.trim()) params.set('fullName', fullName.trim())
+    const query = params.toString()
+    return request<BackendPersonnelProfile>(
+      `/ejournals/personnel/${encodeURIComponent(personExternalId)}/profile${query ? `?${query}` : ''}`,
+    )
+  },
+
   listAllPersonDocuments() {
     return request<BackendPersonDocument[]>('/ejournals/personnel/documents')
   },
@@ -495,6 +587,42 @@ export const api = {
   deletePersonDocument(personExternalId: string, documentId: string) {
     return request<{ id: string; personExternalId: string; deleted: boolean }>(
       `/ejournals/personnel/${encodeURIComponent(personExternalId)}/documents/${encodeURIComponent(documentId)}`,
+      { method: 'DELETE' },
+    )
+  },
+
+  listDocumentSignatories(documentType?: string) {
+    const query = documentType
+      ? `?documentType=${encodeURIComponent(documentType)}`
+      : ''
+    return request<BackendDocumentSignatoryPreset[]>(
+      `/document-signatories${query}`,
+    )
+  },
+
+  createDocumentSignatory(payload: SaveDocumentSignatoryPreset) {
+    return request<BackendDocumentSignatoryPreset>('/document-signatories', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    })
+  },
+
+  updateDocumentSignatory(
+    id: string,
+    payload: SaveDocumentSignatoryPreset,
+  ) {
+    return request<BackendDocumentSignatoryPreset>(
+      `/document-signatories/${encodeURIComponent(id)}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify(payload),
+      },
+    )
+  },
+
+  deleteDocumentSignatory(id: string) {
+    return request<{ id: string; deleted: boolean }>(
+      `/document-signatories/${encodeURIComponent(id)}`,
       { method: 'DELETE' },
     )
   },

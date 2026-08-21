@@ -1,9 +1,15 @@
 import type {
   BackendEjournalImport,
   BackendEjournalImportSheet,
+  BackendPersonDocument,
   EjournalRowActionType,
 } from "../../api";
 import { api } from "../../api";
+import {
+  dataUrlToUint8Array,
+  downloadBlob,
+  sanitizeFileName,
+} from "../../shared/browserExport";
 import type { DbPreviewState, EjournalPreviewRow } from "../ejournal/ejournalTypes";
 import {
   parseDbColumns,
@@ -55,32 +61,87 @@ export const createDefaultActionForm = (): PersonActionForm => ({
   rank: "",
 });
 
-export const getPersonExternalId = (row: EjournalPreviewRow | null) => {
-  if (!row) return "";
+const ROSTER_FIELD_PREFIX = "roster__";
 
+/** Позивний з дужок / «позивний …» / імені файлу анкети (не дата народження). */
+export const isLikelyBirthDateToken = (value: string) => {
+  const text = String(value ?? "").trim();
+  if (!text) return false;
+  if (/\d{1,2}[.\/-]\d{1,2}[.\/-]\d{2,4}/.test(text)) return true;
+  if (/р\.?\s*н\.?/i.test(text)) return true;
+  if (/^\d{1,2}\s+\S+\s+\d{4}/.test(text)) return true;
+  return false;
+};
+
+const rosterSourceKey = (key: string) =>
+  key.startsWith(ROSTER_FIELD_PREFIX)
+    ? key.slice(ROSTER_FIELD_PREFIX.length)
+    : key;
+
+const CUID_VALUE_RE = /^c[a-z0-9]{20,}$/i;
+const UUID_VALUE_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+export const isUnstablePersonExternalId = (value: string) => {
+  const raw = String(value ?? "").trim();
+  if (
+    !raw ||
+    raw === "0" ||
+    raw === "-" ||
+    raw === "null" ||
+    raw === "undefined" ||
+    raw === "[object Object]"
+  ) {
+    return true;
+  }
+  if (raw.startsWith("{") || raw.startsWith("[")) return true;
+  if (/^roster:/i.test(raw)) return true;
+  if (CUID_VALUE_RE.test(raw) || UUID_VALUE_RE.test(raw)) return true;
+  if (/^\d{4}-\d{2}-\d{2}/.test(raw)) return true;
+  if (isLikelyBirthDateToken(raw)) return true;
+  return false;
+};
+
+const isPersonSpreadsheetIdFieldKey = (key: string) => {
+  if (!key || key.startsWith("__")) return false;
+  const source = rosterSourceKey(key).toLowerCase();
+  if (
+    source.includes("дата") ||
+    source.includes("народ") ||
+    source.includes("наказ")
+  ) {
+    return false;
+  }
+  if (
+    source === "id" ||
+    source === "ід" ||
+    source === "externalid" ||
+    source === "external_id"
+  ) {
+    return true;
+  }
+  return source.includes("зовнішн") || /(^|_)id$/i.test(source);
+};
+
+const personSpreadsheetIdKeyRank = (key: string) => {
+  const rosterPenalty = key.startsWith(ROSTER_FIELD_PREFIX) ? 1 : 0;
+  const source = rosterSourceKey(key).toLowerCase();
   const exact =
-    Object.keys(row).find((key) => {
-      const normalized = key.toLowerCase();
-      return (
-        !key.startsWith("__") &&
-        (normalized === "id" ||
-          normalized === "ід" ||
-          normalized === "externalid" ||
-          normalized === "external_id")
-      );
-    }) ??
-    Object.keys(row).find((key) => {
-      const normalized = key.toLowerCase();
-      return (
-        !key.startsWith("__") &&
-        (normalized.includes("зовнішн") || /(^|_)id$/i.test(normalized))
-      );
-    });
+    source === "id" ||
+    source === "ід" ||
+    source === "externalid" ||
+    source === "external_id";
+  return (exact ? 0 : 2) + rosterPenalty;
+};
 
-  if (!exact) return "";
-
-  const raw = previewValueToDisplay(row[exact]).trim();
-  if (!raw || raw === "[object Object]" || raw === "null" || raw === "undefined") {
+const readPersonIdFieldValue = (value: unknown) => {
+  const raw = previewValueToDisplay(value).trim();
+  if (
+    !raw ||
+    raw === "[object Object]" ||
+    raw === "null" ||
+    raw === "undefined"
+  ) {
     return "";
   }
 
@@ -93,12 +154,36 @@ export const getPersonExternalId = (row: EjournalPreviewRow | null) => {
         if (nested != null && nested !== "") return String(nested).trim();
       }
     } catch {
-      // keep empty for unreadable structured IDs
+      return "";
     }
     return "";
   }
 
   return raw;
+};
+
+/** Spreadsheet / OOS person number only — never a DB CUID, birth date, or roster row key. */
+const personSpreadsheetIdCache = new WeakMap<EjournalPreviewRow, string>();
+
+export const getPersonExternalId = (row: EjournalPreviewRow | null) => {
+  if (!row) return "";
+  const cached = personSpreadsheetIdCache.get(row);
+  if (cached !== undefined) return cached;
+
+  const keys = Object.keys(row)
+    .filter(isPersonSpreadsheetIdFieldKey)
+    .sort((left, right) => personSpreadsheetIdKeyRank(left) - personSpreadsheetIdKeyRank(right));
+
+  let resolved = "";
+  for (const key of keys) {
+    const raw = readPersonIdFieldValue(row[key]);
+    if (!raw || isUnstablePersonExternalId(raw)) continue;
+    resolved = raw;
+    break;
+  }
+
+  personSpreadsheetIdCache.set(row, resolved);
+  return resolved;
 };
 
 /** Position indexes come from Excel as newline-separated values; show them on one line. */
@@ -219,6 +304,8 @@ export const extractPhones = (value: unknown): string[] => {
   return phones;
 };
 
+const personFieldKeyCache = new WeakMap<EjournalPreviewRow, Map<string, string>>();
+
 /** Prefer exact / shortest key match so "звання" does not hit order columns. */
 export const resolvePersonFieldKey = (
   row: EjournalPreviewRow | null,
@@ -226,34 +313,52 @@ export const resolvePersonFieldKey = (
 ) => {
   if (!row || keyParts.length === 0) return "";
 
+  const cacheKey = keyParts.join("\0");
+  let cached = personFieldKeyCache.get(row);
+  if (!cached) {
+    cached = new Map();
+    personFieldKeyCache.set(row, cached);
+  }
+  const hit = cached.get(cacheKey);
+  if (hit !== undefined) return hit;
+
   const keys = Object.keys(row).filter((key) => !key.startsWith("__"));
   const parts = keyParts.map((part) => part.toLowerCase());
 
+  let resolved = "";
   if (parts.length === 1) {
     const exact = keys.find((key) => key.toLowerCase() === parts[0]);
-    if (exact) return exact;
+    if (exact) resolved = exact;
   }
 
-  const joined = parts.join("_");
-  const joinedExact = keys.find((key) => key.toLowerCase() === joined);
-  if (joinedExact) return joinedExact;
+  if (!resolved) {
+    const joined = parts.join("_");
+    const joinedExact = keys.find((key) => key.toLowerCase() === joined);
+    if (joinedExact) resolved = joinedExact;
+  }
 
-  const matches = keys.filter((key) => {
-    const normalized = key.toLowerCase();
-    return parts.every((part) => normalized.includes(part));
-  });
-  if (matches.length === 0) return "";
+  if (!resolved) {
+    const matches = keys.filter((key) => {
+      const normalized = key.toLowerCase();
+      return parts.every((part) => normalized.includes(part));
+    });
+    if (matches.length > 0) {
+      // Prefer keys that start with the first part (рнокпп… over відмова_від_рнокпп),
+      // then the shortest remaining match.
+      resolved =
+        matches.sort((left, right) => {
+          const leftStarts = left.toLowerCase().startsWith(parts[0] ?? "") ? 0 : 1;
+          const rightStarts = right.toLowerCase().startsWith(parts[0] ?? "")
+            ? 0
+            : 1;
+          if (leftStarts !== rightStarts) return leftStarts - rightStarts;
+          return left.length - right.length;
+        })[0] ?? "";
+    }
+  }
 
-  // Prefer keys that start with the first part (рнокпп… over відмова_від_рнокпп),
-  // then the shortest remaining match.
-  return (
-    matches.sort((left, right) => {
-      const leftStarts = left.toLowerCase().startsWith(parts[0] ?? "") ? 0 : 1;
-      const rightStarts = right.toLowerCase().startsWith(parts[0] ?? "") ? 0 : 1;
-      if (leftStarts !== rightStarts) return leftStarts - rightStarts;
-      return left.length - right.length;
-    })[0] ?? ""
-  );
+  cached.set(cacheKey, resolved);
+  return resolved;
 };
 
 export const getPersonFieldValue = (
@@ -264,6 +369,12 @@ export const getPersonFieldValue = (
   return key ? previewValueToDisplay(row?.[key]) : "";
 };
 
+export const getPersonDisplayName = (row: EjournalPreviewRow | null) =>
+  (
+    getPersonFieldValue(row, ["прізвище"]) ||
+    getPersonFieldValue(row, ["піб"])
+  ).trim();
+
 export type PersonFieldDef = {
   label: string;
   parts: string[];
@@ -273,7 +384,6 @@ export type PersonFieldDef = {
 
 /** Full OСС (2. ООС) field map for personnel card. */
 export const PERSON_CARD_FIELDS: PersonFieldDef[] = [
-  { label: "ПІБ", parts: ["прізвище"], section: "identity" },
   { label: "Звання", parts: ["звання"], section: "identity" },
   { label: "ID", parts: ["id"], section: "identity", kind: "text" },
   {
@@ -450,6 +560,283 @@ export const PERSON_SECTION_LABELS: Record<PersonFieldDef["section"], string> =
     contacts: "Контакти та додаткова інформація",
   };
 
+const isGenericRosterColumnKey = (key: string) =>
+  /^column_\d+(_\d+)?$/i.test(key.trim());
+
+/**
+ * Назви колонок «1.ОС Загальний список» за Excel-індексом (1-based).
+ * У файлі частина колонок праворуч без заголовка, але з даними / списками.
+ */
+export const MORNING_GENERAL_LIST_COLUMN_LABELS: Record<number, string> = {
+  1: "№",
+  2: "Підрозділ",
+  3: "Взвод",
+  4: "Відділення",
+  5: "Посада",
+  6: "ВОС",
+  7: "Повна посада",
+  8: "ШПК факт",
+  9: "Категорія складу",
+  10: "Анкета",
+  11: "Військовий квиток",
+  12: "Мобілізація/контракт",
+  13: "Звання",
+  14: "ПІБ",
+  15: "Позивний",
+  16: "Дата народження",
+  17: "Дата народження",
+  18: "Повних років",
+  19: "ІПН",
+  20: "Група крові",
+  21: "Статус",
+  22: "Тип В\\С",
+  23: "Статус БГ",
+  24: "БЗВП/БРЕЗ",
+  25: "Наявність БЗВП",
+  26: "Курс БЗВП",
+  27: "Відрядження (БРЕЗ)",
+  28: "Обмеження",
+  29: "В якому підрозділі",
+  31: "Місце перебування",
+  32: "Примітки",
+  33: "Напрямок",
+  34: "Примітка 3",
+  // Колонки без заголовка в Excel (часто списки / дублікаты значень)
+  37: "Статус",
+  38: "Тип В\\С",
+  39: "БЗВП/БРЕЗ",
+  40: "Місце перебування",
+  41: "Обмеження",
+  42: "Статус БГ",
+};
+
+const parseGenericRosterColumnNumber = (key: string) => {
+  const match = key.trim().match(/^column_(\d+)(?:_\d+)?$/i);
+  if (!match) return null;
+  const number = Number(match[1]);
+  return Number.isFinite(number) && number > 0 ? number : null;
+};
+
+export const resolveMorningGeneralListColumnLabel = (
+  sourceKey: string,
+  fallback = "",
+) => {
+  const columnNumber = parseGenericRosterColumnNumber(sourceKey);
+  if (columnNumber != null) {
+    const known = MORNING_GENERAL_LIST_COLUMN_LABELS[columnNumber];
+    if (known) return known;
+    return fallback || `Колонка ${columnNumber}`;
+  }
+  return fallback;
+};
+
+/** Excel I: оф. / серж. / солд. — категорія складу, не військове звання. */
+const RANK_CATEGORY_VALUE_RE = /^(оф|сер[жh]|солд)\.?$/i;
+const RANK_TITLE_VALUE_RE =
+  /(рекрут|солдат|матрос|сержант|старшина|прапорщик|лейтенант|капітан|майор|підполковник|полковник|генерал)/i;
+const GENERIC_ENLISTED_RANK_RE = /^(солдат|матрос|рекрут)$/i;
+
+export const isPersonnelRankCategoryValue = (value: string) =>
+  RANK_CATEGORY_VALUE_RE.test(
+    value.trim().toLocaleLowerCase("uk-UA").replace(/\s+/g, ""),
+  );
+
+const looksLikePersonnelRankTitle = (value: string) => {
+  const text = value.trim();
+  if (!text || isPersonnelRankCategoryValue(text)) return false;
+  return RANK_TITLE_VALUE_RE.test(text.toLocaleLowerCase("uk-UA"));
+};
+
+const shouldSkipRankSourceKey = (sourceKey: string) => {
+  const lower = sourceKey.toLocaleLowerCase("uk-UA");
+  if (lower.includes("fighter_status_")) return true;
+  if (lower.includes("наказ")) return true;
+  if (lower.includes("шпк")) return true;
+  if (lower.includes("поса")) return true;
+  if (lower.includes("категор")) return true;
+  return false;
+};
+
+const isPreferredRankSourceKey = (sourceKey: string) => {
+  const lower = sourceKey.toLocaleLowerCase("uk-UA");
+  return (
+    lower.includes("звання") ||
+    /^column_13(_|$)/.test(lower) ||
+    lower === "m"
+  );
+};
+
+const scorePersonnelRankCandidate = (
+  value: string,
+  sourceKey: string,
+  fromRoster: boolean,
+) => {
+  if (!looksLikePersonnelRankTitle(value)) return Number.NEGATIVE_INFINITY;
+
+  const lowerKey = sourceKey.toLocaleLowerCase("uk-UA");
+  const lowerValue = value.trim().toLocaleLowerCase("uk-UA");
+  let score = 10;
+
+  if (lowerKey.includes("звання")) score += 25;
+  // Excel M у «Загальному списку» — повна назва звання.
+  if (/^column_13(_|$)/.test(lowerKey) || lowerKey === "m") score += 20;
+  if (fromRoster) score += 8;
+  if (/молодший|старший|головний|штаб/.test(lowerValue)) score += 8;
+  if (GENERIC_ENLISTED_RANK_RE.test(lowerValue)) score -= 12;
+  score += Math.min(value.trim().length, 24);
+  return score;
+};
+
+const pickBestRankCandidate = (
+  row: EjournalPreviewRow,
+  preferredKeysOnly: boolean,
+) => {
+  let best = "";
+  let bestScore = Number.NEGATIVE_INFINITY;
+
+  for (const [key, raw] of Object.entries(row)) {
+    if (key.startsWith("__")) continue;
+    const sourceKey = rosterSourceKey(key);
+    if (shouldSkipRankSourceKey(sourceKey)) continue;
+    if (preferredKeysOnly && !isPreferredRankSourceKey(sourceKey)) continue;
+
+    const value = previewValueToDisplay(raw).trim();
+    if (!value) continue;
+
+    const fromRoster =
+      key.startsWith(ROSTER_FIELD_PREFIX) ||
+      isGenericRosterColumnKey(sourceKey);
+    const score = scorePersonnelRankCandidate(value, sourceKey, fromRoster);
+    if (score > bestScore) {
+      bestScore = score;
+      best = value;
+    }
+  }
+
+  return best;
+};
+
+/** Повна назва звання (молодший сержант), не категорія солд./серж./оф. */
+export const resolvePersonRankTitle = (row: EjournalPreviewRow | null) => {
+  if (!row) return "";
+
+  const preferred = pickBestRankCandidate(row, true);
+  if (preferred) return preferred;
+
+  const fallbackTitle = pickBestRankCandidate(row, false);
+  if (fallbackTitle) return fallbackTitle;
+
+  const fallback = previewValueToDisplay(
+    row[resolvePersonFieldKey(row, ["звання"])],
+  ).trim();
+  if (fallback && !isPersonnelRankCategoryValue(fallback)) return fallback;
+  return "";
+};
+
+export const pickPreferredPersonRank = (...values: Array<string | undefined>) => {
+  let best = "";
+  let bestScore = Number.NEGATIVE_INFINITY;
+
+  for (const raw of values) {
+    const value = String(raw ?? "").trim();
+    if (!value || isPersonnelRankCategoryValue(value)) continue;
+    const score = scorePersonnelRankCandidate(value, "звання", false);
+    if (score > bestScore) {
+      bestScore = score;
+      best = value;
+    }
+  }
+
+  if (best) return best;
+  return (
+    values
+      .map((value) => String(value ?? "").trim())
+      .find((value) => value && !isPersonnelRankCategoryValue(value)) || ""
+  );
+};
+
+const extractBirthYear = (value: string) => {
+  const match = value.match(/(\d{1,2})[.\/-](\d{1,2})[.\/-](\d{2,4})/);
+  if (!match) return null;
+  let year = Number(match[3]);
+  if (year < 100) year += year >= 50 ? 1900 : 2000;
+  return Number.isFinite(year) ? year : null;
+};
+
+/** Дата народження з ООС або з «Загального списку» (напр. column_17). */
+export const looksLikePersonBirthDate = (value: string) => {
+  const text = String(value ?? "").trim();
+  if (!text || !isLikelyBirthDateToken(text)) return false;
+  const year = extractBirthYear(text);
+  if (year == null) return true;
+  return year >= 1955 && year <= 2008;
+};
+
+const collectRosterFieldEntries = (row: EjournalPreviewRow | null) => {
+  if (!row) return [];
+
+  return Object.entries(row)
+    .filter(([key]) => key.startsWith(ROSTER_FIELD_PREFIX))
+    .map(([key, raw]) => ({
+      sourceKey: key.slice(ROSTER_FIELD_PREFIX.length),
+      value: formatExcelDateDisplay(raw).trim(),
+    }))
+    .filter((entry) => entry.value);
+};
+
+const resolvePersonBirthDate = (row: EjournalPreviewRow | null) => {
+  const fromOos = formatExcelDateDisplay(
+    getPersonFieldValue(row, ["дата_народження"]),
+  ).trim();
+  if (fromOos) return fromOos;
+
+  const rosterEntries = collectRosterFieldEntries(row);
+
+  for (const entry of rosterEntries) {
+    const lowerKey = entry.sourceKey.toLocaleLowerCase("uk-UA");
+    if (!lowerKey.includes("народ")) continue;
+    if (looksLikePersonBirthDate(entry.value)) return entry.value;
+  }
+
+  for (const entry of rosterEntries) {
+    if (!isGenericRosterColumnKey(entry.sourceKey)) continue;
+    if (looksLikePersonBirthDate(entry.value)) return entry.value;
+  }
+
+  return "";
+};
+
+export const inferRosterFieldLabel = (
+  sourceKey: string,
+  value: string,
+  rosterLabels: Record<string, string>,
+) => {
+  const storedLabel = rosterLabels[sourceKey]?.trim() ?? "";
+  const isGenericLabel =
+    !storedLabel ||
+    isGenericRosterColumnKey(storedLabel) ||
+    isGenericRosterColumnKey(sourceKey);
+
+  if (!isGenericLabel) return storedLabel;
+
+  const fromMorningMap = resolveMorningGeneralListColumnLabel(sourceKey);
+  if (fromMorningMap && !isGenericRosterColumnKey(fromMorningMap)) {
+    return fromMorningMap;
+  }
+
+  const lowerKey = sourceKey.toLocaleLowerCase("uk-UA");
+  if (lowerKey.includes("народ") && lowerKey.includes("дата")) {
+    return "Дата народження";
+  }
+  if (lowerKey.includes("позив")) return "Позивний";
+
+  const displayed = formatExcelDateDisplay(value).trim();
+  if (looksLikePersonBirthDate(displayed)) return "Дата народження";
+
+  if (fromMorningMap) return fromMorningMap;
+  return storedLabel || sourceKey;
+};
+
 export const buildPersonSummary = (row: EjournalPreviewRow | null) => {
   const additionalInfo = formatMultilineText(
     getPersonFieldValue(row, ["додаткова_інформація"]),
@@ -461,16 +848,14 @@ export const buildPersonSummary = (row: EjournalPreviewRow | null) => {
   const phones = extractPhones(additionalInfo);
 
   return {
-    name: getPersonFieldValue(row, ["прізвище"]) || "Особа не вибрана",
-    rank: getPersonFieldValue(row, ["звання"]),
-    externalId: getPersonExternalId(row),
+    name: getPersonDisplayName(row) || "Особа не вибрана",
+    rank: resolvePersonRankTitle(row),
+    externalId: resolvePersonIdentityKey(row),
     positionIndex: formatPositionIndexes(
       getPersonFieldValue(row, ["індекс", "посади"]),
     ),
     serviceType: getPersonFieldValue(row, ["вид_служби"]),
-    birthDate: formatExcelDateDisplay(
-      getPersonFieldValue(row, ["дата_народження"]),
-    ),
+    birthDate: resolvePersonBirthDate(row),
     birthPlace: getPersonFieldValue(row, ["місце_народження"]),
     sex: getPersonFieldValue(row, ["стать"]),
     rnokpp: getPersonFieldValue(row, ["рнокпп_за_наявності"]),
@@ -488,22 +873,35 @@ export const buildPersonSummary = (row: EjournalPreviewRow | null) => {
     contractTo: formatExcelDateDisplay(
       getPersonFieldValue(row, ["закінчення", "контракту"]),
     ),
-    callSign: extractPersonCallSign(
-      getPersonFieldValue(row, ["прізвище"]),
-      additionalInfo,
-    ),
+    callSign: resolvePersonCallSign(row),
   };
 };
 
-/** Позивний з дужок / «позивний …» / імені файлу анкети (не дата народження). */
-export const isLikelyBirthDateToken = (value: string) => {
-  const text = String(value ?? "").trim();
-  if (!text) return false;
-  if (/\d{1,2}[.\/-]\d{1,2}[.\/-]\d{2,4}/.test(text)) return true;
-  if (/р\.?\s*н\.?/i.test(text)) return true;
-  if (/^\d{1,2}\s+\S+\s+\d{4}/.test(text)) return true;
-  return false;
-};
+/** Cheap list row: name, rank, id, callsign only. Full card fields are built for the selected person. */
+export const buildPersonListSummary = (
+  row: EjournalPreviewRow | null,
+): ReturnType<typeof buildPersonSummary> => ({
+  name: getPersonDisplayName(row) || "Особа не вибрана",
+  rank: resolvePersonRankTitle(row),
+  externalId: resolvePersonIdentityKey(row),
+  positionIndex: "",
+  serviceType: "",
+  birthDate: "",
+  birthPlace: "",
+  sex: "",
+  rnokpp: "",
+  location: "",
+  arrivedFrom: "",
+  education: "",
+  relatives: "",
+  additionalInfo: "",
+  phones: [],
+  phonesDisplay: [],
+  militaryId: "",
+  contractFrom: "",
+  contractTo: "",
+  callSign: resolvePersonCallSign(row),
+});
 
 export const isLikelyCallSignToken = (value: string) => {
   const text = String(value ?? "").trim();
@@ -533,6 +931,480 @@ export const extractPersonCallSign = (...sources: Array<string | undefined>) => 
     }
   }
   return "";
+};
+
+export const collectPersonCallSignFieldValues = (
+  row: EjournalPreviewRow | null,
+) => {
+  if (!row) return [];
+
+  const values = new Set<string>();
+  for (const [key, raw] of Object.entries(row)) {
+    if (key.startsWith("__")) continue;
+    if (!key.toLocaleLowerCase("uk-UA").includes("позив")) continue;
+    const displayed = previewValueToDisplay(raw).trim();
+    if (displayed) values.add(displayed);
+  }
+
+  return [...values];
+};
+
+const resolveDirectCallSignValue = (value: string) => {
+  const text = value.trim();
+  if (!text) return "";
+
+  const extracted = extractPersonCallSign(text);
+  if (extracted) return extracted;
+
+  return isLikelyCallSignToken(text) ? text : "";
+};
+
+const resolvePersonCallSign = (row: EjournalPreviewRow | null) => {
+  for (const fieldValue of collectPersonCallSignFieldValues(row)) {
+    const resolved = resolveDirectCallSignValue(fieldValue);
+    if (resolved) return resolved;
+  }
+
+  const additionalInfo = formatMultilineText(
+    getPersonFieldValue(row, ["додаткова_інформація"]),
+  );
+
+  return extractPersonCallSign(
+    getPersonFieldValue(row, ["прізвище"]),
+    additionalInfo,
+  );
+};
+
+const normalizePersonIdentityText = (value: unknown) =>
+  previewValueToDisplay(value)
+    .replace(/[ʼ’']/g, "")
+    .replace(/\([^)]*\)/g, " ")
+    .replace(/[.,;:№#"/\\|()[\]{}]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLocaleLowerCase("uk-UA");
+
+export const normalizePersonBirthKey = (value: string) => {
+  const text = formatExcelDateDisplay(value).trim();
+  if (!text) return "";
+
+  const dotted = text.match(/(\d{1,2})[.\/-](\d{1,2})[.\/-](\d{2,4})/);
+  if (dotted) {
+    let year = Number(dotted[3]);
+    if (year < 100) year += year >= 50 ? 1900 : 2000;
+    const month = String(dotted[2]).padStart(2, "0");
+    const day = String(dotted[1]).padStart(2, "0");
+    if (!Number.isFinite(year)) return "";
+    return `${year}-${month}-${day}`;
+  }
+
+  const iso = text.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
+  return "";
+};
+
+export const buildPersonIdentityFingerprint = (
+  name: string,
+  birthDate = "",
+  callSign = "",
+) => {
+  const nameKey = normalizePersonIdentityText(name);
+  if (!nameKey || nameKey === "особа не вибрана") return "";
+  const birthKey = normalizePersonBirthKey(birthDate);
+  if (birthKey) return `p:${nameKey}:${birthKey}`;
+  const callKey = normalizePersonIdentityText(callSign);
+  if (callKey) return `p:${nameKey}:c:${callKey}`;
+  return `p:${nameKey}`;
+};
+
+/** Stable key for photos / questionnaires / documents across roster re-imports. */
+const personIdentityKeyCache = new WeakMap<EjournalPreviewRow, string>();
+
+export const resolvePersonIdentityKey = (row: EjournalPreviewRow | null) => {
+  if (!row) return "";
+  const cached = personIdentityKeyCache.get(row);
+  if (cached !== undefined) return cached;
+
+  try {
+    const spreadsheetId = getPersonExternalId(row);
+    if (spreadsheetId) {
+      personIdentityKeyCache.set(row, spreadsheetId);
+      return spreadsheetId;
+    }
+
+    const name = getPersonDisplayName(row);
+    const result = buildPersonIdentityFingerprint(
+      name,
+      resolvePersonBirthDate(row),
+      resolvePersonCallSign(row),
+    );
+    personIdentityKeyCache.set(row, result);
+    return result;
+  } catch {
+    personIdentityKeyCache.set(row, "");
+    return "";
+  }
+};
+
+export const collectPersonExternalIdCandidates = (
+  row: EjournalPreviewRow | null,
+) => {
+  if (!row) return [];
+
+  const values = new Set<string>();
+  const push = (value: unknown) => {
+    const text = String(value ?? "").trim();
+    if (text && text !== "0") values.add(text);
+  };
+
+  for (const key of Object.keys(row)) {
+    if (key === "__dbRowId" || isPersonSpreadsheetIdFieldKey(key)) {
+      push(readPersonIdFieldValue(row[key]));
+    }
+  }
+  push(row.__dbRowId);
+
+  const name =
+    getPersonFieldValue(row, ["прізвище"]) ||
+    getPersonFieldValue(row, ["піб"]);
+  const nameKey = normalizePersonIdentityText(name);
+  const spreadsheetId = getPersonExternalId(row);
+  if (nameKey) {
+    push(`roster:${nameKey}`);
+    push(`roster:${String(name).trim()}`);
+  }
+  if (spreadsheetId) push(`roster:${spreadsheetId}`);
+
+  const identityKey = resolvePersonIdentityKey(row);
+  if (identityKey) push(identityKey);
+
+  return [...values];
+};
+
+export type PersonAttachmentMigrationPair = {
+  name: string;
+  fromExternalId: string;
+  toExternalId: string;
+};
+
+export const dedupePersonAttachmentMigrationPairs = (
+  pairs: PersonAttachmentMigrationPair[],
+) => {
+  const seen = new Set<string>();
+  return pairs.filter((pair) => {
+    const fromExternalId = pair.fromExternalId.trim();
+    const toExternalId = pair.toExternalId.trim();
+    if (!fromExternalId || !toExternalId || fromExternalId === toExternalId) {
+      return false;
+    }
+    const key = `${fromExternalId}=>${toExternalId}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+};
+
+export const buildSelfAttachmentMigrationPairs = (
+  rows: EjournalPreviewRow[],
+) => {
+  const pairs: PersonAttachmentMigrationPair[] = [];
+  for (const row of rows) {
+    if (!isLikelyPersonnelRow(row)) continue;
+    const summary = buildPersonSummary(row);
+    const toExternalId = summary.externalId;
+    if (!toExternalId) continue;
+    for (const fromExternalId of collectPersonExternalIdCandidates(row)) {
+      pairs.push({
+        name: summary.name,
+        fromExternalId,
+        toExternalId,
+      });
+    }
+  }
+  return dedupePersonAttachmentMigrationPairs(pairs);
+};
+
+export const buildOrphanAttachmentMigrationPairs = (
+  rows: EjournalPreviewRow[],
+  orphanIds: Set<string>,
+) => {
+  if (!orphanIds.size) return [];
+
+  const pairs: PersonAttachmentMigrationPair[] = [];
+  for (const row of rows) {
+    if (!isLikelyPersonnelRow(row)) continue;
+    const toExternalId = resolvePersonIdentityKey(row);
+    if (!toExternalId) continue;
+    const name =
+      getPersonFieldValue(row, ["прізвище"]) ||
+      getPersonFieldValue(row, ["піб"]);
+    for (const fromExternalId of collectPersonExternalIdCandidates(row)) {
+      if (!orphanIds.has(fromExternalId) || fromExternalId === toExternalId) {
+        continue;
+      }
+      pairs.push({
+        name,
+        fromExternalId,
+        toExternalId,
+      });
+    }
+  }
+  return dedupePersonAttachmentMigrationPairs(pairs);
+};
+
+export type PersonAttachmentMigrationOptions = {
+  includeDocuments?: boolean;
+  photos?: Array<{ personExternalId: string; photoData: string }>;
+  questionnaires?: Array<{ personExternalId: string }>;
+  documents?: BackendPersonDocument[];
+};
+
+const migrateTargetedPersonAttachments = async (
+  pairs: PersonAttachmentMigrationPair[],
+  includeDocuments: boolean,
+) => {
+  let migrated = 0;
+  for (const pair of pairs) {
+    try {
+      const [oldPhoto, newPhoto] = await Promise.all([
+        api.getPersonPhoto(pair.fromExternalId).catch(() => null),
+        api.getPersonPhoto(pair.toExternalId).catch(() => null),
+      ]);
+      if (oldPhoto?.photoData && !newPhoto?.photoData) {
+        await api.upsertPersonPhoto(pair.toExternalId, {
+          photoData: oldPhoto.photoData,
+          fileName: `${pair.name}.jpg`,
+        });
+        migrated += 1;
+      }
+
+      const [oldQuestionnaire, newQuestionnaire] = await Promise.all([
+        api.getPersonQuestionnaire(pair.fromExternalId).catch(() => null),
+        api.getPersonQuestionnaire(pair.toExternalId).catch(() => null),
+      ]);
+      if (oldQuestionnaire?.fileData && !newQuestionnaire?.fileData) {
+        await api.upsertPersonQuestionnaire(pair.toExternalId, {
+          fileData: oldQuestionnaire.fileData,
+          fileName: sanitizeFileName(
+            buildQuestionnaireExportFileName(pair.name),
+          ),
+          mimeType: oldQuestionnaire.mimeType ?? "application/pdf",
+        });
+        migrated += 1;
+      }
+
+      if (!includeDocuments) continue;
+      const [oldDocs, newDocs] = await Promise.all([
+        api.listPersonDocuments(pair.fromExternalId).catch(() => []),
+        api.listPersonDocuments(pair.toExternalId).catch(() => []),
+      ]);
+      const existing = [...newDocs];
+      for (const document of oldDocs) {
+        const already = existing.some(
+          (item) => item.type === document.type && item.title === document.title,
+        );
+        if (already) continue;
+        const created = await api.createPersonDocument(pair.toExternalId, {
+          type: document.type,
+          title: document.title,
+          ...(document.status ? { status: document.status } : {}),
+          ...(document.fields ? { fields: document.fields } : {}),
+          ...(document.workflow ? { workflow: document.workflow } : {}),
+          ...(document.files ? { files: document.files } : {}),
+        });
+        existing.push(created);
+        migrated += 1;
+      }
+    } catch {
+      // One broken ID must not block the rest.
+    }
+  }
+  return migrated;
+};
+
+export const migratePersonAttachmentsBetweenIds = async (
+  pairs: PersonAttachmentMigrationPair[],
+  options: PersonAttachmentMigrationOptions = {},
+) => {
+  const unique = dedupePersonAttachmentMigrationPairs(pairs);
+  if (!unique.length) return 0;
+
+  const includeDocuments = options.includeDocuments !== false;
+  if (
+    unique.length <= 16 &&
+    !options.photos &&
+    !options.questionnaires &&
+    !options.documents
+  ) {
+    return migrateTargetedPersonAttachments(unique, includeDocuments);
+  }
+
+  const [photos, questionnaires, documents] = await Promise.all([
+    options.photos
+      ? Promise.resolve(options.photos)
+      : api.listPersonPhotos().catch(() => []),
+    options.questionnaires
+      ? Promise.resolve(options.questionnaires)
+      : api.listPersonQuestionnaires().catch(() => []),
+    includeDocuments
+      ? options.documents
+        ? Promise.resolve(options.documents)
+        : api.listAllPersonDocuments().catch(() => [])
+      : Promise.resolve([] as BackendPersonDocument[]),
+  ]);
+
+  const photoById = new Map(
+    photos
+      .filter((item) => item.personExternalId && item.photoData)
+      .map((item) => [item.personExternalId, item.photoData]),
+  );
+  const questionnaireIds = new Set(
+    questionnaires
+      .map((item) => item.personExternalId)
+      .filter((item): item is string => Boolean(item)),
+  );
+  const documentsById = new Map<string, BackendPersonDocument[]>();
+  for (const document of documents) {
+    const id = document.personExternalId?.trim();
+    if (!id) continue;
+    documentsById.set(id, [...(documentsById.get(id) ?? []), document]);
+  }
+
+  let migrated = 0;
+  for (const pair of unique) {
+    try {
+      const hasWork =
+        photoById.has(pair.fromExternalId) ||
+        questionnaireIds.has(pair.fromExternalId) ||
+        (documentsById.get(pair.fromExternalId)?.length ?? 0) > 0;
+      if (!hasWork) continue;
+
+      const oldPhoto = photoById.get(pair.fromExternalId);
+      if (oldPhoto && !photoById.has(pair.toExternalId)) {
+        await api.upsertPersonPhoto(pair.toExternalId, {
+          photoData: oldPhoto,
+          fileName: `${pair.name}.jpg`,
+        });
+        photoById.set(pair.toExternalId, oldPhoto);
+        migrated += 1;
+      }
+
+      if (
+        questionnaireIds.has(pair.fromExternalId) &&
+        !questionnaireIds.has(pair.toExternalId)
+      ) {
+        const oldQuestionnaire = await api.getPersonQuestionnaire(
+          pair.fromExternalId,
+        );
+        if (oldQuestionnaire?.fileData) {
+          await api.upsertPersonQuestionnaire(pair.toExternalId, {
+            fileData: oldQuestionnaire.fileData,
+            fileName: sanitizeFileName(
+              buildQuestionnaireExportFileName(pair.name),
+            ),
+            mimeType: oldQuestionnaire.mimeType ?? "application/pdf",
+          });
+          questionnaireIds.add(pair.toExternalId);
+          migrated += 1;
+        }
+      }
+
+      if (!includeDocuments) continue;
+      const oldDocs = documentsById.get(pair.fromExternalId) ?? [];
+      const newDocs = [...(documentsById.get(pair.toExternalId) ?? [])];
+      for (const document of oldDocs) {
+        const already = newDocs.some(
+          (item) => item.type === document.type && item.title === document.title,
+        );
+        if (already) continue;
+        const created = await api.createPersonDocument(pair.toExternalId, {
+          type: document.type,
+          title: document.title,
+          ...(document.status ? { status: document.status } : {}),
+          ...(document.fields ? { fields: document.fields } : {}),
+          ...(document.workflow ? { workflow: document.workflow } : {}),
+          ...(document.files ? { files: document.files } : {}),
+        });
+        newDocs.push(created);
+        migrated += 1;
+      }
+      documentsById.set(pair.toExternalId, newDocs);
+    } catch {
+      // Keep going so one broken attachment cannot empty the personnel list.
+    }
+  }
+
+  return migrated;
+};
+
+const capitalizePersonNamePart = (word: string) => {
+  if (!word) return "";
+  return word
+    .split("-")
+    .map((part) => {
+      const lower = part.toLocaleLowerCase("uk-UA");
+      return lower ? lower.charAt(0).toUpperCase() + lower.slice(1) : "";
+    })
+    .join("-");
+};
+
+/** ПІБ для підпису / назви файлу: ПРІЗВИЩЕ Імʼя По батькові (Позивний). */
+export const formatPersonSignatureName = (
+  fullName: string,
+  callSign?: string | null,
+) => {
+  const trimmed = String(fullName ?? "").trim();
+  if (!trimmed) return "";
+
+  const withoutCallSignParen = trimmed.replace(/\s*\([^)]+\)\s*$/, "").trim();
+  const parts = withoutCallSignParen.split(/\s+/).filter(Boolean);
+  if (!parts.length) return "";
+
+  const formatted = [
+    parts[0].toLocaleUpperCase("uk-UA"),
+    ...parts.slice(1).map(capitalizePersonNamePart),
+  ].join(" ");
+
+  const sign = String(
+    callSign ?? extractPersonCallSign(trimmed) ?? "",
+  ).trim();
+  return sign ? `${formatted} (${sign})` : formatted;
+};
+
+export const buildQuestionnaireExportFileName = (
+  fullName: string,
+  callSign?: string | null,
+) => {
+  const base = formatPersonSignatureName(fullName, callSign);
+  return base ? `${base}.pdf` : "Анкета.pdf";
+};
+
+export const renameQuestionnaireFile = (file: File, fileName: string) =>
+  file.name === fileName
+    ? file
+    : new File([file], fileName, { type: file.type || "application/pdf" });
+
+export const revokeQuestionnairePreviewUrl = (url: string) => {
+  if (url.startsWith("blob:")) URL.revokeObjectURL(url);
+};
+
+export const downloadQuestionnairePdf = (
+  fileName: string,
+  source: { file?: Blob | File; fileData?: string },
+) => {
+  const safeName = sanitizeFileName(fileName);
+  if (source.file) {
+    downloadBlob(source.file, safeName);
+    return;
+  }
+  if (source.fileData) {
+    downloadBlob(
+      new Blob([dataUrlToUint8Array(source.fileData)], {
+        type: "application/pdf",
+      }),
+      safeName,
+    );
+  }
 };
 
 export const readFileAsDataUrl = (file: File) =>
@@ -574,12 +1446,10 @@ export type PersonnelRecord = {
 };
 
 export const isLikelyPersonnelRow = (row: EjournalPreviewRow) => {
-  const summary = buildPersonSummary(row);
-  const name = summary.name.trim();
-
+  if (!row.__dbRowId) return false;
+  const name = getPersonDisplayName(row);
   return Boolean(
-    row.__dbRowId &&
-      name &&
+    name &&
       name !== "Особа не вибрана" &&
       name !== "-" &&
       !/^\d+([.,]\d+)?$/.test(name) &&
@@ -602,23 +1472,31 @@ export const findEjournalPersonnelSheet = (imports: BackendEjournalImport[]) => 
 export const loadAllEjournalSheetRows = async (
   sheet: BackendEjournalImportSheet,
 ): Promise<DbPreviewState> => {
+  const pageSize = 1000;
   const firstPage = await api.listEjournalSheetRows(sheet.id, {
-    limit: 500,
+    limit: pageSize,
     offset: 0,
   });
   const columns = parseDbColumns(firstPage.columns);
   const items = [...firstPage.items];
+  const limit = firstPage.limit || pageSize;
+  const remainingOffsets: number[] = [];
 
   for (
     let offset = firstPage.items.length;
     offset < firstPage.total;
-    offset += firstPage.limit
+    offset += limit
   ) {
-    const nextPage = await api.listEjournalSheetRows(sheet.id, {
-      limit: 500,
-      offset,
-    });
-    items.push(...nextPage.items);
+    remainingOffsets.push(offset);
+  }
+
+  if (remainingOffsets.length > 0) {
+    const pages = await Promise.all(
+      remainingOffsets.map((offset) =>
+        api.listEjournalSheetRows(sheet.id, { limit, offset }),
+      ),
+    );
+    for (const page of pages) items.push(...page.items);
   }
 
   return {

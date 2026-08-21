@@ -21,9 +21,14 @@ import {
   Minimize2,
   MoreHorizontal,
   MoreVertical,
+  Pin,
+  ArrowDown,
+  ArrowUp,
+  ArrowUpDown,
   Plane,
   Search,
   Settings,
+  Share2,
   Shield,
   Swords,
   Upload,
@@ -92,8 +97,13 @@ export const MoreVertOutlinedIcon = withCompatIcon(MoreVertical);
 export const PersonOutlinedIcon = withCompatIcon(User);
 export const PersonSearchOutlinedIcon = withCompatIcon(UserSearch);
 export const PictureAsPdfOutlinedIcon = withCompatIcon(FileText);
+export const PushPinOutlinedIcon = withCompatIcon(Pin);
+export const SortArrowDownIcon = withCompatIcon(ArrowDown);
+export const SortArrowUpIcon = withCompatIcon(ArrowUp);
+export const SortArrowUpDownIcon = withCompatIcon(ArrowUpDown);
 export const SearchOutlinedIcon = withCompatIcon(Search);
 export const SettingsOutlinedIcon = withCompatIcon(Settings);
+export const ShareOutlinedIcon = withCompatIcon(Share2);
 export const ShieldOutlinedIcon = withCompatIcon(Shield);
 export const SyncAltOutlinedIcon = withCompatIcon(ClipboardList);
 export const TableChartOutlinedIcon = withCompatIcon(FileSpreadsheet);

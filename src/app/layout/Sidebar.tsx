@@ -24,10 +24,17 @@ const navItems: Array<{ label: string; page?: AppPage; icon: ReactNode }> = [
   { label: "ЕЖООС", page: "ejournal", icon: <TableChartOutlinedIcon /> },
   { label: "Заповнення Excel", page: "excelFill", icon: <SyncAltOutlinedIcon /> },
   { label: "БЧС", page: "bchs", icon: <ShieldOutlinedIcon /> },
+  { label: "БЧС Lab", page: "bchsLab", icon: <ShieldOutlinedIcon /> },
   { label: "Аналітика", page: "analytics", icon: <AnalyticsOutlinedIcon /> },
   { label: "Імпорт", page: "import", icon: <FileDownloadOutlinedIcon /> },
   { label: "Парсинг анкет", page: "questionnaireParser", icon: <ArticleOutlinedIcon /> },
+  { label: "Соц. паспорт", page: "socPassport", icon: <TableChartOutlinedIcon /> },
   { label: "Документи", page: "documents", icon: <ArticleOutlinedIcon /> },
+  {
+    label: "Записи документів",
+    page: "documentSettings",
+    icon: <SettingsOutlinedIcon />,
+  },
 ];
 
 export function Sidebar({

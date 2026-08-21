@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Box,
   Button,
+  IconButton,
+  LinearProgress,
   MenuItem,
   Stack,
   TextField,
@@ -10,26 +12,103 @@ import {
 } from "@/components/sci/SciPrimitives";
 import {
   ArticleOutlinedIcon,
+  ContentCopyOutlinedIcon,
   DeleteOutlineOutlinedIcon,
+  FileDownloadOutlinedIcon,
+  FileUploadOutlinedIcon,
   PictureAsPdfOutlinedIcon,
 } from "@/components/sci/icons";
 import dayjs from "dayjs";
 import "dayjs/locale/uk";
 import {
   api,
+  type BackendDocumentSignatoryPreset,
   type BackendPersonDocument,
+  type BackendPersonQuestionnaireMeta,
   type BackendPersonnelOverviewRow,
 } from "../../api";
-import { buildDocumentRoute } from "../../app/navigation";
 import type { EjournalPreviewRow } from "../ejournal/ejournalTypes";
 import {
   buildPersonSummary,
+  buildQuestionnaireExportFileName,
+  collectPersonExternalIdCandidates,
+  dataUrlToObjectUrl,
+  downloadQuestionnairePdf,
+  formatUaPhoneDisplay,
   getPersonFieldValue,
+  isUnstablePersonExternalId,
+  migratePersonAttachmentsBetweenIds,
+  pickPreferredPersonRank,
+  revokeQuestionnairePreviewUrl,
 } from "../personnel/personnelUtils";
+import { FloatingQuestionnairePreview } from "../personnel/FloatingQuestionnairePreview";
+import {
+  PERSON_PHONES_DOCUMENT_TYPE,
+  readStoredPersonPhones,
+} from "../personnel/personPhonesStore";
+import {
+  syncEnrichmentToPerson,
+} from "../personnel/personEnrichment";
+import {
+  extractPersonSignature,
+  migrateStoredPersonSignatures,
+  persistPersonSignature,
+  PERSON_SIGNATURE_DOCUMENT_TYPE,
+  withPersonSignature,
+  type PersonSignatureRecord,
+} from "../personnel/personSignatureStore";
+import { exportDocumentsJournalExcel } from "./documentsJournalExcel";
+import {
+  buildFighterTaskPeriodText,
+  getFighterTaskPlace,
+} from "../personnel/fighterStatusImport";
+import { Spinner } from "@/components/ui/spinner/spinner";
+import {
+  copyPngDataUrlToClipboard,
+  getCommanderSignatureTransparent,
+  processSignatureTransparentBackground,
+} from "./ubdSignatureImage";
+import { createUbdWordBlob } from "./ubdWordExport";
+import {
+  createForm6Fields,
+  form6WorkflowSteps,
+  mergeForm6Fields,
+  type Form6ReportFields,
+  type Form6Signatory,
+} from "./form6Report";
+import { createForm6WordBlob } from "./form6WordExport";
+import {
+  createForm12Fields,
+  form12WorkflowSteps,
+  mergeForm12Fields,
+  type Form12ReportFields,
+  type Form12Signatory,
+} from "./form12Report";
+import { createForm12WordBlob } from "./form12WordExport";
+import {
+  WordDocumentPreview,
+  printRenderedWordPreview,
+  useWordPreviewBlob,
+} from "./WordDocumentPreview";
+import {
+  createUbdRestoreFields,
+  mergeUbdRestoreFields,
+  ubdRestoreWorkflowSteps,
+  type UbdRestoreReportFields,
+  type UbdRestoreSignatory,
+} from "./ubdRestoreReport";
+import { createUbdRestoreWordBlob } from "./ubdRestoreWordExport";
 
 dayjs.locale("uk");
 
-type DocumentMode = "default" | "salaryPowerAttorney" | "ubdReport";
+type DocumentMode =
+  | "default"
+  | "salaryPowerAttorney"
+  | "ubdReport"
+  | "ubdRestoreReport"
+  | "form6Report"
+  | "form12Report"
+  | "temporaryMilitaryId";
 
 type DefaultDocumentFieldKey = "pib" | "rank" | "unit" | "date";
 type DefaultDocumentFields = Record<DefaultDocumentFieldKey, string>;
@@ -45,6 +124,7 @@ type SalaryDocumentFields = {
   commander: string;
   personnelChief: string;
   folderName: string;
+  statusNote: string;
 };
 
 type SalaryWorkflowState = {
@@ -65,11 +145,36 @@ type UbdReportFields = {
   taskPeriod: string;
   taskPlace: string;
   basis: string;
+  basisNumber: string;
+  basisDate: string;
   battalionCommander: string;
   approvalOfficer: string;
+  signatories: DocumentSignatorySnapshot[];
   date: string;
   folderName: string;
+  statusNote: string;
 };
+
+type TemporaryMilitaryIdFields = {
+  fullName: string;
+  rank: string;
+  callSign: string;
+  birthDate: string;
+  photoData: string;
+  statusNote: string;
+};
+
+type DocumentSignatorySnapshot = Pick<
+  BackendDocumentSignatoryPreset,
+  | "label"
+  | "blockType"
+  | "title"
+  | "rank"
+  | "fullName"
+  | "signatureData"
+  | "showDate"
+  | "sortOrder"
+> & { sourceId?: string };
 
 type UbdScanFile = {
   id: string;
@@ -81,6 +186,7 @@ type UbdScanFile = {
 
 type DocumentFiles = {
   ubdScans?: UbdScanFile[];
+  ticketPhoto?: UbdScanFile | null;
 };
 
 type PersonStatusSnapshot = {
@@ -138,20 +244,12 @@ const salaryWorkflowSteps = [
 
 const ubdWorkflowSteps = [
   {
-    key: "account",
-    title: "Фото 3x4 та ІНН",
-  },
-  {
     key: "document",
     title: "Заповнили рапорт",
   },
   {
-    key: "print",
-    title: "Роздрукували рапорт",
-  },
-  {
-    key: "sign",
-    title: "Надали підпис службовцю та командиру",
+    key: "account",
+    title: "Фото 3x4 та ІНН",
   },
   {
     key: "scan",
@@ -164,6 +262,25 @@ const ubdWorkflowSteps = [
   {
     key: "sent",
     title: "Відправили",
+  },
+  {
+    key: "received",
+    title: "Отримали",
+  },
+  {
+    key: "handed",
+    title: "Вручили",
+  },
+];
+
+const temporaryMilitaryIdWorkflowSteps = [
+  {
+    key: "photo",
+    title: "Фото",
+  },
+  {
+    key: "order",
+    title: "Замовити",
   },
   {
     key: "received",
@@ -210,7 +327,9 @@ const normalizeIban = (value: string) =>
     .toUpperCase();
 
 const formatIban = (value: string) =>
-  normalizeIban(value).replace(/(.{4})/g, "$1 ").trim();
+  normalizeIban(value)
+    .replace(/(.{4})/g, "$1 ")
+    .trim();
 
 const extractIban = (row: EjournalPreviewRow | null) => {
   const direct =
@@ -250,6 +369,102 @@ const safeFilePart = (value: string) =>
     .replace(/\s+/g, " ")
     .trim();
 
+const UBD_BATTALION_COMMANDER_NAME = "Єгор СИДОРЕНКО";
+const UBD_APPROVAL_OFFICER_NAME = "Олег АДАМОВ";
+
+const legacyUbdSignatories = (): DocumentSignatorySnapshot[] => [
+  {
+    label: "Командир батальйону",
+    blockType: "SIGNER",
+    title: "Командир 1 піхотного батальйону\nвійськової частини A4862",
+    rank: "старший лейтенант",
+    fullName: UBD_BATTALION_COMMANDER_NAME,
+    signatureData: UBD_COMMANDER_SIGNATURE_SRC,
+    showDate: false,
+    sortOrder: 0,
+  },
+  {
+    label: "Затверджує",
+    blockType: "APPROVAL",
+    title:
+      "Тимчасово виконуючий обов’язки\nкомандира військової частини A4862",
+    rank: "капітан",
+    fullName: UBD_APPROVAL_OFFICER_NAME,
+    signatureData: null,
+    showDate: false,
+    sortOrder: 1,
+  },
+];
+
+const toForm12Signatories = (
+  records: DocumentSignatorySnapshot[],
+): Form12Signatory[] =>
+  records.map((record) => ({
+    blockType: record.blockType === "APPROVAL" ? "APPROVAL" : "SIGNER",
+    title: record.title,
+    rank: record.rank,
+    fullName: record.fullName,
+    signatureData: record.signatureData ?? null,
+  }));
+
+const loadForm6SignatoryRecords = async () => {
+  const own = await api.listDocumentSignatories("form6Report");
+  if (own.length) return own;
+  return api.listDocumentSignatories("ubdReport");
+};
+
+const toForm6Signatories = (
+  records: DocumentSignatorySnapshot[],
+): Form6Signatory[] =>
+  records.map((record) => ({
+    blockType: record.blockType === "APPROVAL" ? "APPROVAL" : "SIGNER",
+    title: record.title,
+    rank: record.rank,
+    fullName: record.fullName,
+    signatureData: record.signatureData ?? null,
+  }));
+
+const loadForm12SignatoryRecords = async () => {
+  const own = await api.listDocumentSignatories("form12Report");
+  if (own.length) return own;
+  return api.listDocumentSignatories("ubdReport");
+};
+
+const loadUbdRestoreSignatoryRecords = async () => {
+  const own = await api.listDocumentSignatories("ubdRestoreReport");
+  if (own.length) return own;
+  return api.listDocumentSignatories("ubdReport");
+};
+
+const toUbdRestoreSignatories = (
+  records: DocumentSignatorySnapshot[],
+): UbdRestoreSignatory[] =>
+  records.map((record) => ({
+    blockType: record.blockType === "APPROVAL" ? "APPROVAL" : "SIGNER",
+    title: record.title,
+    rank: record.rank,
+    fullName: record.fullName,
+    signatureData: record.signatureData ?? null,
+  }));
+
+const snapshotSignatories = (
+  records: BackendDocumentSignatoryPreset[],
+): DocumentSignatorySnapshot[] =>
+  records.map((record) => ({
+    sourceId: record.id,
+    label: record.label,
+    blockType: record.blockType,
+    title: record.title,
+    rank: record.rank,
+    fullName: record.fullName,
+    signatureData: record.signatureData,
+    showDate: record.showDate,
+    sortOrder: record.sortOrder,
+  }));
+
+const UBD_COMMANDER_SIGNATURE_SRC =
+  "data:image/jpeg;base64,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";
+
 const createSalaryFields = (
   row: EjournalPreviewRow | null,
   summary: ReturnType<typeof buildPersonSummary>,
@@ -268,15 +483,52 @@ const createSalaryFields = (
     bankName: bank?.name || "",
     rank: summary.rank || "",
     date: dayjs().format("DD.MM.YYYY"),
-    commander: "Командиру 1 піхотного батальйону військової частини А4862",
+    commander: "Командиру 1 піхотного батальйону військової частини A4862",
     personnelChief: "молодший сержант________________      Віталій БОНДАР",
     folderName: fullName ? `ГЗ довіреність - ${fullName}` : "ГЗ довіреність",
+    statusNote: "",
+  };
+};
+
+const UBD_BASIS_KIND = "бойове розпорядження";
+const DEFAULT_UBD_BASIS_NUMBER = "4862/ОКП/1162/дск";
+const DEFAULT_UBD_BASIS_DATE = "09.05.2026";
+
+const stripUbdBasisNumber = (value: string) =>
+  String(value ?? "")
+    .trim()
+    .replace(/^№\s*/, "");
+
+const formatUbdBasisText = (number: string, date: string) => {
+  const orderNumber = stripUbdBasisNumber(number);
+  const orderDate = String(date ?? "").trim();
+  const reference = [orderNumber ? `№${orderNumber}` : "", orderDate ? `від ${orderDate}` : ""]
+    .filter(Boolean)
+    .join(" ");
+  return [UBD_BASIS_KIND, reference].filter(Boolean).join(" ");
+};
+
+const parseUbdBasisParts = (value: string) => {
+  const text = String(value ?? "").trim();
+  const match = text.match(
+    /№\s*(\S+)\s+від\s+(\d{1,2}[.\/-]\d{1,2}[.\/-]\d{2,4})/i,
+  );
+  if (!match) {
+    return {
+      basisNumber: DEFAULT_UBD_BASIS_NUMBER,
+      basisDate: DEFAULT_UBD_BASIS_DATE,
+    };
+  }
+  return {
+    basisNumber: match[1],
+    basisDate: match[2].replaceAll("/", ".").replaceAll("-", "."),
   };
 };
 
 const createUbdFields = (
   row: EjournalPreviewRow | null,
   summary: ReturnType<typeof buildPersonSummary>,
+  signatories: DocumentSignatorySnapshot[] = legacyUbdSignatories(),
 ): UbdReportFields => {
   const fullName = summary.name !== "Особа не вибрана" ? summary.name : "";
   const staffPosition =
@@ -286,23 +538,119 @@ const createUbdFields = (
     "";
 
   return {
-    commander: "Командиру військової частини А4862",
+    commander: "Командиру військової частини A4862",
     fullName,
     rank: summary.rank || "",
     staffPosition,
     birthDate: summary.birthDate || "",
     rnokpp: summary.rnokpp || "",
-    taskPeriod: "",
-    taskPlace: "",
-    basis: "Бойове розпорядження командира 425 ОШП «СКЕЛЯ» №____ від __.__.2026",
+    taskPeriod: buildFighterTaskPeriodText(row),
+    taskPlace: getFighterTaskPlace(row),
+    basisNumber: DEFAULT_UBD_BASIS_NUMBER,
+    basisDate: DEFAULT_UBD_BASIS_DATE,
+    basis: formatUbdBasisText(DEFAULT_UBD_BASIS_NUMBER, DEFAULT_UBD_BASIS_DATE),
     battalionCommander:
-      "Командир 1 піхотного батальйону військової частини А4862\nстарший лейтенант Єгор СИДОРЕНКО",
+      "Командир 1 піхотного батальйону\nвійськової частини A4862\nстарший лейтенант",
     approvalOfficer:
-      "Тимчасово виконуючий обов’язки командира військової частини А4862\nкапітан Олег АДАМОВ",
+      "Тимчасово виконуючий обов’язки\nкомандира військової частини A4862\nкапітан",
+    signatories,
     date: dayjs().format("DD.MM.YYYY"),
     folderName: fullName ? `УБД рапорт - ${fullName}` : "УБД рапорт",
+    statusNote: "",
   };
 };
+
+const padBirthDatePart = (value: number) => String(value).padStart(2, "0");
+
+const formatTemporaryIdBirthDate = (value: string) => {
+  const text = String(value ?? "").trim();
+  if (!text) return "";
+
+  const dotted = text.match(/^(\d{1,2})[.\/-](\d{1,2})[.\/-](\d{2,4})$/);
+  if (dotted) {
+    const day = Number(dotted[1]);
+    const month = Number(dotted[2]);
+    let year = Number(dotted[3]);
+    if (year < 100) year += year >= 50 ? 1900 : 2000;
+    if (
+      day >= 1 &&
+      day <= 31 &&
+      month >= 1 &&
+      month <= 12 &&
+      year >= 1900 &&
+      year <= 2100
+    ) {
+      return `${padBirthDatePart(day)}.${padBirthDatePart(month)}.${year}`;
+    }
+  }
+
+  const iso = text.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (iso) return `${iso[3]}.${iso[2]}.${iso[1]}`;
+
+  return text;
+};
+
+const isFullBirthDate = (value: string) =>
+  /^\d{2}\.\d{2}\.\d{4}$/.test(value.trim());
+
+const createTemporaryMilitaryIdFields = (
+  summary: ReturnType<typeof buildPersonSummary>,
+  photoData = "",
+): TemporaryMilitaryIdFields => {
+  const fullName = summary.name !== "Особа не вибрана" ? summary.name : "";
+  return {
+    fullName,
+    rank: summary.rank || "",
+    callSign: summary.callSign || "",
+    birthDate: formatTemporaryIdBirthDate(summary.birthDate),
+    photoData,
+    statusNote: "",
+  };
+};
+
+const mergeTemporaryMilitaryIdFields = (
+  defaults: TemporaryMilitaryIdFields,
+  value: unknown,
+): TemporaryMilitaryIdFields => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return defaults;
+  }
+
+  const saved = value as Partial<TemporaryMilitaryIdFields> & {
+    birthYear?: string;
+  };
+  const { birthYear: _legacyBirthYear, ...savedFields } = saved;
+  const savedDate = formatTemporaryIdBirthDate(
+    saved.birthDate || saved.birthYear || "",
+  );
+  const birthDate = isFullBirthDate(savedDate)
+    ? savedDate
+    : isFullBirthDate(defaults.birthDate)
+      ? defaults.birthDate
+      : savedDate || defaults.birthDate;
+
+  return {
+    ...defaults,
+    ...savedFields,
+    rank: pickPreferredPersonRank(defaults.rank, saved.rank),
+    birthDate,
+    photoData: saved.photoData || defaults.photoData,
+    statusNote: saved.statusNote ?? defaults.statusNote,
+  };
+};
+
+const formatTemporaryIdDispatchText = (fields: TemporaryMilitaryIdFields) =>
+  [
+    `Звання: ${fields.rank.trim() || "—"}`,
+    `ПІБ: ${fields.fullName.trim() || "—"}`,
+    `Позивний: ${fields.callSign.trim() || "—"}`,
+    `Дата народження: ${fields.birthDate.trim() || "—"}`,
+    fields.statusNote.trim()
+      ? `Додатково по статусу: ${fields.statusNote.trim()}`
+      : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
 
 const createEmptyWorkflow = (): SalaryWorkflowState => ({
   completed: {},
@@ -328,15 +676,49 @@ const mergeSalaryWorkflow = (value: unknown): SalaryWorkflowState =>
 const mergeUbdFields = (
   defaults: UbdReportFields,
   value: unknown,
-): UbdReportFields =>
-  value && typeof value === "object" && !Array.isArray(value)
-    ? { ...defaults, ...(value as Partial<UbdReportFields>) }
-    : defaults;
+): UbdReportFields => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return defaults;
+  }
+
+  const saved = value as Partial<UbdReportFields>;
+  const parsed = parseUbdBasisParts(
+    String(saved.basisNumber ? "" : saved.basis ?? defaults.basis),
+  );
+  const basisNumber =
+    stripUbdBasisNumber(String(saved.basisNumber ?? "")) || parsed.basisNumber;
+  const basisDate =
+    String(saved.basisDate ?? "").trim() || parsed.basisDate;
+  const merged = { ...defaults, ...saved };
+  return {
+    ...merged,
+    basisNumber,
+    basisDate,
+    basis: formatUbdBasisText(basisNumber, basisDate),
+    taskPeriod: merged.taskPeriod.trim() || defaults.taskPeriod,
+    taskPlace: merged.taskPlace.trim() || defaults.taskPlace,
+    signatories:
+      Array.isArray(saved.signatories) && saved.signatories.length
+        ? saved.signatories
+        : defaults.signatories,
+  };
+};
 
 const mergeDocumentFiles = (value: unknown): DocumentFiles =>
   value && typeof value === "object" && !Array.isArray(value)
     ? { ...(value as DocumentFiles) }
     : {};
+
+/** Seed Form 6 phone from saved person phones if the form field is empty. */
+const withSavedPersonPhone = (
+  fields: Form6ReportFields,
+  personExternalId: string,
+): Form6ReportFields => {
+  if (fields.phone.trim()) return fields;
+  const stored = readStoredPersonPhones()[personExternalId.trim()] ?? [];
+  if (!stored.length) return fields;
+  return { ...fields, phone: formatUaPhoneDisplay(stored[0]) };
+};
 
 const compactText = (value: unknown) =>
   String(value ?? "")
@@ -394,31 +776,207 @@ const readDocumentPersonStatus = (
   return compactText(fromOverview?.label || fromFields || "—");
 };
 
+const CREATE_PERSON_DOCUMENT_TYPES = [
+  { value: "salaryPowerAttorney", label: "Довіреність зарплати" },
+  { value: "ubdReport", label: "Рапорт на УБД" },
+  { value: "ubdRestoreReport", label: "Рапорт на відновлення УБД" },
+  { value: "form6Report", label: "Форма 6" },
+  { value: "form12Report", label: "Форма 12" },
+  { value: "temporaryMilitaryId", label: "Тимчасовий військовий квиток" },
+] as const;
+
+const JOURNAL_DOCUMENT_TYPE_FILTERS = [
+  { value: "ALL", label: "Усі документи" },
+  { value: "ubdReport", label: "Рапорт на УБД" },
+  { value: "ubdRestoreReport", label: "Рапорт на відновлення УБД" },
+  { value: "form6Report", label: "Форма 6" },
+  { value: "form12Report", label: "Форма 12" },
+  { value: "temporaryMilitaryId", label: "Тимчасовий військовий квиток" },
+  { value: "salaryPowerAttorney", label: "Довіреність зарплати" },
+] as const;
+
 const salaryDocumentTypeLabel = (type: string) =>
   type === "salaryPowerAttorney"
     ? "Довіреність зарплати"
     : type === "ubdReport"
       ? "Рапорт на УБД"
-      : type;
+      : type === "ubdRestoreReport"
+        ? "Рапорт на відновлення УБД"
+        : type === "form6Report"
+          ? "Форма 6"
+          : type === "form12Report"
+            ? "Форма 12"
+          : type === "temporaryMilitaryId"
+            ? "Тимчасовий військовий квиток"
+            : type;
+
+const buildTicketPhotoFile = (photoData: string) =>
+  photoData
+    ? {
+        id: `photo-${Date.now()}`,
+        name: "фото.jpg",
+        type: "image/jpeg",
+        dataUrl: photoData,
+        uploadedAt: new Date().toISOString(),
+      }
+    : null;
+
+const buildPersonDocumentDraft = (
+  type: DocumentMode,
+  input: {
+    personStatus: string;
+    salaryFields: SalaryDocumentFields;
+    ubdFields: UbdReportFields;
+    form6Fields: Form6ReportFields;
+    form12Fields: Form12ReportFields;
+    restoreFields: UbdRestoreReportFields;
+    ticketFields: TemporaryMilitaryIdFields;
+  },
+) => {
+  const now = dayjs().format("DD.MM.YYYY HH:mm");
+  if (type === "salaryPowerAttorney") {
+    const workflow = createEmptyWorkflow();
+    return {
+      type,
+      title: `Довіреність зарплати · ${now}`,
+      status: workflow.currentStatus,
+      fields: { ...input.salaryFields, personStatus: input.personStatus },
+      workflow: workflow as unknown as Record<string, unknown>,
+    };
+  }
+  if (type === "ubdReport") {
+    const workflow = { ...createEmptyWorkflow(), currentStatus: "document" };
+    return {
+      type,
+      title: `Рапорт на УБД · ${now}`,
+      status: "document",
+      fields: { ...input.ubdFields, personStatus: input.personStatus },
+      workflow: workflow as unknown as Record<string, unknown>,
+      files: { ubdScans: [] },
+    };
+  }
+  if (type === "form6Report") {
+    const workflow = { ...createEmptyWorkflow(), currentStatus: "document" };
+    return {
+      type,
+      title: `Форма 6 · ${now}`,
+      status: "document",
+      fields: { ...input.form6Fields, personStatus: input.personStatus },
+      workflow: workflow as unknown as Record<string, unknown>,
+      files: { ubdScans: [] },
+    };
+  }
+  if (type === "form12Report") {
+    const workflow = { ...createEmptyWorkflow(), currentStatus: "document" };
+    return {
+      type,
+      title: `Форма 12 · ${now}`,
+      status: "document",
+      fields: { ...input.form12Fields, personStatus: input.personStatus },
+      workflow: workflow as unknown as Record<string, unknown>,
+      files: { ubdScans: [] },
+    };
+  }
+  if (type === "ubdRestoreReport") {
+    const workflow = { ...createEmptyWorkflow(), currentStatus: "document" };
+    return {
+      type,
+      title: `Рапорт на відновлення УБД · ${now}`,
+      status: "document",
+      fields: { ...input.restoreFields, personStatus: input.personStatus },
+      workflow: workflow as unknown as Record<string, unknown>,
+      files: { ubdScans: [] },
+    };
+  }
+  if (type === "temporaryMilitaryId") {
+    const workflow = { ...createEmptyWorkflow(), currentStatus: "photo" };
+    const ticketPhoto = buildTicketPhotoFile(input.ticketFields.photoData);
+    return {
+      type,
+      title: `Тимчасовий військовий квиток · ${now}`,
+      status: "photo",
+      fields: { ...input.ticketFields, personStatus: input.personStatus },
+      workflow: workflow as unknown as Record<string, unknown>,
+      files: { ticketPhoto, ubdScans: [] },
+    };
+  }
+  return null;
+};
+
+const autoCreateInFlight = new Set<string>();
 
 const workflowStatusLabel = (status?: string | null) =>
-  salaryWorkflowSteps.find((step) => step.key === status)?.title ||
+  [
+    ...salaryWorkflowSteps,
+    ...ubdWorkflowSteps,
+    ...ubdRestoreWorkflowSteps,
+    ...form6WorkflowSteps,
+    ...form12WorkflowSteps,
+    ...temporaryMilitaryIdWorkflowSteps,
+  ].find((step) => step.key === status)?.title ||
   status ||
   "статус не заданий";
 
 const documentWorkflowSteps = (type?: string | null) =>
-  type === "ubdReport" ? ubdWorkflowSteps : salaryWorkflowSteps;
+  type === "ubdRestoreReport"
+    ? ubdRestoreWorkflowSteps
+    : type === "form12Report"
+      ? form12WorkflowSteps
+      : type === "ubdReport" || type === "form6Report"
+        ? ubdWorkflowSteps
+        : type === "temporaryMilitaryId"
+          ? temporaryMilitaryIdWorkflowSteps
+          : salaryWorkflowSteps;
+
+const resolveDocumentWorkflowStatus = (
+  type: string | null | undefined,
+  status?: string | null,
+) => {
+  if (type === "ubdRestoreReport") {
+    if (status === "account" || status === "print" || status === "sign") {
+      return "photo";
+    }
+    if (status === "ready") return "sent";
+    return status ?? "";
+  }
+  if (type === "form12Report") {
+    if (
+      status === "account" ||
+      status === "scan" ||
+      status === "ready" ||
+      status === "print" ||
+      status === "sign"
+    ) {
+      return "sent";
+    }
+    return status ?? "";
+  }
+  if (
+    (type === "ubdReport" || type === "form6Report") &&
+    (status === "print" || status === "sign")
+  ) {
+    return "scan";
+  }
+  return status ?? "";
+};
 
 const documentWorkflowStatusLabel = (document: BackendPersonDocument) =>
   documentWorkflowSteps(document.type).find(
-    (step) => step.key === document.status,
+    (step) =>
+      step.key ===
+      resolveDocumentWorkflowStatus(document.type, document.status),
   )?.title || workflowStatusLabel(document.status);
 
 const getDocumentProgressPercent = (document: BackendPersonDocument) => {
   const workflow = mergeSalaryWorkflow(document.workflow);
   const steps = documentWorkflowSteps(document.type);
   const index = steps.findIndex(
-    (step) => step.key === (document.status || workflow.currentStatus),
+    (step) =>
+      step.key ===
+      resolveDocumentWorkflowStatus(
+        document.type,
+        document.status || workflow.currentStatus,
+      ),
   );
   const resolvedIndex = Math.max(0, index);
   return Math.round(((resolvedIndex + 1) / steps.length) * 100);
@@ -437,9 +995,53 @@ const getDocumentPersonName = (document: BackendPersonDocument) => {
     : `ID ${document.personExternalId}`;
 };
 
+const normalizeJournalSearchText = (value: string) =>
+  value
+    .trim()
+    .toLocaleLowerCase("uk-UA")
+    .replace(/['’`´]/g, "")
+    .replace(/\s+/g, " ");
+
+const documentMatchesJournalNameQuery = (
+  document: BackendPersonDocument,
+  query: string,
+) => {
+  const normalizedQuery = normalizeJournalSearchText(query);
+  if (!normalizedQuery) return true;
+  const name = normalizeJournalSearchText(getDocumentPersonName(document));
+  const personId = normalizeJournalSearchText(document.personExternalId || "");
+  return name.includes(normalizedQuery) || personId.includes(normalizedQuery);
+};
+
+const readDocumentStatusNote = (document: BackendPersonDocument) => {
+  const value = document.fields?.statusNote;
+  return typeof value === "string" ? value.trim() : "";
+};
+
+const documentCreatedMonthKey = (value?: string | null) => {
+  const date = dayjs(value);
+  return date.isValid() ? date.format("YYYY-MM") : "";
+};
+
+const formatJournalMonthLabel = (monthKey: string) => {
+  const date = dayjs(`${monthKey}-01`);
+  if (!date.isValid()) return monthKey;
+  const label = date.locale("uk").format("MMMM YYYY");
+  return label.charAt(0).toLocaleUpperCase("uk-UA") + label.slice(1);
+};
+
 const getDocumentFileCount = (document: BackendPersonDocument) => {
+  const files = mergeDocumentFiles(document.files);
   if (document.type === "ubdReport") {
-    return mergeDocumentFiles(document.files).ubdScans?.length ?? 0;
+    return files.ubdScans?.length ?? 0;
+  }
+  if (document.type === "temporaryMilitaryId") {
+    const hasPhoto = Boolean(
+      files.ticketPhoto?.dataUrl ||
+        (typeof document.fields?.photoData === "string" &&
+          document.fields.photoData),
+    );
+    return (hasPhoto ? 1 : 0) + (files.ubdScans?.length ?? 0);
   }
 
   const workflow = mergeSalaryWorkflow(document.workflow);
@@ -453,28 +1055,35 @@ const getDocumentFileCount = (document: BackendPersonDocument) => {
 const getDocumentFileSummary = (document: BackendPersonDocument) =>
   document.type === "ubdReport"
     ? `${getDocumentFileCount(document)} сканів`
-    : `${getDocumentFileCount(document)} / 3`;
+    : document.type === "temporaryMilitaryId"
+      ? getDocumentFileCount(document)
+        ? "є фото"
+        : "без фото"
+      : `${getDocumentFileCount(document)} / 3`;
 
 const personWorkflowKey = (
   row: EjournalPreviewRow | null,
   summary: ReturnType<typeof buildPersonSummary>,
-) => String(summary.externalId || row?.__dbRowId || summary.name || "unknown");
+) =>
+  String(
+    summary.externalId ||
+      (row?.__dbRowId && !isUnstablePersonExternalId(String(row.__dbRowId))
+        ? row.__dbRowId
+        : "") ||
+      summary.name ||
+      "unknown",
+  );
 
 const loadWorkflowMap = () => {
   try {
     const raw = window.localStorage.getItem(SALARY_WORKFLOW_STORAGE_KEY);
-    return raw
-      ? (JSON.parse(raw) as Record<string, SalaryWorkflowState>)
-      : {};
+    return raw ? (JSON.parse(raw) as Record<string, SalaryWorkflowState>) : {};
   } catch {
     return {};
   }
 };
 
-const saveWorkflowForPerson = (
-  key: string,
-  workflow: SalaryWorkflowState,
-) => {
+const saveWorkflowForPerson = (key: string, workflow: SalaryWorkflowState) => {
   const current = loadWorkflowMap();
   current[key] = workflow;
   window.localStorage.setItem(
@@ -530,54 +1139,17 @@ const salaryDocumentHtml = (fields: SalaryDocumentFields) => `
 </body>
 </html>`;
 
-const ubdReportHtml = (fields: UbdReportFields) => `
-<!doctype html>
-<html lang="uk">
-<head>
-  <meta charset="utf-8" />
-  <title>Рапорт УБД ${safeFilePart(fields.fullName)}</title>
-  <style>
-    @page { size: A4; margin: 18mm 18mm; }
-    body { font-family: "Times New Roman", serif; color: #000; font-size: 13pt; line-height: 1.28; }
-    .to { text-align: right; margin-left: 45%; }
-    h1 { margin: 18mm 0 8mm; text-align: center; font-size: 16pt; text-transform: uppercase; }
-    table { width: 100%; border-collapse: collapse; margin: 5mm 0 7mm; }
-    td { border: 1px solid #000; padding: 3mm; vertical-align: top; }
-    .label { width: 42%; font-weight: 700; }
-    p { margin: 0 0 5mm; }
-    .sign { margin-top: 10mm; white-space: pre-line; }
-    .approve { margin-top: 12mm; text-align: right; white-space: pre-line; }
-  </style>
-</head>
-<body>
-  <div class="to">${fields.commander}</div>
-  <h1>Рапорт</h1>
-  <p>
-    Прошу Вашого рішення про внесення відомостей до Єдиного державного
-    реєстру ветеранів війни щодо зазначеного нижче військовослужбовця,
-    який розпочав виконання бойового завдання у районі ведення бойових дій,
-    з метою надання статусу учасника бойових дій, а саме:
-  </p>
-  <table>
-    <tr><td class="label">Військове звання</td><td>${fields.rank}</td></tr>
-    <tr><td class="label">Прізвище, ім'я, по-батькові</td><td>${fields.fullName}</td></tr>
-    <tr><td class="label">Посада згідно штату</td><td>${fields.staffPosition}</td></tr>
-    <tr><td class="label">Дата народження</td><td>${fields.birthDate}</td></tr>
-    <tr><td class="label">РНОКПП</td><td>${fields.rnokpp}</td></tr>
-    <tr><td class="label">Період виконання завдань</td><td>${fields.taskPeriod}</td></tr>
-    <tr><td class="label">Місце виконання завдань</td><td>${fields.taskPlace}</td></tr>
-  </table>
-  <p><strong>Підстава:</strong> ${fields.basis}</p>
-  <p><strong>Додаток:</strong> копія паспорта, РНОКПП, дві фотокартки</p>
-  <p class="sign">${fields.battalionCommander}</p>
-  <p>${fields.date}</p>
-  <p class="approve">ЗАТВЕРДЖУЮ
-${fields.approvalOfficer}</p>
-</body>
-</html>`;
-
-const downloadTextFile = (fileName: string, content: string, mimeType: string) => {
-  const url = URL.createObjectURL(new Blob([content], { type: mimeType }));
+const downloadTextFile = (
+  fileName: string,
+  content: string,
+  mimeType: string,
+) => {
+  const fileContent = mimeType.startsWith("application/msword")
+    ? `\ufeff${content}`
+    : content;
+  const url = URL.createObjectURL(
+    new Blob([fileContent], { type: mimeType }),
+  );
   const link = document.createElement("a");
   link.href = url;
   link.download = fileName;
@@ -585,6 +1157,29 @@ const downloadTextFile = (fileName: string, content: string, mimeType: string) =
   link.click();
   link.remove();
   URL.revokeObjectURL(url);
+};
+
+const downloadBlob = (fileName: string, blob: Blob) => {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+};
+
+const openDataUrlInNewTab = (dataUrl: string) => {
+  const objectUrl = dataUrlToObjectUrl(dataUrl);
+  const link = document.createElement("a");
+  link.href = objectUrl;
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
 };
 
 const readFileAsDataUrl = (file: File) =>
@@ -617,9 +1212,7 @@ const getDocumentRouteState = (): DocumentRouteState => {
   };
 };
 
-export function DocumentsPage({
-  onNavigate,
-}: {
+export function DocumentsPage(_props: {
   onNavigate?: (path: string) => void;
 }) {
   const {
@@ -628,9 +1221,8 @@ export function DocumentsPage({
     requestedDocumentId,
     isPersonDocumentMode,
   } = getDocumentRouteState();
-  const [selectedPerson, setSelectedPerson] = useState<EjournalPreviewRow | null>(
-    null,
-  );
+  const [selectedPerson, setSelectedPerson] =
+    useState<EjournalPreviewRow | null>(null);
   const [mode, setMode] = useState<DocumentMode>("default");
   const [fields, setFields] = useState<DefaultDocumentFields>(() =>
     createDefaultFields(buildPersonSummary(null)),
@@ -641,12 +1233,39 @@ export function DocumentsPage({
   const [ubdFields, setUbdFields] = useState<UbdReportFields>(() =>
     createUbdFields(null, buildPersonSummary(null)),
   );
+  const [form6Fields, setForm6Fields] = useState<Form6ReportFields>(() =>
+    createForm6Fields(null, buildPersonSummary(null)),
+  );
+  const [form12Fields, setForm12Fields] = useState<Form12ReportFields>(() =>
+    createForm12Fields(null, buildPersonSummary(null)),
+  );
+  const [ubdRestoreFields, setUbdRestoreFields] =
+    useState<UbdRestoreReportFields>(() =>
+      createUbdRestoreFields(null, buildPersonSummary(null)),
+    );
+  const [ticketFields, setTicketFields] = useState<TemporaryMilitaryIdFields>(
+    () => createTemporaryMilitaryIdFields(buildPersonSummary(null)),
+  );
+  const [commanderSignatureSrc, setCommanderSignatureSrc] = useState(
+    UBD_COMMANDER_SIGNATURE_SRC,
+  );
   const [documentFiles, setDocumentFiles] = useState<DocumentFiles>({});
   const [workflow, setWorkflow] =
     useState<SalaryWorkflowState>(createEmptyWorkflow);
-  const [personDocuments, setPersonDocuments] = useState<BackendPersonDocument[]>(
-    [],
-  );
+  const [personDocuments, setPersonDocuments] = useState<
+    BackendPersonDocument[]
+  >([]);
+  const [personQuestionnaire, setPersonQuestionnaire] =
+    useState<BackendPersonQuestionnaireMeta | null>(null);
+  const [isQuestionnairePreviewOpen, setIsQuestionnairePreviewOpen] =
+    useState(false);
+  const [questionnairePreviewUrl, setQuestionnairePreviewUrl] = useState("");
+  const [questionnaireFileData, setQuestionnaireFileData] = useState("");
+  const [questionnairePreviewPersonId, setQuestionnairePreviewPersonId] =
+    useState("");
+  const [isLoadingQuestionnairePreview, setIsLoadingQuestionnairePreview] =
+    useState(false);
+  const questionnaireLoadSeqRef = useRef(0);
   const [selectedDocumentId, setSelectedDocumentId] = useState("");
   const [documentMessage, setDocumentMessage] = useState("");
   const [isSavingDocument, setIsSavingDocument] = useState(false);
@@ -657,7 +1276,210 @@ export function DocumentsPage({
     Record<string, PersonStatusSnapshot>
   >({});
   const [isLoadingDocumentJournal, setIsLoadingDocumentJournal] =
+    useState(true);
+  const [journalTypeFilter, setJournalTypeFilter] = useState("ALL");
+  const [journalStatusFilter, setJournalStatusFilter] = useState("ALL");
+  const [journalMonthFilter, setJournalMonthFilter] = useState("ALL");
+  const [journalNameQuery, setJournalNameQuery] = useState("");
+  const [journalCreatedSort, setJournalCreatedSort] = useState<"desc" | "asc">(
+    "desc",
+  );
+  const [isExportingDocumentJournal, setIsExportingDocumentJournal] =
     useState(false);
+  const ubdWordFields = useMemo(
+    () => ({
+      ...ubdFields,
+      signatories: ubdFields.signatories.map((signatory) =>
+        signatory.signatureData === UBD_COMMANDER_SIGNATURE_SRC
+          ? { ...signatory, signatureData: commanderSignatureSrc }
+          : signatory,
+      ),
+    }),
+    [commanderSignatureSrc, ubdFields],
+  );
+  const wordPreviewEnabled =
+    mode === "ubdReport" ||
+    mode === "form6Report" ||
+    mode === "form12Report" ||
+    mode === "ubdRestoreReport";
+  const buildActiveWordBlob = useCallback(() => {
+    if (mode === "ubdReport") return createUbdWordBlob(ubdWordFields);
+    if (mode === "form6Report") return createForm6WordBlob(form6Fields);
+    if (mode === "form12Report") return createForm12WordBlob(form12Fields);
+    if (mode === "ubdRestoreReport") {
+      return createUbdRestoreWordBlob(ubdRestoreFields);
+    }
+    return Promise.reject(new Error("Немає Word-шаблону для цього документа."));
+  }, [form12Fields, form6Fields, mode, ubdRestoreFields, ubdWordFields]);
+  const wordPreview = useWordPreviewBlob(buildActiveWordBlob, wordPreviewEnabled);
+
+
+  const journalStatusOptions = useMemo(() => {
+    const steps =
+      journalTypeFilter === "ALL"
+        ? [
+            ...ubdWorkflowSteps,
+            ...ubdRestoreWorkflowSteps,
+            ...form12WorkflowSteps,
+            ...temporaryMilitaryIdWorkflowSteps,
+            ...salaryWorkflowSteps,
+          ]
+        : documentWorkflowSteps(journalTypeFilter);
+    const titles: string[] = [];
+    for (const step of steps) {
+      if (!titles.includes(step.title)) titles.push(step.title);
+    }
+    return titles;
+  }, [journalTypeFilter]);
+
+  const journalDocuments = useMemo(
+    () =>
+      allPersonDocuments.filter(
+        (document) =>
+          document.type !== PERSON_PHONES_DOCUMENT_TYPE &&
+          document.type !== PERSON_SIGNATURE_DOCUMENT_TYPE,
+      ),
+    [allPersonDocuments],
+  );
+
+  const journalMonthOptions = useMemo(() => {
+    const months = new Set<string>();
+    for (const document of journalDocuments) {
+      const monthKey = documentCreatedMonthKey(document.createdAt);
+      if (monthKey) months.add(monthKey);
+    }
+    return [...months].sort((left, right) => right.localeCompare(left));
+  }, [journalDocuments]);
+
+  const filteredJournalDocuments = useMemo(() => {
+    const filtered = journalDocuments.filter((document) => {
+      if (!documentMatchesJournalNameQuery(document, journalNameQuery)) {
+        return false;
+      }
+      if (
+        journalTypeFilter !== "ALL" &&
+        document.type !== journalTypeFilter
+      ) {
+        return false;
+      }
+      if (
+        journalStatusFilter !== "ALL" &&
+        documentWorkflowStatusLabel(document) !== journalStatusFilter
+      ) {
+        return false;
+      }
+      if (
+        journalMonthFilter !== "ALL" &&
+        documentCreatedMonthKey(document.createdAt) !== journalMonthFilter
+      ) {
+        return false;
+      }
+      return true;
+    });
+
+    const direction = journalCreatedSort === "desc" ? -1 : 1;
+    return [...filtered].sort((left, right) => {
+      const leftTs = dayjs(left.createdAt).valueOf();
+      const rightTs = dayjs(right.createdAt).valueOf();
+      const leftSafe = Number.isFinite(leftTs) ? leftTs : 0;
+      const rightSafe = Number.isFinite(rightTs) ? rightTs : 0;
+      if (leftSafe !== rightSafe) return (leftSafe - rightSafe) * direction;
+      return left.id.localeCompare(right.id) * direction;
+    });
+  }, [
+    journalCreatedSort,
+    journalDocuments,
+    journalMonthFilter,
+    journalNameQuery,
+    journalStatusFilter,
+    journalTypeFilter,
+  ]);
+
+  const exportDocumentJournal = async () => {
+    if (!filteredJournalDocuments.length) {
+      setDocumentMessage("Немає рядків для експорту за поточними фільтрами.");
+      return;
+    }
+
+    setIsExportingDocumentJournal(true);
+    try {
+      const { fileName, rowCount } = await exportDocumentsJournalExcel({
+        rows: filteredJournalDocuments.map((document) => {
+          const journalDocument =
+            document.id === selectedDocumentId
+              ? {
+                  ...document,
+                  status: workflow.currentStatus || document.status,
+                  workflow: {
+                    ...(document.workflow &&
+                    typeof document.workflow === "object"
+                      ? document.workflow
+                      : {}),
+                    ...workflow,
+                  },
+                }
+              : document;
+          return {
+            personName: getDocumentPersonName(journalDocument),
+            personId: journalDocument.personExternalId,
+            personStatus: readDocumentPersonStatus(
+              journalDocument,
+              personStatusById,
+            ),
+            documentType: salaryDocumentTypeLabel(journalDocument.type),
+            progressPercent: getDocumentProgressPercent(journalDocument),
+            status: documentWorkflowStatusLabel(journalDocument),
+            note: liveDocumentStatusNote(journalDocument),
+            files: getDocumentFileSummary(journalDocument),
+            createdAt: journalDocument.createdAt,
+            updatedAt: journalDocument.updatedAt,
+          };
+        }),
+        typeFilterLabel:
+          JOURNAL_DOCUMENT_TYPE_FILTERS.find(
+            (item) => item.value === journalTypeFilter,
+          )?.label ?? "Усі документи",
+        statusFilterLabel:
+          journalStatusFilter === "ALL"
+            ? "Усі статуси"
+            : journalStatusFilter,
+        periodFilterLabel:
+          journalMonthFilter === "ALL"
+            ? "Усі місяці"
+            : formatJournalMonthLabel(journalMonthFilter),
+        totalCount: journalDocuments.length,
+      });
+      setDocumentMessage(`Експортовано журнал: ${rowCount} рядків · ${fileName}`);
+    } catch (error) {
+      setDocumentMessage(
+        error instanceof Error
+          ? `Не вдалося експортувати Excel: ${error.message}`
+          : "Не вдалося експортувати Excel.",
+      );
+    } finally {
+      setIsExportingDocumentJournal(false);
+    }
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    void getCommanderSignatureTransparent(UBD_COMMANDER_SIGNATURE_SRC).then(
+      (processed) => {
+        if (!cancelled) setCommanderSignatureSrc(processed);
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (questionnairePreviewUrl) {
+        revokeQuestionnairePreviewUrl(questionnairePreviewUrl);
+      }
+    };
+  }, [questionnairePreviewUrl]);
 
   useEffect(() => {
     const rawPerson = window.localStorage.getItem("army-grid:selected-person");
@@ -669,10 +1491,28 @@ export function DocumentsPage({
     setMode(
       requestedDocumentType === "ubd-report"
         ? "ubdReport"
-        : requestedDocumentType === "salary-power-attorney" ||
-            savedMode === "salaryPowerAttorney"
-          ? "salaryPowerAttorney"
-          : "default",
+        : requestedDocumentType === "ubd-restore-report"
+          ? "ubdRestoreReport"
+          : requestedDocumentType === "form6-report"
+            ? "form6Report"
+            : requestedDocumentType === "form12-report"
+              ? "form12Report"
+            : requestedDocumentType === "temporary-military-id"
+              ? "temporaryMilitaryId"
+              : requestedDocumentType === "salary-power-attorney" ||
+                  savedMode === "salaryPowerAttorney"
+                ? "salaryPowerAttorney"
+                : savedMode === "ubdReport"
+                  ? "ubdReport"
+                  : savedMode === "ubdRestoreReport"
+                    ? "ubdRestoreReport"
+                    : savedMode === "form6Report"
+                      ? "form6Report"
+                      : savedMode === "form12Report"
+                        ? "form12Report"
+                      : savedMode === "temporaryMilitaryId"
+                        ? "temporaryMilitaryId"
+                        : "default",
     );
 
     if (!rawPerson || !isPersonDocumentMode) return;
@@ -681,9 +1521,20 @@ export function DocumentsPage({
       const person = JSON.parse(rawPerson) as EjournalPreviewRow;
       const nextSummary = buildPersonSummary(person);
       const nextPersonId = String(
-        nextSummary.externalId || person.__dbRowId || "",
+        nextSummary.externalId ||
+          (person.__dbRowId &&
+          !isUnstablePersonExternalId(String(person.__dbRowId))
+            ? person.__dbRowId
+            : ""),
       );
-      if (requestedPersonId && nextPersonId !== requestedPersonId) {
+      const allowedIds = new Set(
+        [
+          nextPersonId,
+          nextSummary.externalId,
+          ...collectPersonExternalIdCandidates(person),
+        ].filter(Boolean),
+      );
+      if (requestedPersonId && !allowedIds.has(requestedPersonId)) {
         setDocumentMessage(
           `Не знайшов локальні дані службовця ID ${requestedPersonId}. Відкрийте документ із картки особи.`,
         );
@@ -693,6 +1544,10 @@ export function DocumentsPage({
       setFields(createDefaultFields(nextSummary));
       setSalaryFields(createSalaryFields(person, nextSummary));
       setUbdFields(createUbdFields(person, nextSummary));
+      setForm6Fields(createForm6Fields(person, nextSummary));
+      setForm12Fields(createForm12Fields(person, nextSummary));
+      setUbdRestoreFields(createUbdRestoreFields(person, nextSummary));
+      setTicketFields(createTemporaryMilitaryIdFields(nextSummary));
       const key = personWorkflowKey(person, nextSummary);
       setWorkflow(loadWorkflowMap()[key] ?? createEmptyWorkflow());
     } catch {
@@ -704,49 +1559,155 @@ export function DocumentsPage({
     () => buildPersonSummary(selectedPerson),
     [selectedPerson],
   );
-  const personExternalId = String(
-    requestedPersonId || summary.externalId || selectedPerson?.__dbRowId || "",
-  );
   const selectedDocument = useMemo(
     () =>
       personDocuments.find((document) => document.id === selectedDocumentId) ??
+      allPersonDocuments.find((document) => document.id === selectedDocumentId) ??
       null,
-    [personDocuments, selectedDocumentId],
+    [allPersonDocuments, personDocuments, selectedDocumentId],
+  );
+  const personExternalId = String(
+    summary.externalId ||
+      (requestedPersonId && !isUnstablePersonExternalId(requestedPersonId)
+        ? requestedPersonId
+        : "") ||
+      (selectedPerson?.__dbRowId &&
+      !isUnstablePersonExternalId(String(selectedPerson.__dbRowId))
+        ? selectedPerson.__dbRowId
+        : "") ||
+      requestedPersonId ||
+      selectedDocument?.personExternalId ||
+      "",
   );
   const workflowKey = useMemo(
-    () => personWorkflowKey(selectedPerson, summary),
-    [selectedPerson, summary],
+    () =>
+      [personWorkflowKey(selectedPerson, summary), selectedDocumentId]
+        .filter(Boolean)
+        .join(":"),
+    [selectedDocumentId, selectedPerson, summary],
   );
+  const documentSavePersonId =
+    selectedDocument?.personExternalId || personExternalId;
   const activeWorkflowSteps = documentWorkflowSteps(
     selectedDocument?.type || mode,
   );
   const targetDocumentType: DocumentMode =
     requestedDocumentType === "ubd-report"
       ? "ubdReport"
-      : requestedDocumentType === "salary-power-attorney"
-        ? "salaryPowerAttorney"
-        : mode;
+      : requestedDocumentType === "ubd-restore-report"
+        ? "ubdRestoreReport"
+        : requestedDocumentType === "form6-report"
+          ? "form6Report"
+          : requestedDocumentType === "form12-report"
+            ? "form12Report"
+          : requestedDocumentType === "temporary-military-id"
+            ? "temporaryMilitaryId"
+            : requestedDocumentType === "salary-power-attorney"
+              ? "salaryPowerAttorney"
+              : mode;
 
   useEffect(() => {
     if (!isPersonDocumentMode) return;
     if (
       (targetDocumentType !== "salaryPowerAttorney" &&
-        targetDocumentType !== "ubdReport") ||
+        targetDocumentType !== "ubdReport" &&
+        targetDocumentType !== "ubdRestoreReport" &&
+        targetDocumentType !== "form6Report" &&
+        targetDocumentType !== "form12Report" &&
+        targetDocumentType !== "temporaryMilitaryId") ||
       !personExternalId
     )
       return;
 
     let cancelled = false;
     const salaryDefaults = createSalaryFields(selectedPerson, summary);
-    const ubdDefaults = createUbdFields(selectedPerson, summary);
 
     const loadDocuments = async () => {
       setDocumentMessage("Завантажую документи службовця...");
+      setIsQuestionnairePreviewOpen(false);
+      setIsLoadingQuestionnairePreview(false);
+      setQuestionnaireFileData("");
+      setQuestionnairePreviewPersonId("");
+      questionnaireLoadSeqRef.current += 1;
+      setQuestionnairePreviewUrl((current) => {
+        if (current) revokeQuestionnairePreviewUrl(current);
+        return "";
+      });
       try {
-        const documents = await api.listPersonDocuments(personExternalId);
+        if (selectedPerson && summary.externalId) {
+          const pairs = collectPersonExternalIdCandidates(selectedPerson)
+            .filter(
+              (fromExternalId) =>
+                fromExternalId !== summary.externalId &&
+                isUnstablePersonExternalId(fromExternalId),
+            )
+            .map((fromExternalId) => ({
+              name: summary.name,
+              fromExternalId,
+              toExternalId: summary.externalId,
+            }));
+          if (pairs.length) {
+            migrateStoredPersonSignatures(pairs);
+            await migratePersonAttachmentsBetweenIds(pairs, {
+              includeDocuments: true,
+            });
+          }
+        }
+        const [documents, configuredRecords, personPhoto, questionnaires] =
+          await Promise.all([
+            api.listPersonDocuments(personExternalId),
+            targetDocumentType === "ubdRestoreReport"
+              ? loadUbdRestoreSignatoryRecords()
+              : targetDocumentType === "ubdReport"
+              ? api.listDocumentSignatories("ubdReport")
+              : targetDocumentType === "form6Report"
+                ? loadForm6SignatoryRecords()
+              : targetDocumentType === "form12Report"
+                ? loadForm12SignatoryRecords()
+                : Promise.resolve([]),
+            api.getPersonPhoto(personExternalId).catch(() => null),
+            api.listPersonQuestionnaires().catch(() => []),
+          ]);
+        const questionnaire =
+          questionnaires.find(
+            (item) => item.personExternalId === personExternalId,
+          ) ?? null;
+        const configured = snapshotSignatories(configuredRecords);
+        const ubdDefaults = createUbdFields(
+          selectedPerson,
+          summary,
+          configured.length ? configured : legacyUbdSignatories(),
+        );
+        const ticketDefaults = createTemporaryMilitaryIdFields(
+          summary,
+          personPhoto?.photoData || "",
+        );
+        const form6Defaults = createForm6Fields(
+          selectedPerson,
+          summary,
+          toForm6Signatories(
+            configured.length ? configured : legacyUbdSignatories(),
+          ),
+        );
+        const form12Defaults = createForm12Fields(
+          selectedPerson,
+          summary,
+          toForm12Signatories(
+            configured.length ? configured : legacyUbdSignatories(),
+          ),
+        );
+        const restoreDefaults = createUbdRestoreFields(
+          selectedPerson,
+          summary,
+          toUbdRestoreSignatories(
+            configured.length ? configured : legacyUbdSignatories(),
+          ),
+        );
         let nextDocuments = documents;
         let active =
-          nextDocuments.find((document) => document.id === requestedDocumentId) ??
+          nextDocuments.find(
+            (document) => document.id === requestedDocumentId,
+          ) ??
           nextDocuments.find(
             (document) => document.type === targetDocumentType,
           ) ??
@@ -754,27 +1715,148 @@ export function DocumentsPage({
 
         if (cancelled) return;
         setPersonDocuments(nextDocuments);
+        setPersonQuestionnaire(questionnaire);
         if (!active) {
-          setSelectedDocumentId("");
-          setSalaryFields(salaryDefaults);
-          setUbdFields(ubdDefaults);
-          setDocumentFiles({});
-          setWorkflow(createEmptyWorkflow());
+          const autoCreateKey = `${personExternalId}:${targetDocumentType}`;
+          if (autoCreateInFlight.has(autoCreateKey)) {
+            const latest = await api.listPersonDocuments(personExternalId);
+            if (cancelled) return;
+            nextDocuments = latest;
+            active =
+              latest.find((document) => document.id === requestedDocumentId) ??
+              latest.find((document) => document.type === targetDocumentType) ??
+              null;
+            setPersonDocuments(nextDocuments);
+          }
+        }
+        if (!active) {
+          const autoCreateKey = `${personExternalId}:${targetDocumentType}`;
+          const draft = buildPersonDocumentDraft(targetDocumentType, {
+            personStatus: createPersonStatusSnapshot(selectedPerson, summary)
+              .label,
+            salaryFields: salaryDefaults,
+            ubdFields: ubdDefaults,
+            form6Fields: form6Defaults,
+            form12Fields: form12Defaults,
+            restoreFields: restoreDefaults,
+            ticketFields: ticketDefaults,
+          });
+          if (!draft) {
+            setSelectedDocumentId("");
+            setSalaryFields(salaryDefaults);
+            setUbdFields(ubdDefaults);
+            setForm6Fields(form6Defaults);
+            setForm12Fields(form12Defaults);
+            setUbdRestoreFields(restoreDefaults);
+            setTicketFields(ticketDefaults);
+            setDocumentFiles({});
+            setWorkflow(createEmptyWorkflow());
+            setDocumentMessage(
+              `Для ID ${personExternalId} ще немає документа "${salaryDocumentTypeLabel(targetDocumentType)}". Створіть його вручну.`,
+            );
+            return;
+          }
           setDocumentMessage(
-            `Для ID ${personExternalId} ще немає документа "${salaryDocumentTypeLabel(targetDocumentType)}". Створіть його вручну.`,
+            `Створюю документ "${salaryDocumentTypeLabel(targetDocumentType)}"...`,
           );
-          return;
+          autoCreateInFlight.add(autoCreateKey);
+          try {
+            const created = await api.createPersonDocument(
+              personExternalId,
+              draft,
+            );
+            if (cancelled) return;
+            nextDocuments = [
+              created,
+              ...nextDocuments.filter((document) => document.id !== created.id),
+            ];
+            active = created;
+            setPersonDocuments(nextDocuments);
+            setAllPersonDocuments((current) => [
+              created,
+              ...current.filter((document) => document.id !== created.id),
+            ]);
+          } catch (error) {
+            if (cancelled) return;
+            setSelectedDocumentId("");
+            setSalaryFields(salaryDefaults);
+            setUbdFields(ubdDefaults);
+            setForm6Fields(form6Defaults);
+            setForm12Fields(form12Defaults);
+            setUbdRestoreFields(restoreDefaults);
+            setTicketFields(ticketDefaults);
+            setDocumentFiles({});
+            setWorkflow(createEmptyWorkflow());
+            setDocumentMessage(
+              error instanceof Error
+                ? `Не вдалося створити документ: ${error.message}`
+                : `Для ID ${personExternalId} ще немає документа "${salaryDocumentTypeLabel(targetDocumentType)}". Створіть його вручну.`,
+            );
+            return;
+          } finally {
+            autoCreateInFlight.delete(autoCreateKey);
+          }
         }
         setSelectedDocumentId(active.id);
         setSalaryFields(mergeSalaryFields(salaryDefaults, active.fields));
-        setUbdFields(mergeUbdFields(ubdDefaults, active.fields));
-        setDocumentFiles(mergeDocumentFiles(active.files));
+        const mergedUbdFields = mergeUbdFields(ubdDefaults, active.fields);
+        setUbdFields({
+          ...mergedUbdFields,
+          signatories: ubdDefaults.signatories,
+        });
+        setForm6Fields(
+          withSavedPersonPhone(
+            {
+              ...mergeForm6Fields(form6Defaults, active.fields),
+              signatories: form6Defaults.signatories,
+            },
+            personExternalId,
+          ),
+        );
+        const personSignature = extractPersonSignature(
+          nextDocuments,
+          personExternalId,
+        ).signature;
+        if (personSignature) {
+          void persistPersonSignature(
+            personExternalId,
+            personSignature,
+            nextDocuments,
+          ).catch(() => undefined);
+        }
+        const mergedForm12 = withPersonSignature(
+          mergeForm12Fields(form12Defaults, active.fields),
+          personSignature,
+        );
+        setForm12Fields({
+          ...mergedForm12,
+          signatories: form12Defaults.signatories,
+        });
+        const mergedRestore = withPersonSignature(
+          mergeUbdRestoreFields(restoreDefaults, active.fields),
+          personSignature,
+        );
+        setUbdRestoreFields(mergedRestore);
+        const mergedTicket = mergeTemporaryMilitaryIdFields(
+          ticketDefaults,
+          active.fields,
+        );
+        const ticketFiles = mergeDocumentFiles(active.files);
+        setTicketFields({
+          ...mergedTicket,
+          photoData:
+            mergedTicket.photoData ||
+            ticketFiles.ticketPhoto?.dataUrl ||
+            ticketDefaults.photoData,
+        });
+        setDocumentFiles(ticketFiles);
         setWorkflow(mergeSalaryWorkflow(active.workflow));
         setDocumentMessage(
           `Відкрито документ: ${active.title} · ${new Date(active.updatedAt).toLocaleString("uk-UA")}`,
         );
       } catch (error) {
         if (cancelled) return;
+        setPersonQuestionnaire(null);
         setDocumentMessage(
           error instanceof Error
             ? `БД документів недоступна: ${error.message}`
@@ -833,7 +1915,12 @@ export function DocumentsPage({
   const currentStepIndex = Math.max(
     0,
     activeWorkflowSteps.findIndex(
-      (step) => step.key === workflow.currentStatus,
+      (step) =>
+        step.key ===
+        resolveDocumentWorkflowStatus(
+          selectedDocument?.type || mode,
+          workflow.currentStatus,
+        ),
     ),
   );
   const completedCount = currentStepIndex + 1;
@@ -845,14 +1932,146 @@ export function DocumentsPage({
     setFields((current) => ({ ...current, [key]: value }));
   };
 
-  const openPersonDocument = (document: BackendPersonDocument) => {
+  const openPersonDocument = async (document: BackendPersonDocument) => {
+    const nextPersonId = String(document.personExternalId || "").trim();
+    if (
+      nextPersonId &&
+      nextPersonId !== questionnairePreviewPersonId
+    ) {
+      questionnaireLoadSeqRef.current += 1;
+      setIsQuestionnairePreviewOpen(false);
+      setIsLoadingQuestionnairePreview(false);
+      setQuestionnaireFileData("");
+      setQuestionnairePreviewPersonId("");
+      setQuestionnairePreviewUrl((current) => {
+        if (current) revokeQuestionnairePreviewUrl(current);
+        return "";
+      });
+    }
+
     setSelectedDocumentId(document.id);
+    setPersonDocuments((current) =>
+      current.some((item) => item.id === document.id)
+        ? current
+        : [document, ...current],
+    );
+    void api
+      .getPersonQuestionnaire(document.personExternalId)
+      .then((item) => {
+        setPersonQuestionnaire(
+          item?.personExternalId
+            ? {
+                personExternalId: item.personExternalId,
+                fileName: item.fileName,
+              }
+            : null,
+        );
+      })
+      .catch(() => {
+        setPersonQuestionnaire(null);
+      });
 
     if (document.type === "ubdReport") {
-      const defaults = createUbdFields(selectedPerson, summary);
       setMode("ubdReport");
-      setUbdFields(mergeUbdFields(defaults, document.fields));
+      const configured = snapshotSignatories(
+        await api.listDocumentSignatories("ubdReport"),
+      );
+      const defaults = createUbdFields(
+        selectedPerson,
+        summary,
+        configured.length ? configured : legacyUbdSignatories(),
+      );
+      const merged = mergeUbdFields(defaults, document.fields);
+      setUbdFields({ ...merged, signatories: defaults.signatories });
       setDocumentFiles(mergeDocumentFiles(document.files));
+    } else if (document.type === "form6Report") {
+      setMode("form6Report");
+      const configured = snapshotSignatories(await loadForm6SignatoryRecords());
+      const defaults = createForm6Fields(
+        selectedPerson,
+        summary,
+        toForm6Signatories(
+          configured.length ? configured : legacyUbdSignatories(),
+        ),
+      );
+      setForm6Fields(
+        withSavedPersonPhone(
+          {
+            ...mergeForm6Fields(defaults, document.fields),
+            signatories: defaults.signatories,
+          },
+          nextPersonId || personExternalId,
+        ),
+      );
+      setDocumentFiles(mergeDocumentFiles(document.files));
+    } else if (document.type === "form12Report") {
+      setMode("form12Report");
+      const configured = snapshotSignatories(await loadForm12SignatoryRecords());
+      const defaults = createForm12Fields(
+        selectedPerson,
+        summary,
+        toForm12Signatories(
+          configured.length ? configured : legacyUbdSignatories(),
+        ),
+      );
+      const personDocs =
+        personDocuments.some((item) => item.id === document.id)
+          ? personDocuments
+          : [document, ...personDocuments];
+      const personSignature = extractPersonSignature(
+        personDocs,
+        nextPersonId || personExternalId,
+      ).signature;
+      const merged = withPersonSignature(
+        mergeForm12Fields(defaults, document.fields),
+        personSignature,
+      );
+      setForm12Fields({ ...merged, signatories: defaults.signatories });
+      setDocumentFiles(mergeDocumentFiles(document.files));
+    } else if (document.type === "ubdRestoreReport") {
+      setMode("ubdRestoreReport");
+      const configured = snapshotSignatories(
+        await loadUbdRestoreSignatoryRecords(),
+      );
+      const defaults = createUbdRestoreFields(
+        selectedPerson,
+        summary,
+        toUbdRestoreSignatories(
+          configured.length ? configured : legacyUbdSignatories(),
+        ),
+      );
+      const personDocs =
+        personDocuments.some((item) => item.id === document.id)
+          ? personDocuments
+          : [document, ...personDocuments];
+      const personSignature = extractPersonSignature(
+        personDocs,
+        nextPersonId || personExternalId,
+      ).signature;
+      setUbdRestoreFields(
+        withPersonSignature(
+          mergeUbdRestoreFields(defaults, document.fields),
+          personSignature,
+        ),
+      );
+      setDocumentFiles(mergeDocumentFiles(document.files));
+    } else if (document.type === "temporaryMilitaryId") {
+      const ticketPersonId = document.personExternalId || personExternalId;
+      const personPhoto = ticketPersonId
+        ? await api.getPersonPhoto(ticketPersonId).catch(() => null)
+        : null;
+      const defaults = createTemporaryMilitaryIdFields(
+        summary,
+        personPhoto?.photoData || "",
+      );
+      const merged = mergeTemporaryMilitaryIdFields(defaults, document.fields);
+      const files = mergeDocumentFiles(document.files);
+      setMode("temporaryMilitaryId");
+      setTicketFields({
+        ...merged,
+        photoData: merged.photoData || files.ticketPhoto?.dataUrl || defaults.photoData,
+      });
+      setDocumentFiles(files);
     } else {
       const defaults = createSalaryFields(selectedPerson, summary);
       setMode("salaryPowerAttorney");
@@ -885,7 +2104,9 @@ export function DocumentsPage({
         workflow: nextWorkflow as unknown as Record<string, unknown>,
       });
       setPersonDocuments((current) => [created, ...current]);
+      setAllPersonDocuments((current) => [created, ...current]);
       setSelectedDocumentId(created.id);
+      setMode("salaryPowerAttorney");
       setSalaryFields(mergeSalaryFields(defaults, created.fields));
       setWorkflow(mergeSalaryWorkflow(created.workflow));
       setDocumentMessage(
@@ -904,15 +2125,25 @@ export function DocumentsPage({
 
   const createUbdReportDocument = async () => {
     if (!personExternalId) return;
-    const defaults = createUbdFields(selectedPerson, summary);
-    const fieldPayload = {
-      ...defaults,
-      personStatus: createPersonStatusSnapshot(selectedPerson, summary).label,
+    const nextWorkflow = {
+      ...createEmptyWorkflow(),
+      currentStatus: "document",
     };
-    const nextWorkflow = { ...createEmptyWorkflow(), currentStatus: "document" };
     setIsSavingDocument(true);
     setDocumentMessage("Створюю УБД рапорт...");
     try {
+      const configured = snapshotSignatories(
+        await api.listDocumentSignatories("ubdReport"),
+      );
+      const defaults = createUbdFields(
+        selectedPerson,
+        summary,
+        configured.length ? configured : legacyUbdSignatories(),
+      );
+      const fieldPayload = {
+        ...defaults,
+        personStatus: createPersonStatusSnapshot(selectedPerson, summary).label,
+      };
       const created = await api.createPersonDocument(personExternalId, {
         type: "ubdReport",
         title: `Рапорт на УБД · ${dayjs().format("DD.MM.YYYY HH:mm")}`,
@@ -922,7 +2153,9 @@ export function DocumentsPage({
         files: { ubdScans: [] },
       });
       setPersonDocuments((current) => [created, ...current]);
+      setAllPersonDocuments((current) => [created, ...current]);
       setSelectedDocumentId(created.id);
+      setMode("ubdReport");
       setUbdFields(mergeUbdFields(defaults, created.fields));
       setDocumentFiles(mergeDocumentFiles(created.files));
       setWorkflow(mergeSalaryWorkflow(created.workflow));
@@ -934,6 +2167,223 @@ export function DocumentsPage({
         error instanceof Error
           ? `Не вдалося створити УБД рапорт: ${error.message}`
           : "Не вдалося створити УБД рапорт.",
+      );
+    } finally {
+      setIsSavingDocument(false);
+    }
+  };
+
+  const createForm6ReportDocument = async () => {
+    if (!personExternalId) return;
+    const nextWorkflow = {
+      ...createEmptyWorkflow(),
+      currentStatus: "document",
+    };
+    setIsSavingDocument(true);
+    setDocumentMessage("Створюю Форму 6...");
+    try {
+      const configured = snapshotSignatories(await loadForm6SignatoryRecords());
+      const defaults = createForm6Fields(
+        selectedPerson,
+        summary,
+        toForm6Signatories(
+          configured.length ? configured : legacyUbdSignatories(),
+        ),
+      );
+      const seeded = withSavedPersonPhone(defaults, personExternalId);
+      const fieldPayload = {
+        ...seeded,
+        personStatus: createPersonStatusSnapshot(selectedPerson, summary).label,
+      };
+      const created = await api.createPersonDocument(personExternalId, {
+        type: "form6Report",
+        title: `Форма 6 · ${dayjs().format("DD.MM.YYYY HH:mm")}`,
+        status: "document",
+        fields: fieldPayload as unknown as Record<string, unknown>,
+        workflow: nextWorkflow as unknown as Record<string, unknown>,
+        files: { ubdScans: [] },
+      });
+      setPersonDocuments((current) => [created, ...current]);
+      setAllPersonDocuments((current) => [created, ...current]);
+      setSelectedDocumentId(created.id);
+      setForm6Fields(
+        withSavedPersonPhone(
+          mergeForm6Fields(seeded, created.fields),
+          personExternalId,
+        ),
+      );
+      setDocumentFiles(mergeDocumentFiles(created.files));
+      setWorkflow(mergeSalaryWorkflow(created.workflow));
+      setMode("form6Report");
+      setDocumentMessage(
+        `Створено документ: ${created.title} · ${new Date(created.updatedAt).toLocaleString("uk-UA")}`,
+      );
+    } catch (error) {
+      setDocumentMessage(
+        error instanceof Error
+          ? `Не вдалося створити Форму 6: ${error.message}`
+          : "Не вдалося створити Форму 6.",
+      );
+    } finally {
+      setIsSavingDocument(false);
+    }
+  };
+
+  const createForm12ReportDocument = async () => {
+    if (!personExternalId) return;
+    const nextWorkflow = {
+      ...createEmptyWorkflow(),
+      currentStatus: "document",
+    };
+    setIsSavingDocument(true);
+    setDocumentMessage("Створюю Форму 12...");
+    try {
+      const configured = snapshotSignatories(await loadForm12SignatoryRecords());
+      const defaults = createForm12Fields(
+        selectedPerson,
+        summary,
+        toForm12Signatories(
+          configured.length ? configured : legacyUbdSignatories(),
+        ),
+      );
+      const fieldPayload = {
+        ...defaults,
+        personStatus: createPersonStatusSnapshot(selectedPerson, summary).label,
+      };
+      const created = await api.createPersonDocument(personExternalId, {
+        type: "form12Report",
+        title: `Форма 12 · ${dayjs().format("DD.MM.YYYY HH:mm")}`,
+        status: "document",
+        fields: fieldPayload as unknown as Record<string, unknown>,
+        workflow: nextWorkflow as unknown as Record<string, unknown>,
+        files: { ubdScans: [] },
+      });
+      setPersonDocuments((current) => [created, ...current]);
+      setAllPersonDocuments((current) => [created, ...current]);
+      setSelectedDocumentId(created.id);
+      setForm12Fields(mergeForm12Fields(defaults, created.fields));
+      setDocumentFiles(mergeDocumentFiles(created.files));
+      setWorkflow(mergeSalaryWorkflow(created.workflow));
+      setMode("form12Report");
+      setDocumentMessage(
+        `Створено документ: ${created.title} · ${new Date(created.updatedAt).toLocaleString("uk-UA")}`,
+      );
+    } catch (error) {
+      setDocumentMessage(
+        error instanceof Error
+          ? `Не вдалося створити Форму 12: ${error.message}`
+          : "Не вдалося створити Форму 12.",
+      );
+    } finally {
+      setIsSavingDocument(false);
+    }
+  };
+
+  const createUbdRestoreReportDocument = async () => {
+    if (!personExternalId) return;
+    const nextWorkflow = {
+      ...createEmptyWorkflow(),
+      currentStatus: "document",
+    };
+    setIsSavingDocument(true);
+    setDocumentMessage("Створюю рапорт на відновлення УБД...");
+    try {
+      const configured = snapshotSignatories(
+        await loadUbdRestoreSignatoryRecords(),
+      );
+      const defaults = createUbdRestoreFields(
+        selectedPerson,
+        summary,
+        toUbdRestoreSignatories(
+          configured.length ? configured : legacyUbdSignatories(),
+        ),
+      );
+      const fieldPayload = {
+        ...defaults,
+        personStatus: createPersonStatusSnapshot(selectedPerson, summary).label,
+      };
+      const created = await api.createPersonDocument(personExternalId, {
+        type: "ubdRestoreReport",
+        title: `Рапорт на відновлення УБД · ${dayjs().format("DD.MM.YYYY HH:mm")}`,
+        status: "document",
+        fields: fieldPayload as unknown as Record<string, unknown>,
+        workflow: nextWorkflow as unknown as Record<string, unknown>,
+        files: { ubdScans: [] },
+      });
+      setPersonDocuments((current) => [created, ...current]);
+      setAllPersonDocuments((current) => [created, ...current]);
+      setSelectedDocumentId(created.id);
+      setUbdRestoreFields(mergeUbdRestoreFields(defaults, created.fields));
+      setDocumentFiles(mergeDocumentFiles(created.files));
+      setWorkflow(mergeSalaryWorkflow(created.workflow));
+      setMode("ubdRestoreReport");
+      setDocumentMessage(
+        `Створено документ: ${created.title} · ${new Date(created.updatedAt).toLocaleString("uk-UA")}`,
+      );
+    } catch (error) {
+      setDocumentMessage(
+        error instanceof Error
+          ? `Не вдалося створити рапорт на відновлення УБД: ${error.message}`
+          : "Не вдалося створити рапорт на відновлення УБД.",
+      );
+    } finally {
+      setIsSavingDocument(false);
+    }
+  };
+
+  const createTemporaryMilitaryIdDocument = async () => {
+    if (!personExternalId) return;
+    const nextWorkflow = {
+      ...createEmptyWorkflow(),
+      currentStatus: "photo",
+    };
+    setIsSavingDocument(true);
+    setDocumentMessage("Створюю тимчасовий військовий квиток...");
+    try {
+      const personPhoto = await api
+        .getPersonPhoto(personExternalId)
+        .catch(() => null);
+      const defaults = createTemporaryMilitaryIdFields(
+        summary,
+        personPhoto?.photoData || "",
+      );
+      const ticketPhoto = defaults.photoData
+        ? {
+            id: `photo-${Date.now()}`,
+            name: "фото.jpg",
+            type: "image/jpeg",
+            dataUrl: defaults.photoData,
+            uploadedAt: new Date().toISOString(),
+          }
+        : null;
+      const nextFiles = { ticketPhoto, ubdScans: [] };
+      const fieldPayload = {
+        ...defaults,
+        personStatus: createPersonStatusSnapshot(selectedPerson, summary).label,
+      };
+      const created = await api.createPersonDocument(personExternalId, {
+        type: "temporaryMilitaryId",
+        title: `Тимчасовий військовий квиток · ${dayjs().format("DD.MM.YYYY HH:mm")}`,
+        status: "photo",
+        fields: fieldPayload as unknown as Record<string, unknown>,
+        workflow: nextWorkflow as unknown as Record<string, unknown>,
+        files: nextFiles as unknown as Record<string, unknown>,
+      });
+      setPersonDocuments((current) => [created, ...current]);
+      setAllPersonDocuments((current) => [created, ...current]);
+      setSelectedDocumentId(created.id);
+      setMode("temporaryMilitaryId");
+      setTicketFields(mergeTemporaryMilitaryIdFields(defaults, created.fields));
+      setDocumentFiles(mergeDocumentFiles(created.files));
+      setWorkflow(mergeSalaryWorkflow(created.workflow));
+      setDocumentMessage(
+        `Створено документ: ${created.title} · ${new Date(created.updatedAt).toLocaleString("uk-UA")}`,
+      );
+    } catch (error) {
+      setDocumentMessage(
+        error instanceof Error
+          ? `Не вдалося створити квиток: ${error.message}`
+          : "Не вдалося створити квиток.",
       );
     } finally {
       setIsSavingDocument(false);
@@ -959,7 +2409,35 @@ export function DocumentsPage({
         ubdScans: [...(documentFiles.ubdScans ?? []), ...uploaded],
       };
       setDocumentFiles(nextFiles);
-      await saveUbdDocument(ubdFields, nextFiles);
+      if (selectedDocument.type === "form6Report" || mode === "form6Report") {
+        await saveForm6Document(form6Fields, nextFiles);
+      } else if (selectedDocument.type === "form12Report" || mode === "form12Report") {
+        await saveForm12Document(form12Fields, nextFiles);
+      } else if (
+        selectedDocument.type === "ubdRestoreReport" ||
+        mode === "ubdRestoreReport"
+      ) {
+        await saveUbdRestoreDocument(ubdRestoreFields, nextFiles);
+      } else if (
+        selectedDocument.type === "temporaryMilitaryId" ||
+        mode === "temporaryMilitaryId"
+      ) {
+        await saveTicketDocument(ticketFields, nextFiles);
+      } else {
+        await saveUbdDocument(ubdFields, nextFiles);
+      }
+      window.requestAnimationFrame(() => {
+        document
+          .getElementById(
+            selectedDocument.type === "temporaryMilitaryId"
+              ? "ticket-tvk-scans"
+              : "ubd-scans-panel",
+          )
+          ?.scrollIntoView({
+          block: "end",
+          behavior: "smooth",
+        });
+      });
     } catch (error) {
       setDocumentMessage(
         error instanceof Error
@@ -979,14 +2457,71 @@ export function DocumentsPage({
       ),
     };
     setDocumentFiles(nextFiles);
-    void saveUbdDocument(ubdFields, nextFiles);
+    if (selectedDocument?.type === "form6Report" || mode === "form6Report") {
+      void saveForm6Document(form6Fields, nextFiles);
+    } else if (selectedDocument?.type === "form12Report" || mode === "form12Report") {
+      void saveForm12Document(form12Fields, nextFiles);
+    } else if (
+      selectedDocument?.type === "ubdRestoreReport" ||
+      mode === "ubdRestoreReport"
+    ) {
+      void saveUbdRestoreDocument(ubdRestoreFields, nextFiles);
+    } else if (
+      selectedDocument?.type === "temporaryMilitaryId" ||
+      mode === "temporaryMilitaryId"
+    ) {
+      void saveTicketDocument(ticketFields, nextFiles);
+    } else {
+      void saveUbdDocument(ubdFields, nextFiles);
+    }
+  };
+
+  const nextPersonStatusLabel = () => {
+    const snapshot = createPersonStatusSnapshot(selectedPerson, summary).label;
+    const existing =
+      typeof selectedDocument?.fields?.personStatus === "string"
+        ? selectedDocument.fields.personStatus.trim()
+        : "";
+    if (selectedPerson && snapshot && snapshot !== "—") return snapshot;
+    return existing || snapshot;
+  };
+
+  const applyUpdatedDocument = (updated: BackendPersonDocument) => {
+    setPersonDocuments((current) =>
+      current.some((document) => document.id === updated.id)
+        ? current.map((document) =>
+            document.id === updated.id ? updated : document,
+          )
+        : [updated, ...current],
+    );
+    setAllPersonDocuments((current) =>
+      current.some((document) => document.id === updated.id)
+        ? current.map((document) =>
+            document.id === updated.id ? updated : document,
+          )
+        : [updated, ...current],
+    );
+  };
+
+  const patchSelectedDocumentWorkflow = (nextWorkflow: SalaryWorkflowState) => {
+    if (!selectedDocumentId) return;
+    const patch = (document: BackendPersonDocument) =>
+      document.id === selectedDocumentId
+        ? {
+            ...document,
+            status: nextWorkflow.currentStatus,
+            workflow: nextWorkflow as unknown as Record<string, unknown>,
+          }
+        : document;
+    setPersonDocuments((current) => current.map(patch));
+    setAllPersonDocuments((current) => current.map(patch));
   };
 
   const saveSalaryDocument = async (
     nextFields: SalaryDocumentFields,
     nextWorkflow: SalaryWorkflowState,
   ) => {
-    if (!personExternalId || !selectedDocumentId) {
+    if (!documentSavePersonId || !selectedDocumentId) {
       saveWorkflowForPerson(workflowKey, nextWorkflow);
       return;
     }
@@ -995,10 +2530,10 @@ export function DocumentsPage({
     try {
       const fieldPayload = {
         ...nextFields,
-        personStatus: createPersonStatusSnapshot(selectedPerson, summary).label,
+        personStatus: nextPersonStatusLabel(),
       };
       const updated = await api.updatePersonDocument(
-        personExternalId,
+        documentSavePersonId,
         selectedDocumentId,
         {
           title: selectedDocument?.title || "Довіреність зарплати",
@@ -1007,11 +2542,16 @@ export function DocumentsPage({
           workflow: nextWorkflow as unknown as Record<string, unknown>,
         },
       );
-      setPersonDocuments((current) =>
-        current.map((document) =>
-          document.id === updated.id ? updated : document,
-        ),
-      );
+      applyUpdatedDocument(updated);
+      void syncEnrichmentToPerson({
+        personExternalId: documentSavePersonId,
+        rowId: selectedPerson?.__dbRowId
+          ? String(selectedPerson.__dbRowId)
+          : null,
+        row: selectedPerson,
+        patch: { rnokpp: nextFields.rnokpp },
+        existingPhones: readStoredPersonPhones()[documentSavePersonId] ?? [],
+      }).catch(() => undefined);
       setDocumentMessage(
         `Збережено в БД · ${new Date(updated.updatedAt).toLocaleString("uk-UA")}`,
       );
@@ -1032,16 +2572,16 @@ export function DocumentsPage({
     nextFiles = documentFiles,
     nextWorkflow = workflow,
   ) => {
-    if (!personExternalId || !selectedDocumentId) return;
+    if (!documentSavePersonId || !selectedDocumentId) return;
 
     setIsSavingDocument(true);
     try {
       const fieldPayload = {
         ...nextFields,
-        personStatus: createPersonStatusSnapshot(selectedPerson, summary).label,
+        personStatus: nextPersonStatusLabel(),
       };
       const updated = await api.updatePersonDocument(
-        personExternalId,
+        documentSavePersonId,
         selectedDocumentId,
         {
           title: selectedDocument?.title || "Рапорт на УБД",
@@ -1051,11 +2591,16 @@ export function DocumentsPage({
           files: nextFiles as unknown as Record<string, unknown>,
         },
       );
-      setPersonDocuments((current) =>
-        current.map((document) =>
-          document.id === updated.id ? updated : document,
-        ),
-      );
+      applyUpdatedDocument(updated);
+      void syncEnrichmentToPerson({
+        personExternalId: documentSavePersonId,
+        rowId: selectedPerson?.__dbRowId
+          ? String(selectedPerson.__dbRowId)
+          : null,
+        row: selectedPerson,
+        patch: { rnokpp: nextFields.rnokpp },
+        existingPhones: readStoredPersonPhones()[documentSavePersonId] ?? [],
+      }).catch(() => undefined);
       setDocumentMessage(
         `Збережено в БД · ${new Date(updated.updatedAt).toLocaleString("uk-UA")}`,
       );
@@ -1070,6 +2615,192 @@ export function DocumentsPage({
     }
   };
 
+  const saveForm6Document = async (
+    nextFields: Form6ReportFields,
+    nextFiles = documentFiles,
+    nextWorkflow = workflow,
+  ) => {
+    if (!documentSavePersonId || !selectedDocumentId) return;
+
+    setIsSavingDocument(true);
+    try {
+      const fieldPayload = {
+        ...nextFields,
+        personStatus: nextPersonStatusLabel(),
+      };
+      const updated = await api.updatePersonDocument(
+        documentSavePersonId,
+        selectedDocumentId,
+        {
+          title: selectedDocument?.title || "Форма 6",
+          status: nextWorkflow.currentStatus,
+          fields: fieldPayload as unknown as Record<string, unknown>,
+          workflow: nextWorkflow as unknown as Record<string, unknown>,
+          files: nextFiles as unknown as Record<string, unknown>,
+        },
+      );
+      applyUpdatedDocument(updated);
+
+      const enrichment = await syncEnrichmentToPerson({
+        personExternalId: documentSavePersonId,
+        rowId: selectedPerson?.__dbRowId
+          ? String(selectedPerson.__dbRowId)
+          : null,
+        row: selectedPerson,
+        patch: {
+          rnokpp: nextFields.rnokpp,
+          address: nextFields.address,
+          phone: nextFields.phone,
+        },
+        existingPhones: readStoredPersonPhones()[documentSavePersonId] ?? [],
+      }).catch(() => null);
+
+      const enrichmentNote = enrichment
+        ? [
+            enrichment.phonesAdded.length
+              ? `телефон +${enrichment.phonesAdded.length}`
+              : "",
+            Object.keys(enrichment.fieldUpdates).length
+              ? "порожні поля ОС доповнено"
+              : "",
+          ]
+            .filter(Boolean)
+            .join(", ")
+        : "";
+
+      setDocumentMessage(
+        enrichmentNote
+          ? `Збережено в БД · ${enrichmentNote} · ${new Date(updated.updatedAt).toLocaleString("uk-UA")}`
+          : `Збережено в БД · ${new Date(updated.updatedAt).toLocaleString("uk-UA")}`,
+      );
+    } catch (error) {
+      setDocumentMessage(
+        error instanceof Error
+          ? `Не вдалося зберегти Форму 6: ${error.message}`
+          : "Не вдалося зберегти Форму 6.",
+      );
+    } finally {
+      setIsSavingDocument(false);
+    }
+  };
+
+  const saveForm12Document = async (
+    nextFields: Form12ReportFields,
+    nextFiles = documentFiles,
+    nextWorkflow = workflow,
+  ) => {
+    if (!documentSavePersonId || !selectedDocumentId) return;
+
+    setIsSavingDocument(true);
+    try {
+      const fieldPayload = {
+        ...nextFields,
+        personStatus: nextPersonStatusLabel(),
+      };
+      const updated = await api.updatePersonDocument(
+        documentSavePersonId,
+        selectedDocumentId,
+        {
+          title: selectedDocument?.title || "Форма 12",
+          status: nextWorkflow.currentStatus,
+          fields: fieldPayload as unknown as Record<string, unknown>,
+          workflow: nextWorkflow as unknown as Record<string, unknown>,
+          files: nextFiles as unknown as Record<string, unknown>,
+        },
+      );
+      applyUpdatedDocument(updated);
+      setDocumentMessage(
+        `Збережено в БД · ${new Date(updated.updatedAt).toLocaleString("uk-UA")}`,
+      );
+    } catch (error) {
+      setDocumentMessage(
+        error instanceof Error
+          ? `Не вдалося зберегти Форму 12: ${error.message}`
+          : "Не вдалося зберегти Форму 12.",
+      );
+    } finally {
+      setIsSavingDocument(false);
+    }
+  };
+
+  const saveUbdRestoreDocument = async (
+    nextFields: UbdRestoreReportFields,
+    nextFiles = documentFiles,
+    nextWorkflow = workflow,
+  ) => {
+    if (!documentSavePersonId || !selectedDocumentId) return;
+
+    setIsSavingDocument(true);
+    try {
+      const fieldPayload = {
+        ...nextFields,
+        personStatus: nextPersonStatusLabel(),
+      };
+      const updated = await api.updatePersonDocument(
+        documentSavePersonId,
+        selectedDocumentId,
+        {
+          title: selectedDocument?.title || "Рапорт на відновлення УБД",
+          status: nextWorkflow.currentStatus,
+          fields: fieldPayload as unknown as Record<string, unknown>,
+          workflow: nextWorkflow as unknown as Record<string, unknown>,
+          files: nextFiles as unknown as Record<string, unknown>,
+        },
+      );
+      applyUpdatedDocument(updated);
+      setDocumentMessage(
+        `Збережено в БД · ${new Date(updated.updatedAt).toLocaleString("uk-UA")}`,
+      );
+    } catch (error) {
+      setDocumentMessage(
+        error instanceof Error
+          ? `Не вдалося зберегти рапорт на відновлення УБД: ${error.message}`
+          : "Не вдалося зберегти рапорт на відновлення УБД.",
+      );
+    } finally {
+      setIsSavingDocument(false);
+    }
+  };
+
+  const saveTicketDocument = async (
+    nextFields: TemporaryMilitaryIdFields,
+    nextFiles = documentFiles,
+    nextWorkflow = workflow,
+  ) => {
+    if (!documentSavePersonId || !selectedDocumentId) return;
+
+    setIsSavingDocument(true);
+    try {
+      const fieldPayload = {
+        ...nextFields,
+        personStatus: nextPersonStatusLabel(),
+      };
+      const updated = await api.updatePersonDocument(
+        documentSavePersonId,
+        selectedDocumentId,
+        {
+          title: selectedDocument?.title || "Тимчасовий військовий квиток",
+          status: nextWorkflow.currentStatus,
+          fields: fieldPayload as unknown as Record<string, unknown>,
+          workflow: nextWorkflow as unknown as Record<string, unknown>,
+          files: nextFiles as unknown as Record<string, unknown>,
+        },
+      );
+      applyUpdatedDocument(updated);
+      setDocumentMessage(
+        `Збережено в БД · ${new Date(updated.updatedAt).toLocaleString("uk-UA")}`,
+      );
+    } catch (error) {
+      setDocumentMessage(
+        error instanceof Error
+          ? `Не вдалося зберегти квиток: ${error.message}`
+          : "Не вдалося зберегти квиток.",
+      );
+    } finally {
+      setIsSavingDocument(false);
+    }
+  };
+
   const updateUbdField = (key: keyof UbdReportFields, value: string) => {
     setUbdFields((current) => {
       const next = { ...current, [key]: value };
@@ -1078,7 +2809,389 @@ export function DocumentsPage({
     });
   };
 
-  const updateSalaryField = (key: keyof SalaryDocumentFields, value: string) => {
+  const updateUbdBasisPart = (
+    key: "basisNumber" | "basisDate",
+    value: string,
+  ) => {
+    setUbdFields((current) => {
+      const basisNumber =
+        key === "basisNumber" ? value : current.basisNumber;
+      const basisDate = key === "basisDate" ? value : current.basisDate;
+      const next = {
+        ...current,
+        basisNumber,
+        basisDate,
+        basis: formatUbdBasisText(basisNumber, basisDate),
+      };
+      void saveUbdDocument(next);
+      return next;
+    });
+  };
+
+  const updateForm6Field = (
+    key: Exclude<keyof Form6ReportFields, "signatories">,
+    value: string,
+  ) => {
+    setForm6Fields((current) => {
+      const next = { ...current, [key]: value };
+      void saveForm6Document(next);
+      return next;
+    });
+  };
+
+  const updateForm12Field = (
+    key: Exclude<keyof Form12ReportFields, "signatories">,
+    value: string,
+  ) => {
+    setForm12Fields((current) => {
+      const next = { ...current, [key]: value };
+      void saveForm12Document(next);
+      return next;
+    });
+  };
+
+  const savePersonSignatureForCurrent = async (
+    signature: PersonSignatureRecord | null,
+  ) => {
+    const personId = (documentSavePersonId || personExternalId || "").trim();
+    if (!personId) return;
+    try {
+      const saved = await persistPersonSignature(
+        personId,
+        signature,
+        personDocuments,
+      );
+      if (saved) {
+        setPersonDocuments((current) => [
+          saved,
+          ...current.filter(
+            (item) =>
+              item.id !== saved.id &&
+              item.type !== PERSON_SIGNATURE_DOCUMENT_TYPE,
+          ),
+        ]);
+        setAllPersonDocuments((current) => [
+          saved,
+          ...current.filter(
+            (item) =>
+              item.id !== saved.id &&
+              !(
+                item.type === PERSON_SIGNATURE_DOCUMENT_TYPE &&
+                item.personExternalId === personId
+              ),
+          ),
+        ]);
+      } else if (!signature) {
+        setPersonDocuments((current) =>
+          current.filter((item) => item.type !== PERSON_SIGNATURE_DOCUMENT_TYPE),
+        );
+        setAllPersonDocuments((current) =>
+          current.filter(
+            (item) =>
+              !(
+                item.type === PERSON_SIGNATURE_DOCUMENT_TYPE &&
+                item.personExternalId === personId
+              ),
+          ),
+        );
+      }
+    } catch {
+      // Local storage already updated inside persistPersonSignature.
+    }
+  };
+
+  const uploadForm12Signature = async (file: File | null) => {
+    if (!file) return;
+    try {
+      const dataUrl = await readFileAsDataUrl(file);
+      const signatureData = await processSignatureTransparentBackground(dataUrl);
+      const signatureFileName = file.name.replace(/\.[^.]+$/, "") + ".png";
+      const signature: PersonSignatureRecord = {
+        signatureData,
+        signatureFileName,
+      };
+      setForm12Fields((current) => {
+        const next = {
+          ...current,
+          signatureData,
+          signatureFileName,
+        };
+        void saveForm12Document(next);
+        return next;
+      });
+      setUbdRestoreFields((current) =>
+        current.signatureData
+          ? current
+          : { ...current, signatureData, signatureFileName },
+      );
+      await savePersonSignatureForCurrent(signature);
+      setDocumentMessage(
+        "Підпис службовця збережено — доступний у всіх його документах.",
+      );
+    } catch {
+      setDocumentMessage("Не вдалося обробити зображення підпису.");
+    }
+  };
+
+  const clearForm12Signature = () => {
+    setForm12Fields((current) => {
+      const next = { ...current, signatureData: "", signatureFileName: "" };
+      void saveForm12Document(next);
+      return next;
+    });
+    setUbdRestoreFields((current) => ({
+      ...current,
+      signatureData: "",
+      signatureFileName: "",
+    }));
+    void savePersonSignatureForCurrent(null);
+  };
+
+  const copySignatureImage = async (dataUrl: string) => {
+    if (!dataUrl) return;
+    try {
+      await copyPngDataUrlToClipboard(dataUrl);
+      setDocumentMessage("Підпис скопійовано як зображення.");
+    } catch {
+      setDocumentMessage("Не вдалося скопіювати підпис у буфер.");
+    }
+  };
+
+  const updateUbdRestoreField = (
+    key: Exclude<
+      keyof UbdRestoreReportFields,
+      "signatories" | "signatureData" | "signatureFileName"
+    >,
+    value: string,
+  ) => {
+    setUbdRestoreFields((current) => {
+      const next = { ...current, [key]: value };
+      void saveUbdRestoreDocument(next);
+      return next;
+    });
+  };
+
+  const uploadUbdRestoreSignature = async (file: File | null) => {
+    if (!file) return;
+    try {
+      const dataUrl = await readFileAsDataUrl(file);
+      const signatureData = await processSignatureTransparentBackground(dataUrl);
+      const signatureFileName = file.name.replace(/\.[^.]+$/, "") + ".png";
+      const signature: PersonSignatureRecord = {
+        signatureData,
+        signatureFileName,
+      };
+      setUbdRestoreFields((current) => {
+        const next = {
+          ...current,
+          signatureData,
+          signatureFileName,
+        };
+        void saveUbdRestoreDocument(next);
+        return next;
+      });
+      setForm12Fields((current) =>
+        current.signatureData
+          ? current
+          : { ...current, signatureData, signatureFileName },
+      );
+      await savePersonSignatureForCurrent(signature);
+      setDocumentMessage(
+        "Підпис службовця збережено — доступний у всіх його документах.",
+      );
+    } catch {
+      setDocumentMessage("Не вдалося обробити зображення підпису.");
+    }
+  };
+
+  const clearUbdRestoreSignature = () => {
+    setUbdRestoreFields((current) => {
+      const next = { ...current, signatureData: "", signatureFileName: "" };
+      void saveUbdRestoreDocument(next);
+      return next;
+    });
+    setForm12Fields((current) => ({
+      ...current,
+      signatureData: "",
+      signatureFileName: "",
+    }));
+    void savePersonSignatureForCurrent(null);
+  };
+
+  const updateTicketField = (
+    key: keyof TemporaryMilitaryIdFields,
+    value: string,
+  ) => {
+    setTicketFields((current) => {
+      const next = { ...current, [key]: value };
+      void saveTicketDocument(next);
+      return next;
+    });
+  };
+
+  const addTicketPhoto = async (files: FileList | null) => {
+    const file = files?.[0];
+    if (!file || !selectedDocument) return;
+
+    setIsSavingDocument(true);
+    try {
+      const dataUrl = await readFileAsDataUrl(file);
+      const ticketPhoto: UbdScanFile = {
+        id: `photo-${Date.now()}`,
+        name: file.name,
+        type: file.type || "image/jpeg",
+        dataUrl,
+        uploadedAt: new Date().toISOString(),
+      };
+      const nextFields = { ...ticketFields, photoData: dataUrl };
+      const nextFiles = { ...documentFiles, ticketPhoto };
+      setTicketFields(nextFields);
+      setDocumentFiles(nextFiles);
+      if (personExternalId) {
+        await api
+          .upsertPersonPhoto(personExternalId, {
+            photoData: dataUrl,
+            fileName: file.name,
+            mimeType: file.type || "image/jpeg",
+          })
+          .catch(() => null);
+      }
+      await saveTicketDocument(nextFields, nextFiles);
+    } catch (error) {
+      setDocumentMessage(
+        error instanceof Error
+          ? `Не вдалося додати фото: ${error.message}`
+          : "Не вдалося додати фото.",
+      );
+    } finally {
+      setIsSavingDocument(false);
+    }
+  };
+
+  const copyTicketDispatchLine = async () => {
+    const text = formatTemporaryIdDispatchText(ticketFields);
+    try {
+      await navigator.clipboard.writeText(text);
+      setDocumentMessage("Текст для сповіщення скопійовано.");
+    } catch {
+      setDocumentMessage("Не вдалося скопіювати. Виділіть текст вручну.");
+    }
+  };
+
+  const questionnairePersonName =
+    (summary.name && summary.name !== "Особа не вибрана"
+      ? summary.name
+      : "") ||
+    (selectedDocument ? getDocumentPersonName(selectedDocument) : "") ||
+    "Особа не вибрана";
+  const questionnaireFileName = buildQuestionnaireExportFileName(
+    questionnairePersonName,
+    ticketFields.callSign || summary.callSign,
+  );
+
+  const closeQuestionnairePreview = () => {
+    setIsQuestionnairePreviewOpen(false);
+  };
+
+  const openPersonQuestionnaire = () => {
+    const targetId = String(
+      selectedDocument?.personExternalId ||
+        personQuestionnaire?.personExternalId ||
+        personExternalId ||
+        "",
+    ).trim();
+    if (!targetId) {
+      setDocumentMessage("Немає ID службовця, щоб відкрити анкету.");
+      return;
+    }
+    if (!personQuestionnaire) {
+      setDocumentMessage("Анкета ще не додана в картці особи.");
+      return;
+    }
+
+    setIsQuestionnairePreviewOpen(true);
+
+    const cacheMatches =
+      Boolean(questionnairePreviewUrl) &&
+      questionnairePreviewPersonId === targetId &&
+      Boolean(questionnaireFileData);
+    if (cacheMatches) return;
+    if (
+      isLoadingQuestionnairePreview &&
+      questionnairePreviewPersonId === targetId
+    ) {
+      return;
+    }
+
+    const requestSeq = questionnaireLoadSeqRef.current + 1;
+    questionnaireLoadSeqRef.current = requestSeq;
+    setQuestionnairePreviewPersonId(targetId);
+    setIsLoadingQuestionnairePreview(true);
+    setQuestionnaireFileData("");
+    setQuestionnairePreviewUrl((current) => {
+      if (current) revokeQuestionnairePreviewUrl(current);
+      return "";
+    });
+
+    void api
+      .getPersonQuestionnaire(targetId)
+      .then((full) => {
+        if (requestSeq !== questionnaireLoadSeqRef.current) return;
+        if (!full?.fileData) {
+          setDocumentMessage("Не вдалося завантажити PDF анкети.");
+          return;
+        }
+        const nextUrl = dataUrlToObjectUrl(full.fileData);
+        setQuestionnaireFileData(full.fileData);
+        setQuestionnairePreviewPersonId(full.personExternalId || targetId);
+        setQuestionnairePreviewUrl((current) => {
+          if (current) revokeQuestionnairePreviewUrl(current);
+          return nextUrl;
+        });
+      })
+      .catch((error) => {
+        if (requestSeq !== questionnaireLoadSeqRef.current) return;
+        setDocumentMessage(
+          error instanceof Error
+            ? `Не вдалося відкрити анкету: ${error.message}`
+            : "Не вдалося відкрити анкету.",
+        );
+      })
+      .finally(() => {
+        if (requestSeq !== questionnaireLoadSeqRef.current) return;
+        setIsLoadingQuestionnairePreview(false);
+      });
+  };
+
+  const openPersonQuestionnaireInNewTab = () => {
+    const targetId = String(
+      selectedDocument?.personExternalId ||
+        personQuestionnaire?.personExternalId ||
+        personExternalId ||
+        "",
+    ).trim();
+    if (
+      questionnairePreviewUrl &&
+      questionnairePreviewPersonId === targetId
+    ) {
+      window.open(questionnairePreviewUrl, "_blank", "noopener,noreferrer");
+      return;
+    }
+    if (!targetId || !personQuestionnaire) return;
+    window.open(
+      api.getPersonQuestionnaireFileUrl(
+        targetId,
+        personQuestionnaire.fileName || questionnaireFileName,
+      ),
+      "_blank",
+      "noopener,noreferrer",
+    );
+  };
+
+  const updateSalaryField = (
+    key: keyof SalaryDocumentFields,
+    value: string,
+  ) => {
     setSalaryFields((current) => {
       if (key === "iban") {
         const iban = normalizeIban(value);
@@ -1112,12 +3225,60 @@ export function DocumentsPage({
   };
 
   const saveActiveDocumentWorkflow = (
-    nextFields: SalaryDocumentFields | UbdReportFields,
+    nextFields:
+      | SalaryDocumentFields
+      | UbdReportFields
+      | Form6ReportFields
+      | Form12ReportFields
+      | UbdRestoreReportFields
+      | TemporaryMilitaryIdFields,
     nextWorkflow: SalaryWorkflowState,
     nextFiles = documentFiles,
   ) => {
     if (selectedDocument?.type === "ubdReport" || mode === "ubdReport") {
-      void saveUbdDocument(nextFields as UbdReportFields, nextFiles, nextWorkflow);
+      void saveUbdDocument(
+        nextFields as UbdReportFields,
+        nextFiles,
+        nextWorkflow,
+      );
+      return;
+    }
+
+    if (selectedDocument?.type === "form6Report" || mode === "form6Report") {
+      void saveForm6Document(
+        nextFields as Form6ReportFields,
+        nextFiles,
+        nextWorkflow,
+      );
+      return;
+    }
+
+    if (selectedDocument?.type === "form12Report" || mode === "form12Report") {
+      void saveForm12Document(
+        nextFields as Form12ReportFields,
+        nextFiles,
+        nextWorkflow,
+      );
+      return;
+    }
+
+    if (
+      selectedDocument?.type === "ubdRestoreReport" ||
+      mode === "ubdRestoreReport"
+    ) {
+      void saveUbdRestoreDocument(
+        nextFields as UbdRestoreReportFields,
+        nextFiles,
+        nextWorkflow,
+      );
+      return;
+    }
+
+    if (
+      selectedDocument?.type === "temporaryMilitaryId" ||
+      mode === "temporaryMilitaryId"
+    ) {
+      void saveTicketDocument(ticketFields, nextFiles, nextWorkflow);
       return;
     }
 
@@ -1126,9 +3287,20 @@ export function DocumentsPage({
 
   const updateWorkflow = (next: SalaryWorkflowState) => {
     setWorkflow(next);
+    patchSelectedDocumentWorkflow(next);
     saveWorkflowForPerson(workflowKey, next);
     saveActiveDocumentWorkflow(
-      mode === "ubdReport" ? ubdFields : salaryFields,
+      mode === "ubdReport"
+        ? ubdFields
+        : mode === "form6Report"
+          ? form6Fields
+          : mode === "form12Report"
+            ? form12Fields
+          : mode === "ubdRestoreReport"
+            ? ubdRestoreFields
+            : mode === "temporaryMilitaryId"
+            ? ticketFields
+            : salaryFields,
       next,
     );
   };
@@ -1150,6 +3322,14 @@ export function DocumentsPage({
       completed,
       currentStatus: stepKey,
     });
+    if (stepKey === "fighterSign") {
+      window.requestAnimationFrame(() => {
+        document.getElementById("fighter-signature-panel")?.scrollIntoView({
+          block: "center",
+          behavior: "smooth",
+        });
+      });
+    }
   };
 
   const generateSalaryDoc = () => {
@@ -1172,22 +3352,50 @@ export function DocumentsPage({
     setWorkflowStep("print");
   };
 
-  const generateUbdDoc = () => {
-    downloadTextFile(
-      `${safeFilePart(ubdFields.folderName)}.doc`,
-      ubdReportHtml(ubdFields),
-      "application/msword;charset=utf-8",
+  const saveUbdAsWord = async () => {
+    setDocumentMessage("Формую Word-документ...");
+    const blob = await createUbdWordBlob(ubdWordFields);
+    const fileName = `${safeFilePart(ubdFields.folderName)}.docx`;
+    downloadBlob(fileName, blob);
+    setDocumentMessage(
+      `Word-файл «${fileName}» збережено.`,
     );
+    setWorkflowStep("document");
     void saveUbdDocument(ubdFields);
   };
 
+  const saveForm6AsWord = async () => {
+    setDocumentMessage("Формую Word-документ Форми 6...");
+    const blob = await createForm6WordBlob(form6Fields);
+    const fileName = `${safeFilePart(form6Fields.folderName)}.docx`;
+    downloadBlob(fileName, blob);
+    setDocumentMessage(`Word-файл «${fileName}» збережено.`);
+    setWorkflowStep("document");
+    void saveForm6Document(form6Fields);
+  };
+
+  const saveForm12AsWord = async () => {
+    setDocumentMessage("Формую Word-документ Форми 12...");
+    const blob = await createForm12WordBlob(form12Fields);
+    const fileName = `${safeFilePart(form12Fields.folderName)}.docx`;
+    downloadBlob(fileName, blob);
+    setDocumentMessage(`Word-файл «${fileName}» збережено.`);
+    setWorkflowStep("document");
+    void saveForm12Document(form12Fields);
+  };
+
+  const saveUbdRestoreAsWord = async () => {
+    setDocumentMessage("Формую Word-документ рапорта на відновлення УБД...");
+    const blob = await createUbdRestoreWordBlob(ubdRestoreFields);
+    const fileName = `${safeFilePart(ubdRestoreFields.folderName)}.docx`;
+    downloadBlob(fileName, blob);
+    setDocumentMessage(`Word-файл «${fileName}» збережено.`);
+    setWorkflowStep("document");
+    void saveUbdRestoreDocument(ubdRestoreFields);
+  };
+
   const printUbdDocument = () => {
-    const printWindow = window.open("", "_blank", "noopener,noreferrer");
-    if (!printWindow) return;
-    printWindow.document.write(ubdReportHtml(ubdFields));
-    printWindow.document.close();
-    printWindow.focus();
-    printWindow.print();
+    printRenderedWordPreview();
     void saveUbdDocument(ubdFields);
   };
 
@@ -1266,225 +3474,178 @@ export function DocumentsPage({
     }
   };
 
-  if (!isPersonDocumentMode) {
+  const questionnaireHeaderButton = (
+    <Button
+      variant="outlined"
+      startIcon={<PictureAsPdfOutlinedIcon />}
+      onClick={openPersonQuestionnaire}
+    >
+      Анкета
+    </Button>
+  );
+
+  const createdDocumentTypes = new Set(
+    [...personDocuments, ...allPersonDocuments]
+      .filter(
+        (document) =>
+          document.personExternalId === personExternalId &&
+          document.type !== PERSON_PHONES_DOCUMENT_TYPE &&
+          document.type !== PERSON_SIGNATURE_DOCUMENT_TYPE,
+      )
+      .map((document) => document.type),
+  );
+
+  const createPersonDocumentByType = (type: string) => {
+    if (type === "salaryPowerAttorney") return createSalaryPowerAttorneyDocument();
+    if (type === "ubdReport") return createUbdReportDocument();
+    if (type === "ubdRestoreReport") return createUbdRestoreReportDocument();
+    if (type === "form6Report") return createForm6ReportDocument();
+    if (type === "form12Report") return createForm12ReportDocument();
+    if (type === "temporaryMilitaryId")
+      return createTemporaryMilitaryIdDocument();
+  };
+
+  const personDocumentCreateSelect = (
+    <TextField
+      select
+      size="small"
+      label="Створити документ"
+      value="__none"
+      disabled={isSavingDocument || !personExternalId}
+      onChange={(event) => {
+        const nextType = event.target.value;
+        if (!nextType || nextType === "__none") return;
+        void createPersonDocumentByType(nextType);
+      }}
+    >
+      <MenuItem value="__none">Оберіть тип документа</MenuItem>
+      {CREATE_PERSON_DOCUMENT_TYPES.map((item) => {
+        const exists = createdDocumentTypes.has(item.value);
+        return (
+          <MenuItem
+            key={item.value}
+            value={item.value}
+            className={exists ? "is-ready" : undefined}
+          >
+            {exists ? `${item.label} · є` : item.label}
+          </MenuItem>
+        );
+      })}
+    </TextField>
+  );
+
+  const personQuestionnaireRow = (
+    <article className="salary-person-document-shell ticket-questionnaire-shell">
+      <button
+        className={
+          personQuestionnaire
+            ? "salary-person-document"
+            : "salary-person-document is-empty"
+        }
+        type="button"
+        onClick={openPersonQuestionnaire}
+      >
+        <strong>Анкета службовця (PDF)</strong>
+        <span>
+          {isLoadingQuestionnairePreview
+            ? "Завантажую PDF..."
+            : personQuestionnaire
+              ? "Переглянути PDF"
+              : "Анкета ще не додана в картці особи"}
+        </span>
+        <small>{personQuestionnaire?.fileName || questionnaireFileName}</small>
+      </button>
+    </article>
+  );
+
+  const documentStatusNotePanel = (
+    value: string,
+    onChange: (value: string) => void,
+  ) => (
+    <div className="document-status-note-panel">
+      <div className="panel-heading">Коментар до статусу</div>
+      <TextField
+        size="small"
+        fullWidth
+        multiline
+        rows={3}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder="Проблема з документами, уточнення по статусу або що треба доробити"
+      />
+    </div>
+  );
+
+  const liveDocumentStatusNote = (document: BackendPersonDocument) => {
+    if (document.id !== selectedDocumentId) {
+      return readDocumentStatusNote(document);
+    }
+    if (mode === "ubdReport") return ubdFields.statusNote.trim();
+    if (mode === "form6Report") return form6Fields.statusNote.trim();
+    if (mode === "form12Report") return form12Fields.statusNote.trim();
+    if (mode === "ubdRestoreReport") return ubdRestoreFields.statusNote.trim();
+    if (mode === "temporaryMilitaryId") return ticketFields.statusNote.trim();
+    if (mode === "salaryPowerAttorney") return salaryFields.statusNote.trim();
+    return readDocumentStatusNote(document);
+  };
+
+  const documentListStatusNote = (document: BackendPersonDocument) => {
+    const note = liveDocumentStatusNote(document);
+    if (!note) return null;
     return (
-      <main className="main-panel">
-        <header className="topbar analytics-topbar salary-document-topbar">
-          <Box className="salary-document-title">
-            <Typography component="h1" variant="h4">
-              Документи
-            </Typography>
-            <Typography variant="body2" color="text.secondary">
-              Загальний журнал рапортів · прогрес по всіх службовцях
-            </Typography>
-          </Box>
-          <Stack direction="row" spacing={1}>
-            <Button
-              variant="outlined"
-              startIcon={<ArticleOutlinedIcon />}
-              onClick={() =>
-                void loadDocumentJournal("Оновлюю журнал документів...")
-              }
-            >
-              Оновити
-            </Button>
-          </Stack>
-        </header>
-
-        <Alert
-          severity={isLoadingDocumentJournal ? "info" : "success"}
-          variant="outlined"
-          className="personnel-page-alert"
-        >
-          {documentMessage || "Журнал документів готовий."}
-        </Alert>
-
-        <section className="analytics-panel documents-journal-panel">
-          <div className="panel-heading">
-            Усі документи · {allPersonDocuments.length}
-          </div>
-          <div className="documents-journal-table">
-            <div className="documents-journal-row header">
-              <span>Службовець</span>
-              <span>ID</span>
-              <span>Статус службовця</span>
-              <span>Документ</span>
-              <span>Прогрес</span>
-              <span>Статус</span>
-              <span>Файли</span>
-              <span>Оновлено</span>
-              <span />
-            </div>
-            {allPersonDocuments.length ? (
-              allPersonDocuments.map((document) => {
-                const progress = getDocumentProgressPercent(document);
-                const href = buildDocumentRoute({
-                  personExternalId: document.personExternalId,
-                  documentId: document.id,
-                  type: document.type,
-                });
-                const openDocument = () => onNavigate?.(href);
-                return (
-                  <div
-                    className="documents-journal-row"
-                    key={document.id}
-                    role="button"
-                    tabIndex={0}
-                    onClick={openDocument}
-                    onKeyDown={(event) => {
-                      if (event.key !== "Enter" && event.key !== " ") return;
-                      event.preventDefault();
-                      openDocument();
-                    }}
-                  >
-                    <strong>{getDocumentPersonName(document)}</strong>
-                    <span>{document.personExternalId}</span>
-                    <span
-                      className="documents-journal-person-status"
-                      title={readDocumentPersonStatus(
-                        document,
-                        personStatusById,
-                      )}
-                    >
-                      {readDocumentPersonStatus(document, personStatusById)}
-                    </span>
-                    <span>{salaryDocumentTypeLabel(document.type)}</span>
-                    <span className="documents-journal-progress">
-                      <i style={{ width: `${progress}%` }} />
-                      <b>{progress}%</b>
-                    </span>
-                    <span>{documentWorkflowStatusLabel(document)}</span>
-                    <span>{getDocumentFileSummary(document)}</span>
-                    <span>
-                      {new Date(document.updatedAt).toLocaleString("uk-UA")}
-                    </span>
-                    <button
-                      aria-label="Видалити документ"
-                      className="documents-journal-delete"
-                      disabled={isSavingDocument}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        void deleteDocument(document);
-                      }}
-                      title="Видалити документ"
-                      type="button"
-                    >
-                      <DeleteOutlineOutlinedIcon />
-                    </button>
-                  </div>
-                );
-              })
-            ) : (
-              <div className="documents-journal-empty">
-                Документи ще не створювались.
-              </div>
-            )}
-          </div>
-        </section>
-      </main>
+      <small className="document-status-note-preview" title={note}>
+        {note}
+      </small>
     );
-  }
+  };
 
-  if (mode === "ubdReport") {
-    return (
-      <main className="main-panel">
-        <header className="topbar analytics-topbar salary-document-topbar">
-          <div className="salary-document-main-row">
-            <Box className="salary-document-title">
-              <Typography component="h1" variant="h4">
-                Рапорт на УБД
-              </Typography>
-              <Typography variant="body2" color="text.secondary">
-                {summary.name} · {summary.externalId ? `ID ${summary.externalId}` : "дані з картки особи"}
-                {selectedDocument ? ` · ${selectedDocument.title}` : ""}
-              </Typography>
-            </Box>
-            {selectedDocument ? (
-              <Stack direction="row" spacing={1}>
-                <Button
-                  variant="outlined"
-                  startIcon={<ArticleOutlinedIcon />}
-                  onClick={generateUbdDoc}
-                >
-                  Завантажити DOC
-                </Button>
-                <Button
-                  variant="contained"
-                  startIcon={<PictureAsPdfOutlinedIcon />}
-                  onClick={printUbdDocument}
-                  sx={{ color: "#1a1a14" }}
-                >
-                  Друк / PDF
-                </Button>
-              </Stack>
-            ) : null}
-          </div>
-          {documentStepProgress}
-        </header>
+  const questionnairePreviewDialog = (
+    <FloatingQuestionnairePreview
+      open={isQuestionnairePreviewOpen}
+      title={`Анкета · ${questionnairePersonName}${
+        personQuestionnaire?.fileName || questionnaireFileName
+          ? ` · ${personQuestionnaire?.fileName || questionnaireFileName}`
+          : ""
+      }`}
+      previewUrl={questionnairePreviewUrl}
+      pendingFile={false}
+      isUploading={isLoadingQuestionnairePreview}
+      placement="left"
+      shareFileName={questionnaireFileName}
+      sharePersonName={questionnairePersonName}
+      shareSource={
+        questionnaireFileData ? { fileData: questionnaireFileData } : null
+      }
+      onShareNotify={setDocumentMessage}
+      onClose={closeQuestionnairePreview}
+      onOpenTab={openPersonQuestionnaireInNewTab}
+      childrenHint={
+        isLoadingQuestionnairePreview ? "Завантажую PDF анкети..." : undefined
+      }
+      onDownload={
+        questionnaireFileData
+          ? () =>
+              downloadQuestionnairePdf(questionnaireFileName, {
+                fileData: questionnaireFileData,
+              })
+          : undefined
+      }
+    />
+  );
 
-        <section
-          className={
-            selectedDocument
-              ? "salary-documents-layout ubd-report-layout"
-              : "salary-documents-layout empty"
-          }
-        >
-          <section className="analytics-panel salary-person-documents-panel">
-            <div className="panel-heading">Документи службовця</div>
-            <div className="salary-document-sync">
-              <span>{isSavingDocument ? "збереження..." : "БД синхронізована"}</span>
-              <p>{documentMessage || "Виберіть документ зі списку."}</p>
-            </div>
-            <div className="salary-person-documents-list">
-              {personDocuments.length ? (
-                personDocuments.map((document) => (
-                  <article
-                    className={
-                      document.id === selectedDocumentId
-                        ? "salary-person-document-shell active"
-                        : "salary-person-document-shell"
-                    }
-                    key={document.id}
-                  >
-                    <button
-                      className="salary-person-document"
-                      type="button"
-                      onClick={() => openPersonDocument(document)}
-                    >
-                      <strong>{document.title}</strong>
-                      <span>{salaryDocumentTypeLabel(document.type)}</span>
-                      <em>{documentWorkflowStatusLabel(document)}</em>
-                      <small>
-                        {new Date(document.updatedAt).toLocaleString("uk-UA")}
-                      </small>
-                    </button>
-                    <button
-                      aria-label="Видалити документ"
-                      className="salary-person-document-delete"
-                      disabled={isSavingDocument}
-                      onClick={() => void deleteDocument(document)}
-                      title="Видалити документ"
-                      type="button"
-                    >
-                      <DeleteOutlineOutlinedIcon />
-                    </button>
-                  </article>
-                ))
-              ) : (
-                <p className="salary-empty-documents">
-                  Документів по цьому службовцю ще немає.
-                </p>
-              )}
-            </div>
-            <Button
-              variant="outlined"
-              onClick={createUbdReportDocument}
-              disabled={isSavingDocument || !personExternalId}
-            >
-              Створити УБД рапорт
-            </Button>
-          </section>
+  const wordPreviewPanel = selectedDocument ? (
+    <section className="analytics-panel document-preview">
+      <div className="panel-heading">Попередній перегляд Word</div>
+      <WordDocumentPreview
+        blob={wordPreview.blob}
+        error={wordPreview.error}
+        isLoading={wordPreview.isLoading}
+      />
+    </section>
+  ) : null;
 
+  const ubdWorkspace = (
+    <>
           {selectedDocument ? (
             <section className="analytics-panel document-fields">
               <div className="panel-heading">Дані для УБД рапорта</div>
@@ -1497,7 +3658,6 @@ export function DocumentsPage({
                   ["rnokpp", "РНОКПП"],
                   ["taskPeriod", "Період завдань"],
                   ["taskPlace", "Місце завдань"],
-                  ["basis", "Підстава"],
                   ["date", "Дата"],
                   ["folderName", "Папка"],
                 ].map(([key, label]) => (
@@ -1506,7 +3666,9 @@ export function DocumentsPage({
                     <TextField
                       size="small"
                       fullWidth
-                      value={ubdFields[key as keyof UbdReportFields]}
+                      value={String(
+                        ubdFields[key as keyof UbdReportFields] ?? "",
+                      )}
                       onChange={(event) =>
                         updateUbdField(
                           key as keyof UbdReportFields,
@@ -1516,6 +3678,28 @@ export function DocumentsPage({
                     />
                   </label>
                 ))}
+                <label>
+                  <code>№ розпорядження</code>
+                  <TextField
+                    size="small"
+                    fullWidth
+                    value={ubdFields.basisNumber}
+                    onChange={(event) =>
+                      updateUbdBasisPart("basisNumber", event.target.value)
+                    }
+                  />
+                </label>
+                <label>
+                  <code>Дата розпорядження</code>
+                  <TextField
+                    size="small"
+                    fullWidth
+                    value={ubdFields.basisDate}
+                    onChange={(event) =>
+                      updateUbdBasisPart("basisDate", event.target.value)
+                    }
+                  />
+                </label>
                 <label className="wide">
                   <code>Кому</code>
                   <TextField
@@ -1527,33 +3711,32 @@ export function DocumentsPage({
                     }
                   />
                 </label>
-                <label className="wide">
-                  <code>Командир БТ</code>
-                  <TextField
-                    size="small"
-                    fullWidth
-                    multiline
-                    value={ubdFields.battalionCommander}
-                    onChange={(event) =>
-                      updateUbdField("battalionCommander", event.target.value)
-                    }
-                  />
-                </label>
-                <label className="wide">
-                  <code>Затверджую</code>
-                  <TextField
-                    size="small"
-                    fullWidth
-                    multiline
-                    value={ubdFields.approvalOfficer}
-                    onChange={(event) =>
-                      updateUbdField("approvalOfficer", event.target.value)
-                    }
-                  />
-                </label>
+                <div className="wide document-default-signatories">
+                  <code>Дефолтні записи (редагуються у налаштуваннях)</code>
+                  {ubdFields.signatories.map((signatory, index) => (
+                    <article key={`${signatory.sourceId ?? signatory.label}-${index}`}>
+                      <strong>
+                        {signatory.blockType === "APPROVAL"
+                          ? "ЗАТВЕРДЖУЮ · "
+                          : ""}
+                        {signatory.label}
+                      </strong>
+                      <span>{signatory.title}</span>
+                      <small>
+                        {signatory.rank} · {signatory.fullName}
+                      </small>
+                    </article>
+                  ))}
+                </div>
               </div>
 
-              <div className="ubd-scans-panel">
+              {documentStatusNotePanel(ubdFields.statusNote, (value) =>
+                updateUbdField("statusNote", value),
+              )}
+
+              {personQuestionnaireRow}
+
+              <div className="ubd-scans-panel" id="ubd-scans-panel">
                 <div className="panel-heading">Скани для УБД</div>
                 <Button component="label" variant="outlined">
                   Додати скани
@@ -1572,7 +3755,15 @@ export function DocumentsPage({
                   {(documentFiles.ubdScans ?? []).length ? (
                     (documentFiles.ubdScans ?? []).map((file) => (
                       <article className="ubd-scan-item" key={file.id}>
-                        <a href={file.dataUrl} target="_blank" rel="noreferrer">
+                        <a
+                          href={file.dataUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          onClick={(event) => {
+                            event.preventDefault();
+                            openDataUrlInNewTab(file.dataUrl);
+                          }}
+                        >
                           {file.type.startsWith("image/") ? (
                             <img alt={file.name} src={file.dataUrl} />
                           ) : (
@@ -1600,44 +3791,1823 @@ export function DocumentsPage({
             </section>
           ) : null}
 
-          {selectedDocument ? (
-            <section className="analytics-panel document-preview">
-              <div className="panel-heading">Попередній перегляд</div>
-              <div className="document-page-preview salary-document-preview ubd-document-preview">
-                <div className="salary-preview-to">{ubdFields.commander}</div>
-                <h2>Рапорт</h2>
-                <p>
-                  Прошу Вашого рішення про внесення відомостей до Єдиного
-                  державного реєстру ветеранів війни щодо зазначеного нижче
-                  військовослужбовця з метою надання статусу учасника бойових
-                  дій, а саме:
+          {wordPreviewPanel}
+    </>
+  );
+
+  const form6Workspace = (
+    <>
+      {selectedDocument ? (
+        <section className="analytics-panel document-fields">
+          <div className="panel-heading">Дані для Форми 6</div>
+          <div className="document-placeholder-map salary-document-map ubd-document-map">
+            {(
+              [
+                ["commander", "Кому"],
+                ["rank", "Звання"],
+                ["fullName", "ПІБ"],
+                ["staffPosition", "Посада згідно штату"],
+                ["birthDate", "Дата народження"],
+                ["idDocument", "Документ, що посвідчує особу"],
+                ["rnokpp", "РНОКПП"],
+                ["address", "Адреса проживання"],
+                ["phone", "Телефон"],
+                ["taskPeriod", "Період завдань"],
+                ["taskPlace", "Місце завдань"],
+                ["basis", "Підстава"],
+                ["date", "Дата"],
+                ["folderName", "Папка"],
+              ] as Array<
+                [Exclude<keyof Form6ReportFields, "signatories">, string]
+              >
+            ).map(([key, label]) => (
+              <label key={key} className={key === "staffPosition" || key === "address" || key === "basis" || key === "commander" ? "wide" : undefined}>
+                <code>{label}</code>
+                <TextField
+                  size="small"
+                  fullWidth
+                  multiline={
+                    key === "staffPosition" ||
+                    key === "address" ||
+                    key === "basis" ||
+                    key === "commander"
+                  }
+                  rows={
+                    key === "staffPosition" ||
+                    key === "address" ||
+                    key === "basis" ||
+                    key === "commander"
+                      ? 2
+                      : undefined
+                  }
+                  value={form6Fields[key]}
+                  onChange={(event) =>
+                    updateForm6Field(key, event.target.value)
+                  }
+                />
+              </label>
+            ))}
+          </div>
+          {documentStatusNotePanel(form6Fields.statusNote, (value) =>
+            updateForm6Field("statusNote", value),
+          )}
+          {personQuestionnaireRow}
+          <div className="ubd-scans-panel" id="ubd-scans-panel">
+            <div className="panel-heading">Скани для Форми 6</div>
+            <Button component="label" variant="outlined">
+              Додати скани
+              <input
+                hidden
+                multiple
+                type="file"
+                accept="image/*,application/pdf,.pdf"
+                onChange={(event) => {
+                  void addUbdScanFiles(event.target.files);
+                  event.target.value = "";
+                }}
+              />
+            </Button>
+            <div className="ubd-scan-list">
+              {(documentFiles.ubdScans ?? []).length ? (
+                (documentFiles.ubdScans ?? []).map((file) => (
+                  <article className="ubd-scan-item" key={file.id}>
+                    <a
+                      href={file.dataUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      onClick={(event) => {
+                        event.preventDefault();
+                        openDataUrlInNewTab(file.dataUrl);
+                      }}
+                    >
+                      {file.type.startsWith("image/") ? (
+                        <img alt={file.name} src={file.dataUrl} />
+                      ) : (
+                        <PictureAsPdfOutlinedIcon />
+                      )}
+                      <span>{file.name}</span>
+                    </a>
+                    <button
+                      aria-label="Видалити скан"
+                      className="documents-journal-delete"
+                      onClick={() => deleteUbdScanFile(file.id)}
+                      type="button"
+                    >
+                      <DeleteOutlineOutlinedIcon />
+                    </button>
+                  </article>
+                ))
+              ) : (
+                <p className="salary-empty-documents">
+                  Додайте паспорт, РНОКПП, витяг про проживання або фото 3х4.
                 </p>
-                <table>
-                  <tbody>
-                    <tr><td>Військове звання</td><td>{ubdFields.rank || "—"}</td></tr>
-                    <tr><td>ПІБ</td><td>{ubdFields.fullName || "—"}</td></tr>
-                    <tr><td>Посада згідно штату</td><td>{ubdFields.staffPosition || "—"}</td></tr>
-                    <tr><td>Дата народження</td><td>{ubdFields.birthDate || "—"}</td></tr>
-                    <tr><td>РНОКПП</td><td>{ubdFields.rnokpp || "—"}</td></tr>
-                    <tr><td>Період виконання завдань</td><td>{ubdFields.taskPeriod || "—"}</td></tr>
-                    <tr><td>Місце виконання завдань</td><td>{ubdFields.taskPlace || "—"}</td></tr>
-                  </tbody>
-                </table>
-                <p><strong>Підстава:</strong> {ubdFields.basis}</p>
-                <p><strong>Додаток:</strong> копія паспорта, РНОКПП, дві фотокартки</p>
-                <p className="ubd-preview-sign">{ubdFields.battalionCommander}</p>
-                <p>{ubdFields.date}</p>
-                <p className="ubd-preview-approve">ЗАТВЕРДЖУЮ<br />{ubdFields.approvalOfficer}</p>
+              )}
+            </div>
+          </div>
+        </section>
+      ) : null}
+
+      {wordPreviewPanel}
+    </>
+  );
+
+  const form12Workspace = (
+    <>
+      {selectedDocument ? (
+        <section className="analytics-panel document-fields">
+          <div className="panel-heading">Дані для Форми 12</div>
+          <div className="document-placeholder-map salary-document-map ubd-document-map">
+            {(
+              [
+                ["commander", "Кому"],
+                ["rank", "Звання"],
+                ["fullName", "ПІБ"],
+                ["staffPosition", "Посада згідно штату"],
+                ["date", "Дата"],
+                ["folderName", "Папка"],
+              ] as Array<
+                [Exclude<keyof Form12ReportFields, "signatories" | "signatureData" | "signatureFileName" | "statusNote">, string]
+              >
+            ).map(([key, label]) => (
+              <label
+                key={key}
+                className={
+                  key === "staffPosition" || key === "commander" ? "wide" : undefined
+                }
+              >
+                <code>{label}</code>
+                <TextField
+                  size="small"
+                  fullWidth
+                  multiline={key === "staffPosition" || key === "commander"}
+                  rows={key === "staffPosition" || key === "commander" ? 2 : undefined}
+                  value={form12Fields[key]}
+                  onChange={(event) =>
+                    updateForm12Field(key, event.target.value)
+                  }
+                />
+              </label>
+            ))}
+          </div>
+          <div className="form12-signature-upload" id="fighter-signature-panel">
+            <div className="panel-heading">Підпис бійця (PNG)</div>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+              Зберігається для службовця і підставляється в інші його документи.
+            </Typography>
+            <Stack direction="row" spacing={1}>
+              <Button component="label" variant="outlined">
+                Завантажити PNG
+                <input
+                  hidden
+                  type="file"
+                  accept="image/png,image/jpeg,image/webp,.png,.jpg,.jpeg"
+                  onChange={(event) => {
+                    void uploadForm12Signature(event.target.files?.[0] ?? null);
+                    event.target.value = "";
+                  }}
+                />
+              </Button>
+              {form12Fields.signatureData ? (
+                <>
+                  <Button
+                    variant="outlined"
+                    startIcon={<ContentCopyOutlinedIcon />}
+                    onClick={() =>
+                      void copySignatureImage(form12Fields.signatureData)
+                    }
+                  >
+                    Копіювати
+                  </Button>
+                  <Button variant="text" onClick={clearForm12Signature}>
+                    Прибрати
+                  </Button>
+                </>
+              ) : null}
+            </Stack>
+            {form12Fields.signatureData ? (
+              <div className="form12-signature-preview">
+                <img alt="Підпис бійця" src={form12Fields.signatureData} />
+                <small>{form12Fields.signatureFileName || "підпис.png"}</small>
               </div>
+            ) : (
+              <p className="salary-empty-documents">
+                Завантажте підпис бійця — білий фон прибереться, у Word піде PNG.
+              </p>
+            )}
+          </div>
+          {documentStatusNotePanel(form12Fields.statusNote, (value) =>
+            updateForm12Field("statusNote", value),
+          )}
+          {personQuestionnaireRow}
+          <div className="ubd-scans-panel" id="ubd-scans-panel">
+            <div className="panel-heading">Скани для Форми 12</div>
+            <Button component="label" variant="outlined">
+              Додати скани
+              <input
+                hidden
+                multiple
+                type="file"
+                accept="image/*,application/pdf,.pdf"
+                onChange={(event) => {
+                  void addUbdScanFiles(event.target.files);
+                  event.target.value = "";
+                }}
+              />
+            </Button>
+            <div className="ubd-scan-list">
+              {(documentFiles.ubdScans ?? []).length ? (
+                (documentFiles.ubdScans ?? []).map((file) => (
+                  <article className="ubd-scan-item" key={file.id}>
+                    <a
+                      href={file.dataUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      onClick={(event) => {
+                        event.preventDefault();
+                        openDataUrlInNewTab(file.dataUrl);
+                      }}
+                    >
+                      {file.type.startsWith("image/") ? (
+                        <img alt={file.name} src={file.dataUrl} />
+                      ) : (
+                        <PictureAsPdfOutlinedIcon />
+                      )}
+                      <span>{file.name}</span>
+                    </a>
+                    <button
+                      aria-label="Видалити скан"
+                      className="documents-journal-delete"
+                      onClick={() => deleteUbdScanFile(file.id)}
+                      type="button"
+                    >
+                      <DeleteOutlineOutlinedIcon />
+                    </button>
+                  </article>
+                ))
+              ) : (
+                <p className="salary-empty-documents">
+                  За потреби додайте скани до рапорту.
+                </p>
+              )}
+            </div>
+          </div>
+        </section>
+      ) : null}
+
+      {wordPreviewPanel}
+    </>
+  );
+
+  const ubdRestoreWorkspace = (
+    <>
+      {selectedDocument ? (
+        <section className="analytics-panel document-fields">
+          <div className="panel-heading">Дані для рапорта на відновлення УБД</div>
+          <div className="document-placeholder-map salary-document-map ubd-document-map">
+            {(
+              [
+                ["commander", "Кому (1 сторінка)"],
+                ["rank", "Звання"],
+                ["fullName", "ПІБ"],
+                ["staffPosition", "Посада"],
+                ["signerTitle", "Підпис, посада"],
+                ["certificateSeries", "Серія посвідчення УБД"],
+                ["circumstances", "Обставини пошкодження"],
+                ["requestText", "Прошу"],
+                ["coveringCommander", "Кому (клопотання)"],
+                ["date", "Дата"],
+                ["folderName", "Папка"],
+              ] as Array<
+                [Exclude<keyof UbdRestoreReportFields, "signatories" | "signatureData" | "signatureFileName" | "statusNote">, string]
+              >
+            ).map(([key, label]) => (
+              <label
+                key={key}
+                className={
+                  key === "staffPosition" ||
+                  key === "signerTitle" ||
+                  key === "circumstances" ||
+                  key === "requestText" ||
+                  key === "commander" ||
+                  key === "coveringCommander"
+                    ? "wide"
+                    : undefined
+                }
+              >
+                <code>{label}</code>
+                <TextField
+                  size="small"
+                  fullWidth
+                  multiline={
+                    key === "staffPosition" ||
+                    key === "signerTitle" ||
+                    key === "circumstances" ||
+                    key === "requestText" ||
+                    key === "commander" ||
+                    key === "coveringCommander"
+                  }
+                  rows={
+                    key === "circumstances" || key === "requestText"
+                      ? 3
+                      : key === "staffPosition" ||
+                          key === "signerTitle" ||
+                          key === "commander" ||
+                          key === "coveringCommander"
+                        ? 2
+                        : undefined
+                  }
+                  value={String(ubdRestoreFields[key] ?? "")}
+                  onChange={(event) =>
+                    updateUbdRestoreField(key, event.target.value)
+                  }
+                />
+              </label>
+            ))}
+          </div>
+          <div className="form12-signature-upload" id="fighter-signature-panel">
+            <div className="panel-heading">Підпис службовця (PNG)</div>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+              Зберігається для службовця і підставляється в інші його документи.
+            </Typography>
+            <Stack direction="row" spacing={1}>
+              <Button component="label" variant="outlined">
+                Завантажити PNG
+                <input
+                  hidden
+                  type="file"
+                  accept="image/png,image/jpeg,image/webp,.png,.jpg,.jpeg"
+                  onChange={(event) => {
+                    void uploadUbdRestoreSignature(event.target.files?.[0] ?? null);
+                    event.target.value = "";
+                  }}
+                />
+              </Button>
+              {ubdRestoreFields.signatureData ? (
+                <>
+                  <Button
+                    variant="outlined"
+                    startIcon={<ContentCopyOutlinedIcon />}
+                    onClick={() =>
+                      void copySignatureImage(ubdRestoreFields.signatureData)
+                    }
+                  >
+                    Копіювати
+                  </Button>
+                  <Button variant="text" onClick={clearUbdRestoreSignature}>
+                    Прибрати
+                  </Button>
+                </>
+              ) : null}
+            </Stack>
+            {ubdRestoreFields.signatureData ? (
+              <div className="form12-signature-preview">
+                <img alt="Підпис службовця" src={ubdRestoreFields.signatureData} />
+                <small>{ubdRestoreFields.signatureFileName || "підпис.png"}</small>
+              </div>
+            ) : (
+              <p className="salary-empty-documents">
+                Завантажте PNG підпису — білий фон прибереться, у Word картинка
+                стане прозорою над прізвищем службовця.
+              </p>
+            )}
+          </div>
+          {documentStatusNotePanel(ubdRestoreFields.statusNote, (value) =>
+            updateUbdRestoreField("statusNote", value),
+          )}
+          {personQuestionnaireRow}
+          <div className="ubd-scans-panel" id="ubd-scans-panel">
+            <div className="panel-heading">Скани пошкодженого посвідчення</div>
+            <Button component="label" variant="outlined">
+              Додати скани
+              <input
+                hidden
+                multiple
+                type="file"
+                accept="image/*,application/pdf,.pdf"
+                onChange={(event) => {
+                  void addUbdScanFiles(event.target.files);
+                  event.target.value = "";
+                }}
+              />
+            </Button>
+            <div className="ubd-scan-list">
+              {(documentFiles.ubdScans ?? []).length ? (
+                (documentFiles.ubdScans ?? []).map((file) => (
+                  <article className="ubd-scan-item" key={file.id}>
+                    <a
+                      href={file.dataUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      onClick={(event) => {
+                        event.preventDefault();
+                        openDataUrlInNewTab(file.dataUrl);
+                      }}
+                    >
+                      {file.type.startsWith("image/") ? (
+                        <img alt={file.name} src={file.dataUrl} />
+                      ) : (
+                        <PictureAsPdfOutlinedIcon />
+                      )}
+                      <span>{file.name}</span>
+                    </a>
+                    <button
+                      aria-label="Видалити скан"
+                      className="documents-journal-delete"
+                      onClick={() => deleteUbdScanFile(file.id)}
+                      type="button"
+                    >
+                      <DeleteOutlineOutlinedIcon />
+                    </button>
+                  </article>
+                ))
+              ) : (
+                <p className="salary-empty-documents">
+                  Додайте скан пошкодженого посвідчення УБД.
+                </p>
+              )}
+            </div>
+          </div>
+        </section>
+      ) : null}
+
+      {wordPreviewPanel}
+    </>
+  );
+
+  const ticketDispatchText = formatTemporaryIdDispatchText(ticketFields);
+  const ticketWorkspace = (
+    <>
+      {selectedDocument ? (
+        <section className="analytics-panel document-fields">
+          <div className="panel-heading">
+            Дані для надсилання
+            <IconButton
+              aria-label="Скопіювати для сповіщення"
+              className="ticket-copy-icon"
+              size="small"
+              title="Скопіювати для сповіщення"
+              type="button"
+              onClick={() => void copyTicketDispatchLine()}
+            >
+              <ContentCopyOutlinedIcon />
+            </IconButton>
+          </div>
+          <div className="document-placeholder-map salary-document-map">
+            <label>
+              <span>Звання</span>
+              <TextField
+                size="small"
+                fullWidth
+                value={ticketFields.rank}
+                onChange={(event) =>
+                  updateTicketField("rank", event.target.value)
+                }
+              />
+            </label>
+            <label>
+              <span>ПІБ</span>
+              <TextField
+                size="small"
+                fullWidth
+                value={ticketFields.fullName}
+                onChange={(event) =>
+                  updateTicketField("fullName", event.target.value)
+                }
+              />
+            </label>
+            <label>
+              <span>Позивний</span>
+              <TextField
+                size="small"
+                fullWidth
+                value={ticketFields.callSign}
+                onChange={(event) =>
+                  updateTicketField("callSign", event.target.value)
+                }
+              />
+            </label>
+            <label>
+              <span>Дата народження</span>
+              <TextField
+                size="small"
+                fullWidth
+                value={ticketFields.birthDate}
+                onChange={(event) =>
+                  updateTicketField("birthDate", event.target.value)
+                }
+                placeholder="дд.мм.рррр"
+              />
+            </label>
+            <label className="wide">
+              <span>Текст для сповіщення</span>
+              <TextField
+                size="small"
+                fullWidth
+                multiline
+                rows={4}
+                value={ticketDispatchText}
+                readOnly
+              />
+            </label>
+          </div>
+          {documentStatusNotePanel(ticketFields.statusNote, (value) =>
+            updateTicketField("statusNote", value),
+          )}
+          <div className="ticket-id-photo-actions">
+            <Button
+              component="label"
+              variant="outlined"
+              startIcon={<FileUploadOutlinedIcon />}
+              disabled={isSavingDocument}
+            >
+              {ticketFields.photoData ? "Замінити фото" : "Додати фото"}
+              <input
+                hidden
+                type="file"
+                accept="image/*"
+                onChange={(event) => {
+                  void addTicketPhoto(event.target.files);
+                  event.target.value = "";
+                }}
+              />
+            </Button>
+            <Button
+              component="label"
+              variant="outlined"
+              startIcon={<FileUploadOutlinedIcon />}
+              disabled={isSavingDocument}
+            >
+              Додати скан ТВК
+              <input
+                hidden
+                multiple
+                type="file"
+                accept="image/*,application/pdf,.pdf"
+                onChange={(event) => {
+                  void addUbdScanFiles(event.target.files);
+                  event.target.value = "";
+                }}
+              />
+            </Button>
+            <div className="ubd-scan-list" id="ticket-tvk-scans">
+              {(documentFiles.ubdScans ?? []).length ? (
+                (documentFiles.ubdScans ?? []).map((file) => (
+                  <article className="ubd-scan-item" key={file.id}>
+                    <a
+                      href={file.dataUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      onClick={(event) => {
+                        event.preventDefault();
+                        openDataUrlInNewTab(file.dataUrl);
+                      }}
+                    >
+                      {file.type.startsWith("image/") ? (
+                        <img alt={file.name} src={file.dataUrl} />
+                      ) : (
+                        <PictureAsPdfOutlinedIcon />
+                      )}
+                      <span>{file.name}</span>
+                    </a>
+                    <button
+                      aria-label="Видалити скан ТВК"
+                      className="documents-journal-delete"
+                      onClick={() => deleteUbdScanFile(file.id)}
+                      type="button"
+                    >
+                      <DeleteOutlineOutlinedIcon />
+                    </button>
+                  </article>
+                ))
+              ) : (
+                <p className="salary-empty-documents">
+                  Додайте скан тимчасового військового квитка.
+                </p>
+              )}
+            </div>
+          </div>
+        </section>
+      ) : null}
+
+      {selectedDocument ? (
+        <section className="analytics-panel document-preview">
+          <div className="panel-heading">Фото та рядок</div>
+          <div className="ticket-id-preview">
+            <div className="ticket-id-photo-frame">
+              {ticketFields.photoData ? (
+                <img alt={ticketFields.fullName} src={ticketFields.photoData} />
+              ) : (
+                <span>Фото ще не додано</span>
+              )}
+            </div>
+            <p className="ticket-id-dispatch-line">{ticketDispatchText}</p>
+            {(documentFiles.ubdScans ?? []).length ? (
+              <div className="ticket-tvk-preview">
+                <div className="panel-heading">Скан ТВК</div>
+                {(documentFiles.ubdScans ?? []).map((file) => (
+                  <a
+                    className="ticket-tvk-preview-item"
+                    href={file.dataUrl}
+                    key={file.id}
+                    rel="noreferrer"
+                    target="_blank"
+                    onClick={(event) => {
+                      event.preventDefault();
+                      openDataUrlInNewTab(file.dataUrl);
+                    }}
+                  >
+                    {file.type.startsWith("image/") ? (
+                      <img alt={file.name} src={file.dataUrl} />
+                    ) : (
+                      <span className="ticket-tvk-preview-pdf">
+                        <PictureAsPdfOutlinedIcon />
+                        {file.name}
+                      </span>
+                    )}
+                  </a>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        </section>
+      ) : null}
+    </>
+  );
+
+  const salaryWorkspace = (
+    <>
+      {selectedDocument ? (
+        <section className="analytics-panel document-fields">
+          <div className="panel-heading">Дані для рапорта</div>
+          <div className="document-placeholder-map salary-document-map">
+            <label>
+              <code>ФИО</code>
+              <TextField
+                size="small"
+                fullWidth
+                value={salaryFields.fullName}
+                onChange={(event) =>
+                  updateSalaryField("fullName", event.target.value)
+                }
+                placeholder="ПРІЗВИЩЕ Ім'я По батькові"
+              />
+            </label>
+            <label>
+              <code>ІНН</code>
+              <TextField
+                size="small"
+                fullWidth
+                value={salaryFields.rnokpp}
+                onChange={(event) =>
+                  updateSalaryField("rnokpp", event.target.value)
+                }
+                placeholder="РНОКПП"
+              />
+            </label>
+            <label>
+              <code>IBAN</code>
+              <TextField
+                size="small"
+                fullWidth
+                value={formatIban(salaryFields.iban)}
+                onChange={(event) =>
+                  updateSalaryField("iban", event.target.value)
+                }
+                placeholder="UA..."
+              />
+            </label>
+            <label>
+              <code>БАНК</code>
+              <TextField
+                select
+                size="small"
+                fullWidth
+                value={salaryFields.bankMfo}
+                onChange={(event) =>
+                  updateSalaryField("bankMfo", event.target.value)
+                }
+              >
+                {ukrainianBanks.map((bank) => (
+                  <MenuItem key={bank.mfo} value={bank.mfo}>
+                    {bank.mfo === "custom"
+                      ? bank.name
+                      : `${bank.name} · ${bank.mfo}`}
+                  </MenuItem>
+                ))}
+              </TextField>
+            </label>
+            <label>
+              <code>Назва банку</code>
+              <TextField
+                size="small"
+                fullWidth
+                value={salaryFields.bankName}
+                onChange={(event) =>
+                  updateSalaryField("bankName", event.target.value)
+                }
+                placeholder="АТ «...»"
+              />
+            </label>
+            <label>
+              <code>Дата</code>
+              <TextField
+                size="small"
+                fullWidth
+                value={salaryFields.date}
+                onChange={(event) =>
+                  updateSalaryField("date", event.target.value)
+                }
+                placeholder="ДД.ММ.РРРР"
+              />
+            </label>
+            <label>
+              <code>Папка</code>
+              <TextField
+                size="small"
+                fullWidth
+                value={salaryFields.folderName}
+                onChange={(event) =>
+                  updateSalaryField("folderName", event.target.value)
+                }
+                placeholder="Назва папки"
+              />
+            </label>
+          </div>
+          {documentStatusNotePanel(salaryFields.statusNote, (value) =>
+            updateSalaryField("statusNote", value),
+          )}
+        </section>
+      ) : null}
+
+      {selectedDocument ? (
+        <section className="analytics-panel document-preview">
+          <div className="panel-heading">Попередній перегляд</div>
+          <div className="document-page-preview salary-document-preview">
+            <div className="salary-preview-to">{salaryFields.commander}</div>
+            <h2>Рапорт</h2>
+            <p>
+              Прошу моє грошове забезпечення перераховувати на мій розрахунковий
+              банківський рахунок:
+            </p>
+            <p>
+              {highlightOrPlaceholder(
+                formatIban(salaryFields.iban),
+                "UA___________________________",
+              )}{" "}
+              відкритий {highlightOrPlaceholder(salaryFields.bankName, "банк")}.
+            </p>
+            <p>
+              Код РНОКПП{" "}
+              {highlightOrPlaceholder(salaryFields.rnokpp, "__________")}.
+            </p>
+            <p>Довідка з банківськими реквізитами додається.</p>
+            <p>
+              {highlightOrPlaceholder(salaryFields.rank, "звання")}{" "}
+              {highlightOrPlaceholder(
+                salaryFields.fullName,
+                "ПРІЗВИЩЕ Ім'я По батькові",
+              )}
+            </p>
+            <footer>
+              <span>{salaryFields.date || "__.__.202__"}</span>
+              <span>________________</span>
+            </footer>
+            <p className="salary-finance-note">
+              Начальнику фінансово-економічної служби – головному бухгалтеру
+              військової частини А4862 - прошу прийняти в роботу
+            </p>
+            <p>
+              Начальник групи персоналу штабу
+              <br />1 піхотного батальйону
+              <br />
+              військової частини А4862
+            </p>
+            <p>{salaryFields.personnelChief}</p>
+          </div>
+        </section>
+      ) : null}
+    </>
+  );
+
+  const journalOpenDocument =
+    (mode === "ubdReport" && selectedDocument?.type === "ubdReport") ||
+    (mode === "ubdRestoreReport" &&
+      selectedDocument?.type === "ubdRestoreReport") ||
+    (mode === "form6Report" && selectedDocument?.type === "form6Report") ||
+    (mode === "form12Report" && selectedDocument?.type === "form12Report") ||
+    (mode === "temporaryMilitaryId" &&
+      selectedDocument?.type === "temporaryMilitaryId") ||
+    (mode === "salaryPowerAttorney" &&
+      selectedDocument?.type === "salaryPowerAttorney");
+
+  if (!isPersonDocumentMode) {
+    return (
+      <>
+      <main
+        className={
+          journalOpenDocument
+            ? "main-panel documents-journal-page documents-journal-with-ubd"
+            : "main-panel documents-journal-page"
+        }
+      >
+        <header className="topbar analytics-topbar salary-document-topbar">
+          <Box className="salary-document-title">
+            <Typography component="h1" variant="h4">
+              Документи
+            </Typography>
+            <Typography variant="body2" color="text.secondary">
+              Загальний журнал рапортів · прогрес по всіх службовцях
+            </Typography>
+          </Box>
+          <Stack direction="row" spacing={1}>
+            <Button
+              variant="outlined"
+              startIcon={<ArticleOutlinedIcon />}
+              disabled={isLoadingDocumentJournal}
+              onClick={() =>
+                void loadDocumentJournal("Оновлюю журнал документів...")
+              }
+            >
+              Оновити
+            </Button>
+            <Button
+              variant="contained"
+              startIcon={<FileDownloadOutlinedIcon />}
+              disabled={
+                isLoadingDocumentJournal ||
+                isExportingDocumentJournal ||
+                !filteredJournalDocuments.length
+              }
+              onClick={() => void exportDocumentJournal()}
+              sx={{ color: "#1a1a14" }}
+            >
+              {isExportingDocumentJournal ? "Експорт..." : "Excel"}
+            </Button>
+          </Stack>
+        </header>
+
+        {isLoadingDocumentJournal ? <LinearProgress color="primary" /> : null}
+
+        <Alert
+          severity={isLoadingDocumentJournal ? "info" : "success"}
+          variant="outlined"
+          className="personnel-page-alert"
+        >
+          {documentMessage || "Журнал документів готовий."}
+        </Alert>
+
+        <section className="analytics-panel documents-journal-panel">
+          <div className="panel-heading">
+            Усі документи · {filteredJournalDocuments.length}
+            {filteredJournalDocuments.length !== journalDocuments.length
+              ? ` / ${journalDocuments.length}`
+              : ""}
+          </div>
+          <div className="documents-journal-toolbar">
+            <TextField
+              size="small"
+              label="ПІБ"
+              placeholder="Пошук за прізвищем / імʼям"
+              value={journalNameQuery}
+              onChange={(event) => setJournalNameQuery(event.target.value)}
+              className="documents-journal-search"
+            />
+            <TextField
+              select
+              size="small"
+              label="Документ"
+              value={journalTypeFilter}
+              onChange={(event) => {
+                const nextType = event.target.value;
+                setJournalTypeFilter(nextType);
+                const nextSteps =
+                  nextType === "ALL"
+                    ? [
+                        ...ubdWorkflowSteps,
+                        ...ubdRestoreWorkflowSteps,
+                        ...form12WorkflowSteps,
+                        ...temporaryMilitaryIdWorkflowSteps,
+                        ...salaryWorkflowSteps,
+                      ]
+                    : documentWorkflowSteps(nextType);
+                if (
+                  journalStatusFilter !== "ALL" &&
+                  !nextSteps.some((step) => step.title === journalStatusFilter)
+                ) {
+                  setJournalStatusFilter("ALL");
+                }
+              }}
+            >
+              {JOURNAL_DOCUMENT_TYPE_FILTERS.map((item) => (
+                <MenuItem key={item.value} value={item.value}>
+                  {item.label}
+                </MenuItem>
+              ))}
+            </TextField>
+            <TextField
+              select
+              size="small"
+              label="Статус"
+              value={journalStatusFilter}
+              onChange={(event) => setJournalStatusFilter(event.target.value)}
+            >
+              <MenuItem value="ALL">Усі статуси</MenuItem>
+              {journalStatusOptions.map((title) => (
+                <MenuItem key={title} value={title}>
+                  {title}
+                </MenuItem>
+              ))}
+            </TextField>
+            <TextField
+              select
+              size="small"
+              label="Місяць створення"
+              value={journalMonthFilter}
+              onChange={(event) => setJournalMonthFilter(event.target.value)}
+            >
+              <MenuItem value="ALL">Усі місяці</MenuItem>
+              {(journalMonthOptions.includes(journalMonthFilter) ||
+              journalMonthFilter === "ALL"
+                ? journalMonthOptions
+                : [journalMonthFilter, ...journalMonthOptions]
+              ).map((monthKey) => (
+                <MenuItem key={monthKey} value={monthKey}>
+                  {formatJournalMonthLabel(monthKey)}
+                </MenuItem>
+              ))}
+            </TextField>
+          </div>
+          <div className="documents-journal-table">
+            <div className="documents-journal-row header">
+              <span>Службовець</span>
+              <span>Статус службовця</span>
+              <span>Документ</span>
+              <span>Прогрес</span>
+              <span>Статус</span>
+              <span>Коментар</span>
+              <span>Файли</span>
+              <button
+                type="button"
+                className="documents-journal-sort"
+                aria-label={
+                  journalCreatedSort === "desc"
+                    ? "Сортувати за датою створення: спочатку старіші"
+                    : "Сортувати за датою створення: спочатку новіші"
+                }
+                title="Сортувати за датою створення"
+                onClick={() =>
+                  setJournalCreatedSort((current) =>
+                    current === "desc" ? "asc" : "desc",
+                  )
+                }
+              >
+                Створено {journalCreatedSort === "desc" ? "↓" : "↑"}
+              </button>
+              <span>Оновлено</span>
+              <span />
+            </div>
+            <div className="documents-journal-table-body">
+            {isLoadingDocumentJournal ? (
+              <div className="documents-journal-loader" role="status">
+                <Spinner size="LG" label="ЗАВАНТАЖЕННЯ ЖУРНАЛУ" />
+              </div>
+            ) : filteredJournalDocuments.length ? (
+              filteredJournalDocuments.map((document) => {
+                const journalDocument =
+                  document.id === selectedDocumentId
+                    ? {
+                        ...document,
+                        status: workflow.currentStatus || document.status,
+                        workflow: {
+                          ...(document.workflow &&
+                          typeof document.workflow === "object"
+                            ? document.workflow
+                            : {}),
+                          ...workflow,
+                        },
+                      }
+                    : document;
+                const progress = getDocumentProgressPercent(journalDocument);
+                const openDocument = () => {
+                  void openPersonDocument(journalDocument).then(() => {
+                    window.requestAnimationFrame(() => {
+                      window.document
+                        .getElementById("documents-journal-ubd")
+                        ?.scrollIntoView({
+                          behavior: "smooth",
+                          block: "start",
+                        });
+                    });
+                  });
+                };
+                return (
+                  <div
+                    className={[
+                      "documents-journal-row",
+                      document.id === selectedDocumentId ? "active" : "",
+                    ]
+                      .filter(Boolean)
+                      .join(" ")}
+                    key={document.id}
+                    role="button"
+                    tabIndex={0}
+                    onClick={openDocument}
+                    onKeyDown={(event) => {
+                      if (event.key !== "Enter" && event.key !== " ") return;
+                      event.preventDefault();
+                      openDocument();
+                    }}
+                  >
+                    <strong>{getDocumentPersonName(document)}</strong>
+                    <span
+                      className="documents-journal-person-status"
+                      title={readDocumentPersonStatus(
+                        document,
+                        personStatusById,
+                      )}
+                    >
+                      {readDocumentPersonStatus(document, personStatusById)}
+                    </span>
+                    <span>{salaryDocumentTypeLabel(document.type)}</span>
+                    <span className="documents-journal-progress">
+                      <i style={{ width: `${progress}%` }} />
+                      <b>{progress}%</b>
+                    </span>
+                    <span>{documentWorkflowStatusLabel(journalDocument)}</span>
+                    <span
+                      className="documents-journal-note"
+                      title={liveDocumentStatusNote(journalDocument)}
+                    >
+                      {liveDocumentStatusNote(journalDocument) || "—"}
+                    </span>
+                    <span>{getDocumentFileSummary(document)}</span>
+                    <span>
+                      {new Date(document.createdAt).toLocaleString("uk-UA")}
+                    </span>
+                    <span>
+                      {new Date(document.updatedAt).toLocaleString("uk-UA")}
+                    </span>
+                    <button
+                      aria-label="Видалити документ"
+                      className="documents-journal-delete"
+                      disabled={isSavingDocument}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void deleteDocument(document);
+                      }}
+                      title="Видалити документ"
+                      type="button"
+                    >
+                      <DeleteOutlineOutlinedIcon />
+                    </button>
+                  </div>
+                );
+              })
+            ) : (
+              <div className="documents-journal-empty">
+                {journalDocuments.length
+                  ? "Немає документів за вибраними фільтрами."
+                  : "Документи ще не створювались."}
+              </div>
+            )}
+            </div>
+          </div>
+        </section>
+        {mode === "ubdReport" && selectedDocument?.type === "ubdReport" ? (
+          <section className="documents-journal-ubd" id="documents-journal-ubd">
+            <header className="topbar analytics-topbar salary-document-topbar">
+              <div className="salary-document-main-row">
+                <Box className="salary-document-title">
+                  <Typography component="h1" variant="h4">
+                    Рапорт на УБД
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    {getDocumentPersonName(selectedDocument)}
+                    {selectedDocument.personExternalId
+                      ? ` · ID ${selectedDocument.personExternalId}`
+                      : ""}
+                    {selectedDocument.title ? ` · ${selectedDocument.title}` : ""}
+                  </Typography>
+                </Box>
+                <Stack direction="row" spacing={1}>
+                  {questionnaireHeaderButton}
+                  <Button
+                    variant="outlined"
+                    startIcon={<ArticleOutlinedIcon />}
+                    onClick={() => void saveUbdAsWord()}
+                  >
+                    Зберегти у Word
+                  </Button>
+                  <Button
+                    variant="contained"
+                    startIcon={<PictureAsPdfOutlinedIcon />}
+                    onClick={printUbdDocument}
+                    sx={{ color: "#1a1a14" }}
+                  >
+                    Друк / PDF
+                  </Button>
+                </Stack>
+              </div>
+              {documentStepProgress}
+            </header>
+            <section className="salary-documents-layout ubd-report-layout documents-journal-ubd-layout">
+              {ubdWorkspace}
             </section>
-          ) : null}
+          </section>
+        ) : null}
+        {mode === "form6Report" && selectedDocument?.type === "form6Report" ? (
+          <section className="documents-journal-ubd" id="documents-journal-ubd">
+            <header className="topbar analytics-topbar salary-document-topbar">
+              <div className="salary-document-main-row">
+                <Box className="salary-document-title">
+                  <Typography component="h1" variant="h4">
+                    Форма 6
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    {getDocumentPersonName(selectedDocument)}
+                    {selectedDocument.personExternalId
+                      ? ` · ID ${selectedDocument.personExternalId}`
+                      : ""}
+                    {selectedDocument.title ? ` · ${selectedDocument.title}` : ""}
+                  </Typography>
+                </Box>
+                <Stack direction="row" spacing={1}>
+                  {questionnaireHeaderButton}
+                  <Button
+                    variant="outlined"
+                    startIcon={<ArticleOutlinedIcon />}
+                    onClick={() => void saveForm6AsWord()}
+                  >
+                    Зберегти у Word
+                  </Button>
+                </Stack>
+              </div>
+              {documentStepProgress}
+            </header>
+            <section className="salary-documents-layout ubd-report-layout documents-journal-ubd-layout">
+              {form6Workspace}
+            </section>
+          </section>
+        ) : null}
+        {mode === "form12Report" && selectedDocument?.type === "form12Report" ? (
+          <section className="documents-journal-ubd" id="documents-journal-ubd">
+            <header className="topbar analytics-topbar salary-document-topbar">
+              <div className="salary-document-main-row">
+                <Box className="salary-document-title">
+                  <Typography component="h1" variant="h4">
+                    Форма 12
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    {getDocumentPersonName(selectedDocument)}
+                    {selectedDocument.personExternalId
+                      ? ` · ID ${selectedDocument.personExternalId}`
+                      : ""}
+                    {selectedDocument.title ? ` · ${selectedDocument.title}` : ""}
+                  </Typography>
+                </Box>
+                <Stack direction="row" spacing={1}>
+                  {questionnaireHeaderButton}
+                  <Button
+                    variant="outlined"
+                    startIcon={<ArticleOutlinedIcon />}
+                    onClick={() => void saveForm12AsWord()}
+                  >
+                    Зберегти у Word
+                  </Button>
+                </Stack>
+              </div>
+              {documentStepProgress}
+            </header>
+            <section className="salary-documents-layout ubd-report-layout documents-journal-ubd-layout">
+              {form12Workspace}
+            </section>
+          </section>
+        ) : null}
+        {mode === "ubdRestoreReport" &&
+        selectedDocument?.type === "ubdRestoreReport" ? (
+          <section className="documents-journal-ubd" id="documents-journal-ubd">
+            <header className="topbar analytics-topbar salary-document-topbar">
+              <div className="salary-document-main-row">
+                <Box className="salary-document-title">
+                  <Typography component="h1" variant="h4">
+                    Рапорт на відновлення УБД
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    {getDocumentPersonName(selectedDocument)}
+                    {selectedDocument.personExternalId
+                      ? ` · ID ${selectedDocument.personExternalId}`
+                      : ""}
+                    {selectedDocument.title ? ` · ${selectedDocument.title}` : ""}
+                  </Typography>
+                </Box>
+                <Stack direction="row" spacing={1}>
+                  {questionnaireHeaderButton}
+                  <Button
+                    variant="outlined"
+                    startIcon={<ArticleOutlinedIcon />}
+                    onClick={() => void saveUbdRestoreAsWord()}
+                  >
+                    Зберегти у Word
+                  </Button>
+                </Stack>
+              </div>
+              {documentStepProgress}
+            </header>
+            <section className="salary-documents-layout ubd-report-layout documents-journal-ubd-layout">
+              {ubdRestoreWorkspace}
+            </section>
+          </section>
+        ) : null}
+        {mode === "temporaryMilitaryId" &&
+        selectedDocument?.type === "temporaryMilitaryId" ? (
+          <section className="documents-journal-ubd" id="documents-journal-ubd">
+            <header className="topbar analytics-topbar salary-document-topbar">
+              <div className="salary-document-main-row">
+                <Box className="salary-document-title">
+                  <Typography component="h1" variant="h4">
+                    Тимчасовий військовий квиток
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    {getDocumentPersonName(selectedDocument)}
+                    {selectedDocument.personExternalId
+                      ? ` · ID ${selectedDocument.personExternalId}`
+                      : ""}
+                    {selectedDocument.title ? ` · ${selectedDocument.title}` : ""}
+                  </Typography>
+                </Box>
+                {questionnaireHeaderButton}
+              </div>
+              {documentStepProgress}
+            </header>
+            <section className="salary-documents-layout ticket-id-layout documents-journal-ubd-layout">
+              {ticketWorkspace}
+            </section>
+          </section>
+        ) : null}
+        {mode === "salaryPowerAttorney" &&
+        selectedDocument?.type === "salaryPowerAttorney" ? (
+          <section className="documents-journal-ubd" id="documents-journal-ubd">
+            <header className="topbar analytics-topbar salary-document-topbar">
+              <div className="salary-document-main-row">
+                <Box className="salary-document-title">
+                  <Typography component="h1" variant="h4">
+                    Довіреність зарплати
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    {getDocumentPersonName(selectedDocument)}
+                    {selectedDocument.personExternalId
+                      ? ` · ID ${selectedDocument.personExternalId}`
+                      : ""}
+                    {selectedDocument.title ? ` · ${selectedDocument.title}` : ""}
+                  </Typography>
+                </Box>
+                <Stack direction="row" spacing={1}>
+                  {questionnaireHeaderButton}
+                  <Button
+                    variant="outlined"
+                    startIcon={<ArticleOutlinedIcon />}
+                    onClick={generateSalaryDoc}
+                  >
+                    Завантажити DOC
+                  </Button>
+                  <Button
+                    variant="contained"
+                    startIcon={<PictureAsPdfOutlinedIcon />}
+                    onClick={printSalaryDocument}
+                    sx={{ color: "#1a1a14" }}
+                  >
+                    Друк / PDF
+                  </Button>
+                </Stack>
+              </div>
+              {documentStepProgress}
+            </header>
+            <section className="salary-documents-layout documents-journal-ubd-layout">
+              {salaryWorkspace}
+            </section>
+          </section>
+        ) : null}
+      </main>
+      {questionnairePreviewDialog}
+      </>
+    );
+  }
+
+  if (mode === "temporaryMilitaryId") {
+    return (
+      <>
+      <main className="main-panel documents-ubd-page">
+        <header className="topbar analytics-topbar salary-document-topbar">
+          <div className="salary-document-main-row">
+            <Box className="salary-document-title">
+              <Typography component="h1" variant="h4">
+                Тимчасовий військовий квиток
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                {summary.name} ·{" "}
+                {summary.externalId
+                  ? `ID ${summary.externalId}`
+                  : "дані з картки особи"}
+                {selectedDocument ? ` · ${selectedDocument.title}` : ""}
+              </Typography>
+            </Box>
+            {questionnaireHeaderButton}
+          </div>
+          {documentStepProgress}
+        </header>
+
+        <section
+          className={
+            selectedDocument
+              ? "salary-documents-layout ticket-id-layout"
+              : "salary-documents-layout empty"
+          }
+        >
+          <section className="analytics-panel salary-person-documents-panel">
+            <div className="panel-heading">Документи службовця</div>
+            <div className="salary-document-sync">
+              <span>
+                {isSavingDocument ? "збереження..." : "БД синхронізована"}
+              </span>
+              <p>{documentMessage || "Виберіть документ зі списку."}</p>
+            </div>
+            <div className="salary-person-documents-list">
+              {personQuestionnaireRow}
+              {personDocuments.length ? (
+                personDocuments.map((document) => (
+                  <article
+                    className={
+                      document.id === selectedDocumentId
+                        ? "salary-person-document-shell active"
+                        : "salary-person-document-shell"
+                    }
+                    key={document.id}
+                  >
+                    <button
+                      className="salary-person-document"
+                      type="button"
+                      onClick={() => openPersonDocument(document)}
+                    >
+                      <strong>{document.title}</strong>
+                      <span>{salaryDocumentTypeLabel(document.type)}</span>
+                      <em>{documentWorkflowStatusLabel(document)}</em>
+                      {documentListStatusNote(document)}
+                      <small>
+                        {new Date(document.updatedAt).toLocaleString("uk-UA")}
+                      </small>
+                    </button>
+                    <button
+                      aria-label="Видалити документ"
+                      className="salary-person-document-delete"
+                      disabled={isSavingDocument}
+                      onClick={() => void deleteDocument(document)}
+                      title="Видалити документ"
+                      type="button"
+                    >
+                      <DeleteOutlineOutlinedIcon />
+                    </button>
+                  </article>
+                ))
+              ) : (
+                <p className="salary-empty-documents">
+                  Документів по цьому службовцю ще немає.
+                </p>
+              )}
+            </div>
+            {personDocumentCreateSelect}
+          </section>
+
+          {ticketWorkspace}
         </section>
       </main>
+      {questionnairePreviewDialog}
+      </>
+    );
+  }
+
+  if (mode === "ubdReport") {
+    return (
+      <>
+      <main className="main-panel documents-ubd-page">
+        <header className="topbar analytics-topbar salary-document-topbar">
+          <div className="salary-document-main-row">
+            <Box className="salary-document-title">
+              <Typography component="h1" variant="h4">
+                Рапорт на УБД
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                {summary.name} ·{" "}
+                {summary.externalId
+                  ? `ID ${summary.externalId}`
+                  : "дані з картки особи"}
+                {selectedDocument ? ` · ${selectedDocument.title}` : ""}
+              </Typography>
+            </Box>
+            {selectedDocument ? (
+              <Stack direction="row" spacing={1}>
+                {questionnaireHeaderButton}
+                <Button
+                  variant="outlined"
+                  startIcon={<ArticleOutlinedIcon />}
+                  onClick={() => void saveUbdAsWord()}
+                >
+                  Зберегти у Word
+                </Button>
+                <Button
+                  variant="contained"
+                  startIcon={<PictureAsPdfOutlinedIcon />}
+                  onClick={printUbdDocument}
+                  sx={{ color: "#1a1a14" }}
+                >
+                  Друк / PDF
+                </Button>
+              </Stack>
+            ) : questionnaireHeaderButton}
+          </div>
+          {documentStepProgress}
+        </header>
+
+        <section
+          className={
+            selectedDocument
+              ? "salary-documents-layout ubd-report-layout"
+              : "salary-documents-layout empty"
+          }
+        >
+          <section className="analytics-panel salary-person-documents-panel">
+            <div className="panel-heading">Документи службовця</div>
+            <div className="salary-document-sync">
+              <span>
+                {isSavingDocument ? "збереження..." : "БД синхронізована"}
+              </span>
+              <p>{documentMessage || "Виберіть документ зі списку."}</p>
+            </div>
+            <div className="salary-person-documents-list">
+              {personQuestionnaireRow}
+              {personDocuments.length ? (
+                personDocuments.map((document) => (
+                  <article
+                    className={
+                      document.id === selectedDocumentId
+                        ? "salary-person-document-shell active"
+                        : "salary-person-document-shell"
+                    }
+                    key={document.id}
+                  >
+                    <button
+                      className="salary-person-document"
+                      type="button"
+                      onClick={() => openPersonDocument(document)}
+                    >
+                      <strong>{document.title}</strong>
+                      <span>{salaryDocumentTypeLabel(document.type)}</span>
+                      <em>{documentWorkflowStatusLabel(document)}</em>
+                      {documentListStatusNote(document)}
+                      <small>
+                        {new Date(document.updatedAt).toLocaleString("uk-UA")}
+                      </small>
+                    </button>
+                    <button
+                      aria-label="Видалити документ"
+                      className="salary-person-document-delete"
+                      disabled={isSavingDocument}
+                      onClick={() => void deleteDocument(document)}
+                      title="Видалити документ"
+                      type="button"
+                    >
+                      <DeleteOutlineOutlinedIcon />
+                    </button>
+                  </article>
+                ))
+              ) : (
+                <p className="salary-empty-documents">
+                  Документів по цьому службовцю ще немає.
+                </p>
+              )}
+            </div>
+            {personDocumentCreateSelect}
+          </section>
+
+          {ubdWorkspace}
+        </section>
+      </main>
+      {questionnairePreviewDialog}
+      </>
+    );
+  }
+
+  if (mode === "form6Report") {
+    return (
+      <>
+      <main className="main-panel documents-ubd-page">
+        <header className="topbar analytics-topbar salary-document-topbar">
+          <div className="salary-document-main-row">
+            <Box className="salary-document-title">
+              <Typography component="h1" variant="h4">
+                Форма 6
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                {summary.name} ·{" "}
+                {summary.externalId
+                  ? `ID ${summary.externalId}`
+                  : "дані з картки особи"}
+                {selectedDocument ? ` · ${selectedDocument.title}` : ""}
+              </Typography>
+            </Box>
+            {selectedDocument ? (
+              <Stack direction="row" spacing={1}>
+                {questionnaireHeaderButton}
+                <Button
+                  variant="outlined"
+                  startIcon={<ArticleOutlinedIcon />}
+                  onClick={() => void saveForm6AsWord()}
+                >
+                  Зберегти у Word
+                </Button>
+              </Stack>
+            ) : questionnaireHeaderButton}
+          </div>
+          {documentStepProgress}
+        </header>
+
+        <section
+          className={
+            selectedDocument
+              ? "salary-documents-layout ubd-report-layout"
+              : "salary-documents-layout empty"
+          }
+        >
+          <section className="analytics-panel salary-person-documents-panel">
+            <div className="panel-heading">Документи службовця</div>
+            <div className="salary-document-sync">
+              <span>
+                {isSavingDocument ? "збереження..." : "БД синхронізована"}
+              </span>
+              <p>{documentMessage || "Виберіть документ зі списку."}</p>
+            </div>
+            <div className="salary-person-documents-list">
+              {personQuestionnaireRow}
+              {personDocuments.length ? (
+                personDocuments.map((document) => (
+                  <article
+                    className={
+                      document.id === selectedDocumentId
+                        ? "salary-person-document-shell active"
+                        : "salary-person-document-shell"
+                    }
+                    key={document.id}
+                  >
+                    <button
+                      className="salary-person-document"
+                      type="button"
+                      onClick={() => openPersonDocument(document)}
+                    >
+                      <strong>{document.title}</strong>
+                      <span>{salaryDocumentTypeLabel(document.type)}</span>
+                      <em>{documentWorkflowStatusLabel(document)}</em>
+                      {documentListStatusNote(document)}
+                      <small>
+                        {new Date(document.updatedAt).toLocaleString("uk-UA")}
+                      </small>
+                    </button>
+                    <button
+                      aria-label="Видалити документ"
+                      className="salary-person-document-delete"
+                      disabled={isSavingDocument}
+                      onClick={() => void deleteDocument(document)}
+                      title="Видалити документ"
+                      type="button"
+                    >
+                      <DeleteOutlineOutlinedIcon />
+                    </button>
+                  </article>
+                ))
+              ) : (
+                <p className="salary-empty-documents">
+                  Документів по цьому службовцю ще немає.
+                </p>
+              )}
+            </div>
+            {personDocumentCreateSelect}
+          </section>
+
+          {form6Workspace}
+        </section>
+      </main>
+      {questionnairePreviewDialog}
+      </>
+    );
+  }
+
+  if (mode === "form12Report") {
+    return (
+      <>
+      <main className="main-panel documents-ubd-page">
+        <header className="topbar analytics-topbar salary-document-topbar">
+          <div className="salary-document-main-row">
+            <Box className="salary-document-title">
+              <Typography component="h1" variant="h4">
+                Форма 12
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                {summary.name} ·{" "}
+                {summary.externalId
+                  ? `ID ${summary.externalId}`
+                  : "дані з картки особи"}
+                {selectedDocument ? ` · ${selectedDocument.title}` : ""}
+              </Typography>
+            </Box>
+            {selectedDocument ? (
+              <Stack direction="row" spacing={1}>
+                {questionnaireHeaderButton}
+                <Button
+                  variant="outlined"
+                  startIcon={<ArticleOutlinedIcon />}
+                  onClick={() => void saveForm12AsWord()}
+                >
+                  Зберегти у Word
+                </Button>
+              </Stack>
+            ) : questionnaireHeaderButton}
+          </div>
+          {documentStepProgress}
+        </header>
+
+        <section
+          className={
+            selectedDocument
+              ? "salary-documents-layout ubd-report-layout"
+              : "salary-documents-layout empty"
+          }
+        >
+          <section className="analytics-panel salary-person-documents-panel">
+            <div className="panel-heading">Документи службовця</div>
+            <div className="salary-document-sync">
+              <span>
+                {isSavingDocument ? "збереження..." : "БД синхронізована"}
+              </span>
+              <p>{documentMessage || "Виберіть документ зі списку."}</p>
+            </div>
+            <div className="salary-person-documents-list">
+              {personQuestionnaireRow}
+              {personDocuments.length ? (
+                personDocuments.map((document) => (
+                  <article
+                    className={
+                      document.id === selectedDocumentId
+                        ? "salary-person-document-shell active"
+                        : "salary-person-document-shell"
+                    }
+                    key={document.id}
+                  >
+                    <button
+                      className="salary-person-document"
+                      type="button"
+                      onClick={() => openPersonDocument(document)}
+                    >
+                      <strong>{document.title}</strong>
+                      <span>{salaryDocumentTypeLabel(document.type)}</span>
+                      <em>{documentWorkflowStatusLabel(document)}</em>
+                      {documentListStatusNote(document)}
+                      <small>
+                        {new Date(document.updatedAt).toLocaleString("uk-UA")}
+                      </small>
+                    </button>
+                    <button
+                      aria-label="Видалити документ"
+                      className="salary-person-document-delete"
+                      disabled={isSavingDocument}
+                      onClick={() => void deleteDocument(document)}
+                      title="Видалити документ"
+                      type="button"
+                    >
+                      <DeleteOutlineOutlinedIcon />
+                    </button>
+                  </article>
+                ))
+              ) : (
+                <p className="salary-empty-documents">
+                  Документів по цьому службовцю ще немає.
+                </p>
+              )}
+            </div>
+            {personDocumentCreateSelect}
+          </section>
+
+          {form12Workspace}
+        </section>
+      </main>
+      {questionnairePreviewDialog}
+      </>
+    );
+  }
+
+  if (mode === "ubdRestoreReport") {
+    return (
+      <>
+      <main className="main-panel documents-ubd-page">
+        <header className="topbar analytics-topbar salary-document-topbar">
+          <div className="salary-document-main-row">
+            <Box className="salary-document-title">
+              <Typography component="h1" variant="h4">
+                Рапорт на відновлення УБД
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                {summary.name} ·{" "}
+                {summary.externalId
+                  ? `ID ${summary.externalId}`
+                  : "дані з картки особи"}
+                {selectedDocument ? ` · ${selectedDocument.title}` : ""}
+              </Typography>
+            </Box>
+            {selectedDocument ? (
+              <Stack direction="row" spacing={1}>
+                {questionnaireHeaderButton}
+                <Button
+                  variant="outlined"
+                  startIcon={<ArticleOutlinedIcon />}
+                  onClick={() => void saveUbdRestoreAsWord()}
+                >
+                  Зберегти у Word
+                </Button>
+              </Stack>
+            ) : questionnaireHeaderButton}
+          </div>
+          {documentStepProgress}
+        </header>
+
+        <section
+          className={
+            selectedDocument
+              ? "salary-documents-layout ubd-report-layout"
+              : "salary-documents-layout empty"
+          }
+        >
+          <section className="analytics-panel salary-person-documents-panel">
+            <div className="panel-heading">Документи службовця</div>
+            <div className="salary-document-sync">
+              <span>
+                {isSavingDocument ? "збереження..." : "БД синхронізована"}
+              </span>
+              <p>{documentMessage || "Виберіть документ зі списку."}</p>
+            </div>
+            <div className="salary-person-documents-list">
+              {personQuestionnaireRow}
+              {personDocuments.length ? (
+                personDocuments.map((document) => (
+                  <article
+                    className={
+                      document.id === selectedDocumentId
+                        ? "salary-person-document-shell active"
+                        : "salary-person-document-shell"
+                    }
+                    key={document.id}
+                  >
+                    <button
+                      className="salary-person-document"
+                      type="button"
+                      onClick={() => openPersonDocument(document)}
+                    >
+                      <strong>{document.title}</strong>
+                      <span>{salaryDocumentTypeLabel(document.type)}</span>
+                      <em>{documentWorkflowStatusLabel(document)}</em>
+                      {documentListStatusNote(document)}
+                      <small>
+                        {new Date(document.updatedAt).toLocaleString("uk-UA")}
+                      </small>
+                    </button>
+                    <button
+                      aria-label="Видалити документ"
+                      className="salary-person-document-delete"
+                      disabled={isSavingDocument}
+                      onClick={() => void deleteDocument(document)}
+                      title="Видалити документ"
+                      type="button"
+                    >
+                      <DeleteOutlineOutlinedIcon />
+                    </button>
+                  </article>
+                ))
+              ) : (
+                <p className="salary-empty-documents">
+                  Документів по цьому службовцю ще немає.
+                </p>
+              )}
+            </div>
+            {personDocumentCreateSelect}
+          </section>
+
+          {ubdRestoreWorkspace}
+        </section>
+      </main>
+      {questionnairePreviewDialog}
+      </>
     );
   }
 
   if (mode === "salaryPowerAttorney") {
     return (
+      <>
       <main className="main-panel">
         <header className="topbar analytics-topbar salary-document-topbar">
           <div className="salary-document-main-row">
@@ -1646,12 +5616,16 @@ export function DocumentsPage({
                 Довіреність зарплати
               </Typography>
               <Typography variant="body2" color="text.secondary">
-                {summary.name} · {summary.externalId ? `ID ${summary.externalId}` : "дані з картки особи"}
+                {summary.name} ·{" "}
+                {summary.externalId
+                  ? `ID ${summary.externalId}`
+                  : "дані з картки особи"}
                 {selectedDocument ? ` · ${selectedDocument.title}` : ""}
               </Typography>
             </Box>
             {selectedDocument ? (
               <Stack direction="row" spacing={1}>
+                {questionnaireHeaderButton}
                 <Button
                   variant="outlined"
                   startIcon={<ArticleOutlinedIcon />}
@@ -1683,10 +5657,13 @@ export function DocumentsPage({
           <section className="analytics-panel salary-person-documents-panel">
             <div className="panel-heading">Документи службовця</div>
             <div className="salary-document-sync">
-              <span>{isSavingDocument ? "збереження..." : "БД синхронізована"}</span>
+              <span>
+                {isSavingDocument ? "збереження..." : "БД синхронізована"}
+              </span>
               <p>{documentMessage || "Виберіть документ зі списку."}</p>
             </div>
             <div className="salary-person-documents-list">
+              {personQuestionnaireRow}
               {personDocuments.length ? (
                 personDocuments.map((document) => (
                   <article
@@ -1705,6 +5682,7 @@ export function DocumentsPage({
                       <strong>{document.title}</strong>
                       <span>{salaryDocumentTypeLabel(document.type)}</span>
                       <em>{workflowStatusLabel(document.status)}</em>
+                      {documentListStatusNote(document)}
                       <small>
                         {new Date(document.updatedAt).toLocaleString("uk-UA")}
                       </small>
@@ -1727,164 +5705,14 @@ export function DocumentsPage({
                 </p>
               )}
             </div>
-            <Button
-              variant="outlined"
-              onClick={createSalaryPowerAttorneyDocument}
-              disabled={isSavingDocument || !personExternalId}
-            >
-              Створити довіреність
-            </Button>
+            {personDocumentCreateSelect}
           </section>
 
-          {selectedDocument ? (
-            <section className="analytics-panel document-fields">
-              <div className="panel-heading">Дані для рапорта</div>
-              <div className="document-placeholder-map salary-document-map">
-              <label>
-                <code>ФИО</code>
-                <TextField
-                  size="small"
-                  fullWidth
-                  value={salaryFields.fullName}
-                  onChange={(event) =>
-                    updateSalaryField("fullName", event.target.value)
-                  }
-                  placeholder="ПРІЗВИЩЕ Ім'я По батькові"
-                />
-              </label>
-              <label>
-                <code>ІНН</code>
-                <TextField
-                  size="small"
-                  fullWidth
-                  value={salaryFields.rnokpp}
-                  onChange={(event) =>
-                    updateSalaryField("rnokpp", event.target.value)
-                  }
-                  placeholder="РНОКПП"
-                />
-              </label>
-              <label>
-                <code>IBAN</code>
-                <TextField
-                  size="small"
-                  fullWidth
-                  value={formatIban(salaryFields.iban)}
-                  onChange={(event) =>
-                    updateSalaryField("iban", event.target.value)
-                  }
-                  placeholder="UA..."
-                />
-              </label>
-              <label>
-                <code>БАНК</code>
-                <TextField
-                  select
-                  size="small"
-                  fullWidth
-                  value={salaryFields.bankMfo}
-                  onChange={(event) =>
-                    updateSalaryField("bankMfo", event.target.value)
-                  }
-                >
-                  {ukrainianBanks.map((bank) => (
-                    <MenuItem key={bank.mfo} value={bank.mfo}>
-                      {bank.mfo === "custom"
-                        ? bank.name
-                        : `${bank.name} · ${bank.mfo}`}
-                    </MenuItem>
-                  ))}
-                </TextField>
-              </label>
-              <label>
-                <code>Назва банку</code>
-                <TextField
-                  size="small"
-                  fullWidth
-                  value={salaryFields.bankName}
-                  onChange={(event) =>
-                    updateSalaryField("bankName", event.target.value)
-                  }
-                  placeholder="АТ «...»"
-                />
-              </label>
-              <label>
-                <code>Дата</code>
-                <TextField
-                  size="small"
-                  fullWidth
-                  value={salaryFields.date}
-                  onChange={(event) =>
-                    updateSalaryField("date", event.target.value)
-                  }
-                  placeholder="ДД.ММ.РРРР"
-                />
-              </label>
-              <label>
-                <code>Папка</code>
-                <TextField
-                  size="small"
-                  fullWidth
-                  value={salaryFields.folderName}
-                  onChange={(event) =>
-                    updateSalaryField("folderName", event.target.value)
-                  }
-                  placeholder="Назва папки"
-                />
-              </label>
-              </div>
-            </section>
-          ) : null}
-
-          {selectedDocument ? (
-            <section className="analytics-panel document-preview">
-              <div className="panel-heading">Попередній перегляд</div>
-              <div className="document-page-preview salary-document-preview">
-              <div className="salary-preview-to">{salaryFields.commander}</div>
-              <h2>Рапорт</h2>
-              <p>
-                Прошу моє грошове забезпечення перераховувати на мій
-                розрахунковий банківський рахунок:
-              </p>
-              <p>
-                {highlightOrPlaceholder(
-                  formatIban(salaryFields.iban),
-                  "UA___________________________",
-                )}{" "}
-                відкритий{" "}
-                {highlightOrPlaceholder(salaryFields.bankName, "банк")}.
-              </p>
-              <p>
-                Код РНОКПП{" "}
-                {highlightOrPlaceholder(salaryFields.rnokpp, "__________")}.
-              </p>
-              <p>Довідка з банківськими реквізитами додається.</p>
-              <p>
-                {highlightOrPlaceholder(salaryFields.rank, "звання")}{" "}
-                {highlightOrPlaceholder(
-                  salaryFields.fullName,
-                  "ПРІЗВИЩЕ Ім'я По батькові",
-                )}
-              </p>
-              <footer>
-                <span>{salaryFields.date || "__.__.202__"}</span>
-                <span>________________</span>
-              </footer>
-              <p className="salary-finance-note">
-                Начальнику фінансово-економічної служби – головному бухгалтеру
-                військової частини А4862 - прошу прийняти в роботу
-              </p>
-              <p>
-                Начальник групи персоналу штабу
-                <br />1 піхотного батальйону
-                <br />військової частини А4862
-              </p>
-              <p>{salaryFields.personnelChief}</p>
-              </div>
-            </section>
-          ) : null}
+          {salaryWorkspace}
         </section>
       </main>
+      {questionnairePreviewDialog}
+      </>
     );
   }
 
@@ -1957,7 +5785,9 @@ export function DocumentsPage({
                 size="small"
                 fullWidth
                 value={fields.pib}
-                onChange={(event) => updateDefaultField("pib", event.target.value)}
+                onChange={(event) =>
+                  updateDefaultField("pib", event.target.value)
+                }
                 placeholder="Прізвище Ім'я По батькові"
               />
             </label>
@@ -1967,7 +5797,9 @@ export function DocumentsPage({
                 size="small"
                 fullWidth
                 value={fields.rank}
-                onChange={(event) => updateDefaultField("rank", event.target.value)}
+                onChange={(event) =>
+                  updateDefaultField("rank", event.target.value)
+                }
                 placeholder="Звання"
               />
             </label>
@@ -1977,7 +5809,9 @@ export function DocumentsPage({
                 size="small"
                 fullWidth
                 value={fields.unit}
-                onChange={(event) => updateDefaultField("unit", event.target.value)}
+                onChange={(event) =>
+                  updateDefaultField("unit", event.target.value)
+                }
                 placeholder="Підрозділ / частина"
               />
             </label>
@@ -1987,7 +5821,9 @@ export function DocumentsPage({
                 size="small"
                 fullWidth
                 value={fields.date}
-                onChange={(event) => updateDefaultField("date", event.target.value)}
+                onChange={(event) =>
+                  updateDefaultField("date", event.target.value)
+                }
                 placeholder="ДД.ММ.РРРР"
               />
             </label>

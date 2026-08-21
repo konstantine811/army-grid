@@ -69,23 +69,48 @@ import {
   buildBchsAppendixSupplement,
   buildBchsPersonnelBzvpSupplement,
   buildBchsSupplementComparisonRow,
+  computeBchsUnitAttachedStats,
+  computeBchsUnitAbsenceCategoryStats,
+  computeBchsUnitAwayStats,
+  computeBchsUnitBusinessTripCount,
+  computeBchsUnitRankListedAvailableStats,
+  computeBchsUnitUnassignedNewcomers,
+  computeBchsUnitSearchInProgressCount,
+  computeBchsUnitCombatComponentStats,
+  sumBchsComparisonCombatComponent,
+  applyBchsRankListedAvailableToComparisonRow,
+  sumBchsComparisonRankListedAvailable,
   createBchsComparisonRow,
+  enrichBchsAnalyticsForExport,
+  BCHS_PIB_FILL_VALUE_KEY,
   extractBchsAwayPeopleFromDbRows,
   extractBchsAwayPeopleFromSheet,
+  extractBchsNovaPeopleFromSheet,
+  filterBchsNovaPeople,
   formatRatioPercent,
   isBchsAppendixSheet,
+  isBchsDetachedStatus,
   isBchsPersonnelGeneralListSheet,
   isBchsPersonnelBzvpSheet,
+  isBchsTotalUnit,
   isLegacyBchsAnalyticsSheet,
   parseBchsDestinationText,
   parseBchsImportAnalytics,
+  resolveBchsFullRosterPeople,
+  resolveBchsRosterPeople,
+  summarizeBchsCommanderReserve,
   toPercent,
 } from "./bchsCalc";
 import {
+  BCHS_EXPORT_DATA_END_ROW,
+  BCHS_EXPORT_DATA_START_ROW,
   buildBchsMainExportRows,
+  clearBchsSheetPaddingRows,
   fitBchsTextExportColumns,
   fitSheetColumnToText,
   materializeBchsSheetFormulas,
+  styleBchsMainAttachedHeaderColumns,
+  styleBchsMainAbsenceHeaderColumns,
   styleBchsMainDataRows,
   updateBchsSheetHeaderDate,
   writeBchsAppendixRow,
@@ -95,6 +120,7 @@ import {
   writeGeneratedBchsWorkbook,
 } from "./bchsExport";
 import type {
+  BchsAnalyticsSnapshot,
   BchsDataIssue,
   BchsPersonnelAwayPerson,
   BchsSupplementSnapshot,
@@ -119,29 +145,199 @@ const keepOnlyWorkbookSheet = (workbook: any, sheetToKeep: any) => {
 const waitForNextBchsDownload = () =>
   new Promise((resolve) => window.setTimeout(resolve, 450));
 
+const forceWorkbookFullCalculation = (workbook: any) => {
+  const workbookNode = workbook?._node;
+  const children = Array.isArray(workbookNode?.children)
+    ? workbookNode.children
+    : null;
+  if (!children) return;
+
+  let calcPr = children.find((child: any) => child?.name === "calcPr");
+  if (!calcPr) {
+    calcPr = { name: "calcPr", attributes: {}, children: [] };
+    children.push(calcPr);
+  }
+
+  calcPr.attributes = {
+    ...(calcPr.attributes ?? {}),
+    calcMode: "auto",
+    fullCalcOnLoad: 1,
+    forceFullCalc: 1,
+  };
+};
+
+const writeFormulaDrivenBchsCalculationWorkbook = (
+  workbook: any,
+  exportDate: string,
+  analytics: BchsAnalyticsSnapshot,
+  people: BchsPersonnelAwayPerson[],
+) => {
+  const calculationSheet = workbook.sheet("Аркуш1") ?? workbook.sheet(0);
+  writeMainBchsCalculationSheet(
+    calculationSheet,
+    exportDate,
+    analytics,
+    people,
+  );
+  keepOnlyWorkbookSheet(workbook, calculationSheet);
+  forceWorkbookFullCalculation(workbook);
+};
+
 const writeMainBchsCalculationSheet = (
   sheet: any,
   exportDate: string,
   analytics: ReturnType<typeof buildBchsAnalyticsFromWorkbook>,
+  people: BchsPersonnelAwayPerson[] = [],
 ) => {
   updateBchsSheetHeaderDate(sheet, exportDate);
   materializeBchsSheetFormulas(sheet);
-  const exportRows = buildBchsMainExportRows(analytics);
-  for (let rowNumber = 11; rowNumber <= 34; rowNumber += 1) {
+  const rosterPeople = filterBchsNovaPeople(people);
+  const enriched = enrichBchsAnalyticsForExport(analytics, people);
+  const exportRows = buildBchsMainExportRows(enriched).map((row) => {
+    if (rosterPeople.length === 0 || row.rowNumber === 11 || isBchsTotalUnit(row.unit)) {
+      return row;
+    }
+    // Always recompute away from roster at write time (нова + Відком. за межі).
+    const away = computeBchsUnitAwayStats(rosterPeople, row.unit);
+    const attached = computeBchsUnitAttachedStats(people, row.unit);
+    const rankStats = computeBchsUnitRankListedAvailableStats(
+      rosterPeople,
+      row.unit,
+    );
+    const absenceStats = computeBchsUnitAbsenceCategoryStats(
+      rosterPeople,
+      row.unit,
+    );
+    const businessTrip = computeBchsUnitBusinessTripCount(
+      rosterPeople,
+      row.unit,
+    );
+    const unassignedNewcomers = computeBchsUnitUnassignedNewcomers(
+      people,
+      row.unit,
+    );
+    const searchInProgress = computeBchsUnitSearchInProgressCount(
+      rosterPeople,
+      row.unit,
+    );
+    const combat = computeBchsUnitCombatComponentStats(people, row.unit);
+    return applyBchsRankListedAvailableToComparisonRow(
+      createBchsComparisonRow({
+        ...row,
+        awayOfficers: away.officers,
+        awaySergeants: away.sergeants,
+        awaySoldiers: away.soldiers,
+        awayInOtherUnits: away.total,
+        awayDestinationsText: away.destinationText,
+        attachedOfficers: attached.officers,
+        attachedSergeants: attached.sergeants,
+        attachedSoldiers: attached.soldiers,
+        attachedFromOtherUnits: attached.total,
+        attachedSourcesText: attached.sourcesText,
+        businessTrip,
+        unassignedNewcomers,
+        searchInProgress,
+        ...combat,
+        training: absenceStats.training,
+        hospitalWounded: absenceStats.hospitalWounded,
+        hospitalIllness: absenceStats.hospitalIllness,
+        vacation: absenceStats.vacation,
+        awol: absenceStats.awol,
+        missing: absenceStats.missing,
+        killed: absenceStats.killed,
+        medWounded: absenceStats.medWounded,
+        medIllness: absenceStats.medIllness,
+      }),
+      rankStats,
+    );
+  });
+
+  // Recompute total away/attached from detail rows (Excel: no AO text on Усього).
+  const detailRows = exportRows.filter(
+    (row) => row.rowNumber !== 11 && !isBchsTotalUnit(row.unit),
+  );
+  const totalAwayOfficers = detailRows.reduce((sum, row) => sum + row.awayOfficers, 0);
+  const totalAwaySergeants = detailRows.reduce((sum, row) => sum + row.awaySergeants, 0);
+  const totalAwaySoldiers = detailRows.reduce((sum, row) => sum + row.awaySoldiers, 0);
+  const totalAttachedOfficers = detailRows.reduce((sum, row) => sum + row.attachedOfficers, 0);
+  const totalAttachedSergeants = detailRows.reduce((sum, row) => sum + row.attachedSergeants, 0);
+  const totalAttachedSoldiers = detailRows.reduce((sum, row) => sum + row.attachedSoldiers, 0);
+  const totalRankStats = sumBchsComparisonRankListedAvailable(detailRows);
+  const totalBusinessTrip = detailRows.reduce(
+    (sum, row) => sum + row.businessTrip,
+    0,
+  );
+  const totalUnassignedNewcomers = detailRows.reduce(
+    (sum, row) => sum + row.unassignedNewcomers,
+    0,
+  );
+  const totalSearchInProgress = detailRows.reduce(
+    (sum, row) => sum + row.searchInProgress,
+    0,
+  );
+  const totalCombat = sumBchsComparisonCombatComponent(detailRows);
+  const exportRowsWithTotal = exportRows.map((row) => {
+    if (row.rowNumber !== 11 && !isBchsTotalUnit(row.unit)) return row;
+    return applyBchsRankListedAvailableToComparisonRow(
+      createBchsComparisonRow({
+        ...row,
+        awayOfficers: totalAwayOfficers,
+        awaySergeants: totalAwaySergeants,
+        awaySoldiers: totalAwaySoldiers,
+        awayInOtherUnits: totalAwayOfficers + totalAwaySergeants + totalAwaySoldiers,
+        awayDestinationsText: "",
+        attachedOfficers: totalAttachedOfficers,
+        attachedSergeants: totalAttachedSergeants,
+        attachedSoldiers: totalAttachedSoldiers,
+        attachedFromOtherUnits:
+          totalAttachedOfficers + totalAttachedSergeants + totalAttachedSoldiers,
+        attachedSourcesText: "",
+        businessTrip: totalBusinessTrip,
+        unassignedNewcomers: totalUnassignedNewcomers,
+        searchInProgress: totalSearchInProgress,
+        ...totalCombat,
+        training: detailRows.reduce((sum, item) => sum + item.training, 0),
+        hospitalWounded: detailRows.reduce(
+          (sum, item) => sum + item.hospitalWounded,
+          0,
+        ),
+        hospitalIllness: detailRows.reduce(
+          (sum, item) => sum + item.hospitalIllness,
+          0,
+        ),
+        vacation: detailRows.reduce((sum, item) => sum + item.vacation, 0),
+        awol: detailRows.reduce((sum, item) => sum + item.awol, 0),
+        missing: detailRows.reduce((sum, item) => sum + item.missing, 0),
+        killed: detailRows.reduce((sum, item) => sum + item.killed, 0),
+        medWounded: detailRows.reduce((sum, item) => sum + item.medWounded, 0),
+        medIllness: detailRows.reduce((sum, item) => sum + item.medIllness, 0),
+      }),
+      totalRankStats,
+    );
+  });
+
+  for (
+    let rowNumber = BCHS_EXPORT_DATA_START_ROW;
+    rowNumber <= BCHS_EXPORT_DATA_END_ROW;
+    rowNumber += 1
+  ) {
     writeBchsLegacyRow(sheet, createBchsComparisonRow({ rowNumber, unit: "" }));
   }
-  exportRows.forEach((row) => {
+  exportRowsWithTotal.forEach((row) => {
     writeBchsLegacyRow(sheet, row);
   });
+  clearBchsSheetPaddingRows(sheet);
+  styleBchsMainAbsenceHeaderColumns(sheet);
+  styleBchsMainAttachedHeaderColumns(sheet);
   styleBchsMainDataRows(
     sheet,
-    exportRows
+    exportRowsWithTotal
       .map((row) => row.rowNumber)
       .filter((rowNumber): rowNumber is number => Boolean(rowNumber)),
   );
   fitBchsTextExportColumns(
     sheet,
-    exportRows
+    exportRowsWithTotal
       .map((row) => row.rowNumber)
       .filter((rowNumber): rowNumber is number => Boolean(rowNumber)),
   );
@@ -191,15 +387,28 @@ export function BchsPage() {
       ? buildBchsAnalyticsFromWorkbook(snapshot, analyticsSheet)
       : (analyticsFromDb ?? buildBchsAnalytics(undefined));
 
-    const peopleFromSnapshot = extractBchsAwayPeopleFromSheet(dataSheet);
-    const people =
-      peopleFromSnapshot.length > 0 ? peopleFromSnapshot : personnelAwayPeople;
+    const people = resolveBchsFullRosterPeople(
+      dataSheet ? extractBchsAwayPeopleFromSheet(dataSheet) : undefined,
+      personnelAwayPeople,
+    );
 
     return applyBchsPersonnelDerivedColumns(base, people);
   }, [analyticsFromDb, analyticsSheet, dataSheet, personnelAwayPeople, snapshot]);
   const dataIssues = (analytics.dataIssues ?? []) as BchsDataIssue[];
   const detachedDestinationIssues = dataIssues.filter(
-    (issue) => issue.reason === "невідоме місце відкомандирування",
+    (issue) =>
+      issue.kind === "destination" ||
+      issue.reason === "невідоме місце відкомандирування",
+  );
+  const rankDataIssues = dataIssues.filter(
+    (issue) =>
+      issue.kind === "rank" ||
+      /званн|капітан|капитан|латиниц/i.test(issue.reason),
+  );
+  const statusDataIssues = dataIssues.filter(
+    (issue) =>
+      !detachedDestinationIssues.includes(issue) &&
+      !rankDataIssues.includes(issue),
   );
   const personnelSupplementForExport = useMemo(() => {
     if (analytics.supplement?.kind === "personnel-bzvp")
@@ -501,15 +710,21 @@ export function BchsPage() {
       const columns = buildImportColumns(dataSheet);
       const rows = dataSheet.rows
         .filter((row) => hasRowData(row.values))
-        .map((row) => ({
-          excelRowNumber: row.excelRowNumber,
-          values: Object.fromEntries(
-            columns.map((column, index) => [
-              column.key,
-              cellValueToJson(row.values[index]),
-            ]),
-          ),
-        }));
+        .map((row) => {
+          const fill = dataSheet.pibFillByExcelRow?.[row.excelRowNumber];
+          return {
+            excelRowNumber: row.excelRowNumber,
+            values: {
+              ...Object.fromEntries(
+                columns.map((column, index) => [
+                  column.key,
+                  cellValueToJson(row.values[index]),
+                ]),
+              ),
+              ...(fill ? { [BCHS_PIB_FILL_VALUE_KEY]: fill } : {}),
+            },
+          };
+        });
 
       return {
         name: snapshot.fileName.replace(/\.xlsx$/i, ""),
@@ -650,13 +865,15 @@ export function BchsPage() {
 
     const loadPersonnelAwayPeople = async () => {
       if (snapshot) {
+        // Live Excel snapshot already has Аркуш2/список у пам'яті.
         setPersonnelAwayPeople([]);
         return;
       }
 
-      const personnelSheet = selectedImport?.sheets.find((sheet) =>
-        /аркуш\s*2|особов|загальн.*спис/i.test(sheet.name),
-      );
+      const personnelSheet =
+        selectedImport?.sheets.find((sheet) =>
+          /аркуш\s*2|особов|загальн.*спис|1\.?\s*ос/i.test(sheet.name),
+        ) ?? selectedImport?.sheets[0];
       if (!personnelSheet) {
         setPersonnelAwayPeople([]);
         return;
@@ -664,6 +881,7 @@ export function BchsPage() {
 
       try {
         const allRows: Array<Record<string, unknown>> = [];
+        let columns: ReturnType<typeof parseDbColumns> = [];
         let offset = 0;
         const limit = 500;
 
@@ -672,15 +890,24 @@ export function BchsPage() {
             limit,
             offset,
           });
+          if (columns.length === 0) {
+            columns = parseDbColumns(response.columns);
+          }
           allRows.push(...response.items.map((item) => item.values));
           offset += response.limit;
           if (offset >= response.total || response.items.length === 0) break;
         }
 
         if (!cancelled) {
-          setPersonnelAwayPeople(extractBchsAwayPeopleFromDbRows(allRows));
+          const allPeople = extractBchsAwayPeopleFromDbRows(allRows, columns);
+          const novaPeople = filterBchsNovaPeople(allPeople);
+          console.info(
+            `[BCHS] З БД підвантажено людей: ${allPeople.length} (нова: ${novaPeople.length}) · аркуш «${personnelSheet.name}»`,
+          );
+          setPersonnelAwayPeople(allPeople);
         }
-      } catch {
+      } catch (error) {
+        console.warn("[BCHS] Не вдалося підвантажити людей з БД", error);
         if (!cancelled) setPersonnelAwayPeople([]);
       }
     };
@@ -853,7 +1080,49 @@ export function BchsPage() {
         snapshot?.sheets.some(isLegacyBchsAnalyticsSheet),
       );
 
-      if (snapshot && hasLegacyCalculationSheet) {
+      if (dataSheet) {
+        const peopleForExport = resolveBchsFullRosterPeople(
+          dataSheet ? extractBchsAwayPeopleFromSheet(dataSheet) : undefined,
+          personnelAwayPeople,
+        );
+        console.info(
+          "[BCHS] Резерв командира полку",
+          summarizeBchsCommanderReserve(peopleForExport),
+        );
+        const novaDetached = filterBchsNovaPeople(peopleForExport).filter((person) =>
+          isBchsDetachedStatus(person.status),
+        ).length;
+        await exportTemplateWorkbookWithMutations(
+          "/templates/bchs-calculation-template.xlsx",
+          (workbook) =>
+            writeFormulaDrivenBchsCalculationWorkbook(
+              workbook,
+              exportDate,
+              analytics,
+              peopleForExport,
+            ),
+          buildMainBchsExportFileName(exportDate),
+        );
+        if (novaDetached === 0) {
+          console.warn(
+            "[BCHS export] Немає відкомандированих з battalion=нова — AK–AO будуть порожні.",
+          );
+        } else {
+          console.info(
+            `[BCHS export] Відкомандировані (нова): ${novaDetached} осіб → пишемо AK–AO.`,
+          );
+        }
+      } else if (snapshot && hasLegacyCalculationSheet) {
+        const legacyPeople = resolveBchsFullRosterPeople(
+          dataSheet
+            ? extractBchsAwayPeopleFromSheet(dataSheet)
+            : snapshot?.sheets.find(isBchsPersonnelGeneralListSheet)
+              ? extractBchsAwayPeopleFromSheet(
+                  snapshot.sheets.find(isBchsPersonnelGeneralListSheet),
+                )
+              : undefined,
+          personnelAwayPeople,
+        );
         await exportWorkbookWithMutations(
           snapshot,
           (workbook) => {
@@ -864,7 +1133,12 @@ export function BchsPage() {
 
               if (isLegacyBchsAnalyticsSheet(sheetSnapshot)) {
                 calculationSheet ??= sheet;
-                writeMainBchsCalculationSheet(sheet, exportDate, analytics);
+                writeMainBchsCalculationSheet(
+                  sheet,
+                  exportDate,
+                  analytics,
+                  legacyPeople,
+                );
                 return;
               }
 
@@ -932,19 +1206,32 @@ export function BchsPage() {
           "/templates/bchs-calculation-template.xlsx",
           (workbook) => {
             const sheet = workbook.sheet("Аркуш1") ?? workbook.sheet(0);
-            writeMainBchsCalculationSheet(sheet, exportDate, analytics);
+            writeMainBchsCalculationSheet(
+              sheet,
+              exportDate,
+              analytics,
+              personnelAwayPeople,
+            );
             keepOnlyWorkbookSheet(workbook, sheet);
           },
           buildMainBchsExportFileName(exportDate),
         );
       }
       await waitForNextBchsDownload();
+      const peopleForPersonnelExport = resolveBchsRosterPeople(
+        extractBchsNovaPeopleFromSheet(dataSheet),
+        personnelAwayPeople,
+      );
       await exportTemplateWorkbookWithMutations(
         "/templates/bchs-personnel-bzvp-template.xlsx",
         (workbook) => {
           const sheet = workbook.sheet(0);
           updateBchsSheetHeaderDate(sheet, exportDate);
-          writeBchsPersonnelBzvp1PbTemplate(sheet, analytics);
+          writeBchsPersonnelBzvp1PbTemplate(
+            sheet,
+            analytics,
+            peopleForPersonnelExport,
+          );
         },
         `1ПБ Особовий склад підрозділів + БЗВП_${exportDate}.xlsx`,
       );
@@ -957,6 +1244,7 @@ export function BchsPage() {
             personnelSupplementForExport,
             exportDate,
             "Аркуш1",
+            peopleForPersonnelExport,
           ),
         "БЧС додаток",
         `1ПБ БЧС додаток ${exportDate}.xlsx`,
@@ -1434,17 +1722,17 @@ export function BchsPage() {
                   <em>{item.label}</em>
                 </div>
               ))}
-              {dataIssues.length > 0 && (
+              {statusDataIssues.length > 0 && (
                 <div className="bchs-data-issues">
                   <div className="combat-attention-row">
                     <span>
                       <HelpOutlineOutlinedIcon />
                     </span>
-                    <strong>{dataIssues.length}</strong>
+                    <strong>{statusDataIssues.length}</strong>
                     <em>невідомий статус</em>
                   </div>
                   <div className="bchs-data-issues-list">
-                    {dataIssues.slice(0, 8).map((issue, index) => (
+                    {statusDataIssues.slice(0, 8).map((issue, index) => (
                       <div
                         className="bchs-data-issue"
                         key={`${issue.fullName}-${issue.status}-${index}`}
@@ -1456,8 +1744,38 @@ export function BchsPage() {
                         <em>{issue.reason}</em>
                       </div>
                     ))}
-                    {dataIssues.length > 8 && (
-                      <p>ще {dataIssues.length - 8} у списку аналітики</p>
+                    {statusDataIssues.length > 8 && (
+                      <p>ще {statusDataIssues.length - 8} у списку аналітики</p>
+                    )}
+                  </div>
+                </div>
+              )}
+              {rankDataIssues.length > 0 && (
+                <div className="bchs-data-issues bchs-rank-issues">
+                  <div className="combat-attention-row">
+                    <span>
+                      <WarningAmberOutlinedIcon />
+                    </span>
+                    <strong>{rankDataIssues.length}</strong>
+                    <em>помилки звань</em>
+                  </div>
+                  <div className="bchs-data-issues-list">
+                    {rankDataIssues.slice(0, 12).map((issue, index) => (
+                      <div
+                        className="bchs-data-issue"
+                        key={`${issue.fullName}-rank-${index}`}
+                      >
+                        <strong>{issue.fullName}</strong>
+                        <span>
+                          {issue.rosterUnit}
+                          {issue.rankTitle ? ` · ${issue.rankTitle}` : ""}
+                          {issue.rankCategory ? ` · ${issue.rankCategory}` : ""}
+                        </span>
+                        <em>{issue.reason}</em>
+                      </div>
+                    ))}
+                    {rankDataIssues.length > 12 && (
+                      <p>ще {rankDataIssues.length - 12} у списку</p>
                     )}
                   </div>
                 </div>
@@ -2245,6 +2563,36 @@ export function BchsPage() {
                   {issue.reason} · колонка `В якому підрозділі`:{" "}
                   {issue.destination}
                 </em>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {rankDataIssues.length > 0 && (
+        <section className="analytics-panel bchs-rank-issues-panel">
+          <div className="panel-heading">
+            Помилки / розбіжності звань · {rankDataIssues.length}
+          </div>
+          <p className="bchs-rank-issues-hint">
+            Показуємо лише підозріле написання звання (змішана латиниця/кирилиця).
+            Українське «капітан» вважається правильним і в підрахунках враховується.
+          </p>
+          <div className="bchs-data-issues-list">
+            {rankDataIssues.map((issue, index) => (
+              <div
+                className="bchs-data-issue"
+                key={`${issue.fullName}-rank-panel-${index}`}
+              >
+                <strong>{issue.fullName}</strong>
+                <span>
+                  {issue.rosterUnit}
+                  {issue.rankTitle ? ` · звання: ${issue.rankTitle}` : ""}
+                  {issue.rankCategory
+                    ? ` · категорія: ${issue.rankCategory}`
+                    : ""}
+                </span>
+                <em>{issue.reason}</em>
               </div>
             ))}
           </div>

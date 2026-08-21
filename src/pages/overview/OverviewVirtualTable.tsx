@@ -1,12 +1,37 @@
-import { useEffect, useRef } from "react";
-import { Chip, IconButton, Typography } from "@/components/sci/SciPrimitives";
-import { InfoOutlinedIcon } from "@/components/sci/icons";
-import { MoreHorizOutlinedIcon } from "@/components/sci/icons";
-import { PersonOutlinedIcon } from "@/components/sci/icons";
-import { useVirtualizer } from "@tanstack/react-virtual";
+import { useMemo } from "react";
+import { Chip, IconButton } from "@/components/sci/SciPrimitives";
+import { InfoOutlinedIcon, MoreHorizOutlinedIcon, PersonOutlinedIcon } from "@/components/sci/icons";
+import {
+  MaterialReactTable,
+  type MRT_ColumnDef,
+  type SciDataTableExportContext,
+  useMaterialReactTable,
+} from "@/components/sci/SciDataTable";
 import type { BackendPersonnelOverviewRow } from "../../api";
 
-const ROW_HEIGHT = 64;
+export type OverviewPersonDocumentSummary = {
+  count: number;
+  labels: string[];
+};
+
+const overviewDocumentPresence = (
+  row: BackendPersonnelOverviewRow,
+  documentsByExternalId?: Record<string, OverviewPersonDocumentSummary>,
+) => {
+  const count =
+    (row.externalId && documentsByExternalId?.[row.externalId]?.count) || 0;
+  return count > 0 ? "Є" : "Немає";
+};
+
+const overviewDocumentChipLabel = (
+  row: BackendPersonnelOverviewRow,
+  documentsByExternalId?: Record<string, OverviewPersonDocumentSummary>,
+) => {
+  const summary =
+    (row.externalId && documentsByExternalId?.[row.externalId]) || null;
+  if (!summary?.count) return "Немає";
+  return summary.count > 1 ? `Є · ${summary.count}` : "Є";
+};
 
 export const overviewStatusTone = (status: string) => {
   switch (status) {
@@ -35,11 +60,21 @@ export type OverviewPersonTarget = {
 export function OverviewVirtualTable({
   rows,
   photos,
+  questionnaireByExternalId,
+  documentsByExternalId,
   onOpenPersonnel,
+  onExport,
+  emptyMessage = "Немає записів за поточними фільтрами.",
 }: {
   rows: BackendPersonnelOverviewRow[];
   photos: Record<string, string>;
+  questionnaireByExternalId?: Record<string, true>;
+  documentsByExternalId?: Record<string, OverviewPersonDocumentSummary>;
   onOpenPersonnel?: (target: OverviewPersonTarget) => void;
+  onExport?: (
+    context: SciDataTableExportContext<BackendPersonnelOverviewRow>,
+  ) => void | Promise<void>;
+  emptyMessage?: string;
 }) {
   const openPerson = (row: BackendPersonnelOverviewRow) => {
     onOpenPersonnel?.({
@@ -47,105 +82,193 @@ export function OverviewVirtualTable({
       externalId: row.externalId,
     });
   };
-  const parentRef = useRef<HTMLDivElement | null>(null);
-  const rowVirtualizer = useVirtualizer({
-    count: rows.length,
-    getScrollElement: () => parentRef.current,
-    estimateSize: () => ROW_HEIGHT,
-    overscan: 16,
+
+  const columns = useMemo<Array<MRT_ColumnDef<BackendPersonnelOverviewRow>>>(
+    () => [
+      {
+        id: "person",
+        header: "ПІБ",
+        size: 360,
+        pin: "left",
+        accessorFn: (row) => row.name,
+        exportValue: (row) => row.name,
+        Cell: ({ row }) => (
+          <button
+            type="button"
+            className="overview-person-cell"
+            onClick={() => openPerson(row.original)}
+          >
+            <span className="overview-avatar" aria-hidden>
+              {row.original.externalId && photos[row.original.externalId] ? (
+                <img alt="" src={photos[row.original.externalId]} />
+              ) : (
+                <PersonOutlinedIcon fontSize="small" />
+              )}
+            </span>
+            <span>
+              <strong>{row.original.name}</strong>
+            </span>
+          </button>
+        ),
+      },
+      {
+        accessorKey: "unit",
+        header: "Підрозділ",
+        size: 240,
+      },
+      {
+        accessorKey: "rank",
+        header: "Звання",
+        size: 180,
+      },
+      {
+        id: "status",
+        header: "Поточний статус",
+        size: 220,
+        accessorFn: (row) => row.statusLabel,
+        Cell: ({ row }) => (
+          <Chip
+            className={`overview-status-chip tone-${overviewStatusTone(row.original.status)}`}
+            label={row.original.statusLabel}
+            size="small"
+            variant="outlined"
+          />
+        ),
+      },
+      {
+        id: "questionnaire",
+        header: "Анкета",
+        size: 130,
+        accessorFn: (row) =>
+          row.externalId && questionnaireByExternalId?.[row.externalId]
+            ? "Є"
+            : "Немає",
+        Cell: ({ row }) => (
+          <Chip
+            className={`overview-status-chip ${
+              row.original.externalId &&
+              questionnaireByExternalId?.[row.original.externalId]
+                ? "tone-ok"
+                : "tone-other"
+            }`}
+            label={
+              row.original.externalId &&
+              questionnaireByExternalId?.[row.original.externalId]
+                ? "Є"
+                : "Немає"
+            }
+            size="small"
+            variant="outlined"
+          />
+        ),
+      },
+      {
+        id: "documents",
+        header: "Документи",
+        size: 150,
+        accessorFn: (row) =>
+          overviewDocumentPresence(row, documentsByExternalId),
+        exportValue: (row) =>
+          overviewDocumentChipLabel(row, documentsByExternalId),
+        Cell: ({ row }) => {
+          const summary =
+            (row.original.externalId &&
+              documentsByExternalId?.[row.original.externalId]) ||
+            null;
+          const hasDocuments = Boolean(summary?.count);
+          return (
+            <span title={summary?.labels.join(" · ") || "Немає створених документів"}>
+              <Chip
+                className={`overview-status-chip ${
+                  hasDocuments ? "tone-ok" : "tone-other"
+                }`}
+                label={overviewDocumentChipLabel(
+                  row.original,
+                  documentsByExternalId,
+                )}
+                size="small"
+                variant="outlined"
+              />
+            </span>
+          );
+        },
+      },
+      {
+        accessorKey: "fighterDirection",
+        header: "Напрямок",
+        size: 190,
+      },
+      {
+        accessorKey: "fighterExitDate",
+        header: "Дата виходу",
+        size: 150,
+      },
+      {
+        accessorKey: "fighterReturnDate",
+        header: "Дата повернення",
+        size: 160,
+      },
+      {
+        accessorKey: "fighterTotalDays",
+        header: "Днів",
+        size: 110,
+        filterVariant: "number-range",
+      },
+      {
+        accessorKey: "fighterStatus",
+        header: "Статус бійців",
+        size: 150,
+      },
+      {
+        accessorKey: "updatedAt",
+        header: "Оновлено",
+        size: 190,
+      },
+      {
+        id: "actions",
+        header: "",
+        size: 90,
+        pin: "right",
+        enableColumnFilter: false,
+        enableGlobalFilter: false,
+        enableHiding: false,
+        Cell: ({ row }) => (
+          <div className="overview-table-actions">
+            <IconButton
+              size="small"
+              aria-label="Деталі"
+              onClick={() => openPerson(row.original)}
+            >
+              <InfoOutlinedIcon fontSize="small" />
+            </IconButton>
+            <IconButton size="small" aria-label="Меню">
+              <MoreHorizOutlinedIcon fontSize="small" />
+            </IconButton>
+          </div>
+        ),
+      },
+    ],
+    [documentsByExternalId, onOpenPersonnel, photos, questionnaireByExternalId],
+  );
+
+  const table = useMaterialReactTable({
+    columns,
+    data: rows,
+    emptyMessage,
+    exportLabel: "Експорт",
+    globalFilterPlaceholder: "Пошук по особовому складу",
+    getRowId: (row) => row.id,
+    onExport,
+    initialState: {
+      pagination: {
+        pageSize: 1000,
+      },
+      columnPinning: {
+        left: ["person"],
+        right: ["actions"],
+      },
+    },
   });
 
-  useEffect(() => {
-    parentRef.current?.scrollTo({ top: 0 });
-  }, [rows]);
-
-  return (
-    <div className="overview-table-wrap">
-      <div className="overview-table-header" role="row">
-        <span>ПІБ</span>
-        <span>Підрозділ</span>
-        <span>Звання</span>
-        <span>Поточний статус</span>
-        <span>Від</span>
-        <span>Днів</span>
-        <span>Оновлено</span>
-        <span />
-      </div>
-
-      <div className="overview-table-body" ref={parentRef}>
-        {rows.length === 0 ? (
-          <Typography variant="body2" color="text.secondary" sx={{ p: 2 }}>
-            Немає записів за поточними фільтрами.
-          </Typography>
-        ) : (
-          <div
-            className="overview-table-virtual"
-            style={{ height: rowVirtualizer.getTotalSize() }}
-          >
-            {rowVirtualizer.getVirtualItems().map((virtualRow) => {
-              const row = rows[virtualRow.index];
-              if (!row) return null;
-
-              return (
-                <div
-                  className="overview-table-row"
-                  key={row.id}
-                  role="row"
-                  style={{
-                    height: virtualRow.size,
-                    transform: `translateY(${virtualRow.start}px)`,
-                  }}
-                >
-                  <div>
-                    <button
-                      type="button"
-                      className="overview-person-cell"
-                      onClick={() => openPerson(row)}
-                    >
-                      <span className="overview-avatar" aria-hidden>
-                        {row.externalId && photos[row.externalId] ? (
-                          <img alt="" src={photos[row.externalId]} />
-                        ) : (
-                          <PersonOutlinedIcon fontSize="small" />
-                        )}
-                      </span>
-                      <span>
-                        <strong>{row.name}</strong>
-                        <small>{row.externalId || "без ID"}</small>
-                      </span>
-                    </button>
-                  </div>
-                  <div>{row.unit || "—"}</div>
-                  <div>{row.rank || "—"}</div>
-                  <div>
-                    <Chip
-                      className={`overview-status-chip tone-${overviewStatusTone(row.status)}`}
-                      label={row.statusLabel}
-                      size="small"
-                      variant="outlined"
-                    />
-                  </div>
-                  <div>{row.validFrom || "—"}</div>
-                  <div>{row.days ?? "—"}</div>
-                  <div>{row.updatedAt}</div>
-                  <div className="overview-table-actions">
-                    <IconButton
-                      size="small"
-                      aria-label="Деталі"
-                      onClick={() => openPerson(row)}
-                    >
-                      <InfoOutlinedIcon fontSize="small" />
-                    </IconButton>
-                    <IconButton size="small" aria-label="Меню">
-                      <MoreHorizOutlinedIcon fontSize="small" />
-                    </IconButton>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </div>
-    </div>
-  );
+  return <MaterialReactTable table={table} />;
 }

@@ -6,16 +6,21 @@ import {
 } from "../../excelRoundTrip";
 import { normalizeDatasetKey } from "../../shared/format";
 import type { EjournalColumn, EjournalPreviewRow } from "./ejournalTypes";
+import { resolveMorningGeneralListColumnLabel } from "../personnel/personnelUtils";
 
 export const buildImportColumns = (
   sheet: ExcelWorkbookSnapshot | ExcelWorkbookSnapshot["sheets"][number],
 ) =>
   Array.from({ length: sheet.columnCount }, (_, index) => {
     const originalIndex = sheet.columnIndexes[index] ?? index;
-    const label = getColumnHeader(sheet, index);
+    const rawLabel = getColumnHeader(sheet, index).trim();
+    const fallbackKey = `column_${originalIndex + 1}`;
+    const label =
+      rawLabel ||
+      resolveMorningGeneralListColumnLabel(fallbackKey) ||
+      rawLabel;
     const baseKey =
-      normalizeDatasetKey(label || `column_${originalIndex + 1}`) ||
-      `column_${originalIndex + 1}`;
+      normalizeDatasetKey(label || fallbackKey) || fallbackKey;
 
     return {
       key: baseKey,

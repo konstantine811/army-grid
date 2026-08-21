@@ -15,9 +15,13 @@ import type {
   BchsPersonnelAwayPerson,
   BchsSupplementRow,
   BchsSupplementSnapshot,
+  BchsUnitAbsenceCategoryStats,
   BchsUnitAttachedStats,
   BchsUnitAwayStats,
+  BchsUnitCombatComponentStats,
 } from "./bchsTypes";
+
+export const BCHS_PIB_FILL_VALUE_KEY = "__pibFill";
 
 export const columnLetterToIndex = (letter: string) =>
   letter
@@ -98,6 +102,9 @@ export const emptyBchsRow: BchsAnalyticsRow = {
   shortagePercent: 0,
   absent: 0,
   businessTrip: 0,
+  absentOfficers: 0,
+  absentSergeants: 0,
+  absentSoldiers: 0,
   training: 0,
   hospitalWounded: 0,
   hospitalIllness: 0,
@@ -128,14 +135,12 @@ export const BCHS_PERCENT_COLUMNS = new Set(["K", "U", "BA"]);
  * - destinations from AC "В якому підрозділі"
  *
  * Аркуш1 "В розташуванні з інших підрозділів полку":
- * AP=Офіцери, AQ=Сержанти, AR=Солдати, AS=Всього, AT=Звідки прикомандировані
+ * AP=Офіцери, AQ=Сержанти, AR=Солдати, AS=AP+AQ+AR, AT=Звідки прикомандировані
  *
- * Counted from Аркуш2:
- * - B = ПРИКОМАНДИРОВАНІ → Інженерно-саперне відділення
- * - B = БРЕЗ → Відділення радіоелектронної боротьби
- * - U = "В строю" або "Новоприбулий"
- * - rank from I, fallback to M (Звання)
- * - AT sources: for БРЕЗ → "БРЕЗ"; for ПРИКОМ. → A (№), known units kept, rest → "інші"
+ * Лише два рядки Аркуш1 (решта = 0):
+ * - Інженерно-саперне відділення: B=*ПРИКОМАНДИРОВАНІ*, U=в строю|Новоприбулий, звання з M
+ * - Відділення РРЕБ: X=*БРЕЗ*, U=в строю|Новоприбулий, звання з M
+ * Без фільтра A=«нова» (прикомандировані з інших батальйонів).
  */
 
 export const normalizeBchsText = (value: unknown) =>
@@ -145,10 +150,94 @@ export const normalizeBchsText = (value: unknown) =>
     .toLowerCase()
     .replace(/ё/g, "е");
 
-export const BCHS_COMMAND_ROSTER_ALIASES = [
+/**
+ * Для зіставлення звань: українська «і/ї», російська «и» і латинські
+ * lookalike-літери зводяться до кирилиці (інакше COUNTIFS *капитан*
+ * не бачить «капітан» / «капitan»).
+ */
+export const normalizeBchsRankMatchText = (value: unknown) =>
+  normalizeBchsText(value)
+    .replace(/[іїïíìıi]/g, "и")
+    .replace(/[àáâäa]/g, "а")
+    .replace(/[èéêëe]/g, "е")
+    .replace(/[òóôöo]/g, "о")
+    .replace(/[pρ]/g, "р")
+    .replace(/c/g, "с")
+    .replace(/y/g, "у")
+    .replace(/t/g, "т")
+    .replace(/n/g, "н")
+    .replace(/m/g, "м")
+    .replace(/k/g, "к")
+    .replace(/['’`´]/g, "");
+
+/** Exact B values from Excel COUNTIFS for row «Командування» (AK–AN). */
+export const BCHS_EXCEL_COMMAND_ROSTER_UNITS = [
+  "ж",
   "штаб",
   "група безпілотних систем",
 ] as const;
+
+/** Аркуш1 sub-rows → exact B on Аркуш2 (Управління = ж, …). */
+export const BCHS_SUBUNIT_ROSTER_ALIASES: Record<string, readonly string[]> = {
+  управління: ["ж"],
+  штаб: ["штаб"],
+  "група безпілотних систем": ["група безпілотних систем"],
+};
+
+export const BCHS_COMMAND_ROSTER_ALIASES = [
+  ...BCHS_EXCEL_COMMAND_ROSTER_UNITS,
+  "управління",
+  "командування",
+] as const;
+
+/** Перший фільтр у всьому pipeline БЧС: battalion A = «нова». */
+export const filterBchsNovaPeople = <T extends { battalion: string }>(
+  people: T[],
+) =>
+  people.filter((person) => normalizeBchsText(person.battalion) === "нова");
+
+/** Взяти roster з джерел і одразу застосувати фільтр «нова» (перший крок перед розрахунками). */
+export const resolveBchsRosterPeople = (
+  ...sources: Array<BchsPersonnelAwayPerson[] | undefined | null>
+): BchsPersonnelAwayPerson[] => {
+  for (const source of sources) {
+    if (source?.length) return filterBchsNovaPeople(source);
+  }
+  return [];
+};
+
+/** Повний roster без фільтра «нова» — для AP–AT (ПРИКОМАНДИРОВАНІ / БРЕЗ). */
+export const resolveBchsFullRosterPeople = (
+  ...sources: Array<BchsPersonnelAwayPerson[] | undefined | null>
+): BchsPersonnelAwayPerson[] => {
+  const lists = sources.filter(
+    (source): source is BchsPersonnelAwayPerson[] => Boolean(source?.length),
+  );
+  if (!lists.length) return [];
+
+  const base = lists.reduce((best, list) =>
+    list.length > best.length ? list : best,
+  );
+  const withFills =
+    lists.find((list) =>
+      list.some((person) => Boolean(person.pibHighlightRgb)),
+    ) ?? null;
+  if (!withFills || withFills === base) return base;
+
+  const fillByName = new Map<string, string>();
+  withFills.forEach((person) => {
+    const name = normalizeBchsText(person.fullName);
+    if (name && person.pibHighlightRgb && !fillByName.has(name)) {
+      fillByName.set(name, person.pibHighlightRgb);
+    }
+  });
+
+  return base.map((person) => {
+    if (person.pibHighlightRgb) return person;
+    const fill = fillByName.get(normalizeBchsText(person.fullName));
+    return fill ? { ...person, pibHighlightRgb: fill } : person;
+  });
+};
 
 export const BCHS_RANK_OFFICER = "оф.";
 export const BCHS_RANK_SERGEANT = "серж.";
@@ -174,6 +263,10 @@ export const normalizeBchsDestinationLabel = (value: string) => {
     return "Полігон Б";
   if (normalized === "рекрутинг") return "Рекрутинг";
   if (normalized === "рбпак") return "РБпАК";
+  if (normalized === "ппо") return "ППО";
+  if (normalized === "2пб") return "2ПБ";
+  if (normalized === "2ббс") return "2ББС";
+  if (normalized === "бмз") return "БМЗ";
 
   return label;
 };
@@ -222,7 +315,8 @@ export const normalizeBchsRosterUnitLabel = (unitName: string) => {
     normalized === "ж" ||
     normalized === "штаб" ||
     normalized === "управління" ||
-    normalized === "командування"
+    normalized === "командування" ||
+    normalized.includes("група безпілотних систем")
   )
     return "Командування";
   return label;
@@ -232,6 +326,12 @@ export const isBchsDetachedStatus = (status: string) => {
   const normalized = normalizeBchsText(status);
   // Require "за межі" so "в межах ПБ" is not counted.
   return normalized.includes("відком") && normalized.includes("за межі");
+};
+
+/** Excel V:Y «Відсутні» = U contains «Відрядження» (not «Відком. за межі ПБ»). */
+export const isBchsBusinessTripStatus = (status: string) => {
+  const normalized = normalizeBchsText(status);
+  return normalized.includes("відряд") && !isBchsDetachedStatus(status);
 };
 
 export const emptyBchsUnitAwayStats = (): BchsUnitAwayStats => ({
@@ -245,11 +345,21 @@ export const emptyBchsUnitAwayStats = (): BchsUnitAwayStats => ({
 
 export const matchesBchsRosterUnit = (arkush1Unit: string, rosterUnit: string) => {
   const unit = normalizeBchsText(arkush1Unit);
+  const rawRoster = normalizeBchsText(rosterUnit);
+  if (!unit || !rawRoster) return false;
+
+  const subunitAliases = BCHS_SUBUNIT_ROSTER_ALIASES[unit];
+  if (subunitAliases) {
+    return subunitAliases.some((alias) => rawRoster === normalizeBchsText(alias));
+  }
+
   const roster = normalizeBchsText(normalizeBchsRosterUnitLabel(rosterUnit));
-  if (!unit || !roster) return false;
 
   if (isBchsCommandUnit(unit)) {
-    return BCHS_COMMAND_ROSTER_ALIASES.some((alias) => roster === alias);
+    // Excel COUNTIFS: exact match on column B (ж / штаб / група БС).
+    return BCHS_EXCEL_COMMAND_ROSTER_UNITS.some(
+      (alias) => rawRoster === normalizeBchsText(alias),
+    );
   }
 
   if (roster === unit) return true;
@@ -273,10 +383,8 @@ export const matchesBchsRosterUnit = (arkush1Unit: string, rosterUnit: string) =
 };
 
 export const logBchsDetachedPeopleDebug = (people: BchsPersonnelAwayPerson[]) => {
-  const detached = people.filter(
-    (person) =>
-      normalizeBchsText(person.battalion) === "нова" &&
-      isBchsDetachedStatus(person.status),
+  const detached = filterBchsNovaPeople(people).filter((person) =>
+    isBchsDetachedStatus(person.status),
   );
 
   const byUnit = new Map<
@@ -342,9 +450,9 @@ export const computeBchsUnitAwayStats = (
   if (isBchsTotalUnit(unitName)) return emptyBchsUnitAwayStats();
 
   const stats = emptyBchsUnitAwayStats();
+  const novaPeople = filterBchsNovaPeople(people);
 
-  people.forEach((person) => {
-    if (normalizeBchsText(person.battalion) !== "нова") return;
+  novaPeople.forEach((person) => {
     if (!isBchsDetachedStatus(person.status)) return;
     if (!matchesBchsRosterUnit(unitName, person.rosterUnit)) return;
 
@@ -367,6 +475,335 @@ export const computeBchsUnitAwayStats = (
   return stats;
 };
 
+export type BchsUnitRankBucketStats = {
+  officers: number;
+  sergeants: number;
+  soldiers: number;
+  total: number;
+};
+
+export type BchsUnitRankListedAvailableStats = {
+  /** Excel G/H/I — COUNTIFS(I, B, M<>). */
+  listed: BchsUnitRankBucketStats;
+  /** Excel L/M/N — «в строю» + «Відком. за межі ПБ». */
+  available: BchsUnitRankBucketStats;
+  /** Excel V/W/X — listed − available. */
+  absent: BchsUnitRankBucketStats;
+};
+
+const emptyBchsUnitRankBucketStats = (): BchsUnitRankBucketStats => ({
+  officers: 0,
+  sergeants: 0,
+  soldiers: 0,
+  total: 0,
+});
+
+/** Excel «за списком» / V:Y: M (звання) заповнене. */
+export const isBchsListedWithRankTitle = (person: BchsPersonnelAwayPerson) =>
+  Boolean(person.rankTitle.trim());
+
+/** Excel subtract part for V/W/X: «в строю» + «Відком. за межі ПБ». */
+export const isBchsAvailableForAbsentFormula = (status: string) => {
+  const normalized = normalizeBchsText(status);
+  return normalized.includes("в строю") || isBchsDetachedStatus(status);
+};
+
+const classifyBchsRankCategory = (
+  rankCategory: string,
+): "officers" | "sergeants" | "soldiers" | null => {
+  const rank = normalizeBchsText(rankCategory);
+  if (rank === BCHS_RANK_OFFICER) return "officers";
+  if (rank === BCHS_RANK_SERGEANT) return "sergeants";
+  if (rank === BCHS_RANK_SOLDIER || rank.includes("солд")) return "soldiers";
+  return null;
+};
+
+const finalizeBchsUnitRankBucketStats = (
+  stats: Omit<BchsUnitRankBucketStats, "total">,
+): BchsUnitRankBucketStats => ({
+  ...stats,
+  total: stats.officers + stats.sergeants + stats.soldiers,
+});
+
+/** Excel G–I / L–N / V–X / O (= SUM L:N), AJ (= O). */
+export const computeBchsUnitRankListedAvailableStats = (
+  people: BchsPersonnelAwayPerson[],
+  unitName: string,
+): BchsUnitRankListedAvailableStats => {
+  if (isBchsTotalUnit(unitName)) {
+    const empty = emptyBchsUnitRankBucketStats();
+    return { listed: empty, available: empty, absent: empty };
+  }
+
+  const listed = { officers: 0, sergeants: 0, soldiers: 0 };
+  const available = { officers: 0, sergeants: 0, soldiers: 0 };
+
+  filterBchsNovaPeople(people).forEach((person) => {
+    if (!isBchsListedWithRankTitle(person)) return;
+    if (!matchesBchsRosterUnit(unitName, person.rosterUnit)) return;
+
+    const bucket = classifyBchsRankCategory(person.rankCategory);
+    if (!bucket) return;
+
+    listed[bucket] += 1;
+    if (isBchsAvailableForAbsentFormula(person.status)) {
+      available[bucket] += 1;
+    }
+  });
+
+  const listedStats = finalizeBchsUnitRankBucketStats(listed);
+  const availableStats = finalizeBchsUnitRankBucketStats(available);
+
+  return {
+    listed: listedStats,
+    available: availableStats,
+    absent: finalizeBchsUnitRankBucketStats({
+      officers: Math.max(0, listed.officers - available.officers),
+      sergeants: Math.max(0, listed.sergeants - available.sergeants),
+      soldiers: Math.max(0, listed.soldiers - available.soldiers),
+    }),
+  };
+};
+
+/** Excel V/W/X: COUNTIFS(I,M<>)-COUNTIFS(в строю+відком), A=нова. */
+export const computeBchsUnitAbsentRankStats = (
+  people: BchsPersonnelAwayPerson[],
+  unitName: string,
+): BchsUnitRankBucketStats =>
+  computeBchsUnitRankListedAvailableStats(people, unitName).absent;
+
+export const applyBchsRankListedAvailableToComparisonRow = (
+  row: BchsComparisonRow,
+  stats: BchsUnitRankListedAvailableStats,
+): BchsComparisonRow =>
+  createBchsComparisonRow({
+    ...row,
+    listedOfficers: stats.listed.officers,
+    listedSergeants: stats.listed.sergeants,
+    listedSoldiers: stats.listed.soldiers,
+    listed: stats.listed.total,
+    availableOfficers: stats.available.officers,
+    availableSergeants: stats.available.sergeants,
+    availableSoldiers: stats.available.soldiers,
+    available: stats.available.total,
+    absentOfficers: stats.absent.officers,
+    absentSergeants: stats.absent.sergeants,
+    absentSoldiers: stats.absent.soldiers,
+    absent: stats.absent.total,
+  });
+
+export const sumBchsComparisonRankListedAvailable = (
+  rows: BchsComparisonRow[],
+): BchsUnitRankListedAvailableStats => {
+  const listed = finalizeBchsUnitRankBucketStats({
+    officers: rows.reduce((sum, row) => sum + row.listedOfficers, 0),
+    sergeants: rows.reduce((sum, row) => sum + row.listedSergeants, 0),
+    soldiers: rows.reduce((sum, row) => sum + row.listedSoldiers, 0),
+  });
+  const available = finalizeBchsUnitRankBucketStats({
+    officers: rows.reduce((sum, row) => sum + row.availableOfficers, 0),
+    sergeants: rows.reduce((sum, row) => sum + row.availableSergeants, 0),
+    soldiers: rows.reduce((sum, row) => sum + row.availableSoldiers, 0),
+  });
+  const absent = finalizeBchsUnitRankBucketStats({
+    officers: rows.reduce((sum, row) => sum + row.absentOfficers, 0),
+    sergeants: rows.reduce((sum, row) => sum + row.absentSergeants, 0),
+    soldiers: rows.reduce((sum, row) => sum + row.absentSoldiers, 0),
+  });
+
+  return { listed, available, absent };
+};
+
+/** Excel Z: COUNTIFS(U;"*Відрядження*",B,M<>), A=нова — без розбивки по I. */
+export const computeBchsUnitBusinessTripCount = (
+  people: BchsPersonnelAwayPerson[],
+  unitName: string,
+): number => {
+  if (isBchsTotalUnit(unitName)) return 0;
+
+  let count = 0;
+  filterBchsNovaPeople(people).forEach((person) => {
+    if (!isBchsListedWithRankTitle(person)) return;
+    if (!matchesBchsRosterUnit(unitName, person.rosterUnit)) return;
+    if (!isBchsBusinessTripStatus(person.status)) return;
+    count += 1;
+  });
+
+  return count;
+};
+
+export const emptyBchsUnitAbsenceCategoryStats =
+  (): BchsUnitAbsenceCategoryStats => ({
+    training: 0,
+    hospitalWounded: 0,
+    hospitalIllness: 0,
+    vacation: 0,
+    awol: 0,
+    missing: 0,
+    killed: 0,
+    medWounded: 0,
+    medIllness: 0,
+  });
+
+/** Excel U: «*Лікування*». */
+export const isBchsTreatmentStatus = (status: string) =>
+  normalizeBchsText(status).includes("лікування");
+
+/** Excel AA: «*Від-ні навчання*». */
+export const isBchsTrainingStatus = (status: string) => {
+  const normalized = normalizeBchsText(status);
+  return normalized.includes("від") && normalized.includes("навч");
+};
+
+/** Excel AD: «*Відпустка*» (колонка U). */
+export const isBchsVacationStatus = (status: string) =>
+  normalizeBchsText(status).includes("відпуст");
+
+/** Excel AE: «*СЗЧ*» + «*Не в сторою*». */
+export const isBchsAwolStatus = (status: string) => {
+  const normalized = normalizeBchsText(status);
+  return normalized.includes("сзч") || normalized.includes("не в сторою");
+};
+
+export const isBchsMissingStatus = (status: string) =>
+  normalizeBchsText(status).includes("зникл");
+
+export const isBchsKilledStatus = (status: string) =>
+  normalizeBchsText(status).includes("загиб");
+
+/** Excel AF/T: «*по пораненню*». */
+export const isBchsWoundedByExcelNote = (note: string) =>
+  normalizeBchsText(note).includes("по пораненню");
+
+const isBchsExcelHospitalPlace = (medicalPlace: string) =>
+  normalizeBchsText(medicalPlace).includes("шпитал");
+
+const isBchsExcelMedicalLeavePlace = (medicalPlace: string) => {
+  const normalized = normalizeBchsText(medicalPlace);
+  return (
+    normalized.includes("відпустка лікув") ||
+    (normalized.includes("відпуст") && normalized.includes("лікув"))
+  );
+};
+
+const isBchsExcelMedRotaPlace = (medicalPlace: string) => {
+  const normalized = normalizeBchsText(medicalPlace);
+  return normalized.includes("мед") && normalized.includes("рота");
+};
+
+const getBchsWoundedNoteForUnit = (
+  person: BchsPersonnelAwayPerson,
+  unitName: string,
+) =>
+  isBchsCommandUnit(unitName) ? person.treatmentNote : person.medicalNote;
+
+const countBchsUnitListedPeople = (
+  people: BchsPersonnelAwayPerson[],
+  unitName: string,
+  matches: (person: BchsPersonnelAwayPerson) => boolean,
+): number => {
+  if (isBchsTotalUnit(unitName)) return 0;
+
+  let count = 0;
+  filterBchsNovaPeople(people).forEach((person) => {
+    if (!isBchsListedWithRankTitle(person)) return;
+    if (!matchesBchsRosterUnit(unitName, person.rosterUnit)) return;
+    if (matches(person)) count += 1;
+  });
+  return count;
+};
+
+/** Excel AA–AI: COUNTIFS по U/AE/AF (+ AC/AI = total − wounded). */
+export const computeBchsUnitAbsenceCategoryStats = (
+  people: BchsPersonnelAwayPerson[],
+  unitName: string,
+): BchsUnitAbsenceCategoryStats => {
+  if (isBchsTotalUnit(unitName)) return emptyBchsUnitAbsenceCategoryStats();
+
+  const isTreatmentPerson = (person: BchsPersonnelAwayPerson) =>
+    isBchsTreatmentStatus(person.status);
+
+  const isWoundedPerson = (person: BchsPersonnelAwayPerson) =>
+    isBchsWoundedByExcelNote(getBchsWoundedNoteForUnit(person, unitName));
+
+  const hospitalWounded =
+    countBchsUnitListedPeople(
+      people,
+      unitName,
+      (person) =>
+        isTreatmentPerson(person) &&
+        isBchsExcelHospitalPlace(person.medicalPlace) &&
+        isWoundedPerson(person),
+    ) +
+    countBchsUnitListedPeople(
+      people,
+      unitName,
+      (person) =>
+        isTreatmentPerson(person) &&
+        isBchsExcelMedicalLeavePlace(person.medicalPlace) &&
+        isWoundedPerson(person),
+    );
+
+  const hospitalTotal =
+    countBchsUnitListedPeople(
+      people,
+      unitName,
+      (person) =>
+        isTreatmentPerson(person) &&
+        isBchsExcelHospitalPlace(person.medicalPlace),
+    ) +
+    countBchsUnitListedPeople(
+      people,
+      unitName,
+      (person) =>
+        isTreatmentPerson(person) &&
+        isBchsExcelMedicalLeavePlace(person.medicalPlace),
+    );
+
+  const medWounded = countBchsUnitListedPeople(
+    people,
+    unitName,
+    (person) =>
+      isTreatmentPerson(person) &&
+      isBchsExcelMedRotaPlace(person.medicalPlace) &&
+      isWoundedPerson(person),
+  );
+
+  const medTotal = countBchsUnitListedPeople(
+    people,
+    unitName,
+    (person) =>
+      isTreatmentPerson(person) &&
+      isBchsExcelMedRotaPlace(person.medicalPlace),
+  );
+
+  return {
+    training: countBchsUnitListedPeople(people, unitName, (person) =>
+      isBchsTrainingStatus(person.status),
+    ),
+    hospitalWounded,
+    hospitalIllness: Math.max(0, hospitalTotal - hospitalWounded),
+    vacation: countBchsUnitListedPeople(people, unitName, (person) =>
+      isBchsVacationStatus(person.status),
+    ),
+    awol:
+      countBchsUnitListedPeople(people, unitName, (person) =>
+        normalizeBchsText(person.status).includes("сзч"),
+      ) +
+      countBchsUnitListedPeople(people, unitName, (person) =>
+        normalizeBchsText(person.status).includes("не в сторою"),
+      ),
+    missing: countBchsUnitListedPeople(people, unitName, (person) =>
+      isBchsMissingStatus(person.status),
+    ),
+    killed: countBchsUnitListedPeople(people, unitName, (person) =>
+      isBchsKilledStatus(person.status),
+    ),
+    medWounded,
+    medIllness: Math.max(0, medTotal - medWounded),
+  };
+};
+
 export const extractBchsAwayPeopleFromSheet = (
   sheet: ExcelWorkbookSnapshot["sheets"][number] | undefined,
 ): BchsPersonnelAwayPerson[] => {
@@ -381,6 +818,8 @@ export const extractBchsAwayPeopleFromSheet = (
 
   const battalionCol = columnIndex(0);
   const rosterCol = columnIndex(1);
+  const positionCol = columnIndex(4);
+  const shpkFactCol = columnIndex(7);
   const rankCol = columnIndex(8);
   const rankTitleCol = columnIndex(12);
   const fullNameCol = columnIndex(13);
@@ -388,15 +827,29 @@ export const extractBchsAwayPeopleFromSheet = (
   const roleTypeCol = columnIndex(21);
   const combatReadinessCol = columnIndex(22);
   const bzvpStatusCol = columnIndex(23);
+  const mobilizationCol = columnIndex(11);
+  const treatmentNoteCol = columnIndex(19);
   const destinationCol = columnIndex(28);
   const medicalPlaceCol = columnIndex(30);
   const medicalNoteCol = columnIndex(31);
 
-  return sheet.rawRows
-    .slice(1)
-    .map((row) => ({
+  const sourceRows =
+    sheet.rows.length > 0
+      ? sheet.rows.map((row) => ({
+          values: row.values,
+          excelRowNumber: row.excelRowNumber,
+        }))
+      : sheet.rawRows.slice(1).map((values, index) => ({
+          values,
+          excelRowNumber: index + 2,
+        }));
+
+  return sourceRows
+    .map(({ values: row, excelRowNumber }) => ({
       battalion: valueToDisplay(row[battalionCol] as CellValue),
       rosterUnit: valueToDisplay(row[rosterCol] as CellValue),
+      position: valueToDisplay(row[positionCol] as CellValue),
+      shpkFact: valueToDisplay(row[shpkFactCol] as CellValue),
       rankCategory: valueToDisplay(row[rankCol] as CellValue),
       rankTitle: valueToDisplay(row[rankTitleCol] as CellValue),
       fullName: valueToDisplay(row[fullNameCol] as CellValue),
@@ -404,13 +857,17 @@ export const extractBchsAwayPeopleFromSheet = (
       roleType: valueToDisplay(row[roleTypeCol] as CellValue),
       combatReadiness: valueToDisplay(row[combatReadinessCol] as CellValue),
       bzvpStatus: valueToDisplay(row[bzvpStatusCol] as CellValue),
+      treatmentNote: valueToDisplay(row[treatmentNoteCol] as CellValue),
+      mobilizationContract: valueToDisplay(row[mobilizationCol] as CellValue),
       destination: valueToDisplay(row[destinationCol] as CellValue),
       medicalPlace: valueToDisplay(row[medicalPlaceCol] as CellValue),
       medicalNote: valueToDisplay(row[medicalNoteCol] as CellValue),
+      pibHighlightRgb: sheet.pibFillByExcelRow?.[excelRowNumber] ?? null,
     }))
     .filter(
       (person) =>
         person.rosterUnit ||
+        person.position ||
         person.status ||
         person.rankCategory ||
         person.rankTitle ||
@@ -419,55 +876,218 @@ export const extractBchsAwayPeopleFromSheet = (
         person.combatReadiness ||
         person.bzvpStatus ||
         person.destination ||
+        person.treatmentNote ||
         person.medicalPlace ||
         person.medicalNote,
     );
 };
 
+type BchsDbColumnMeta = {
+  key: string;
+  letter?: string;
+  originalIndex?: number;
+};
+
+const pickBchsDbCellValue = (
+  row: Record<string, unknown>,
+  candidates: Array<string | undefined>,
+) => {
+  const wanted = candidates
+    .filter((key): key is string => Boolean(key && key.trim()))
+    .map((key) => key.trim());
+
+  for (const key of wanted) {
+    if (Object.prototype.hasOwnProperty.call(row, key)) {
+      return valueToDisplay(row[key] as CellValue);
+    }
+  }
+
+  const lowerToActual = new Map(
+    Object.keys(row).map((key) => [key.toLowerCase(), key] as const),
+  );
+  for (const key of wanted) {
+    const actual = lowerToActual.get(key.toLowerCase());
+    if (!actual) continue;
+    return valueToDisplay(row[actual] as CellValue);
+  }
+
+  return "";
+};
+
+const resolveBchsDbColumnKeyByLetter = (
+  columns: BchsDbColumnMeta[] | undefined,
+  letter: string,
+) => {
+  if (!columns?.length) return undefined;
+  const target = letter.trim().toUpperCase();
+  const byLetter = columns.find(
+    (column) => column.letter?.trim().toUpperCase() === target,
+  );
+  if (byLetter?.key) return byLetter.key;
+
+  const byIndex = columns.find(
+    (column) =>
+      typeof column.originalIndex === "number" &&
+      getColumnLabel(column.originalIndex).toUpperCase() === target,
+  );
+  return byIndex?.key;
+};
+
+/** Map DB row values (header keys and/or Excel letters) back to roster people. */
 export const extractBchsAwayPeopleFromDbRows = (
   rows: Array<Record<string, unknown>>,
-): BchsPersonnelAwayPerson[] =>
-  rows.map((row) => ({
-    battalion: valueToDisplay(
-      (row.column_1 ?? row["№"] ?? row.battalion ?? "") as CellValue,
-    ),
-    rosterUnit: valueToDisplay(
-      (row.підрозділ ?? row.rosterUnit ?? row.B ?? "") as CellValue,
-    ),
-    rankCategory: valueToDisplay(
-      (row.column_9 ?? row.rankCategory ?? row.I ?? "") as CellValue,
-    ),
-    rankTitle: valueToDisplay(
-      (row.звання ?? row.rankTitle ?? row.M ?? "") as CellValue,
-    ),
-    fullName: valueToDisplay(
-      (row.піб ?? row.fullName ?? row.N ?? "") as CellValue,
-    ),
-    status: valueToDisplay(
-      (row.статус ?? row.status ?? row.U ?? "") as CellValue,
-    ),
-    roleType: valueToDisplay(
-      (row.тип_в_с ?? row.roleType ?? row.V ?? "") as CellValue,
-    ),
-    combatReadiness: valueToDisplay(
-      (row.статус_бг ?? row.combatReadiness ?? row.W ?? "") as CellValue,
-    ),
-    bzvpStatus: valueToDisplay(
-      (row.бзвп_брез ?? row.bzvpStatus ?? row.X ?? "") as CellValue,
-    ),
-    destination: valueToDisplay(
-      (row.в_якому_підрозділі ??
-        row.externalUnit ??
-        row.AC ??
-        "") as CellValue,
-    ),
-    medicalPlace: valueToDisplay(
-      (row.місце_перебування ?? row.medicalPlace ?? row.AE ?? "") as CellValue,
-    ),
-    medicalNote: valueToDisplay(
-      (row.примітки ?? row.medicalNote ?? row.AF ?? "") as CellValue,
-    ),
+  columns?: BchsDbColumnMeta[],
+): BchsPersonnelAwayPerson[] => {
+  const keyA = resolveBchsDbColumnKeyByLetter(columns, "A");
+  const keyB = resolveBchsDbColumnKeyByLetter(columns, "B");
+  const keyE = resolveBchsDbColumnKeyByLetter(columns, "E");
+  const keyH = resolveBchsDbColumnKeyByLetter(columns, "H");
+  const keyI = resolveBchsDbColumnKeyByLetter(columns, "I");
+  const keyM = resolveBchsDbColumnKeyByLetter(columns, "M");
+  const keyN = resolveBchsDbColumnKeyByLetter(columns, "N");
+  const keyL = resolveBchsDbColumnKeyByLetter(columns, "L");
+  const keyU = resolveBchsDbColumnKeyByLetter(columns, "U");
+  const keyV = resolveBchsDbColumnKeyByLetter(columns, "V");
+  const keyW = resolveBchsDbColumnKeyByLetter(columns, "W");
+  const keyX = resolveBchsDbColumnKeyByLetter(columns, "X");
+  const keyT = resolveBchsDbColumnKeyByLetter(columns, "T");
+  const keyAC = resolveBchsDbColumnKeyByLetter(columns, "AC");
+  const keyAE = resolveBchsDbColumnKeyByLetter(columns, "AE");
+  const keyAF = resolveBchsDbColumnKeyByLetter(columns, "AF");
+
+  return rows.map((row) => ({
+    // A: батальйон (нова) — без цього після F5 усі COUNTIFS по nova = 0.
+    battalion: pickBchsDbCellValue(row, [
+      keyA,
+      "A",
+      "батальйон",
+      "battalion",
+      "column_1",
+      "№",
+    ]),
+    rosterUnit: pickBchsDbCellValue(row, [
+      keyB,
+      "B",
+      "підрозділ",
+      "rosterUnit",
+      "column_2",
+    ]),
+    position: pickBchsDbCellValue(row, [
+      keyE,
+      "E",
+      "посада",
+      "position",
+      "column_5",
+    ]),
+    shpkFact: pickBchsDbCellValue(row, [
+      keyH,
+      "H",
+      "шпк",
+      "shpkFact",
+      "column_8",
+    ]),
+    rankCategory: pickBchsDbCellValue(row, [
+      keyI,
+      "I",
+      "категорія",
+      "rankCategory",
+      "column_9",
+    ]),
+    rankTitle: pickBchsDbCellValue(row, [
+      keyM,
+      "M",
+      "звання",
+      "rankTitle",
+      "column_13",
+    ]),
+    fullName: pickBchsDbCellValue(row, [
+      keyN,
+      "N",
+      "піб",
+      "fullName",
+      "column_14",
+    ]),
+    status: pickBchsDbCellValue(row, [
+      keyU,
+      "U",
+      "статус",
+      "status",
+      "column_21",
+    ]),
+    roleType: pickBchsDbCellValue(row, [
+      keyV,
+      "V",
+      "тип_в_с",
+      "roleType",
+      "column_22",
+    ]),
+    combatReadiness: pickBchsDbCellValue(row, [
+      keyW,
+      "W",
+      "статус_бг",
+      "combatReadiness",
+      "column_23",
+    ]),
+    bzvpStatus: pickBchsDbCellValue(row, [
+      keyX,
+      "X",
+      "бзвп_брез",
+      "bzvpStatus",
+      "column_24",
+    ]),
+    treatmentNote: pickBchsDbCellValue(row, [
+      keyT,
+      "T",
+      "примітки_лікування",
+      "treatmentNote",
+      "column_20",
+    ]),
+    mobilizationContract: pickBchsDbCellValue(row, [
+      keyL,
+      "L",
+      "мобілізація",
+      "mobilizationContract",
+      "column_12",
+    ]),
+    destination: pickBchsDbCellValue(row, [
+      keyAC,
+      "AC",
+      "в_якому_підрозділі",
+      "externalUnit",
+      "column_29",
+    ]),
+    medicalPlace: pickBchsDbCellValue(row, [
+      keyAE,
+      "AE",
+      "місце_перебування",
+      "medicalPlace",
+      "column_31",
+    ]),
+    medicalNote: pickBchsDbCellValue(row, [
+      keyAF,
+      "AF",
+      "примітки",
+      "medicalNote",
+      "column_32",
+    ]),
+    pibHighlightRgb:
+      pickBchsDbCellValue(row, [
+        BCHS_PIB_FILL_VALUE_KEY,
+        "pibHighlightRgb",
+        "__pibFill",
+      ]) || null,
   }));
+};
+
+/** Extract + перший фільтр «нова» — стандартний вхід для analytics/export. */
+export const extractBchsNovaPeopleFromSheet = (
+  sheet: ExcelWorkbookSnapshot["sheets"][number] | undefined,
+) => filterBchsNovaPeople(extractBchsAwayPeopleFromSheet(sheet));
+
+export const extractBchsNovaPeopleFromDbRows = (
+  rows: Array<Record<string, unknown>>,
+  columns?: BchsDbColumnMeta[],
+) => filterBchsNovaPeople(extractBchsAwayPeopleFromDbRows(rows, columns));
 
 export const applyBchsAwayFromPersonnel = (
   analytics: BchsAnalyticsSnapshot,
@@ -546,6 +1166,11 @@ export const applyBchsAwayFromPersonnel = (
                 match.awaySergeants +
                 match.awaySoldiers,
               AO: match.awayDestinationsText,
+              AJ: match.available,
+              AW: match.actualOfficers,
+              AX: match.actualSergeants,
+              AY: match.actualSoldiers,
+              AZ: match.inRanksActually,
             },
           };
         }),
@@ -567,6 +1192,194 @@ export const applyBchsAwayFromPersonnel = (
   };
 };
 
+export const applyBchsAbsentFromPersonnel = (
+  analytics: BchsAnalyticsSnapshot,
+  people: BchsPersonnelAwayPerson[],
+): BchsAnalyticsSnapshot => {
+  if (people.length === 0) return analytics;
+
+  const unitRows = analytics.comparisonRows.map((row) => {
+    if (row.rowNumber <= 11 || isBchsTotalUnit(row.unit)) return row;
+
+    const rankStats = computeBchsUnitRankListedAvailableStats(people, row.unit);
+    const businessTrip = computeBchsUnitBusinessTripCount(people, row.unit);
+    return applyBchsRankListedAvailableToComparisonRow(
+      createBchsComparisonRow({
+        ...row,
+        businessTrip,
+      }),
+      rankStats,
+    );
+  });
+
+  const detailRows = unitRows.filter(
+    (row) => row.rowNumber > 11 && !isBchsTotalUnit(row.unit),
+  );
+  const totalRankStats = sumBchsComparisonRankListedAvailable(detailRows);
+  const totalBusinessTrip = detailRows.reduce(
+    (sum, row) => sum + row.businessTrip,
+    0,
+  );
+
+  const comparisonRows = unitRows.map((row) => {
+    if (row.rowNumber !== 11 && !isBchsTotalUnit(row.unit)) return row;
+
+    return applyBchsRankListedAvailableToComparisonRow(
+      createBchsComparisonRow({
+        ...row,
+        businessTrip: totalBusinessTrip,
+      }),
+      totalRankStats,
+    );
+  });
+
+  const table = analytics.table
+    ? {
+        columns: analytics.table.columns,
+        rows: analytics.table.rows.map((tableRow) => {
+          const match =
+            comparisonRows.find((row) => row.rowNumber === tableRow.rowNumber) ??
+            null;
+          if (!match) return tableRow;
+
+          return {
+            ...tableRow,
+            values: {
+              ...tableRow.values,
+              G: match.listedOfficers,
+              H: match.listedSergeants,
+              I: match.listedSoldiers,
+              J: match.listed,
+              L: match.availableOfficers,
+              M: match.availableSergeants,
+              N: match.availableSoldiers,
+              O: match.available,
+              V: match.absentOfficers,
+              W: match.absentSergeants,
+              X: match.absentSoldiers,
+              Y: match.absent,
+              Z: match.businessTrip,
+              AJ: match.available,
+            },
+          };
+        }),
+      }
+    : undefined;
+
+  const total =
+    comparisonRows.find((row) => row.rowNumber === 11) ??
+    comparisonRows[0] ??
+    analytics.total;
+
+  return {
+    ...analytics,
+    total,
+    rows: comparisonRows,
+    comparisonRows,
+    table,
+  };
+};
+
+const mergeBchsAbsenceCategoryStats = (
+  row: BchsComparisonRow,
+  stats: BchsUnitAbsenceCategoryStats,
+): BchsComparisonRow =>
+  createBchsComparisonRow({
+    ...row,
+    training: stats.training,
+    hospitalWounded: stats.hospitalWounded,
+    hospitalIllness: stats.hospitalIllness,
+    vacation: stats.vacation,
+    awol: stats.awol,
+    missing: stats.missing,
+    killed: stats.killed,
+    medWounded: stats.medWounded,
+    medIllness: stats.medIllness,
+  });
+
+const sumBchsAbsenceCategoryStats = (
+  rows: BchsComparisonRow[],
+): BchsUnitAbsenceCategoryStats =>
+  rows.reduce(
+    (total, row) => ({
+      training: total.training + row.training,
+      hospitalWounded: total.hospitalWounded + row.hospitalWounded,
+      hospitalIllness: total.hospitalIllness + row.hospitalIllness,
+      vacation: total.vacation + row.vacation,
+      awol: total.awol + row.awol,
+      missing: total.missing + row.missing,
+      killed: total.killed + row.killed,
+      medWounded: total.medWounded + row.medWounded,
+      medIllness: total.medIllness + row.medIllness,
+    }),
+    emptyBchsUnitAbsenceCategoryStats(),
+  );
+
+/** Excel AA–AI з roster (як COUNTIFS на Аркуш2). */
+export const applyBchsAbsenceCategoriesFromPersonnel = (
+  analytics: BchsAnalyticsSnapshot,
+  people: BchsPersonnelAwayPerson[],
+): BchsAnalyticsSnapshot => {
+  if (people.length === 0) return analytics;
+
+  const unitRows = analytics.comparisonRows.map((row) => {
+    if (row.rowNumber <= 11 || isBchsTotalUnit(row.unit)) return row;
+    const stats = computeBchsUnitAbsenceCategoryStats(people, row.unit);
+    return mergeBchsAbsenceCategoryStats(row, stats);
+  });
+
+  const detailRows = unitRows.filter(
+    (row) => row.rowNumber > 11 && !isBchsTotalUnit(row.unit),
+  );
+  const totalStats = sumBchsAbsenceCategoryStats(detailRows);
+
+  const comparisonRows = unitRows.map((row) => {
+    if (row.rowNumber !== 11 && !isBchsTotalUnit(row.unit)) return row;
+    return mergeBchsAbsenceCategoryStats(row, totalStats);
+  });
+
+  const table = analytics.table
+    ? {
+        columns: analytics.table.columns,
+        rows: analytics.table.rows.map((tableRow) => {
+          const match =
+            comparisonRows.find((row) => row.rowNumber === tableRow.rowNumber) ??
+            null;
+          if (!match) return tableRow;
+
+          return {
+            ...tableRow,
+            values: {
+              ...tableRow.values,
+              AA: match.training,
+              AB: match.hospitalWounded,
+              AC: match.hospitalIllness,
+              AD: match.vacation,
+              AE: match.awol,
+              AF: match.missing,
+              AG: match.killed,
+              AH: match.medWounded,
+              AI: match.medIllness,
+            },
+          };
+        }),
+      }
+    : undefined;
+
+  const total =
+    comparisonRows.find((row) => row.rowNumber === 11) ??
+    comparisonRows[0] ??
+    analytics.total;
+
+  return {
+    ...analytics,
+    total,
+    rows: comparisonRows,
+    comparisonRows,
+    table,
+  };
+};
+
 export const emptyBchsUnitAttachedStats = (): BchsUnitAttachedStats => ({
   officers: 0,
   sergeants: 0,
@@ -578,14 +1391,51 @@ export const emptyBchsUnitAttachedStats = (): BchsUnitAttachedStats => ({
 
 export const isBchsAttachedPresentStatus = (status: string) => {
   const normalized = normalizeBchsText(status);
-  return normalized === "в строю" || normalized.includes("новоприбулий");
+  // Excel AR24: U = *в строю* або *Новоприбулий* (окремі COUNTIFS, одна людина — один раз).
+  return normalized.includes("в строю") || normalized.includes("новоприбулий");
+};
+
+/** Excel COUNTIFS wildcard: *текст* → includes після normalize. */
+export const matchesBchsExcelWildcard = (value: string, pattern: string) => {
+  const normalized = normalizeBchsText(value);
+  const core = normalizeBchsText(pattern.replace(/^\*+|\*+$/g, ""));
+  return Boolean(core) && normalized.includes(core);
+};
+
+/** Як Excel COUNTIFS по званню, але з нормалізацією і/и/i (капітан ≈ капитан). */
+export const matchesBchsRankWildcard = (value: string, pattern: string) => {
+  const normalized = normalizeBchsRankMatchText(value);
+  const core = normalizeBchsRankMatchText(pattern.replace(/^\*+|\*+$/g, ""));
+  return Boolean(core) && normalized.includes(core);
 };
 
 export const isBchsPrikomaniRoster = (rosterUnit: string) =>
-  normalizeBchsText(rosterUnit).includes("приком");
+  matchesBchsExcelWildcard(rosterUnit, "*ПРИКОМАНДИРОВАНІ*");
+
+/** Excel AP24: M = *майор*|*капитан*|*лейтенант* (+ укр. «капітан»). */
+export const isBchsAttachedOfficerRankTitle = (rankTitle: string) =>
+  matchesBchsRankWildcard(rankTitle, "*майор*") ||
+  matchesBchsRankWildcard(rankTitle, "*капитан*") ||
+  matchesBchsRankWildcard(rankTitle, "*капітан*") ||
+  matchesBchsRankWildcard(rankTitle, "*лейтенант*");
+
+/** Excel AQ24: M = *сержант*|*старшина*. */
+export const isBchsAttachedSergeantRankTitle = (rankTitle: string) =>
+  matchesBchsRankWildcard(rankTitle, "*сержант*") ||
+  matchesBchsRankWildcard(rankTitle, "*старшина*");
+
+/** Excel AR24: M = *солдат*|*матрос*|*рядовий*. */
+export const isBchsAttachedSoldierRankTitle = (rankTitle: string) =>
+  matchesBchsRankWildcard(rankTitle, "*солдат*") ||
+  matchesBchsRankWildcard(rankTitle, "*матрос*") ||
+  matchesBchsRankWildcard(rankTitle, "*рядовий*");
 
 export const isBchsBrezRoster = (rosterUnit: string) =>
   normalizeBchsText(rosterUnit) === "брез";
+
+/** Excel AP–AR для РРЕБ: X (БЗВП/БРЕЗ) містить «БРЕЗ», не колонка B. */
+export const isBchsBrezAttachedPerson = (person: BchsPersonnelAwayPerson) =>
+  normalizeBchsText(person.bzvpStatus).includes("брез");
 
 export const isBchsEngineerUnit = (unitName: string) =>
   /інженер|сапер/i.test(unitName);
@@ -595,39 +1445,46 @@ export const isBchsRebUnit = (unitName: string) => {
   return unit.includes("радіоелектрон") || unit.includes("відділення реб");
 };
 
-export const matchesBchsAttachedUnit = (arkush1Unit: string, rosterUnit: string) => {
-  if (isBchsEngineerUnit(arkush1Unit)) return isBchsPrikomaniRoster(rosterUnit);
-  if (isBchsRebUnit(arkush1Unit)) return isBchsBrezRoster(rosterUnit);
+export const matchesBchsAttachedUnit = (
+  arkush1Unit: string,
+  person: BchsPersonnelAwayPerson,
+) => {
+  if (isBchsEngineerUnit(arkush1Unit)) {
+    return isBchsPrikomaniRoster(person.rosterUnit);
+  }
+  if (isBchsRebUnit(arkush1Unit)) {
+    return isBchsBrezAttachedPerson(person);
+  }
   return false;
 };
 
-export const classifyBchsAttachedRank = (
-  rankCategory: string,
+/** Excel AP/AQ/AR: звання лише з M (патерни COUNTIFS), не з I. */
+export const classifyBchsAttachedRankByExcel = (
   rankTitle: string,
 ): "officers" | "sergeants" | "soldiers" | null => {
-  // Attached rows often have empty I; Excel ranks them by M (Звання).
-  const title = normalizeBchsText(rankTitle);
-  if (title) {
-    if (
-      /лейтенант|капітан|майор|підполковник|полковник|генерал/.test(title)
-    )
-      return "officers";
-    if (/сержан|старшин/.test(title)) return "sergeants";
-    return "soldiers";
-  }
-
-  const category = normalizeBchsText(rankCategory);
-  if (category === BCHS_RANK_OFFICER) return "officers";
-  if (category === BCHS_RANK_SERGEANT) return "sergeants";
-  if (category === BCHS_RANK_SOLDIER) return "soldiers";
+  if (!rankTitle.trim()) return null;
+  if (isBchsAttachedOfficerRankTitle(rankTitle)) return "officers";
+  if (isBchsAttachedSergeantRankTitle(rankTitle)) return "sergeants";
+  if (isBchsAttachedSoldierRankTitle(rankTitle)) return "soldiers";
   return null;
 };
+
+export const classifyBchsAttachedRank = (
+  _rankCategory: string,
+  rankTitle: string,
+): "officers" | "sergeants" | "soldiers" | null =>
+  classifyBchsAttachedRankByExcel(rankTitle);
 
 export const normalizeBchsAttachedSourceLabel = (
   battalion: string,
   rosterUnit: string,
+  bzvpStatus = "",
 ) => {
-  if (isBchsBrezRoster(rosterUnit)) return "БРЕЗ";
+  if (
+    isBchsBrezRoster(rosterUnit) ||
+    normalizeBchsText(bzvpStatus).includes("брез")
+  )
+    return "БРЕЗ";
 
   const raw = battalion.replace(/\s+/g, " ").trim();
   const normalized = normalizeBchsText(raw);
@@ -636,6 +1493,7 @@ export const normalizeBchsAttachedSourceLabel = (
   if (normalized.includes("шквал")) return "ШКВАЛ";
   if (normalized === "210") return "210";
   if (normalized === "155" || /^155\s*омбр/.test(normalized)) return "155 ОМБр";
+  if (normalized.includes("41") && normalized.includes("омбр")) return "41ОМБр";
   if (normalized.includes("омбр")) return raw;
 
   return "інші";
@@ -649,9 +1507,10 @@ export const computeBchsUnitAttachedStats = (
 
   const stats = emptyBchsUnitAttachedStats();
 
+  // Excel AP–AR: B=ПРИКОМАНДИРОВАНІ / X=БРЕЗ — без фільтра A=«нова».
   people.forEach((person) => {
     if (!isBchsAttachedPresentStatus(person.status)) return;
-    if (!matchesBchsAttachedUnit(unitName, person.rosterUnit)) return;
+    if (!matchesBchsAttachedUnit(unitName, person)) return;
 
     const rank = classifyBchsAttachedRank(
       person.rankCategory,
@@ -665,6 +1524,7 @@ export const computeBchsUnitAttachedStats = (
     const source = normalizeBchsAttachedSourceLabel(
       person.battalion,
       person.rosterUnit,
+      person.bzvpStatus,
     );
     if (source) {
       stats.sources.set(source, (stats.sources.get(source) ?? 0) + 1);
@@ -674,6 +1534,361 @@ export const computeBchsUnitAttachedStats = (
   stats.total = stats.officers + stats.sergeants + stats.soldiers;
   stats.sourcesText = formatBchsDestinationText(stats.sources);
   return stats;
+};
+
+/** Excel AU: посада порожня або примітка про прибуття (не штатна посада). */
+export const isBchsWithoutStaffPosition = (person: BchsPersonnelAwayPerson) => {
+  const position = normalizeBchsText(person.position);
+  if (!position) return true;
+  return (
+    position.includes("прибув") ||
+    position.includes("чл") ||
+    position.includes("без посади")
+  );
+};
+
+/** Excel AU: A=«нова», U=*новоприбулий*, без штатної посади; не блоки ПРИКОМАНД./БРЕЗ. */
+export const isBchsUnassignedNewcomer = (person: BchsPersonnelAwayPerson) => {
+  const status = normalizeBchsText(person.status);
+  if (!status.includes("новоприбулий")) return false;
+  if (normalizeBchsText(person.battalion) !== "нова") return false;
+  if (
+    isBchsPrikomaniRoster(person.rosterUnit) ||
+    isBchsBrezRoster(person.rosterUnit)
+  ) {
+    return false;
+  }
+  return isBchsWithoutStaffPosition(person);
+};
+
+export const computeBchsTotalUnassignedNewcomers = (
+  people: BchsPersonnelAwayPerson[],
+): number =>
+  filterBchsNovaPeople(people).filter(isBchsUnassignedNewcomer).length;
+
+/** Excel AU per unit: COUNTIFS(A=«нова», U=*новоприбулий*, B, без посади). */
+export const computeBchsUnitUnassignedNewcomers = (
+  people: BchsPersonnelAwayPerson[],
+  unitName: string,
+): number => {
+  if (isBchsTotalUnit(unitName)) return 0;
+
+  let count = 0;
+  filterBchsNovaPeople(people).forEach((person) => {
+    if (!isBchsUnassignedNewcomer(person)) return;
+    if (!matchesBchsRosterUnit(unitName, person.rosterUnit)) return;
+    count += 1;
+  });
+  return count;
+};
+
+/** Excel AV: COUNTIFS(U;"*пошук*", B, M<>), A=«нова». */
+export const computeBchsUnitSearchInProgressCount = (
+  people: BchsPersonnelAwayPerson[],
+  unitName: string,
+): number => {
+  if (isBchsTotalUnit(unitName)) return 0;
+
+  let count = 0;
+  filterBchsNovaPeople(people).forEach((person) => {
+    if (!normalizeBchsText(person.status).includes("пошук")) return;
+    if (!matchesBchsRosterUnit(unitName, person.rosterUnit)) return;
+    if (!isBchsListedWithRankTitle(person)) return;
+    count += 1;
+  });
+  return count;
+};
+
+const emptyBchsUnitCombatComponentStats = (): BchsUnitCombatComponentStats => ({
+  assaultReady: 0,
+  assaultRecovery: 0,
+  assaultExecution: 0,
+  noBzvp: 0,
+  assaultTotal: 0,
+  vehicleCrew: 0,
+  droneCrew: 0,
+  crewServedWeapons: 0,
+  commandCombat: 0,
+  supportCombat: 0,
+  combatComponent: 0,
+});
+
+const isBchsInfantryRoleType = (roleType: string) =>
+  normalizeBchsText(roleType).includes("піхот");
+
+const isBchsDriverRoleType = (roleType: string) =>
+  normalizeBchsText(roleType).includes("водій");
+
+const isBchsPilotRoleType = (roleType: string) => {
+  const role = normalizeBchsText(roleType);
+  return role.includes("пілот") || role.includes("бпла");
+};
+
+const isBchsGrenadeRoleType = (roleType: string) => {
+  const role = normalizeBchsText(roleType);
+  return (
+    role.includes("гранатомет") ||
+    role.includes("міномет") ||
+    role.includes("кулемет")
+  );
+};
+
+const isBchsCommandRoleType = (roleType: string) => {
+  const role = normalizeBchsText(roleType);
+  return role.includes("упр") || role.includes("штаб");
+};
+
+const isBchsCombatAttachedRoster = (person: BchsPersonnelAwayPerson) =>
+  isBchsPrikomaniRoster(person.rosterUnit) || isBchsBrezRoster(person.rosterUnit);
+
+/** Excel U: «в строю»; для ПРИКОМАНД./БРЕЗ також «Новоприбулий». */
+const isBchsCombatComponentStatus = (
+  person: BchsPersonnelAwayPerson,
+  allowNewcomer: boolean,
+) => {
+  const status = normalizeBchsText(person.status);
+  if (status.includes("в строю")) return true;
+  return allowNewcomer && status.includes("новоприбулий");
+};
+
+const matchesBchsCombatComponentRoster = (
+  unitName: string,
+  person: BchsPersonnelAwayPerson,
+) => {
+  if (isBchsEngineerUnit(unitName)) {
+    return (
+      matchesBchsRosterUnit(unitName, person.rosterUnit) ||
+      isBchsPrikomaniRoster(person.rosterUnit)
+    );
+  }
+  if (isBchsRebUnit(unitName)) {
+    return (
+      matchesBchsRosterUnit(unitName, person.rosterUnit) ||
+      isBchsBrezRoster(person.rosterUnit)
+    );
+  }
+  return matchesBchsRosterUnit(unitName, person.rosterUnit);
+};
+
+const isInBchsCombatComponentPool = (
+  unitName: string,
+  person: BchsPersonnelAwayPerson,
+) => {
+  if (!matchesBchsCombatComponentRoster(unitName, person)) return false;
+
+  const attached = isBchsCombatAttachedRoster(person);
+  if (!attached && normalizeBchsText(person.battalion) !== "нова") return false;
+
+  return isBchsCombatComponentStatus(person, attached);
+};
+
+const isBchsBattleReadyCombatStatus = (combatReadiness: string) =>
+  normalizeBchsText(combatReadiness) === "бг";
+
+const isBchsOnCombatExecution = (person: BchsPersonnelAwayPerson) =>
+  normalizeBchsText(person.medicalPlace).includes("на виконанні");
+
+const isBchsNoBzvpStatus = (bzvpStatus: string) =>
+  normalizeBchsText(bzvpStatus).includes("бзвп");
+
+/** Excel BB–BL: COUNTIFS по V/W/X/AE + ПРИКОМАНД./БРЕЗ для ІСВ/РРЕБ. */
+export const computeBchsUnitCombatComponentStats = (
+  people: BchsPersonnelAwayPerson[],
+  unitName: string,
+): BchsUnitCombatComponentStats => {
+  if (isBchsTotalUnit(unitName)) return emptyBchsUnitCombatComponentStats();
+
+  const pool = people.filter((person) =>
+    isInBchsCombatComponentPool(unitName, person),
+  );
+
+  if (isBchsCommandUnit(unitName)) {
+    const commandCombat = pool.filter((person) =>
+      isBchsCommandRoleType(person.roleType),
+    ).length;
+    const supportCombat = Math.max(0, pool.length - commandCombat);
+    return {
+      assaultReady: 0,
+      assaultRecovery: 0,
+      assaultExecution: 0,
+      noBzvp: 0,
+      assaultTotal: 0,
+      vehicleCrew: 0,
+      droneCrew: 0,
+      crewServedWeapons: 0,
+      commandCombat,
+      supportCombat,
+      combatComponent: pool.length,
+    };
+  }
+
+  const infantry = pool.filter((person) =>
+    isBchsInfantryRoleType(person.roleType),
+  );
+  const assaultReady = infantry.filter((person) =>
+    isBchsBattleReadyCombatStatus(person.combatReadiness),
+  ).length;
+  const noBzvp = infantry.filter((person) =>
+    isBchsNoBzvpStatus(person.bzvpStatus),
+  ).length;
+  const assaultExecutionInf = infantry.filter((person) =>
+    isBchsOnCombatExecution(person),
+  ).length;
+  const assaultExecutionGr = pool.filter(
+    (person) =>
+      isBchsGrenadeRoleType(person.roleType) &&
+      isBchsOnCombatExecution(person),
+  ).length;
+  const assaultExecution = assaultExecutionInf + assaultExecutionGr;
+  const assaultRecovery = Math.max(
+    0,
+    infantry.length - assaultExecutionInf - assaultReady - noBzvp,
+  );
+  const vehicleCrew = pool.filter((person) =>
+    isBchsDriverRoleType(person.roleType),
+  ).length;
+  const droneCrew = pool.filter((person) =>
+    isBchsPilotRoleType(person.roleType),
+  ).length;
+  const grenadePool = pool.filter((person) =>
+    isBchsGrenadeRoleType(person.roleType),
+  );
+  const crewServedWeapons = Math.max(
+    0,
+    grenadePool.length -
+      grenadePool.filter((person) => isBchsOnCombatExecution(person)).length -
+      grenadePool.filter((person) => isBchsNoBzvpStatus(person.bzvpStatus))
+        .length,
+  );
+  const commandCombat = pool.filter((person) =>
+    isBchsCommandRoleType(person.roleType),
+  ).length;
+  const assaultTotal =
+    assaultReady + assaultRecovery + assaultExecution + noBzvp;
+  const supportCombat = Math.max(
+    0,
+    pool.length -
+      assaultTotal -
+      vehicleCrew -
+      droneCrew -
+      crewServedWeapons -
+      commandCombat,
+  );
+
+  return {
+    assaultReady,
+    assaultRecovery,
+    assaultExecution,
+    noBzvp,
+    assaultTotal,
+    vehicleCrew,
+    droneCrew,
+    crewServedWeapons,
+    commandCombat,
+    supportCombat,
+    combatComponent: pool.length,
+  };
+};
+
+export const sumBchsComparisonCombatComponent = (
+  rows: BchsComparisonRow[],
+): BchsUnitCombatComponentStats => ({
+  assaultReady: rows.reduce((sum, row) => sum + row.assaultReady, 0),
+  assaultRecovery: rows.reduce((sum, row) => sum + row.assaultRecovery, 0),
+  assaultExecution: rows.reduce((sum, row) => sum + row.assaultExecution, 0),
+  noBzvp: rows.reduce((sum, row) => sum + row.noBzvp, 0),
+  assaultTotal: rows.reduce((sum, row) => sum + row.assaultTotal, 0),
+  vehicleCrew: rows.reduce((sum, row) => sum + row.vehicleCrew, 0),
+  droneCrew: rows.reduce((sum, row) => sum + row.droneCrew, 0),
+  crewServedWeapons: rows.reduce((sum, row) => sum + row.crewServedWeapons, 0),
+  commandCombat: rows.reduce((sum, row) => sum + row.commandCombat, 0),
+  supportCombat: rows.reduce((sum, row) => sum + row.supportCombat, 0),
+  combatComponent: rows.reduce((sum, row) => sum + row.combatComponent, 0),
+});
+
+export const applyBchsCombatComponentFromPersonnel = (
+  analytics: BchsAnalyticsSnapshot,
+  people: BchsPersonnelAwayPerson[],
+): BchsAnalyticsSnapshot => {
+  if (people.length === 0) return analytics;
+
+  const unitRows = analytics.comparisonRows.map((row) => {
+    if (row.rowNumber <= 11 || isBchsTotalUnit(row.unit)) return row;
+
+    const combat = computeBchsUnitCombatComponentStats(people, row.unit);
+    return createBchsComparisonRow({
+      ...row,
+      ...combat,
+    });
+  });
+
+  const detailRows = unitRows.filter(
+    (row) => row.rowNumber > 11 && !isBchsTotalUnit(row.unit),
+  );
+  const totalCombat = sumBchsComparisonCombatComponent(detailRows);
+
+  const comparisonRows = unitRows.map((row) => {
+    if (row.rowNumber !== 11 && !isBchsTotalUnit(row.unit)) return row;
+    return createBchsComparisonRow({
+      ...row,
+      ...totalCombat,
+    });
+  });
+
+  return {
+    ...analytics,
+    comparisonRows,
+    rows: comparisonRows,
+    total: comparisonRows[0] ?? analytics.total,
+  };
+};
+
+export const applyBchsNewcomersAndSearchFromPersonnel = (
+  analytics: BchsAnalyticsSnapshot,
+  people: BchsPersonnelAwayPerson[],
+): BchsAnalyticsSnapshot => {
+  if (people.length === 0) return analytics;
+
+  const novaPeople = filterBchsNovaPeople(people);
+  const unitRows = analytics.comparisonRows.map((row) => {
+    if (row.rowNumber <= 11 || isBchsTotalUnit(row.unit)) return row;
+
+    return createBchsComparisonRow({
+      ...row,
+      unassignedNewcomers: computeBchsUnitUnassignedNewcomers(people, row.unit),
+      searchInProgress: computeBchsUnitSearchInProgressCount(
+        novaPeople,
+        row.unit,
+      ),
+    });
+  });
+
+  const detailRows = unitRows.filter(
+    (row) => row.rowNumber > 11 && !isBchsTotalUnit(row.unit),
+  );
+
+  const comparisonRows = unitRows.map((row) => {
+    if (row.rowNumber !== 11 && !isBchsTotalUnit(row.unit)) return row;
+
+    return createBchsComparisonRow({
+      ...row,
+      unassignedNewcomers: detailRows.reduce(
+        (sum, item) => sum + item.unassignedNewcomers,
+        0,
+      ),
+      searchInProgress: detailRows.reduce(
+        (sum, item) => sum + item.searchInProgress,
+        0,
+      ),
+    });
+  });
+
+  return {
+    ...analytics,
+    comparisonRows,
+    rows: comparisonRows,
+    total: comparisonRows[0] ?? analytics.total,
+  };
 };
 
 export const applyBchsAttachedFromPersonnel = (
@@ -748,6 +1963,11 @@ export const applyBchsAttachedFromPersonnel = (
               AR: match.attachedSoldiers,
               AS: match.attachedFromOtherUnits,
               AT: match.attachedSourcesText,
+              AJ: match.available,
+              AW: match.actualOfficers,
+              AX: match.actualSergeants,
+              AY: match.actualSoldiers,
+              AZ: match.inRanksActually,
             },
           };
         }),
@@ -772,21 +1992,50 @@ export const applyBchsAttachedFromPersonnel = (
 export const applyBchsPersonnelDerivedColumns = (
   analytics: BchsAnalyticsSnapshot,
   people: BchsPersonnelAwayPerson[],
+  options: { force?: boolean } = {},
 ): BchsAnalyticsSnapshot => {
-  const derived = applyBchsAttachedFromPersonnel(
-    applyBchsAwayFromPersonnel(analytics, people),
-    people,
+  if (people.length === 0) return analytics;
+
+  const novaPeople = filterBchsNovaPeople(people);
+  const canApplyNovaDerived = novaPeople.length > 0;
+
+  if (canApplyNovaDerived && !options.force) {
+    const novaDetachedCount = novaPeople.filter((person) =>
+      isBchsDetachedStatus(person.status),
+    ).length;
+    const storedAway = bchsToNumber(analytics.total.awayInOtherUnits);
+    if (novaDetachedCount === 0 && storedAway > 0) {
+      // Status column not mapped yet — do not replace «в інших» with 0.
+      return applyBchsAttachedFromPersonnel(analytics, people);
+    }
+  }
+
+  let derived = analytics;
+  if (canApplyNovaDerived) {
+    derived = applyBchsAwayFromPersonnel(derived, novaPeople);
+    derived = applyBchsAbsentFromPersonnel(derived, novaPeople);
+    derived = applyBchsAbsenceCategoriesFromPersonnel(derived, novaPeople);
+  }
+  derived = applyBchsAttachedFromPersonnel(derived, people);
+  derived = applyBchsNewcomersAndSearchFromPersonnel(derived, people);
+  derived = applyBchsCombatComponentFromPersonnel(derived, people);
+  const dataIssues = buildBchsGeneralListDataIssues(
+    canApplyNovaDerived ? people : novaPeople.length > 0 ? novaPeople : people,
   );
-  const dataIssues = people.length > 0
-    ? buildBchsGeneralListDataIssues(people)
-    : [];
 
   return {
     ...derived,
-    dataIssues: dataIssues.length > 0
-      ? dataIssues
-      : derived.dataIssues,
+    dataIssues: dataIssues.length > 0 ? dataIssues : derived.dataIssues,
   };
+};
+
+/** Ensure AK–AO / AP–AT are filled from roster people before Excel write. */
+export const enrichBchsAnalyticsForExport = (
+  analytics: BchsAnalyticsSnapshot,
+  people: BchsPersonnelAwayPerson[],
+): BchsAnalyticsSnapshot => {
+  if (people.length === 0) return analytics;
+  return applyBchsPersonnelDerivedColumns(analytics, people, { force: true });
 };
 
 export const getBchsDestinationCellValue = (
@@ -1324,23 +2573,63 @@ export const createBchsComparisonRow = (
   const attachedFromOtherUnits = hasAttachedRankBreakdown
     ? attachedOfficers + attachedSergeants + attachedSoldiers
     : bchsToNumber(row.attachedFromOtherUnits);
-  const inRanksActually = bchsToNumber(base.inRanksActually);
   const staff = bchsToNumber(base.staff);
   const listed = bchsToNumber(base.listed);
-  const absent = bchsToNumber(base.absent);
   const available = bchsToNumber(base.available);
+  const absentOfficers = bchsToNumber(row.absentOfficers);
+  const absentSergeants = bchsToNumber(row.absentSergeants);
+  const absentSoldiers = bchsToNumber(row.absentSoldiers);
+  const hasAbsentRankBreakdown =
+    row.absentOfficers != null ||
+    row.absentSergeants != null ||
+    row.absentSoldiers != null;
+  // Excel V:Y = G−L by rank; fallback Y = J−O when roster breakdown unavailable.
+  const listedOfficers = bchsToNumber(row.listedOfficers);
+  const listedSergeants = bchsToNumber(row.listedSergeants);
+  const listedSoldiers = bchsToNumber(row.listedSoldiers);
+  const absent = hasAbsentRankBreakdown
+    ? absentOfficers + absentSergeants + absentSoldiers
+    : listed > 0
+      ? Math.max(0, listed - available)
+      : bchsToNumber(base.absent);
+  const availableOfficers = hasAbsentRankBreakdown
+    ? Math.max(0, listedOfficers - absentOfficers)
+    : bchsToNumber(row.availableOfficers);
+  const availableSergeants = hasAbsentRankBreakdown
+    ? Math.max(0, listedSergeants - absentSergeants)
+    : bchsToNumber(row.availableSergeants);
+  const availableSoldiers = hasAbsentRankBreakdown
+    ? Math.max(0, listedSoldiers - absentSoldiers)
+    : bchsToNumber(row.availableSoldiers);
+  const availableTotal =
+    availableOfficers + availableSergeants + availableSoldiers;
+  // Excel: AW/AX/AY = G/H/I − V/W/X − AK/AL/AM + AP/AQ/AR
+  const actualOfficers = Math.max(
+    0,
+    listedOfficers - absentOfficers - awayOfficers + attachedOfficers,
+  );
+  const actualSergeants = Math.max(
+    0,
+    listedSergeants - absentSergeants - awaySergeants + attachedSergeants,
+  );
+  const actualSoldiers = Math.max(
+    0,
+    listedSoldiers - absentSoldiers - awaySoldiers + attachedSoldiers,
+  );
+  const inRanksActually = actualOfficers + actualSergeants + actualSoldiers;
 
   return {
     ...base,
     staffOfficers: bchsToNumber(row.staffOfficers),
     staffSergeants: bchsToNumber(row.staffSergeants),
     staffSoldiers: bchsToNumber(row.staffSoldiers),
-    listedOfficers: bchsToNumber(row.listedOfficers),
-    listedSergeants: bchsToNumber(row.listedSergeants),
-    listedSoldiers: bchsToNumber(row.listedSoldiers),
-    availableOfficers: bchsToNumber(row.availableOfficers),
-    availableSergeants: bchsToNumber(row.availableSergeants),
-    availableSoldiers: bchsToNumber(row.availableSoldiers),
+    listedOfficers,
+    listedSergeants,
+    listedSoldiers,
+    availableOfficers,
+    availableSergeants,
+    availableSoldiers,
+    available: hasAbsentRankBreakdown ? availableTotal : bchsToNumber(base.available),
     staffedPercent: normalizeBchsPercentValue(
       base.staffedPercent,
       available || listed,
@@ -1351,9 +2640,10 @@ export const createBchsComparisonRow = (
       inRanksActually,
       staff,
     ),
-    actualOfficers: bchsToNumber(row.actualOfficers),
-    actualSergeants: bchsToNumber(row.actualSergeants),
-    actualSoldiers: bchsToNumber(row.actualSoldiers),
+    inRanksActually,
+    actualOfficers,
+    actualSergeants,
+    actualSoldiers,
     awayInOtherUnits,
     awayOfficers,
     awaySergeants,
@@ -1365,6 +2655,7 @@ export const createBchsComparisonRow = (
     attachedSoldiers,
     attachedSourcesText: String(row.attachedSourcesText ?? "").trim(),
     unassignedNewcomers: bchsToNumber(row.unassignedNewcomers),
+    searchInProgress: bchsToNumber(row.searchInProgress),
     noBzvp: bchsToNumber(row.noBzvp),
     levelPercent: staff > 0 ? inRanksActually / staff : 0,
     balanceActual: listed - absent - awayInOtherUnits + attachedFromOtherUnits,
@@ -1377,6 +2668,14 @@ export const createBchsComparisonRow = (
     crewServedWeapons: bchsToNumber(row.crewServedWeapons),
     commandCombat: bchsToNumber(row.commandCombat),
     supportCombat: bchsToNumber(row.supportCombat),
+    combatComponent:
+      bchsToNumber(row.combatComponent) ||
+      bchsToNumber(row.assaultTotal) +
+        bchsToNumber(row.vehicleCrew) +
+        bchsToNumber(row.droneCrew) +
+        bchsToNumber(row.crewServedWeapons) +
+        bchsToNumber(row.commandCombat) +
+        bchsToNumber(row.supportCombat),
   };
 };
 
@@ -1410,6 +2709,9 @@ export const buildBchsComparisonRowsFromTable = (
       available: bchsToNumber(row.values.O),
       shortage: bchsToNumber(row.values.T),
       shortagePercent: row.values.U,
+      absentOfficers: bchsToNumber(row.values.V),
+      absentSergeants: bchsToNumber(row.values.W),
+      absentSoldiers: bchsToNumber(row.values.X),
       absent: bchsToNumber(row.values.Y),
       businessTrip: bchsToNumber(row.values.Z),
       training: bchsToNumber(row.values.AA),
@@ -1438,6 +2740,7 @@ export const buildBchsComparisonRowsFromTable = (
       attachedFromOtherUnits: bchsToNumber(row.values.AS),
       attachedSourcesText: valueToDisplay(row.values.AT as CellValue),
       unassignedNewcomers: bchsToNumber(row.values.AU),
+      searchInProgress: bchsToNumber(row.values.AV),
       noBzvp: bchsToNumber(row.values.BE),
       assaultReady: bchsToNumber(row.values.BB),
       assaultRecovery: bchsToNumber(row.values.BC),
@@ -1533,6 +2836,9 @@ export const buildBchsAnalytics = (
       available: bchsToNumber(getSheetValue(sheet, rowNumber, "O")),
       shortage: bchsToNumber(getSheetValue(sheet, rowNumber, "T")),
       shortagePercent: getSheetValue(sheet, rowNumber, "U"),
+      absentOfficers: bchsToNumber(getSheetValue(sheet, rowNumber, "V")),
+      absentSergeants: bchsToNumber(getSheetValue(sheet, rowNumber, "W")),
+      absentSoldiers: bchsToNumber(getSheetValue(sheet, rowNumber, "X")),
       absent: bchsToNumber(getSheetValue(sheet, rowNumber, "Y")),
       businessTrip: bchsToNumber(getSheetValue(sheet, rowNumber, "Z")),
       training: bchsToNumber(getSheetValue(sheet, rowNumber, "AA")),
@@ -1569,6 +2875,7 @@ export const buildBchsAnalytics = (
         getSheetValue(sheet, rowNumber, "AT") as CellValue,
       ),
       unassignedNewcomers: bchsToNumber(getSheetValue(sheet, rowNumber, "AU")),
+      searchInProgress: bchsToNumber(getSheetValue(sheet, rowNumber, "AV")),
       noBzvp: bchsToNumber(getSheetValue(sheet, rowNumber, "BE")),
       assaultReady: bchsToNumber(getSheetValue(sheet, rowNumber, "BB")),
       assaultRecovery: bchsToNumber(getSheetValue(sheet, rowNumber, "BC")),
@@ -1619,6 +2926,9 @@ type BchsGeneralListUnitAccumulator = {
   availableSergeants: number;
   availableSoldiers: number;
   absent: number;
+  absentOfficers: number;
+  absentSergeants: number;
+  absentSoldiers: number;
   businessTrip: number;
   training: number;
   hospitalWounded: number;
@@ -1664,6 +2974,9 @@ const emptyBchsGeneralListUnit = (
   availableSoldiers: 0,
   absent: 0,
   businessTrip: 0,
+  absentOfficers: 0,
+  absentSergeants: 0,
+  absentSoldiers: 0,
   training: 0,
   hospitalWounded: 0,
   hospitalIllness: 0,
@@ -1690,9 +3003,398 @@ const emptyBchsGeneralListUnit = (
   supportCombat: 0,
 });
 
-const isBchsGeneralListPresentStatus = (status: string) => {
+export const isBchsGeneralListPresentStatus = (status: string) => {
   const normalized = normalizeBchsText(status);
   return normalized === "в строю" || normalized.includes("новоприбулий");
+};
+
+/** Excel O (наявність): «в строю» / новоприбулий + відком. за межі ПБ. */
+export const isBchsGeneralListAvailableStatus = (status: string) =>
+  isBchsGeneralListPresentStatus(status) || isBchsDetachedStatus(status);
+
+export type BchsNovaRosterUnitStats = {
+  staff: number;
+  listed: number;
+  present: number;
+};
+
+/** Count nova roster people for exact/alias unit labels (Управління=ж, Штаб, …). */
+export const countBchsNovaRosterUnitStats = (
+  people: BchsPersonnelAwayPerson[],
+  unitAliases: string[],
+): BchsNovaRosterUnitStats => {
+  const aliases = unitAliases.map(normalizeBchsText).filter(Boolean);
+  const stats: BchsNovaRosterUnitStats = { staff: 0, listed: 0, present: 0 };
+
+  filterBchsNovaPeople(people).forEach((person) => {
+    const roster = normalizeBchsText(person.rosterUnit);
+    if (!aliases.some((alias) => roster === alias || roster.includes(alias)))
+      return;
+
+    stats.staff += 1;
+    if (person.fullName.trim()) stats.listed += 1;
+    if (isBchsGeneralListPresentStatus(person.status)) stats.present += 1;
+  });
+
+  return stats;
+};
+
+/** Excel U: точне «в строю» (без новоприбулих) — для 1ПБ таблиці. */
+export const isBchsExactInRanksStatus = (status: string) =>
+  normalizeBchsText(status) === "в строю";
+
+/** Excel U: *в строю* — для COUNTIFS колонки G у 1ПБ таблиці. */
+export const isBchsPersonnel1PbInRanksStatus = (status: string) =>
+  normalizeBchsText(status).includes("в строю");
+
+const isBchsNovaRosterExactUnitMatch = (
+  rosterUnit: string,
+  aliases: string[],
+) => {
+  const roster = normalizeBchsText(rosterUnit);
+  return aliases.some((alias) => roster === normalizeBchsText(alias));
+};
+
+/** Короткі коди B (напр. «ж») — лише exact match, без substring. */
+const isBchsPersonnel1PbRosterUnitMatch = (
+  rosterUnit: string,
+  aliases: string[],
+) => {
+  const roster = normalizeBchsText(rosterUnit);
+  return aliases.some((alias) => {
+    const normalized = normalizeBchsText(alias);
+    if (normalized.length <= 2) return roster === normalized;
+    return roster === normalized || roster.includes(normalized);
+  });
+};
+
+const isBchsNovaRosterWildcardUnitMatch = (
+  rosterUnit: string,
+  pattern: string,
+) => normalizeBchsText(rosterUnit).includes(normalizeBchsText(pattern));
+
+export type BchsPersonnel1PbUnitMode =
+  | "roster-command"
+  | "roster-presence"
+  | "zenit"
+  | "arkush1";
+
+export type BchsPersonnel1PbUnitStats = {
+  staff: number;
+  listed: number;
+  presence: number;
+  listedStaffRatio: number;
+  combatTask: number;
+  commanderReserve: number;
+};
+
+const BCHS_PERSONNEL_1PB_ROSTER_ALIASES: Record<string, string[]> = {
+  /** Управління в цій таблиці = roster B «ж» (exact, не substring). */
+  Управління: ["ж"],
+  Штаб: ["штаб"],
+  "Група безпілотних систем": ["група безпілотних систем"],
+};
+
+const BCHS_PERSONNEL_1PB_UNIT_MODES: Record<string, BchsPersonnel1PbUnitMode> =
+  {
+    Управління: "roster-command",
+    Штаб: "roster-command",
+    "Група безпілотних систем": "roster-command",
+    "Відділення радіоелектронної боротьби": "roster-presence",
+    "Інженерно-саперне відділення": "roster-presence",
+    "Зенітно-ракетний взвод": "zenit",
+  };
+
+export const resolveBchsPersonnel1PbUnitAliases = (unitName: string) => {
+  const fromMap = BCHS_PERSONNEL_1PB_ROSTER_ALIASES[unitName];
+  const aliases = fromMap
+    ? [...fromMap]
+    : (() => {
+        const normalized = normalizeBchsText(unitName);
+        if (normalized.includes("вмтз"))
+          return ["взвод матеріально-технічного забезпечення", "вмтз"];
+        if (normalized === "ісв" || normalized.includes("інженерно-саперне"))
+          return ["інженерно-саперне відділення", "ісв"];
+        if (normalized.includes("реб"))
+          return ["відділення радіоелектронної боротьби", "відділення реб"];
+        return [unitName];
+      })();
+
+  const extras = aliases.flatMap((alias) => {
+    const text = normalizeBchsText(alias);
+    if (text.includes("піхотна рота"))
+      return [text.replace("піхотна рота", "штурмова рота")];
+    if (text.includes("штурмова рота"))
+      return [text.replace("штурмова рота", "піхотна рота")];
+    return [];
+  });
+
+  return [...aliases, ...extras];
+};
+
+const getBchsPersonnel1PbUnitMode = (unitName: string): BchsPersonnel1PbUnitMode =>
+  BCHS_PERSONNEL_1PB_UNIT_MODES[unitName] ?? "arkush1";
+
+/** Управління / Штаб / ГБС: COUNTIFS оф.+серж. за B (Управління = «ж» exact). */
+export const countBchsNovaRosterCommandUnitStats = (
+  people: BchsPersonnelAwayPerson[],
+  unitAliases: string[],
+): BchsNovaRosterUnitStats => {
+  const aliases = unitAliases.map(normalizeBchsText).filter(Boolean);
+  const stats: BchsNovaRosterUnitStats = { staff: 0, listed: 0, present: 0 };
+  const commandRanks = new Set([BCHS_RANK_OFFICER, BCHS_RANK_SERGEANT]);
+
+  filterBchsNovaPeople(people).forEach((person) => {
+    if (!isBchsPersonnel1PbRosterUnitMatch(person.rosterUnit, aliases)) return;
+
+    const rank = normalizeBchsText(person.rankCategory);
+    if (!commandRanks.has(rank)) return;
+
+    stats.staff += 1;
+    if (isBchsListedWithRankTitle(person)) stats.listed += 1;
+    if (isBchsExactInRanksStatus(person.status)) stats.present += 1;
+  });
+
+  return stats;
+};
+
+/** РЕБ / ІСВ: COUNTIFS усі звання, U=«в стroю». */
+export const countBchsNovaRosterPresenceAllRanks = (
+  people: BchsPersonnelAwayPerson[],
+  unitAliases: string[],
+) => {
+  const aliases = unitAliases.map(normalizeBchsText).filter(Boolean);
+  let count = 0;
+
+  filterBchsNovaPeople(people).forEach((person) => {
+    if (!isBchsNovaRosterExactUnitMatch(person.rosterUnit, aliases)) return;
+    if (!isBchsExactInRanksStatus(person.status)) return;
+    count += 1;
+  });
+
+  return count;
+};
+
+/** Excel G: COUNTIFS(B *unit*, U *в stрою*, AE «на виконанні»). */
+export const countBchsNovaCombatTask = (
+  people: BchsPersonnelAwayPerson[],
+  unitPattern: string,
+) => {
+  let count = 0;
+
+  filterBchsNovaPeople(people).forEach((person) => {
+    if (!isBchsNovaRosterWildcardUnitMatch(person.rosterUnit, unitPattern))
+      return;
+    if (!isBchsPersonnel1PbInRanksStatus(person.status)) return;
+    if (normalizeBchsText(person.medicalPlace) !== "на виконанні") return;
+    count += 1;
+  });
+
+  return count;
+};
+
+/** Dark green PIB fill in roster «Ос загальний» / Аркуш2 (резерв командира полку). */
+export const BCHS_COMMANDER_RESERVE_PIB_FILL_RGB = new Set([
+  "FF38761D",
+  "FF00B050",
+  "FF548235",
+  "FF70AD47",
+  "FF375623",
+  "FF385723",
+  "FF006600",
+  "FF008000",
+  "FF92D050",
+  "FFC6EFCE",
+  "FF216E39",
+]);
+
+const rgbToHueSatLight = (r: number, g: number, b: number) => {
+  const red = r / 255;
+  const green = g / 255;
+  const blue = b / 255;
+  const max = Math.max(red, green, blue);
+  const min = Math.min(red, green, blue);
+  const lightness = (max + min) / 2;
+  const delta = max - min;
+  const saturation =
+    delta === 0 ? 0 : delta / (1 - Math.abs(2 * lightness - 1));
+  let hue = 0;
+  if (delta !== 0) {
+    if (max === red) hue = 60 * (((green - blue) / delta) % 6);
+    else if (max === green) hue = 60 * ((blue - red) / delta + 2);
+    else hue = 60 * ((red - green) / delta + 4);
+    if (hue < 0) hue += 360;
+  }
+  return { hue, saturation, lightness };
+};
+
+export const isBchsCommanderReservePibHighlight = (
+  rgb: string | null | undefined,
+) => {
+  if (!rgb) return false;
+  const hex = rgb.replace(/^#/, "").toUpperCase();
+  const argb = hex.length === 6 ? `FF${hex}` : hex;
+  if (BCHS_COMMANDER_RESERVE_PIB_FILL_RGB.has(argb)) return true;
+  if (argb.length !== 8) return false;
+  const r = Number.parseInt(argb.slice(2, 4), 16);
+  const g = Number.parseInt(argb.slice(4, 6), 16);
+  const b = Number.parseInt(argb.slice(6, 8), 16);
+  if (![r, g, b].every(Number.isFinite)) return false;
+  if (g >= 45 && g > r && g > b && g - r >= 12 && g - b >= 12) return true;
+  const { hue, saturation, lightness } = rgbToHueSatLight(r, g, b);
+  return (
+    hue >= 70 &&
+    hue <= 165 &&
+    saturation >= 0.18 &&
+    lightness >= 0.12 &&
+    lightness <= 0.78
+  );
+};
+
+/** Excel L = «10» — особа в штатці (штатна посада в ШПК). */
+export const isBchsInStaffTableMobilization = (
+  person: BchsPersonnelAwayPerson,
+) => normalizeBchsText(person.mobilizationContract) === "10";
+
+/** Особа в штатці: є ПІБ, штатна посада, звання за ШПК (H/M). */
+export const isBchsInStaffTablePerson = (
+  person: BchsPersonnelAwayPerson,
+) => {
+  if (!person.fullName.trim()) return false;
+  if (isBchsWithoutStaffPosition(person)) return false;
+  return Boolean(
+    normalizeBchsText(person.shpkFact) || normalizeBchsText(person.rankTitle),
+  );
+};
+
+/** @deprecated alias — L=10 + штатка; для J використовуй isBchsInStaffTablePerson. */
+export const isBchsStaffTableReservePerson = (
+  person: BchsPersonnelAwayPerson,
+) => {
+  if (!isBchsInStaffTablePerson(person)) return false;
+  return isBchsInStaffTableMobilization(person);
+};
+
+const isBchsCommanderReserveStatus = (status: string) => {
+  const normalized = normalizeBchsText(status);
+  if (normalized === "в строю") return true;
+  return normalized.includes("новоприбул");
+};
+
+/**
+ * Excel J — резерв командира полку:
+ * «нова» / «в строю» / «новоприбулий» + ПІБ із зеленою заливкою.
+ */
+export const isBchsCommanderReservePerson = (
+  person: BchsPersonnelAwayPerson,
+) => {
+  if (!person.fullName.trim()) return false;
+  if (!isBchsCommanderReserveStatus(person.status)) return false;
+  return isBchsCommanderReservePibHighlight(person.pibHighlightRgb);
+};
+
+export const summarizeBchsCommanderReserve = (
+  people: BchsPersonnelAwayPerson[],
+) => {
+  const novaPeople = filterBchsNovaPeople(people);
+  const pool = novaPeople.length > 0 ? novaPeople : people;
+  const inRanks = pool.filter(
+    (person) =>
+      Boolean(person.fullName.trim()) &&
+      isBchsCommanderReserveStatus(person.status),
+  );
+  const withFill = inRanks.filter((person) => person.pibHighlightRgb);
+  const green = inRanks.filter((person) =>
+    isBchsCommanderReservePibHighlight(person.pibHighlightRgb),
+  );
+  const fillSamples = [
+    ...new Set(
+      withFill
+        .map((person) => person.pibHighlightRgb)
+        .filter((value): value is string => Boolean(value)),
+    ),
+  ].slice(0, 8);
+
+  return {
+    pool: pool.length,
+    inRanks: inRanks.length,
+    withFill: withFill.length,
+    green: green.length,
+    fillSamples,
+  };
+};
+
+export const countBchsNovaCommanderReserve = (
+  people: BchsPersonnelAwayPerson[],
+  unitName: string,
+) => {
+  const aliases = resolveBchsPersonnel1PbUnitAliases(unitName);
+  const novaPeople = filterBchsNovaPeople(people);
+  const pool = novaPeople.length > 0 ? novaPeople : people;
+  let count = 0;
+
+  pool.forEach((person) => {
+    if (!isBchsPersonnel1PbRosterUnitMatch(person.rosterUnit, aliases)) return;
+    if (!isBchsCommanderReservePerson(person)) return;
+    count += 1;
+  });
+
+  return count;
+};
+
+/** Розрахунок одного рядка таблиці «1ПБ Особовий склад + БЗВП». */
+export const computeBchsPersonnel1PbUnitStats = (
+  unitName: string,
+  comparisonRow: BchsComparisonRow | undefined,
+  people: BchsPersonnelAwayPerson[],
+): BchsPersonnel1PbUnitStats => {
+  const mode = getBchsPersonnel1PbUnitMode(unitName);
+  const aliases = resolveBchsPersonnel1PbUnitAliases(unitName);
+  const commanderReserve = countBchsNovaCommanderReserve(people, unitName);
+
+  if (mode === "zenit") {
+    return {
+      staff: 0,
+      listed: 0,
+      presence: 0,
+      listedStaffRatio: 0,
+      combatTask: 0,
+      commanderReserve,
+    };
+  }
+
+  let staff = 0;
+  let listed = 0;
+  let presence = 0;
+
+  if (mode === "roster-command") {
+    const roster = countBchsNovaRosterCommandUnitStats(people, aliases);
+    staff = roster.staff;
+    listed = roster.listed;
+    presence = roster.present;
+  } else if (mode === "roster-presence") {
+    staff = comparisonRow?.staff ?? 0;
+    listed = comparisonRow?.listed ?? 0;
+    presence = countBchsNovaRosterPresenceAllRanks(people, aliases);
+  } else {
+    staff = comparisonRow?.staff ?? 0;
+    listed = comparisonRow?.listed ?? 0;
+    presence = comparisonRow?.combatComponent ?? 0;
+  }
+
+  const listedStaffRatio = staff > 0 ? listed / staff : 0;
+
+  const combatTask =
+    mode === "roster-command" ? 0 : countBchsNovaCombatTask(people, unitName);
+
+  return {
+    staff,
+    listed,
+    presence,
+    listedStaffRatio,
+    combatTask,
+    commanderReserve,
+  };
 };
 
 const explainBchsGeneralListStatusIssue = (
@@ -1726,6 +3428,26 @@ const hasBchsUnknownDetachedDestination = (person: BchsPersonnelAwayPerson) => {
   return !destination || destination.includes("невідом");
 };
 
+const hasMixedScriptRankTitle = (rankTitle: string) =>
+  /[A-Za-z]/.test(rankTitle) && /[А-Яа-яІіЇїЄєҐґ]/.test(rankTitle);
+
+const explainBchsRankTitleIssue = (
+  person: BchsPersonnelAwayPerson,
+): string | null => {
+  if (!person.fullName.trim()) return null;
+  if (!isBchsListedWithRankTitle(person)) return null;
+
+  const title = person.rankTitle.trim();
+
+  // Лише реальні помилки написання (змішана латиниця), не коректна укр. орфографія.
+  // «капітан» з українською «і» — правильно; Excel-маски *капитан* — окрема тема формул.
+  if (hasMixedScriptRankTitle(title)) {
+    return `у званні змішані латиниця і кирилиця: «${title}» (перевірте лат. i/a/o замість кирилиці)`;
+  }
+
+  return null;
+};
+
 const buildBchsGeneralListDataIssues = (
   people: BchsPersonnelAwayPerson[],
 ): BchsDataIssue[] =>
@@ -1736,31 +3458,30 @@ const buildBchsGeneralListDataIssues = (
         fullName: person.fullName.trim() || "(без ПІБ)",
         rosterUnit: normalizeBchsRosterUnitLabel(person.rosterUnit),
         status: person.status.trim() || "(порожньо)",
+        rankTitle: person.rankTitle.trim() || undefined,
+        rankCategory: person.rankCategory.trim() || undefined,
       };
       const issues: BchsDataIssue[] = [];
       const statusReason = explainBchsGeneralListStatusIssue(person);
-      if (statusReason) issues.push({ ...base, reason: statusReason });
+      if (statusReason) {
+        issues.push({ ...base, kind: "status", reason: statusReason });
+      }
       if (hasBchsUnknownDetachedDestination(person)) {
         issues.push({
           ...base,
+          kind: "destination",
           destination:
             normalizeBchsDestinationLabel(person.destination) || "(порожньо)",
           reason: "невідоме місце відкомандирування",
         });
       }
+      const rankReason = explainBchsRankTitleIssue(person);
+      if (rankReason) {
+        issues.push({ ...base, kind: "rank", reason: rankReason });
+      }
       return issues;
     })
     .filter((issue): issue is BchsDataIssue => Boolean(issue));
-
-const isBchsWoundedMedicalNote = (value: string) => {
-  const normalized = normalizeBchsText(value);
-  return /поран|ранен|травм/.test(normalized);
-};
-
-const isBchsIllnessMedicalNote = (value: string) => {
-  const normalized = normalizeBchsText(value);
-  return /хвор|болез|захвор/.test(normalized);
-};
 
 const addBchsGeneralListTotals = (
   total: BchsGeneralListUnitAccumulator,
@@ -1779,6 +3500,9 @@ const addBchsGeneralListTotals = (
   total.availableSergeants += row.availableSergeants;
   total.availableSoldiers += row.availableSoldiers;
   total.absent += row.absent;
+  total.absentOfficers += row.absentOfficers;
+  total.absentSergeants += row.absentSergeants;
+  total.absentSoldiers += row.absentSoldiers;
   total.businessTrip += row.businessTrip;
   total.training += row.training;
   total.hospitalWounded += row.hospitalWounded;
@@ -1831,6 +3555,9 @@ const bchsGeneralListUnitToRow = (
       ? Math.max(item.staff - item.listed, 0) / item.staff
       : 0,
     absent: item.absent,
+    absentOfficers: item.absentOfficers,
+    absentSergeants: item.absentSergeants,
+    absentSoldiers: item.absentSoldiers,
     businessTrip: item.businessTrip,
     training: item.training,
     hospitalWounded: item.hospitalWounded,
@@ -1865,20 +3592,18 @@ const BCHS_GENERAL_LIST_UNIT_ORDER = [
   "1 піхотна рота",
   "2 піхотна рота",
   "3 піхотна рота",
-  "Взвод зв'язку",
-  "Взвод логістично-евакуаційних безпілотних наземних систем",
-  "Взвод матеріально-технічного забезпечення",
-  "Взвод перехоплювачів безпілотних літальних апаратів",
-  "Взвод протитанкових ракетних комплексів",
-  "Відділення радіоелектронної боротьби",
-  "Гранатометний взвод",
-  "Група безпілотних систем",
-  "Зенітно-ракетний взвод",
-  "Інженерно-саперне відділення",
-  "Кулеметний взвод",
-  "Мінометний взвод",
-  "Розвідувальний взвод",
   "Рота безпілотних авіаційних комплексів",
+  "Гранатометний взвод",
+  "Мінометний взвод",
+  "Кулеметний взвод",
+  "Взвод протитанкових ракетних комплексів",
+  "Взвод логістично-евакуаційних безпілотних наземних систем",
+  "Взвод перехоплювачів безпілотних літальних апаратів",
+  "Розвідувальний взвод",
+  "Інженерно-саперне відділення",
+  "Відділення радіоелектронної боротьби",
+  "Взвод зв'язку",
+  "Взвод матеріально-технічного забезпечення",
   "Медичний пункт",
 ];
 
@@ -1895,7 +3620,8 @@ export const buildBchsAnalyticsFromGeneralList = (
 ): BchsAnalyticsSnapshot | null => {
   if (!isBchsPersonnelGeneralListSheet(sheet)) return null;
 
-  const people = extractBchsAwayPeopleFromSheet(sheet);
+  const allPeople = extractBchsAwayPeopleFromSheet(sheet);
+  const novaPeople = filterBchsNovaPeople(allPeople);
   const units = new Map<string, BchsGeneralListUnitAccumulator>();
 
   const getUnit = (unitName: string) => {
@@ -1905,18 +3631,13 @@ export const buildBchsAnalyticsFromGeneralList = (
     return current;
   };
 
-  people
-    .filter((person) => normalizeBchsText(person.battalion) === "нова")
-    .forEach((person) => {
+  novaPeople.forEach((person) => {
       const unit = getUnit(person.rosterUnit);
-      const status = normalizeBchsText(person.status);
       const fullName = person.fullName.trim();
       const rank = normalizeBchsText(person.rankCategory);
       const roleType = normalizeBchsText(person.roleType);
       const combatReadiness = normalizeBchsText(person.combatReadiness);
       const bzvpStatus = normalizeBchsText(person.bzvpStatus);
-      const medicalPlace = normalizeBchsText(person.medicalPlace);
-      const medicalText = `${person.medicalPlace} ${person.medicalNote}`;
 
       unit.staff += 1;
       if (rank === BCHS_RANK_OFFICER) unit.staffOfficers += 1;
@@ -1925,48 +3646,22 @@ export const buildBchsAnalyticsFromGeneralList = (
 
       if (fullName) {
         unit.listed += 1;
-        if (rank === BCHS_RANK_OFFICER) unit.listedOfficers += 1;
-        else if (rank === BCHS_RANK_SERGEANT) unit.listedSergeants += 1;
-        else if (rank === BCHS_RANK_SOLDIER) unit.listedSoldiers += 1;
       }
 
       if (isBchsGeneralListPresentStatus(person.status)) {
-        unit.available += 1;
         unit.inRanksActually += 1;
-        if (rank === BCHS_RANK_OFFICER) {
-          unit.availableOfficers += 1;
-          unit.actualOfficers += 1;
-        } else if (rank === BCHS_RANK_SERGEANT) {
-          unit.availableSergeants += 1;
-          unit.actualSergeants += 1;
-        } else if (rank === BCHS_RANK_SOLDIER) {
-          unit.availableSoldiers += 1;
-          unit.actualSoldiers += 1;
-        }
-      } else if (fullName) {
-        unit.absent += 1;
+        if (rank === BCHS_RANK_OFFICER) unit.actualOfficers += 1;
+        else if (rank === BCHS_RANK_SERGEANT) unit.actualSergeants += 1;
+        else if (rank === BCHS_RANK_SOLDIER) unit.actualSoldiers += 1;
       }
 
-      if (status.includes("відряд") || isBchsDetachedStatus(person.status))
+      // Excel Z: COUNTIFS(U;"*Відрядження*", M<>).
+      if (
+        isBchsListedWithRankTitle(person) &&
+        isBchsBusinessTripStatus(person.status)
+      ) {
         unit.businessTrip += 1;
-      if (status.includes("навч")) unit.training += 1;
-      if (status.includes("ліку") || medicalPlace.includes("шпитал")) {
-        const wounded = isBchsWoundedMedicalNote(medicalText);
-        const illness =
-          isBchsIllnessMedicalNote(medicalText) || (!wounded && fullName);
-
-        if (medicalPlace.includes("мед")) {
-          if (wounded) unit.medWounded += 1;
-          else if (illness) unit.medIllness += 1;
-        } else {
-          if (wounded) unit.hospitalWounded += 1;
-          else if (illness) unit.hospitalIllness += 1;
-        }
       }
-      if (status.includes("відпуст")) unit.vacation += 1;
-      if (status.includes("сзч")) unit.awol += 1;
-      if (status.includes("зник")) unit.missing += 1;
-      if (status.includes("загиб")) unit.killed += 1;
       if (bzvpStatus.includes("без бзвп")) unit.noBzvp += 1;
       if (roleType.includes("піхот")) {
         unit.assaultTotal += 1;
@@ -1996,6 +3691,40 @@ export const buildBchsAnalyticsFromGeneralList = (
         unit.supportCombat += 1;
     });
 
+  Array.from(units.values()).forEach((unit) => {
+    const rankStats = computeBchsUnitRankListedAvailableStats(
+      novaPeople,
+      unit.unit,
+    );
+    unit.listedOfficers = rankStats.listed.officers;
+    unit.listedSergeants = rankStats.listed.sergeants;
+    unit.listedSoldiers = rankStats.listed.soldiers;
+    unit.listed = rankStats.listed.total;
+    unit.availableOfficers = rankStats.available.officers;
+    unit.availableSergeants = rankStats.available.sergeants;
+    unit.availableSoldiers = rankStats.available.soldiers;
+    unit.available = rankStats.available.total;
+    unit.absentOfficers = rankStats.absent.officers;
+    unit.absentSergeants = rankStats.absent.sergeants;
+    unit.absentSoldiers = rankStats.absent.soldiers;
+    unit.absent = rankStats.absent.total;
+    unit.businessTrip = computeBchsUnitBusinessTripCount(novaPeople, unit.unit);
+
+    const absenceStats = computeBchsUnitAbsenceCategoryStats(
+      novaPeople,
+      unit.unit,
+    );
+    unit.training = absenceStats.training;
+    unit.hospitalWounded = absenceStats.hospitalWounded;
+    unit.hospitalIllness = absenceStats.hospitalIllness;
+    unit.vacation = absenceStats.vacation;
+    unit.awol = absenceStats.awol;
+    unit.missing = absenceStats.missing;
+    unit.killed = absenceStats.killed;
+    unit.medWounded = absenceStats.medWounded;
+    unit.medIllness = absenceStats.medIllness;
+  });
+
   const detailRows = Array.from(units.values())
     .sort(
       (left, right) =>
@@ -2008,15 +3737,12 @@ export const buildBchsAnalyticsFromGeneralList = (
   Array.from(units.values()).forEach((item) =>
     addBchsGeneralListTotals(totalAccumulator, item),
   );
-  totalAccumulator.unassignedNewcomers = people.filter(
-    (person) =>
-      normalizeBchsText(person.status).includes("новоприбулий") &&
-      normalizeBchsText(person.battalion) !== "нова",
-  ).length;
+  totalAccumulator.unassignedNewcomers =
+    computeBchsTotalUnassignedNewcomers(allPeople);
   const total = bchsGeneralListUnitToRow(totalAccumulator, 11);
   const comparisonRows = [total, ...detailRows];
 
-  return {
+  const baseAnalytics = {
     reportDate: getBchsReportDate(sheet),
     total,
     rows: comparisonRows,
@@ -2025,8 +3751,11 @@ export const buildBchsAnalyticsFromGeneralList = (
     detachedDestinations: [],
     attachedSources: [],
     absenceReasons: buildBchsAbsenceReasons(total),
-    dataIssues: buildBchsGeneralListDataIssues(people),
+    dataIssues: buildBchsGeneralListDataIssues(allPeople),
   } satisfies BchsAnalyticsSnapshot;
+
+  // Bake away/attached into general-list analytics (same people source as Excel Аркуш2).
+  return applyBchsPersonnelDerivedColumns(baseAnalytics, allPeople);
 };
 
 export const isLegacyBchsAnalyticsSheet = (
@@ -2109,7 +3838,7 @@ export const buildBchsAnalyticsFromWorkbook = (
 
     return applyBchsPersonnelDerivedColumns(
       baseAnalytics,
-      extractBchsAwayPeopleFromSheet(personnelSheet),
+      extractBchsNovaPeopleFromSheet(personnelSheet),
     );
   }
 

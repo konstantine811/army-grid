@@ -17,7 +17,8 @@ import {
 } from "../../api";
 import { extractPassportPhotoFromPdf } from "./autoPassportPhoto";
 import { FloatingWindow } from "./FloatingWindow";
-import { dataUrlToFile } from "./personnelUtils";
+import { dataUrlToFile, buildQuestionnaireExportFileName } from "./personnelUtils";
+import { sanitizeFileName } from "../../shared/browserExport";
 
 type SearchPersonInput = {
   rowId: string;
@@ -161,6 +162,9 @@ export function QuestionnaireDiskSearchDialog({
     );
   };
 
+  const getQuestionnaireSaveFileName = (row: Pick<RowState, "fullName" | "callSign">) =>
+    sanitizeFileName(buildQuestionnaireExportFileName(row.fullName, row.callSign));
+
   const loadMatchFile = async (relativePath: string, fileName: string) => {
     const blob = await api.getDiskQuestionnaireFile(relativePath);
     return new File([blob], fileName || "questionnaire.pdf", {
@@ -222,7 +226,11 @@ export function QuestionnaireDiskSearchDialog({
 
       if (shouldAutoConfirm(row)) {
         try {
-          await api.confirmDiskQuestionnaire(row.externalId, match.relativePath);
+          await api.confirmDiskQuestionnaire(
+            row.externalId,
+            match.relativePath,
+            getQuestionnaireSaveFileName(row),
+          );
           savedQuestionnaires += 1;
           patchRow(row.rowId, {
             confirmed: true,
@@ -397,7 +405,11 @@ export function QuestionnaireDiskSearchDialog({
     setError("");
 
     try {
-      await api.confirmDiskQuestionnaire(row.externalId, row.selectedPath);
+      await api.confirmDiskQuestionnaire(
+        row.externalId,
+        row.selectedPath,
+        getQuestionnaireSaveFileName(row),
+      );
       patchRow(row.rowId, {
         confirmed: true,
         confirming: false,
@@ -484,8 +496,7 @@ export function QuestionnaireDiskSearchDialog({
                         {row.fullName}
                       </Typography>
                       <Typography variant="body2" color="text.secondary">
-                        ID: {row.externalId}
-                        {row.callSign ? ` · позивний ${row.callSign}` : ""}
+                        {row.callSign ? `позивний ${row.callSign}` : "без позивного"}
                       </Typography>
                     </Box>
                     <Stack

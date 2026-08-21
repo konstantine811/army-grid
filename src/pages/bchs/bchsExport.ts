@@ -4,14 +4,20 @@ import {
   BCHS_PERCENT_COLUMNS,
   bchsToNumber,
   columnLetterToIndex,
+  computeBchsPersonnel1PbUnitStats,
+  countBchsNovaCommanderReserve,
   createBchsComparisonRow,
   emptyBchsSupplementRow,
+  filterBchsNovaPeople,
+  formatBchsDestinationText,
   normalizeBchsText,
+  parseBchsDestinationText,
 } from "./bchsCalc";
 import type {
   BchsAnalyticsSnapshot,
   BchsAnalyticsTableRow,
   BchsComparisonRow,
+  BchsPersonnelAwayPerson,
   BchsSupplementRow,
   BchsSupplementSnapshot,
   GeneratedSheet,
@@ -24,9 +30,12 @@ export const setWorkbookCellValue = (
   columnLetter: string,
   value: unknown,
   styles: Record<string, unknown> = {},
+  options: { keepZero?: boolean } = {},
 ) => {
   const normalized =
-    typeof value === "number" && value === 0 ? null : (value ?? null);
+    typeof value === "number" && value === 0 && !options.keepZero
+      ? null
+      : (value ?? null);
   const cell = sheet.cell(rowNumber, columnLetterToIndex(columnLetter) + 1);
   cell.value(normalized);
   if (cell && typeof cell.style === "function") {
@@ -44,47 +53,91 @@ export const BCHS_EXPORT_START_COLUMN = columnLetterToIndex("B");
 export const BCHS_EXPORT_END_COLUMN = columnLetterToIndex("BL");
 /** Whole percents in Excel: 0.845 → 85%. */
 export const BCHS_PERCENT_NUMBER_FORMAT = "0%";
+/** Excel BF «Загалом шtурмovиків» — темно-зелений (#00B050), не 8ed973. */
+export const BCHS_BF_COLUMN_FILL = "00b050";
+const BCHS_COMBAT_COMPONENT_LIGHT_FILL = "8ed973";
+/** Палітра блоку Z…AN із потрібного зразка. */
+const BCHS_ABSENCE_HEADER_FILL = "f2cfee";
+const BCHS_ABSENCE_DATA_FILL = "c1e5f5";
+const BCHS_ABSENCE_FOOTER_FILL = "f2cfee";
+const BCHS_IN_SERVICE_HEADER_FILL = "d86ecc";
+const BCHS_IN_SERVICE_DATA_FILL = "46b1e1";
+const BCHS_IN_SERVICE_DATA_FONT = "ff0000";
+const BCHS_AWAY_UNITS_FILL = "caeefb";
+/** AU/AV — новоприбулі / пошук (світло-блакитний). */
+const BCHS_NEWCOMERS_DATA_FILL = "ceebf6";
+/** Еталон — зелений блок (наявність, «В строю фактично» AW–AY, рядок Усього). */
+const BCHS_MAIN_GREEN_FILL = "b8dbab";
+/** Еталон — заголовок групи «В строю фактично» (AW–AZ, рядки 4–5). */
+const BCHS_IN_RANKS_GROUP_HEADER_FILL = "94ca81";
+/** Еталон — заголовок «% фактичної укомплектованості» (BA, рядки 4–5). */
+const BCHS_PERCENT_HEADER_FILL = "6ec4e5";
+/** Розмір шрифту для числових комірок даних (етalon 28pt). */
+export const BCHS_DATA_FONT_SIZE = 28;
+const BCHS_ABSENCE_HEADER_LETTERS = new Set([
+  "Z",
+  "AA",
+  "AB",
+  "AC",
+  "AD",
+  "AE",
+  "AF",
+  "AG",
+  "AH",
+  "AI",
+]);
+const BCHS_COMBAT_COMPONENT_HEADER_LETTERS = new Set([
+  "BB",
+  "BC",
+  "BD",
+  "BE",
+  "BG",
+  "BH",
+  "BI",
+  "BJ",
+  "BK",
+  "BL",
+]);
 
 export const BCHS_MAIN_EXPORT_UNIT_ORDER = [
   "Командування",
   "1 піхотна рота",
   "2 піхотна рота",
   "3 піхотна рота",
-  "Взвод зв'язку",
-  "Взвод логістично-евакуаційних безпілотних наземних систем",
-  "Взвод матеріально-технічного забезпечення",
-  "Взвод перехоплювачів безпілотних літальних апаратів",
-  "Взвод протитанкових ракетних комплексів",
-  "Відділення радіоелектронної боротьби",
-  "Гранатометний взвод",
-  "Група безпілотних систем",
-  "Зенітно-ракетний взвод",
-  "Інженерно-саперне відділення",
-  "Кулеметний взвод",
-  "Медичний пункт",
-  "Мінометний взвод",
-  "Розвідувальний взвод",
   "Рота безпілотних авіаційних комплексів",
+  "Гранатометний взвод",
+  "Мінометний взвод",
+  "Кулеметний взвод",
+  "Взвод протитанкових ракетних комплексів",
+  "Взвод логістично-евакуаційних безпілотних наземних систем",
+  "Взвод перехоплювачів безпілотних літальних апаратів",
+  "Розвідувальний взвод",
+  "Інженерно-саперне відділення",
+  "Відділення радіоелектронної боротьби",
+  "Взвод зв'язку",
+  "Взвод матеріально-технічного забезпечення",
+  "Медичний пункт",
 ] as const;
 
 const BCHS_MAIN_DATA_COLUMN_FILLS: Array<[string, string, string]> = [
-  ["B", "B", "ddebf7"],
-  ["C", "F", "b7dee8"],
-  ["G", "J", "d8f0d0"],
+  ["B", "B", "ceebf6"],
+  ["C", "F", "d0dfe5"],
+  ["G", "J", "b8dbab"],
   ["K", "K", "ffc000"],
-  ["L", "O", "8ed973"],
+  ["L", "O", "b8dbab"],
   ["P", "P", "ffffff"],
-  ["Q", "T", "fce4d6"],
-  ["U", "U", "44b3d5"],
-  ["V", "Y", "b7e1a1"],
-  ["Z", "AA", "d9eaf7"],
-  ["AB", "AI", "ead0e9"],
-  ["AK", "AT", "ffffff"],
-  ["AU", "AU", "b7e1a1"],
-  ["AZ", "AZ", "b7e1a1"],
+  ["Q", "T", "fae2d5"],
+  ["U", "U", "ffc000"],
+  ["V", "Y", "b8dbab"],
+  ["AK", "AN", BCHS_AWAY_UNITS_FILL],
+  ["AO", "AO", "ffffff"],
+  ["AP", "AS", "b8dbab"],
+  ["AT", "AT", "ffffff"],
+  ["AW", "AY", BCHS_MAIN_GREEN_FILL],
   ["BA", "BA", "ffc000"],
-  ["BB", "BE", "d9eaf7"],
-  ["BF", "BL", "8ed973"],
+  ["BB", "BE", "b8dbab"],
+  ["BF", "BF", BCHS_BF_COLUMN_FILL],
+  ["BG", "BL", "b8dbab"],
 ];
 
 export const styleBchsMainDataRows = (
@@ -94,17 +147,49 @@ export const styleBchsMainDataRows = (
   rowNumbers
     .filter((rowNumber) => Number.isFinite(rowNumber) && rowNumber > 0)
     .forEach((rowNumber) => {
-      const rowRange = sheet.range(`B${rowNumber}`, `BL${rowNumber}`);
-      rowRange.style({
-        border: true,
-        fontFamily: "Times New Roman",
-        fontSize: 20,
-        bold: true,
-        verticalAlignment: "center",
-      });
+      for (
+        let columnIndex = BCHS_EXPORT_START_COLUMN;
+        columnIndex <= BCHS_EXPORT_END_COLUMN;
+        columnIndex += 1
+      ) {
+        const letter = getColumnLabel(columnIndex);
+        sheet.cell(rowNumber, columnIndex + 1).style({
+          border: true,
+          fontFamily: "Times New Roman",
+          fontSize: BCHS_TEXT_EXPORT_COLUMNS.has(letter) ? 20 : BCHS_DATA_FONT_SIZE,
+          bold: true,
+          verticalAlignment: "center",
+        });
+      }
       BCHS_MAIN_DATA_COLUMN_FILLS.forEach(([start, end, fill]) => {
         sheet.range(`${start}${rowNumber}`, `${end}${rowNumber}`).style("fill", fill);
       });
+      const isTotalRow = rowNumber === BCHS_EXPORT_DATA_START_ROW;
+      sheet
+        .range(`Z${rowNumber}`, `AI${rowNumber}`)
+        .style(
+          "fill",
+          rowNumber >= 27 ? BCHS_ABSENCE_FOOTER_FILL : BCHS_ABSENCE_DATA_FILL,
+        );
+      sheet
+        .cell(rowNumber, columnLetterToIndex("AJ") + 1)
+        .style("fill", BCHS_IN_SERVICE_DATA_FILL)
+        .style("fontColor", BCHS_IN_SERVICE_DATA_FONT);
+      if (isTotalRow) {
+        sheet
+          .range(`AU${rowNumber}`, `AZ${rowNumber}`)
+          .style("fill", BCHS_MAIN_GREEN_FILL);
+      } else {
+        sheet
+          .range(`AU${rowNumber}`, `AV${rowNumber}`)
+          .style("fill", BCHS_NEWCOMERS_DATA_FILL);
+        sheet
+          .range(`AW${rowNumber}`, `AY${rowNumber}`)
+          .style("fill", BCHS_MAIN_GREEN_FILL);
+        sheet
+          .cell(rowNumber, columnLetterToIndex("AZ") + 1)
+          .style("fill", BCHS_NEWCOMERS_DATA_FILL);
+      }
       ["K", "U", "BA"].forEach((letter) => {
         sheet
           .cell(rowNumber, columnLetterToIndex(letter) + 1)
@@ -112,6 +197,42 @@ export const styleBchsMainDataRows = (
           .style("bold", true);
       });
     });
+};
+
+/** Заголовки Z…AN (рядки 4–5) — рожево-блакитні, як у потрібному зразку. */
+export const styleBchsMainAbsenceHeaderColumns = (sheet: any) => {
+  [4, 5].forEach((rowNumber) => {
+    sheet
+      .range(`Z${rowNumber}`, `AI${rowNumber}`)
+      .style("fill", BCHS_ABSENCE_HEADER_FILL);
+    sheet
+      .cell(rowNumber, columnLetterToIndex("AJ") + 1)
+      .style("fill", BCHS_IN_SERVICE_HEADER_FILL);
+    sheet
+      .range(`AK${rowNumber}`, `AN${rowNumber}`)
+      .style("fill", BCHS_AWAY_UNITS_FILL);
+  });
+};
+
+/** Заголовки AP–AS, AU–BA, BB–BL (рядки 4–5) — як еталон Рассчет.xlsx. */
+export const styleBchsMainAttachedHeaderColumns = (sheet: any) => {
+  [4, 5].forEach((rowNumber) => {
+    sheet.range(`AP${rowNumber}`, `AS${rowNumber}`).style("fill", BCHS_MAIN_GREEN_FILL);
+    sheet.range(`AU${rowNumber}`, `AV${rowNumber}`).style("fill", BCHS_MAIN_GREEN_FILL);
+    sheet
+      .range(`AW${rowNumber}`, `AZ${rowNumber}`)
+      .style("fill", BCHS_IN_RANKS_GROUP_HEADER_FILL);
+    sheet.range(`BA${rowNumber}`, `BA${rowNumber}`).style("fill", BCHS_PERCENT_HEADER_FILL);
+    sheet
+      .range(`BB${rowNumber}`, `BE${rowNumber}`)
+      .style("fill", BCHS_COMBAT_COMPONENT_LIGHT_FILL);
+    sheet
+      .range(`BG${rowNumber}`, `BL${rowNumber}`)
+      .style("fill", BCHS_COMBAT_COMPONENT_LIGHT_FILL);
+    sheet
+      .range(`BF${rowNumber}`, `BF${rowNumber}`)
+      .style("fill", BCHS_BF_COLUMN_FILL);
+  });
 };
 
 /**
@@ -122,6 +243,14 @@ export const toBchsExportPercentRatio = (raw: unknown) => {
   const percent = bchsToNumber(raw);
   if (!Number.isFinite(percent) || percent === 0) return null;
   return Math.round(percent * 100) / 100;
+};
+
+/** Always listed/staff for О/С % (including 0%). */
+export const toBchsListedStaffPercentRatio = (listed: number, staff: number) => {
+  if (!(staff > 0)) return 0;
+  const ratio = listed / staff;
+  if (!Number.isFinite(ratio)) return 0;
+  return Math.round(ratio * 100) / 100;
 };
 
 export const looksLikeExcelFormulaText = (text: string) =>
@@ -229,8 +358,52 @@ export const writeBchsLegacyRow = (sheet: any, row: BchsComparisonRow) => {
   const targetRow = row.rowNumber || 11;
   const shortageRatio =
     row.staff > 0 ? row.shortage / row.staff : 0;
-  const actualRatio =
-    row.staff > 0 ? row.inRanksActually / row.staff : 0;
+
+  const shortageOfficers = Math.max(
+    0,
+    bchsToNumber(row.staffOfficers) - bchsToNumber(row.listedOfficers),
+  );
+  const shortageSergeants = Math.max(
+    0,
+    bchsToNumber(row.staffSergeants) - bchsToNumber(row.listedSergeants),
+  );
+  const shortageSoldiers = Math.max(
+    0,
+    bchsToNumber(row.staffSoldiers) - bchsToNumber(row.listedSoldiers),
+  );
+  // Excel V:Y «Відсутні» = G−L by rank; Z «Відрядження» = окремий COUNTIFS.
+  const absentOfficers = bchsToNumber(row.absentOfficers);
+  const absentSergeants = bchsToNumber(row.absentSergeants);
+  const absentSoldiers = bchsToNumber(row.absentSoldiers);
+  const absentTotal =
+    bchsToNumber(row.absent) ||
+    absentOfficers + absentSergeants + absentSoldiers;
+  const businessTripTotal = bchsToNumber(row.businessTrip);
+  // Excel: AW/AX/AY = G/H/I − V/W/X − AK/AL/AM + AP/AQ/AR
+  const actualOfficers = Math.max(
+    0,
+    bchsToNumber(row.listedOfficers) -
+      absentOfficers -
+      bchsToNumber(row.awayOfficers) +
+      bchsToNumber(row.attachedOfficers),
+  );
+  const actualSergeants = Math.max(
+    0,
+    bchsToNumber(row.listedSergeants) -
+      absentSergeants -
+      bchsToNumber(row.awaySergeants) +
+      bchsToNumber(row.attachedSergeants),
+  );
+  const actualSoldiers = Math.max(
+    0,
+    bchsToNumber(row.listedSoldiers) -
+      absentSoldiers -
+      bchsToNumber(row.awaySoldiers) +
+      bchsToNumber(row.attachedSoldiers),
+  );
+  const inRanksActually =
+    actualOfficers + actualSergeants + actualSoldiers;
+
   const values: Array<[string, unknown]> = [
     ["B", row.unit],
     ["C", row.staffOfficers],
@@ -246,14 +419,20 @@ export const writeBchsLegacyRow = (sheet: any, row: BchsComparisonRow) => {
     ["M", row.availableSergeants],
     ["N", row.availableSoldiers],
     ["O", row.available],
-    ["T", row.shortage],
+    ["Q", shortageOfficers],
+    ["R", shortageSergeants],
+    ["S", shortageSoldiers],
+    ["T", row.shortage || shortageOfficers + shortageSergeants + shortageSoldiers],
     [
       "U",
       toBchsExportPercentRatio(row.shortagePercent) ??
         toBchsExportPercentRatio(shortageRatio),
     ],
-    ["Y", row.absent],
-    ["Z", row.businessTrip],
+    ["V", absentOfficers],
+    ["W", absentSergeants],
+    ["X", absentSoldiers],
+    ["Y", absentTotal],
+    ["Z", businessTripTotal],
     ["AA", row.training],
     ["AB", row.hospitalWounded],
     ["AC", row.hospitalIllness],
@@ -263,6 +442,8 @@ export const writeBchsLegacyRow = (sheet: any, row: BchsComparisonRow) => {
     ["AG", row.killed],
     ["AH", row.medWounded],
     ["AI", row.medIllness],
+    // Excel: AJ = O («В строю за штатом»).
+    ["AJ", row.available],
     ["AK", row.awayOfficers],
     ["AL", row.awaySergeants],
     ["AM", row.awaySoldiers],
@@ -274,11 +455,16 @@ export const writeBchsLegacyRow = (sheet: any, row: BchsComparisonRow) => {
     ["AS", row.attachedFromOtherUnits],
     ["AT", row.attachedSourcesText || null],
     ["AU", row.unassignedNewcomers],
-    ["AZ", row.inRanksActually],
+    ["AV", row.searchInProgress],
+    ["AW", actualOfficers],
+    ["AX", actualSergeants],
+    ["AY", actualSoldiers],
+    ["AZ", inRanksActually],
     [
       "BA",
-      toBchsExportPercentRatio(row.actualPercent) ??
-        toBchsExportPercentRatio(actualRatio),
+      toBchsExportPercentRatio(
+        row.staff > 0 ? inRanksActually / row.staff : 0,
+      ),
     ],
     ["BB", row.assaultReady],
     ["BC", row.assaultRecovery],
@@ -315,6 +501,39 @@ export const writeBchsLegacyRow = (sheet: any, row: BchsComparisonRow) => {
       cell.style("numberFormat", BCHS_PERCENT_NUMBER_FORMAT);
     }
   });
+
+  const aoCell = sheet.cell(targetRow, columnLetterToIndex("AO") + 1);
+  if (aoCell && typeof aoCell.style === "function") {
+    aoCell.style("wrapText", true);
+    aoCell.style("verticalAlignment", "top");
+  }
+  const atCell = sheet.cell(targetRow, columnLetterToIndex("AT") + 1);
+  if (atCell && typeof atCell.style === "function") {
+    atCell.style("wrapText", true);
+    atCell.style("verticalAlignment", "top");
+  }
+};
+
+/** Рядки 29–34 у еталоні порожні — прибираємо нулі/формули шаблону. */
+export const clearBchsSheetPaddingRows = (
+  sheet: any,
+  fromRow = BCHS_EXPORT_DATA_END_ROW + 1,
+  toRow = 34,
+) => {
+  for (let rowNumber = fromRow; rowNumber <= toRow; rowNumber += 1) {
+    for (
+      let columnIndex = BCHS_EXPORT_START_COLUMN;
+      columnIndex <= BCHS_EXPORT_END_COLUMN;
+      columnIndex += 1
+    ) {
+      setWorkbookCellValue(
+        sheet,
+        rowNumber,
+        getColumnLabel(columnIndex),
+        null,
+      );
+    }
+  }
 };
 
 export const writeBchsAppendixRow = (
@@ -322,10 +541,38 @@ export const writeBchsAppendixRow = (
   rowNumber: number,
   row: BchsComparisonRow,
 ) => {
+  // Excel appendix: E = SUM(F:P), S = SUM(X:AC) (= combat component BL).
+  const absentIncludingAway =
+    bchsToNumber(row.businessTrip) +
+    bchsToNumber(row.training) +
+    bchsToNumber(row.hospitalWounded) +
+    bchsToNumber(row.hospitalIllness) +
+    bchsToNumber(row.vacation) +
+    bchsToNumber(row.awol) +
+    bchsToNumber(row.missing) +
+    bchsToNumber(row.killed) +
+    bchsToNumber(row.medWounded) +
+    bchsToNumber(row.medIllness) +
+    bchsToNumber(row.awayInOtherUnits);
+  const combatComponent =
+    bchsToNumber(row.combatComponent) ||
+    bchsToNumber(row.assaultTotal) +
+      bchsToNumber(row.vehicleCrew) +
+      bchsToNumber(row.droneCrew) +
+      bchsToNumber(row.crewServedWeapons) +
+      bchsToNumber(row.commandCombat) +
+      bchsToNumber(row.supportCombat);
+  const assaultTotal =
+    bchsToNumber(row.assaultTotal) ||
+    bchsToNumber(row.assaultReady) +
+      bchsToNumber(row.assaultRecovery) +
+      bchsToNumber(row.assaultExecution) +
+      bchsToNumber(row.noBzvp);
+
   const values: Array<[string, unknown]> = [
     ["C", row.staff],
     ["D", row.listed],
-    ["E", row.absent],
+    ["E", absentIncludingAway],
     ["F", row.businessTrip],
     ["G", row.training],
     ["H", row.hospitalWounded],
@@ -339,12 +586,12 @@ export const writeBchsAppendixRow = (
     ["P", row.awayInOtherUnits],
     ["Q", row.attachedFromOtherUnits],
     ["R", row.unassignedNewcomers],
-    ["S", row.inRanksActually],
+    ["S", combatComponent],
     ["T", row.assaultReady],
     ["U", row.assaultRecovery],
     ["V", row.assaultExecution],
     ["W", row.noBzvp],
-    ["X", row.assaultTotal],
+    ["X", assaultTotal],
     ["Y", row.vehicleCrew],
     ["Z", row.droneCrew],
     ["AA", row.crewServedWeapons],
@@ -360,7 +607,7 @@ export const writeBchsPersonnelBzvpRow = (sheet: any, row: BchsSupplementRow) =>
     ["C", row.staff],
     ["D", row.listed],
     ["E", row.available || null],
-    ["F", toBchsExportPercentRatio(row.staffedPercent)],
+    ["F", toBchsListedStaffPercentRatio(row.listed, row.staff)],
     ["G", row.combatTask],
     ["H", row.replacementReserve],
     ["I", row.taskReserve],
@@ -374,6 +621,7 @@ export const writeBchsPersonnelBzvpRow = (sheet: any, row: BchsSupplementRow) =>
       letter,
       value,
       letter === "F" ? { numberFormat: BCHS_PERCENT_NUMBER_FORMAT } : {},
+      letter === "F" ? { keepZero: true } : {},
     ),
   );
   row.bzvpBuckets.forEach((bucket, index) => {
@@ -421,14 +669,14 @@ const findBchsComparisonRowByUnit = (
 ) => {
   const target = normalizeBchsUnitKey(unitName);
   const aliases =
-    target === "штаб" || target === "командування"
-      ? ["ж", "упр", "управління", "штаб", "командування"]
-      : target === "відділення радіоелектронної боротьби"
-        ? ["відділення радіоелектронної боротьби", "відділення реб", "брез"]
-        : target === "взвод матеріально-технічного забезпечення"
-          ? ["взвод матеріально-технічного забезпечення", "вмтз"]
-          : target === "інженерно-саперне відділення"
-            ? ["інженерно-саперне відділення", "ісв"]
+    target === "відділення радіоелектронної боротьби"
+      ? ["відділення радіоелектронної боротьби", "відділення реб", "реб"]
+      : target === "взвод матеріально-технічного забезпечення"
+        ? ["взвод матеріально-технічного забезпечення", "вмтз"]
+        : target === "інженерно-саперне відділення"
+          ? ["інженерно-саперне відділення", "ісв"]
+          : target === "управління"
+            ? ["управління", "ж"]
             : [target];
 
   return (
@@ -440,7 +688,11 @@ const findBchsComparisonRowByUnit = (
     rows.find((row) => normalizeBchsUnitKey(row.unit) === target) ??
     rows.find((row) => {
       const unit = normalizeBchsUnitKey(row.unit);
-      return aliases.some((alias) => unit.includes(alias) || alias.includes(unit));
+      if (unit.length < 8 || target.length < 8) return false;
+      return aliases.some(
+        (alias) =>
+          alias.length >= 8 && (unit.includes(alias) || alias.includes(unit)),
+      );
     })
   );
 };
@@ -462,6 +714,9 @@ const BCHS_SUMMABLE_COMPARISON_FIELDS: Array<
     | "availableSoldiers"
     | "shortage"
     | "absent"
+    | "absentOfficers"
+    | "absentSergeants"
+    | "absentSoldiers"
     | "businessTrip"
     | "training"
     | "hospitalWounded"
@@ -486,6 +741,7 @@ const BCHS_SUMMABLE_COMPARISON_FIELDS: Array<
     | "attachedSergeants"
     | "attachedSoldiers"
     | "unassignedNewcomers"
+    | "searchInProgress"
     | "noBzvp"
     | "assaultReady"
     | "assaultRecovery"
@@ -501,13 +757,14 @@ const BCHS_SUMMABLE_COMPARISON_FIELDS: Array<
   "staff", "staffOfficers", "staffSergeants", "staffSoldiers",
   "listed", "listedOfficers", "listedSergeants", "listedSoldiers",
   "available", "availableOfficers", "availableSergeants", "availableSoldiers",
-  "shortage", "absent", "businessTrip", "training", "hospitalWounded",
+  "shortage", "absent", "absentOfficers", "absentSergeants", "absentSoldiers",
+  "businessTrip", "training", "hospitalWounded",
   "hospitalIllness", "vacation", "awol", "missing", "killed", "medWounded",
   "medIllness", "inRanksActually", "combatComponent", "actualOfficers",
   "actualSergeants", "actualSoldiers", "awayInOtherUnits", "awayOfficers",
   "awaySergeants", "awaySoldiers", "attachedFromOtherUnits",
   "attachedOfficers", "attachedSergeants", "attachedSoldiers",
-  "unassignedNewcomers", "noBzvp", "assaultReady", "assaultRecovery",
+  "unassignedNewcomers", "searchInProgress", "noBzvp", "assaultReady", "assaultRecovery",
   "assaultExecution", "assaultTotal", "vehicleCrew", "droneCrew",
   "crewServedWeapons", "commandCombat", "supportCombat",
 ];
@@ -544,15 +801,61 @@ const combineBchsComparisonRows = (
     combined.absent -
     combined.awayInOtherUnits +
     combined.attachedFromOtherUnits;
-  combined.awayDestinationsText = rows
-    .map((row) => row.awayDestinationsText)
-    .filter(Boolean)
-    .join("\n");
-  combined.attachedSourcesText = rows
-    .map((row) => row.attachedSourcesText)
-    .filter(Boolean)
-    .join("\n");
+  const mergedDestinations = new Map<string, number>();
+  rows.forEach((row) => {
+    parseBchsDestinationText(row.awayDestinationsText).forEach((count, label) => {
+      mergedDestinations.set(
+        label,
+        (mergedDestinations.get(label) ?? 0) + count,
+      );
+    });
+  });
+  combined.awayDestinationsText = formatBchsDestinationText(mergedDestinations);
+
+  const mergedSources = new Map<string, number>();
+  rows.forEach((row) => {
+    parseBchsDestinationText(row.attachedSourcesText).forEach((count, label) => {
+      mergedSources.set(label, (mergedSources.get(label) ?? 0) + count);
+    });
+  });
+  combined.attachedSourcesText = formatBchsDestinationText(mergedSources);
   return combined;
+};
+
+/** Overlay AK–AO from personnel-derived analytics (formula path does not fill AO). */
+export const writeBchsAwayExportColumns = (
+  sheet: any,
+  analytics: BchsAnalyticsSnapshot,
+) => {
+  const exportRows = buildBchsMainExportRows(analytics);
+  const rowNumbers = exportRows
+    .map((row) => row.rowNumber)
+    .filter((rowNumber): rowNumber is number => Boolean(rowNumber));
+
+  exportRows.forEach((row) => {
+    const targetRow = row.rowNumber || 11;
+    const values: Array<[string, unknown]> = [
+      ["AK", row.awayOfficers],
+      ["AL", row.awaySergeants],
+      ["AM", row.awaySoldiers],
+      ["AN", row.awayInOtherUnits],
+      ["AO", row.awayDestinationsText || null],
+    ];
+
+    values.forEach(([letter, value]) => {
+      const cell = setWorkbookCellValue(sheet, targetRow, letter, value);
+      if (letter === "AO" && cell && typeof cell.style === "function") {
+        cell.style("wrapText", true);
+        cell.style("verticalAlignment", "top");
+      }
+    });
+  });
+
+  fitSheetColumnToText(sheet, "AO", rowNumbers, {
+    minWidth: 22,
+    maxWidth: 80,
+    headerTexts: ["Куди відкомандировані"],
+  });
 };
 
 export const buildBchsMainExportRows = (
@@ -571,6 +874,7 @@ export const buildBchsMainExportRows = (
             "управління",
             "штаб",
             "командування",
+            "група безпілотних систем",
           ])
         : [];
     const row =
@@ -578,20 +882,15 @@ export const buildBchsMainExportRows = (
         ? combineBchsComparisonRows(unitName, matchedRows)
         : matchedRows[0] ??
           findBchsComparisonRowByUnit(analytics.comparisonRows, unitName);
-    if (!row || row === total || used.has(row)) return [];
+    if (!row) return [createBchsComparisonRow({ unit: unitName })];
+    if (row === total || used.has(row))
+      return [createBchsComparisonRow({ unit: unitName })];
     matchedRows.forEach((matchedRow) => used.add(matchedRow));
     used.add(row);
     return [{ ...row, unit: unitName }];
   });
-  const overflowRows = analytics.comparisonRows.filter(
-    (row) =>
-      row !== total &&
-      row.rowNumber !== 11 &&
-      row.unit.trim() &&
-      !used.has(row),
-  );
 
-  return [total, ...detailRows, ...overflowRows].map((row, index) => ({
+  return [total, ...detailRows].map((row, index) => ({
     ...row,
     rowNumber: 11 + index,
   }));
@@ -600,76 +899,114 @@ export const buildBchsMainExportRows = (
 export const writeBchsPersonnelBzvp1PbTemplate = (
   sheet: any,
   analytics: BchsAnalyticsSnapshot,
+  people: BchsPersonnelAwayPerson[] = [],
 ) => {
-  const total =
-    analytics.comparisonRows.find((row) => row.rowNumber === 11) ??
-    analytics.total;
-
   ["C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N"].forEach(
     (letter) => setGeneratedColumnWidth(sheet, letter, letter === "F" ? 9 : 10),
   );
 
-  const taskTotals = {
+  const rosterPeople = filterBchsNovaPeople(people);
+  const detailTotals = {
+    staff: 0,
+    listed: 0,
+    presence: 0,
     combatTask: 0,
-    replacementReserve: 0,
-    taskReserve: 0,
     commanderReserve: 0,
   };
 
   BCHS_PERSONNEL_1PB_TEMPLATE_ROWS.forEach(([rowNumber, unitName]) => {
     const isTotal = /всього/i.test(unitName);
-    const row = isTotal
-      ? total
-      : findBchsComparisonRowByUnit(analytics.comparisonRows, unitName);
+
+    if (isTotal) {
+      setWorkbookCellValue(sheet, rowNumber, "A", "Всього:");
+      setWorkbookCellValue(sheet, rowNumber, "B", null);
+      setWorkbookCellValue(sheet, rowNumber, "C", detailTotals.staff, {}, {
+        keepZero: true,
+      });
+      setWorkbookCellValue(sheet, rowNumber, "D", detailTotals.listed, {}, {
+        keepZero: true,
+      });
+      setWorkbookCellValue(sheet, rowNumber, "E", detailTotals.presence, {}, {
+        keepZero: true,
+      });
+      setWorkbookCellValue(
+        sheet,
+        rowNumber,
+        "F",
+        toBchsListedStaffPercentRatio(detailTotals.listed, detailTotals.staff),
+        { numberFormat: BCHS_PERCENT_NUMBER_FORMAT },
+        { keepZero: true },
+      );
+      setWorkbookCellValue(
+        sheet,
+        rowNumber,
+        "G",
+        detailTotals.combatTask,
+        {},
+        { keepZero: true },
+      );
+      setWorkbookCellValue(sheet, rowNumber, "H", 0, {}, { keepZero: true });
+      setWorkbookCellValue(sheet, rowNumber, "I", 0, {}, { keepZero: true });
+      setWorkbookCellValue(
+        sheet,
+        rowNumber,
+        "J",
+        detailTotals.commanderReserve,
+        {},
+        { keepZero: true },
+      );
+      ["K", "L", "M", "N"].forEach((letter) =>
+        setWorkbookCellValue(sheet, rowNumber, letter, 0, {}, { keepZero: true }),
+      );
+      return;
+    }
+
+    const comparisonRow = findBchsComparisonRowByUnit(
+      analytics.comparisonRows,
+      unitName,
+    );
+    const stats = computeBchsPersonnel1PbUnitStats(
+      unitName,
+      comparisonRow,
+      rosterPeople,
+    );
+
+    detailTotals.staff += stats.staff;
+    detailTotals.listed += stats.listed;
+    detailTotals.presence += stats.presence;
+    detailTotals.combatTask += stats.combatTask;
+    detailTotals.commanderReserve += stats.commanderReserve;
 
     if (rowNumber === 81) setWorkbookCellValue(sheet, rowNumber, "A", "1 ПБ");
-    setWorkbookCellValue(sheet, rowNumber, "B", isTotal ? null : unitName);
-    setWorkbookCellValue(sheet, rowNumber, "C", row?.staff ?? null);
-    setWorkbookCellValue(sheet, rowNumber, "D", row?.listed ?? null);
-    setWorkbookCellValue(sheet, rowNumber, "E", row?.available ?? null);
+    setWorkbookCellValue(sheet, rowNumber, "B", unitName);
+    setWorkbookCellValue(sheet, rowNumber, "C", stats.staff, {}, {
+      keepZero: true,
+    });
+    setWorkbookCellValue(sheet, rowNumber, "D", stats.listed, {}, {
+      keepZero: true,
+    });
+    setWorkbookCellValue(sheet, rowNumber, "E", stats.presence, {}, {
+      keepZero: true,
+    });
     setWorkbookCellValue(
       sheet,
       rowNumber,
       "F",
-      row
-        ? toBchsExportPercentRatio(row.staff > 0 ? row.listed / row.staff : 0)
-        : null,
+      toBchsListedStaffPercentRatio(stats.listed, stats.staff),
       { numberFormat: BCHS_PERCENT_NUMBER_FORMAT },
+      { keepZero: true },
     );
-
-    ["G", "H", "I", "J", "K", "L", "M", "N"].forEach((letter) =>
-      setWorkbookCellValue(sheet, rowNumber, letter, null),
+    setWorkbookCellValue(sheet, rowNumber, "G", stats.combatTask, {}, {
+      keepZero: true,
+    });
+    setWorkbookCellValue(sheet, rowNumber, "H", 0, {}, { keepZero: true });
+    setWorkbookCellValue(sheet, rowNumber, "I", 0, {}, { keepZero: true });
+    setWorkbookCellValue(sheet, rowNumber, "J", stats.commanderReserve, {}, {
+      keepZero: true,
+    });
+    ["K", "L", "M", "N"].forEach((letter) =>
+      setWorkbookCellValue(sheet, rowNumber, letter, 0, {}, { keepZero: true }),
     );
-
-    if (isTotal) {
-      setWorkbookCellValue(sheet, rowNumber, "A", "Всього:");
-      setWorkbookCellValue(sheet, rowNumber, "G", taskTotals.combatTask);
-      setWorkbookCellValue(
-        sheet,
-        rowNumber,
-        "H",
-        taskTotals.replacementReserve,
-      );
-      setWorkbookCellValue(sheet, rowNumber, "I", taskTotals.taskReserve);
-      setWorkbookCellValue(sheet, rowNumber, "J", taskTotals.commanderReserve);
-      return;
-    }
-    if (!row) return;
-
-    const combatTask = row.assaultExecution;
-    const replacementReserve = 0;
-    const taskReserve = row.noBzvp;
-    const commanderReserve = row.attachedFromOtherUnits;
-
-    taskTotals.combatTask += combatTask;
-    taskTotals.replacementReserve += replacementReserve;
-    taskTotals.taskReserve += taskReserve;
-    taskTotals.commanderReserve += commanderReserve;
-
-    setWorkbookCellValue(sheet, rowNumber, "G", combatTask);
-    setWorkbookCellValue(sheet, rowNumber, "H", replacementReserve);
-    setWorkbookCellValue(sheet, rowNumber, "I", taskReserve);
-    setWorkbookCellValue(sheet, rowNumber, "J", commanderReserve);
   });
 };
 
@@ -698,9 +1035,12 @@ export const setGeneratedCell = (
   columnLetter: string,
   value: unknown,
   styles: Record<string, unknown> = {},
+  options: { keepZero?: boolean } = {},
 ) => {
   const normalized =
-    typeof value === "number" && value === 0 ? null : (value ?? null);
+    typeof value === "number" && value === 0 && !options.keepZero
+      ? null
+      : (value ?? null);
   const cell = sheet
     .cell(rowNumber, columnLetterToIndex(columnLetter) + 1)
     .value(normalized);
@@ -855,6 +1195,7 @@ export const writeGeneratedBchsWorkbook = (
   personnelSupplementOverride?: BchsSupplementSnapshot,
   reportDateOverride?: string,
   sheetName = "Аркуш1",
+  people: BchsPersonnelAwayPerson[] = [],
 ) => {
   const reportDate = reportDateOverride ?? analytics.reportDate;
   const reportSheet = workbook.sheet(0);
@@ -939,23 +1280,25 @@ export const writeGeneratedBchsWorkbook = (
     ["P", "P", "Місцезнаходження", "ffffff"],
     ["Q", "T", "Некомплект", "fce4d6"],
     ["U", "U", "% не укомплектованості", "44b3d5"],
-    ["V", "Y", "Відсутні", "b7e1a1"],
-    ["Z", "Z", "Відрядження", "d9eaf7"],
-    ["AA", "AA", "Навчання", "d9eaf7"],
-    ["AB", "AC", "Шпиталь", "ead0e9"],
-    ["AD", "AD", "Відпустка", "ead0e9"],
-    ["AE", "AE", "СЗЧ", "ead0e9"],
-    ["AF", "AF", "Зниклі безвісти", "ead0e9"],
-    ["AG", "AG", "Загиблі", "ead0e9"],
-    ["AH", "AI", "Мед.рота", "ead0e9"],
-    ["AK", "AN", "Виконують завдання в інших підрозділах полку", "ffffff"],
+    ["V", "Y", "Відсутні", "b8dbab"],
+    ["Z", "Z", "Відрядження", BCHS_ABSENCE_HEADER_FILL],
+    ["AA", "AA", "Навчання", BCHS_ABSENCE_HEADER_FILL],
+    ["AB", "AC", "Шпиталь", BCHS_ABSENCE_HEADER_FILL],
+    ["AD", "AD", "Відпустка", BCHS_ABSENCE_HEADER_FILL],
+    ["AE", "AE", "СЗЧ", BCHS_ABSENCE_HEADER_FILL],
+    ["AF", "AF", "Зниклі безвісти", BCHS_ABSENCE_HEADER_FILL],
+    ["AG", "AG", "Загиблі", BCHS_ABSENCE_HEADER_FILL],
+    ["AH", "AI", "Мед.рота", BCHS_ABSENCE_HEADER_FILL],
+    ["AJ", "AJ", "В строю за штатом", BCHS_IN_SERVICE_HEADER_FILL],
+    ["AK", "AN", "Виконують завдання в інших підрозділах полку", BCHS_AWAY_UNITS_FILL],
     ["AO", "AO", "Куди відкомандировані", "ffffff"],
-    ["AP", "AS", "В розташуванні з інших підрозділів полку", "ffffff"],
+    ["AP", "AS", "В розташуванні з інших підрозділів полку", "8ed973"],
     ["AT", "AT", "Звідки прикомандировані", "ffffff"],
-    ["AU", "AU", "Новоприбулі (без посади)", "b7e1a1"],
-    ["AZ", "AZ", "В строю фактично", "b7e1a1"],
-    ["BA", "BA", "% фактичної укомплектованості", "ffc000"],
-    ["BB", "BE", "Піхота", "d9eaf7"],
+    ["AU", "AU", "Новоприбулі (без посади)", BCHS_MAIN_GREEN_FILL],
+    ["AV", "AV", "Ведеться пошук", BCHS_MAIN_GREEN_FILL],
+    ["AW", "AZ", "В строю фактично", BCHS_IN_RANKS_GROUP_HEADER_FILL],
+    ["BA", "BA", "% фактичної укомплектованості", BCHS_PERCENT_HEADER_FILL],
+    ["BB", "BE", "Піхота", "8ed973"],
     ["BF", "BL", "Бойова складова", "8ed973"],
   ];
 
@@ -969,6 +1312,34 @@ export const writeGeneratedBchsWorkbook = (
     });
     if (start !== end) mergeExcelRange(reportSheet, `${start}4`, `${end}4`);
   });
+  mergeExcelRange(reportSheet, "AJ4", "AJ5");
+  setGeneratedCell(reportSheet, 5, "AJ", "", {
+    bold: true,
+    fill: BCHS_IN_SERVICE_HEADER_FILL,
+    horizontalAlignment: "center",
+    verticalAlignment: "center",
+    wrapText: true,
+  });
+
+  const resolveBchsSubHeaderFill = (letter: string) => {
+    if (letter === "BF") return BCHS_BF_COLUMN_FILL;
+    if (BCHS_COMBAT_COMPONENT_HEADER_LETTERS.has(letter)) {
+      return BCHS_COMBAT_COMPONENT_LIGHT_FILL;
+    }
+    if (letter === "AJ") return BCHS_IN_SERVICE_HEADER_FILL;
+    if (["AK", "AL", "AM", "AN"].includes(letter)) {
+      return BCHS_AWAY_UNITS_FILL;
+    }
+    if (["AU", "AV"].includes(letter)) return BCHS_MAIN_GREEN_FILL;
+    if (["AW", "AX", "AY", "AZ"].includes(letter)) {
+      return BCHS_IN_RANKS_GROUP_HEADER_FILL;
+    }
+    if (letter === "BA") return BCHS_PERCENT_HEADER_FILL;
+    if (BCHS_ABSENCE_HEADER_LETTERS.has(letter)) {
+      return BCHS_ABSENCE_HEADER_FILL;
+    }
+    return undefined;
+  };
 
   const subHeaders: Record<string, string> = {
     C: "Офіцери",
@@ -1003,11 +1374,15 @@ export const writeGeneratedBchsWorkbook = (
     AQ: "Сержанти",
     AR: "Солдати",
     AS: "Всього",
+    AW: "офіцери",
+    AX: "сержанти",
+    AY: "солдати",
+    AZ: "Всього",
     BB: "Готові",
     BC: "На відновленні",
     BD: "На виконанні",
     BE: "Без БЗВП",
-    BF: "Штурмовики",
+    BF: "Загалом штурмовиків",
     BG: "Екіпажі техніки",
     BH: "Екіпажі БПЛА",
     BI: "Колективне озброєння",
@@ -1018,6 +1393,7 @@ export const writeGeneratedBchsWorkbook = (
   Object.entries(subHeaders).forEach(([letter, label]) =>
     setGeneratedCell(reportSheet, 5, letter, label, {
       bold: true,
+      fill: resolveBchsSubHeaderFill(letter),
       horizontalAlignment: "center",
       textRotation: 90,
       verticalAlignment: "center",
@@ -1055,9 +1431,9 @@ export const writeGeneratedBchsWorkbook = (
         toBchsExportPercentRatio(
           row.staff > 0 ? row.shortage / row.staff : 0,
         ),
-      V: tableRow ? resolveBchsExportCellValue("V", tableRow.values.V) : null,
-      W: tableRow ? resolveBchsExportCellValue("W", tableRow.values.W) : null,
-      X: tableRow ? resolveBchsExportCellValue("X", tableRow.values.X) : null,
+      V: row.absentOfficers,
+      W: row.absentSergeants,
+      X: row.absentSoldiers,
       Y: row.absent,
       Z: row.businessTrip,
       AA: row.training,
@@ -1069,6 +1445,7 @@ export const writeGeneratedBchsWorkbook = (
       AG: row.killed,
       AH: row.medWounded,
       AI: row.medIllness,
+      AJ: row.available,
       AK: row.awayOfficers,
       AL: row.awaySergeants,
       AM: row.awaySoldiers,
@@ -1080,6 +1457,7 @@ export const writeGeneratedBchsWorkbook = (
       AS: row.attachedFromOtherUnits,
       AT: row.attachedSourcesText || null,
       AU: row.unassignedNewcomers,
+      AV: row.searchInProgress,
       AW: row.actualOfficers,
       AX: row.actualSergeants,
       AY: row.actualSoldiers,
@@ -1125,6 +1503,8 @@ export const writeGeneratedBchsWorkbook = (
     reportSheet,
     mainExportRows.map((_, index) => 11 + index),
   );
+  styleBchsMainAbsenceHeaderColumns(reportSheet);
+  styleBchsMainAttachedHeaderColumns(reportSheet);
   fitBchsTextExportColumns(
     reportSheet,
     mainExportRows.map((_, index) => 11 + index),
@@ -1266,6 +1646,17 @@ export const writeGeneratedBchsWorkbook = (
     }),
   ];
   const supplementRows = personnelSupplement?.rows ?? fallbackSupplementRows;
+  const rosterPeople = filterBchsNovaPeople(people);
+  const commanderReserveByIndex = supplementRows.map((row) => {
+    const isTotal =
+      /всього/i.test(row.unit) || /всього/i.test(row.battalion);
+    if (isTotal) return 0;
+    return countBchsNovaCommanderReserve(rosterPeople, row.unit);
+  });
+  const commanderReserveTotal = commanderReserveByIndex.reduce(
+    (sum, value) => sum + value,
+    0,
+  );
   let previousSupplementBattalion = "";
 
   supplementRows.forEach((row, index) => {
@@ -1278,17 +1669,19 @@ export const writeGeneratedBchsWorkbook = (
 
     if (row.battalion && !isTotalRow) previousSupplementBattalion = row.battalion;
 
+    const commanderReserve = isTotalRow
+      ? commanderReserveTotal
+      : commanderReserveByIndex[index];
+
     const values: Record<string, unknown> = {
       A: visibleBattalion,
       B: row.unit,
       C: row.staff,
       D: row.listed,
       E: row.available || null,
-      F: row.staffedPercent,
       G: row.combatTask,
       H: row.replacementReserve,
       I: row.taskReserve,
-      J: row.commanderReserve,
     };
 
     Object.entries(values).forEach(([letter, value]) =>
@@ -1299,11 +1692,31 @@ export const writeGeneratedBchsWorkbook = (
         wrapText: letter === "B",
       }),
     );
-    setGeneratedCell(supplementSheet, rowNumber, "F", toBchsExportPercentRatio(row.staffedPercent), {
-      numberFormat: BCHS_PERCENT_NUMBER_FORMAT,
-      horizontalAlignment: "center",
-      bold: isTotalRow,
-    });
+    setGeneratedCell(
+      supplementSheet,
+      rowNumber,
+      "F",
+      toBchsListedStaffPercentRatio(row.listed, row.staff),
+      {
+        numberFormat: BCHS_PERCENT_NUMBER_FORMAT,
+        fill: "ffffff",
+        horizontalAlignment: "center",
+        bold: isTotalRow,
+      },
+      { keepZero: true },
+    );
+    setGeneratedCell(
+      supplementSheet,
+      rowNumber,
+      "J",
+      commanderReserve,
+      {
+        fill: "ffffff",
+        horizontalAlignment: "center",
+        bold: isTotalRow,
+      },
+      { keepZero: true },
+    );
     bzvpHeaders.forEach((_, bucketIndex) => {
       const bucketValue = row.bzvpBuckets[bucketIndex]?.value ?? 0;
       setGeneratedCell(
@@ -1498,11 +1911,39 @@ export const writeGeneratedBchsWorkbook = (
     fontSize: number,
     horizontalAlignment: "center" | "right",
   ) => {
+    // Excel appendix: E = SUM(F:P), S = SUM(X:AC), X = SUM(T:W).
+    const absentIncludingAway =
+      bchsToNumber(row.businessTrip) +
+      bchsToNumber(row.training) +
+      bchsToNumber(row.hospitalWounded) +
+      bchsToNumber(row.hospitalIllness) +
+      bchsToNumber(row.vacation) +
+      bchsToNumber(row.awol) +
+      bchsToNumber(row.missing) +
+      bchsToNumber(row.killed) +
+      bchsToNumber(row.medWounded) +
+      bchsToNumber(row.medIllness) +
+      bchsToNumber(row.awayInOtherUnits);
+    const assaultTotal =
+      bchsToNumber(row.assaultTotal) ||
+      bchsToNumber(row.assaultReady) +
+        bchsToNumber(row.assaultRecovery) +
+        bchsToNumber(row.assaultExecution) +
+        bchsToNumber(row.noBzvp);
+    const combatComponent =
+      bchsToNumber(row.combatComponent) ||
+      assaultTotal +
+        bchsToNumber(row.vehicleCrew) +
+        bchsToNumber(row.droneCrew) +
+        bchsToNumber(row.crewServedWeapons) +
+        bchsToNumber(row.commandCombat) +
+        bchsToNumber(row.supportCombat);
+
     const values: Record<string, unknown> = {
       B: label,
       C: row.staff,
       D: row.listed,
-      E: row.absent,
+      E: absentIncludingAway,
       F: row.businessTrip,
       G: row.training,
       H: row.hospitalWounded,
@@ -1516,12 +1957,12 @@ export const writeGeneratedBchsWorkbook = (
       P: row.awayInOtherUnits,
       Q: row.attachedFromOtherUnits,
       R: row.unassignedNewcomers,
-      S: row.inRanksActually,
+      S: combatComponent,
       T: row.assaultReady,
       U: row.assaultRecovery,
       V: row.assaultExecution,
       W: row.noBzvp,
-      X: row.assaultTotal,
+      X: assaultTotal,
       Y: row.vehicleCrew,
       Z: row.droneCrew,
       AA: row.crewServedWeapons,

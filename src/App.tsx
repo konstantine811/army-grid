@@ -40,10 +40,13 @@ import { DocumentsPage } from "./pages/documents/DocumentsPage";
 import { EjournalPage } from "./pages/ejournal/EjournalPage";
 import type { EjournalPreviewRow } from "./pages/ejournal/ejournalTypes";
 import { buildPersonSummary } from "./pages/personnel/personnelUtils";
+import { BchsLabPage } from "./pages/bchs/BchsLabPage";
 import { BchsPage } from "./pages/bchs/BchsPage";
 import { OverviewPage } from "./pages/overview/OverviewPage";
 import { ExcelFillPage } from "./pages/excel-fill/ExcelFillPage";
 import { QuestionnaireParserPage } from "./pages/questionnaire-parser/QuestionnaireParserPage";
+import { SocPassportPage } from "./pages/soc-passport/SocPassportPage";
+import { DocumentSignatoriesSettingsPage } from "./pages/document-settings/DocumentSignatoriesSettingsPage";
 import { SciScrollbars } from "./components/sci/SciScrollbars";
 
 function App() {
@@ -266,7 +269,14 @@ function App() {
   };
   const openDocumentsForPerson = (
     row: EjournalPreviewRow,
-    mode: "default" | "salaryPowerAttorney" | "ubdReport" = "default",
+    mode:
+      | "default"
+      | "salaryPowerAttorney"
+      | "ubdReport"
+      | "ubdRestoreReport"
+      | "form6Report"
+      | "form12Report"
+      | "temporaryMilitaryId" = "default",
   ) => {
     const externalId = buildPersonSummary(row).externalId;
     window.localStorage.setItem(
@@ -300,10 +310,14 @@ function App() {
         <AnalyticsPage />
       ) : activePage === "bchs" ? (
         <BchsPage />
+      ) : activePage === "bchsLab" ? (
+        <BchsLabPage />
       ) : activePage === "excelFill" ? (
         <ExcelFillPage />
       ) : activePage === "questionnaireParser" ? (
         <QuestionnaireParserPage />
+      ) : activePage === "socPassport" ? (
+        <SocPassportPage />
       ) : activePage === "ejournal" ? (
         <EjournalPage />
       ) : activePage === "personnel" ? (
@@ -315,6 +329,8 @@ function App() {
             applyRoute(pushAppRoute(path, getPageFromPath(path)));
           }}
         />
+      ) : activePage === "documentSettings" ? (
+        <DocumentSignatoriesSettingsPage />
       ) : (
         <main className="main-panel">
           <header className="topbar">

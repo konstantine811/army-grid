@@ -4,10 +4,13 @@ export type AppPage =
   | "analytics"
   | "ejournal"
   | "bchs"
+  | "bchsLab"
   | "excelFill"
   | "questionnaireParser"
+  | "socPassport"
   | "personnel"
-  | "documents";
+  | "documents"
+  | "documentSettings";
 export type BchsAnalyticsTab = "overview" | "comparison" | "combat" | "supplement";
 
 export const pagePaths: Record<AppPage, string> = {
@@ -16,10 +19,13 @@ export const pagePaths: Record<AppPage, string> = {
   analytics: "/analytics",
   ejournal: "/ejournal",
   bchs: "/bchs",
+  bchsLab: "/bchs-lab",
   excelFill: "/excel-fill",
   questionnaireParser: "/questionnaire-parser",
+  socPassport: "/soc-passport",
   personnel: "/personnel",
   documents: "/documents",
+  documentSettings: "/document-settings",
 };
 
 const pathPages = Object.fromEntries(
@@ -79,13 +85,26 @@ export const buildDocumentRoute = ({
   personExternalId?: string;
   rowId?: string;
   documentId?: string;
-  type?: "salaryPowerAttorney" | "ubdReport" | "default" | string;
+  type?:
+    | "salaryPowerAttorney"
+    | "ubdReport"
+    | "ubdRestoreReport"
+    | "form6Report"
+    | "form12Report"
+    | "temporaryMilitaryId"
+    | "default"
+    | string;
 }) => {
   const params = new URLSearchParams();
   if (rowId) params.set("rowId", rowId);
   if (documentId) params.set("documentId", documentId);
   if (type === "salaryPowerAttorney") params.set("type", "salary-power-attorney");
   if (type === "ubdReport") params.set("type", "ubd-report");
+  if (type === "ubdRestoreReport") params.set("type", "ubd-restore-report");
+  if (type === "form6Report") params.set("type", "form6-report");
+  if (type === "form12Report") params.set("type", "form12-report");
+  if (type === "temporaryMilitaryId")
+    params.set("type", "temporary-military-id");
 
   const path = `${pagePaths.documents}${
     personExternalId ? `/${encodeURIComponent(personExternalId)}` : ""
