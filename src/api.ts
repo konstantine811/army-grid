@@ -1,3 +1,9 @@
+import {
+  CacheKeys,
+  invalidateDataCache,
+  invalidatePersonnelCaches,
+} from './data/idbDataCache'
+
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:4000'
 
 type JsonRecord = Record<string, unknown>
@@ -367,6 +373,13 @@ export const api = {
     return request<BackendEjournalImportRow>(`/ejournals/rows/${rowId}`, {
       method: 'PATCH',
       body: JSON.stringify({ values, actor: 'operator' }),
+    }).then(async (result) => {
+      await invalidateDataCache(
+        'ejournal:sheet-rows:',
+        CacheKeys.rosterLatest,
+        CacheKeys.overview,
+      )
+      return result
     })
   },
 
@@ -565,7 +578,10 @@ export const api = {
         method: 'POST',
         body: JSON.stringify(payload),
       },
-    )
+    ).then(async (result) => {
+      await invalidateDataCache(CacheKeys.documentsAll, CacheKeys.overview)
+      return result
+    })
   },
 
   updatePersonDocument(personExternalId: string, documentId: string, payload: {
@@ -581,14 +597,20 @@ export const api = {
         method: 'PATCH',
         body: JSON.stringify(payload),
       },
-    )
+    ).then(async (result) => {
+      await invalidateDataCache(CacheKeys.documentsAll, CacheKeys.overview)
+      return result
+    })
   },
 
   deletePersonDocument(personExternalId: string, documentId: string) {
     return request<{ id: string; personExternalId: string; deleted: boolean }>(
       `/ejournals/personnel/${encodeURIComponent(personExternalId)}/documents/${encodeURIComponent(documentId)}`,
       { method: 'DELETE' },
-    )
+    ).then(async (result) => {
+      await invalidateDataCache(CacheKeys.documentsAll, CacheKeys.overview)
+      return result
+    })
   },
 
   listDocumentSignatories(documentType?: string) {
@@ -658,6 +680,9 @@ export const api = {
     return request<BackendEjournalImport>('/ejournals/import-workbook', {
       method: 'POST',
       body: JSON.stringify(payload),
+    }).then(async (result) => {
+      await invalidatePersonnelCaches()
+      return result
     })
   },
 
@@ -675,6 +700,13 @@ export const api = {
     return request<BackendEjournalImport>('/ejournals/personnel/roster/import', {
       method: 'POST',
       body: JSON.stringify(payload),
+    }).then(async (result) => {
+      await invalidateDataCache(
+        CacheKeys.rosterLatest,
+        CacheKeys.overview,
+        'ejournal:sheet-rows:',
+      )
+      return result
     })
   },
 

@@ -7,6 +7,12 @@ import {
 } from "@/components/sci/icons";
 import { api } from "../../api";
 import {
+  CacheKeys,
+  fetchWithCache,
+  jsonChanged,
+  readDataCache,
+} from "../../data/idbDataCache";
+import {
   type CellValue,
   type ExcelSheetSnapshot,
   type ExcelWorkbookSnapshot,
@@ -671,7 +677,43 @@ export function ExcelFillPage() {
   const loadPositionsFromDb = async () => {
     setIsBusy(true);
     try {
-      const latest = await api.getLatestPersonnelRoster();
+      const applyLatest = (
+        latest: NonNullable<Awaited<ReturnType<typeof api.getLatestPersonnelRoster>>>,
+        fromCache = false,
+      ) => {
+        if (!latest?.sheet) {
+          setPositionsPeople([]);
+          setPositionsRosterLabel("");
+          setMessage(
+            "У БД немає імпортованого «Загального списку». Спочатку імпортуйте ранковий звіт у персонал.",
+          );
+          return;
+        }
+        const people = parseRosterLatestToPeople(latest);
+        setPositionsPeople(people);
+        setPositionsRosterLabel(
+          latest.sourceFileName || latest.importName || "Загальний список",
+        );
+        setMessage(
+          fromCache
+            ? `Кеш: ${people.length} осіб · оновлюю з БД…`
+            : `З БД завантажено ${people.length} осіб · ${latest.sourceFileName || latest.importName}.`,
+        );
+      };
+
+      const cached = await readDataCache<
+        Awaited<ReturnType<typeof api.getLatestPersonnelRoster>>
+      >(CacheKeys.rosterLatest);
+      if (cached?.sheet) {
+        applyLatest(cached, true);
+        setIsBusy(false);
+      }
+
+      const latest = await fetchWithCache({
+        key: CacheKeys.rosterLatest,
+        fetcher: () => api.getLatestPersonnelRoster(),
+        isChanged: jsonChanged,
+      });
       if (!latest?.sheet) {
         setPositionsPeople([]);
         setPositionsRosterLabel("");
@@ -680,14 +722,7 @@ export function ExcelFillPage() {
         );
         return;
       }
-      const people = parseRosterLatestToPeople(latest);
-      setPositionsPeople(people);
-      setPositionsRosterLabel(
-        latest.sourceFileName || latest.importName || "Загальний список",
-      );
-      setMessage(
-        `З БД завантажено ${people.length} осіб · ${latest.sourceFileName || latest.importName}.`,
-      );
+      applyLatest(latest);
     } catch (error) {
       setMessage(
         error instanceof Error

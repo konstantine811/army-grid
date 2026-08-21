@@ -25,8 +25,15 @@ import {
   type BackendDocumentSignatoryPreset,
   type BackendPersonDocument,
   type BackendPersonQuestionnaireMeta,
+  type BackendPersonnelOverview,
   type BackendPersonnelOverviewRow,
 } from "../../api";
+import {
+  CacheKeys,
+  fetchWithCache,
+  jsonChanged,
+  readDataCache,
+} from "../../data/idbDataCache";
 import type { EjournalPreviewRow } from "../ejournal/ejournalTypes";
 import {
   buildPersonSummary,
@@ -1883,19 +1890,48 @@ export function DocumentsPage(_props: {
     setIsLoadingDocumentJournal(true);
     setDocumentMessage(message);
     try {
-      const [documents, overview] = await Promise.all([
-        api.listAllPersonDocuments(),
-        api.getPersonnelOverview().catch(() => null),
+      const applyJournal = (
+        documents: BackendPersonDocument[],
+        overview: BackendPersonnelOverview | null,
+        fromCache = false,
+      ) => {
+        setAllPersonDocuments(documents);
+        setPersonStatusById(
+          Object.fromEntries(
+            (overview?.rows ?? [])
+              .filter((row) => row.externalId)
+              .map((row) => [row.externalId, overviewStatusSnapshot(row)]),
+          ),
+        );
+        setDocumentMessage(
+          fromCache
+            ? `Кеш журналу: ${documents.length} · оновлюю з БД…`
+            : `Документів у журналі: ${documents.length}.`,
+        );
+      };
+
+      const [cachedDocs, cachedOverview] = await Promise.all([
+        readDataCache<BackendPersonDocument[]>(CacheKeys.documentsAll),
+        readDataCache<BackendPersonnelOverview>(CacheKeys.overview),
       ]);
-      setAllPersonDocuments(documents);
-      setPersonStatusById(
-        Object.fromEntries(
-          (overview?.rows ?? [])
-            .filter((row) => row.externalId)
-            .map((row) => [row.externalId, overviewStatusSnapshot(row)]),
-        ),
-      );
-      setDocumentMessage(`Документів у журналі: ${documents.length}.`);
+      if (cachedDocs) {
+        applyJournal(cachedDocs, cachedOverview, true);
+        setIsLoadingDocumentJournal(false);
+      }
+
+      const [documents, overview] = await Promise.all([
+        fetchWithCache({
+          key: CacheKeys.documentsAll,
+          fetcher: () => api.listAllPersonDocuments(),
+          isChanged: jsonChanged,
+        }),
+        fetchWithCache({
+          key: CacheKeys.overview,
+          fetcher: () => api.getPersonnelOverview(),
+          isChanged: jsonChanged,
+        }).catch(() => null),
+      ]);
+      applyJournal(documents, overview);
     } catch (error) {
       setDocumentMessage(
         error instanceof Error

@@ -25,7 +25,14 @@ import {
   type BackendEjournalImport,
   type BackendPersonDocument,
   type BackendPersonQuestionnaire,
+  type BackendPersonnelRosterLatest,
 } from "../../api";
+import {
+  CacheKeys,
+  fetchWithCache,
+  jsonChanged,
+  readDataCache,
+} from "../../data/idbDataCache";
 import {
   buildFighterStatusAdditions,
   extractFighterStatusFieldRows,
@@ -79,6 +86,7 @@ import {
   resolvePersonRankTitle,
   isPositionIndexField,
   loadAllEjournalSheetRows,
+  sheetRowsCacheKey,
   personActions,
   renameQuestionnaireFile,
   revokeQuestionnairePreviewUrl,
@@ -853,23 +861,26 @@ export function PersonnelPage({
     }
   };
 
-  const loadLatestPersonnelRoster = async () => {
-    const latest = await api.getLatestPersonnelRoster();
+  const mapRosterLatestToRows = (latest: BackendPersonnelRosterLatest | null | undefined) => {
     if (!latest?.sheet) {
-      setRosterLabels({});
-      setRosterImportName("");
       return [] as EjournalPreviewRow[];
     }
-
-    const columns = parseDbColumns(latest.sheet.columns);
-    const rows = latest.rows.map((row) => ({
+    return latest.rows.map((row) => ({
       __dbRowId: row.id,
       __rowNumber: row.excelRowNumber,
       ...(row.values && typeof row.values === "object" && !Array.isArray(row.values)
         ? row.values
         : {}),
     })) as EjournalPreviewRow[];
+  };
 
+  const applyRosterMeta = (latest: BackendPersonnelRosterLatest | null | undefined) => {
+    if (!latest?.sheet) {
+      setRosterLabels({});
+      setRosterImportName("");
+      return;
+    }
+    const columns = parseDbColumns(latest.sheet.columns);
     setRosterLabels(
       Object.fromEntries(
         columns.map((column) => [
@@ -881,7 +892,136 @@ export function PersonnelPage({
       ),
     );
     setRosterImportName(latest.sourceFileName || latest.importName);
-    return rows;
+  };
+
+  const loadLatestPersonnelRoster = async () => {
+    const latest = await fetchWithCache({
+      key: CacheKeys.rosterLatest,
+      fetcher: () => api.getLatestPersonnelRoster(),
+      isChanged: jsonChanged,
+    });
+    applyRosterMeta(latest);
+    return mapRosterLatestToRows(latest);
+  };
+
+  const applyPersonnelPreview = (
+    preview: DbPreviewState,
+    latestRosterRows: EjournalPreviewRow[],
+    sheet: BackendEjournalImport["sheets"][number],
+    options?: { fromCache?: boolean },
+  ) => {
+    let mergedPreview = preview;
+    try {
+      mergedPreview = mergeRosterRowsIntoPreview(preview, latestRosterRows);
+    } catch {
+      mergedPreview = preview;
+    }
+    const rows = mergedPreview.rows.filter(isLikelyPersonnelRow);
+    const focusTarget = readPersonnelFocusTarget();
+    const focusedRow =
+      (focusTarget.rowId &&
+        rows.find((row) => row.__dbRowId === focusTarget.rowId)) ||
+      (focusTarget.externalId &&
+        rows.find(
+          (row) => resolvePersonIdentityKey(row) === focusTarget.externalId,
+        )) ||
+      null;
+
+    setDbPreview(mergedPreview);
+    setSelectedRowId(focusedRow?.__dbRowId ?? rows[0]?.__dbRowId ?? "");
+    if (focusedRow) clearPersonnelFocusTarget();
+
+    setMessage(
+      focusedRow
+        ? `Відкрито картку: ${getPersonDisplayName(focusedRow) || "особу"}.`
+        : options?.fromCache
+          ? `Кеш: ${rows.length} записів · ${sheet.name}. Оновлюю з БД…`
+          : `Завантажено особовий склад з БД: ${rows.length} записів · ${sheet.name}.`,
+    );
+
+    return mergedPreview;
+  };
+
+  const loadPersonnel = async (isCancelled?: () => boolean) => {
+    setIsLoading(true);
+    try {
+      // Cache-first: paint roster from IndexedDB before network round-trips.
+      const [cachedImports, cachedRoster] = await Promise.all([
+        readDataCache<BackendEjournalImport[]>(CacheKeys.ejournalImports),
+        readDataCache<BackendPersonnelRosterLatest | null>(CacheKeys.rosterLatest),
+      ]);
+      const cachedSheet = cachedImports
+        ? findEjournalPersonnelSheet(cachedImports)
+        : null;
+      if (cachedSheet && cachedImports && !isCancelled?.()) {
+        const cachedPreview = await readDataCache<DbPreviewState>(
+          sheetRowsCacheKey(cachedSheet),
+        );
+        if (cachedPreview) {
+          setImports(cachedImports);
+          applyRosterMeta(cachedRoster);
+          applyPersonnelPreview(
+            cachedPreview,
+            mapRosterLatestToRows(cachedRoster),
+            cachedSheet,
+            { fromCache: true },
+          );
+          setIsLoading(false);
+        }
+      }
+
+      const nextImports = await fetchWithCache({
+        key: CacheKeys.ejournalImports,
+        fetcher: () => api.listEjournalImports(),
+        isChanged: jsonChanged,
+      });
+      if (isCancelled?.()) return;
+
+      const sheet = findEjournalPersonnelSheet(nextImports);
+      setImports(nextImports);
+      if (!sheet) {
+        setDbPreview(null);
+        setMessage("У БД ще немає ЕЖООС-імпорту для особового складу.");
+        return;
+      }
+
+      const [preview, latestRosterRows] = await Promise.all([
+        loadAllEjournalSheetRows(sheet),
+        loadLatestPersonnelRoster().catch(() => [] as EjournalPreviewRow[]),
+      ]);
+      if (isCancelled?.()) return;
+
+      const mergedPreview = applyPersonnelPreview(
+        preview,
+        latestRosterRows,
+        sheet,
+      );
+      if (!isCancelled?.()) setIsLoading(false);
+
+      const startAttachments = () => {
+        if (isCancelled?.()) return;
+        const photosPromise = loadPersonnelPhotos();
+        const questionnairesPromise = loadPersonnelQuestionnaireIds();
+        void healOrphanAttachmentsInBackground(
+          mergedPreview.rows,
+          isCancelled,
+          photosPromise,
+          questionnairesPromise,
+        );
+      };
+      window.requestAnimationFrame(() => {
+        window.setTimeout(startAttachments, 0);
+      });
+    } catch (error) {
+      if (isCancelled?.()) return;
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "Не вдалося завантажити особовий склад.",
+      );
+    } finally {
+      if (!isCancelled?.()) setIsLoading(false);
+    }
   };
 
   const migrateAttachmentsToNewExternalIds = async (
@@ -1015,85 +1155,6 @@ export function PersonnelPage({
     }
     return people;
   }, [personnelRows, photoByExternalId, questionnaireByExternalId]);
-
-  const loadPersonnel = async (isCancelled?: () => boolean) => {
-    setIsLoading(true);
-    try {
-      const nextImports = await api.listEjournalImports();
-      if (isCancelled?.()) return;
-
-      const sheet = findEjournalPersonnelSheet(nextImports);
-      setImports(nextImports);
-      if (!sheet) {
-        setDbPreview(null);
-        setMessage("У БД ще немає ЕЖООС-імпорту для особового складу.");
-        return;
-      }
-
-      const [preview, latestRosterRows] = await Promise.all([
-        loadAllEjournalSheetRows(sheet),
-        loadLatestPersonnelRoster().catch(() => [] as EjournalPreviewRow[]),
-      ]);
-      if (isCancelled?.()) return;
-
-      let mergedPreview = preview;
-      try {
-        mergedPreview = mergeRosterRowsIntoPreview(preview, latestRosterRows);
-      } catch {
-        mergedPreview = preview;
-      }
-      const rows = mergedPreview.rows.filter(isLikelyPersonnelRow);
-
-      // Show the roster immediately — photos and rematch must not block first paint.
-      const focusTarget = readPersonnelFocusTarget();
-      const focusedRow =
-        (focusTarget.rowId &&
-          rows.find((row) => row.__dbRowId === focusTarget.rowId)) ||
-        (focusTarget.externalId &&
-          rows.find(
-            (row) => resolvePersonIdentityKey(row) === focusTarget.externalId,
-          )) ||
-        null;
-
-      setDbPreview(mergedPreview);
-      setSelectedRowId(focusedRow?.__dbRowId ?? rows[0]?.__dbRowId ?? "");
-
-      if (focusedRow) {
-        clearPersonnelFocusTarget();
-      }
-
-      setMessage(
-        focusedRow
-          ? `Відкрито картку: ${getPersonDisplayName(focusedRow) || "особу"}.`
-          : `Завантажено особовий склад з БД: ${rows.length} записів · ${sheet.name}.`,
-      );
-      if (!isCancelled?.()) setIsLoading(false);
-
-      const startAttachments = () => {
-        if (isCancelled?.()) return;
-        const photosPromise = loadPersonnelPhotos();
-        const questionnairesPromise = loadPersonnelQuestionnaireIds();
-        void healOrphanAttachmentsInBackground(
-          mergedPreview.rows,
-          isCancelled,
-          photosPromise,
-          questionnairesPromise,
-        );
-      };
-      window.requestAnimationFrame(() => {
-        window.setTimeout(startAttachments, 0);
-      });
-    } catch (error) {
-      if (isCancelled?.()) return;
-      setMessage(
-        error instanceof Error
-          ? error.message
-          : "Не вдалося завантажити особовий склад.",
-      );
-    } finally {
-      if (!isCancelled?.()) setIsLoading(false);
-    }
-  };
 
   const importPersonnelRoster = async (file: File | undefined) => {
     if (!file) return;

@@ -23,7 +23,14 @@ import {
   type BackendPersonDocument,
   type BackendPersonnelOverview,
   type BackendPersonnelOverviewRow,
+  type BackendPersonnelRosterLatest,
 } from "../../api";
+import {
+  CacheKeys,
+  fetchWithCache,
+  jsonChanged,
+  readDataCache,
+} from "../../data/idbDataCache";
 import { valueToDisplay } from "../../excelRoundTrip";
 import {
   createStoredZipBlob,
@@ -269,7 +276,11 @@ const mergeRosterRowsIntoOverview = (
 };
 
 const loadLatestPersonnelRosterRows = async () => {
-  const latest = await api.getLatestPersonnelRoster();
+  const latest = await fetchWithCache({
+    key: CacheKeys.rosterLatest,
+    fetcher: () => api.getLatestPersonnelRoster(),
+    isChanged: jsonChanged,
+  });
   if (!latest?.sheet) return [] as EjournalPreviewRow[];
 
   return latest.rows.map((row) => ({
@@ -320,19 +331,70 @@ export function OverviewPage({
   const load = async () => {
     setIsLoading(true);
     try {
-      const [overview, photoList, questionnaireList, rosterRows] = await Promise.all([
-        api.getPersonnelOverview(),
-        api.listPersonPhotos().catch(() => []),
-        api.listPersonQuestionnaires().catch(() => []),
-        loadLatestPersonnelRosterRows().catch(() => [] as EjournalPreviewRow[]),
+      const applyOverview = (
+        overview: BackendPersonnelOverview,
+        rosterRows: EjournalPreviewRow[],
+        fromCache = false,
+      ) => {
+        let mergedOverview = overview;
+        try {
+          mergedOverview = mergeRosterRowsIntoOverview(overview, rosterRows);
+        } catch {
+          mergedOverview = overview;
+        }
+        setData(mergedOverview);
+        try {
+          setCallSignByExternalId(buildCallSignByExternalId(rosterRows));
+        } catch {
+          setCallSignByExternalId({});
+        }
+        setMessage(
+          fromCache
+            ? `Кеш огляду · оновлюю з БД…`
+            : mergedOverview.importName
+              ? `Джерело: ${mergedOverview.importName} · ООС + Загальний список`
+              : "Немає імпорту ЕЖООС",
+        );
+      };
+
+      const [cachedOverview, cachedRoster] = await Promise.all([
+        readDataCache<BackendPersonnelOverview>(CacheKeys.overview),
+        readDataCache<BackendPersonnelRosterLatest | null>(CacheKeys.rosterLatest),
       ]);
-      let mergedOverview = overview;
-      try {
-        mergedOverview = mergeRosterRowsIntoOverview(overview, rosterRows);
-      } catch {
-        mergedOverview = overview;
+      if (cachedOverview) {
+        const cachedRosterRows = cachedRoster?.sheet
+          ? ((cachedRoster.rows.map((row) => ({
+              __dbRowId: row.id,
+              __rowNumber: row.excelRowNumber,
+              ...(row.values &&
+              typeof row.values === "object" &&
+              !Array.isArray(row.values)
+                ? row.values
+                : {}),
+            })) as EjournalPreviewRow[]) ?? [])
+          : [];
+        applyOverview(cachedOverview, cachedRosterRows, true);
+        setIsLoading(false);
       }
-      setData(mergedOverview);
+
+      const [overview, photoList, questionnaireList, rosterRows] =
+        await Promise.all([
+          fetchWithCache({
+            key: CacheKeys.overview,
+            fetcher: () => api.getPersonnelOverview(),
+            isChanged: jsonChanged,
+          }),
+          api.listPersonPhotos().catch(() => []),
+          fetchWithCache({
+            key: CacheKeys.questionnairesMeta,
+            fetcher: () => api.listPersonQuestionnaires(),
+            isChanged: jsonChanged,
+          }).catch(() => []),
+          loadLatestPersonnelRosterRows().catch(
+            () => [] as EjournalPreviewRow[],
+          ),
+        ]);
+      applyOverview(overview, rosterRows);
       setPhotos(
         Object.fromEntries(
           photoList.map((item) => [item.personExternalId, item.photoData]),
@@ -345,16 +407,6 @@ export function OverviewPage({
             .map((item) => [item.personExternalId, true as const]),
         ),
       );
-      try {
-        setCallSignByExternalId(buildCallSignByExternalId(rosterRows));
-      } catch {
-        setCallSignByExternalId({});
-      }
-      setMessage(
-        mergedOverview.importName
-          ? `Джерело: ${mergedOverview.importName} · ООС + Загальний список`
-          : "Немає імпорту ЕЖООС",
-      );
     } catch (error) {
       setMessage(
         error instanceof Error ? error.message : "Не вдалося завантажити огляд",
@@ -364,7 +416,11 @@ export function OverviewPage({
     }
 
     try {
-      const documentList = await api.listAllPersonDocuments();
+      const documentList = await fetchWithCache({
+        key: CacheKeys.documentsAll,
+        fetcher: () => api.listAllPersonDocuments(),
+        isChanged: jsonChanged,
+      });
       setDocumentsByExternalId(buildDocumentsByExternalId(documentList));
     } catch {
       setDocumentsByExternalId({});

@@ -6,6 +6,11 @@ import type {
 } from "../../api";
 import { api } from "../../api";
 import {
+  CacheKeys,
+  fetchWithCache,
+  jsonChanged,
+} from "../../data/idbDataCache";
+import {
   dataUrlToUint8Array,
   downloadBlob,
   sanitizeFileName,
@@ -1469,46 +1474,62 @@ export const findEjournalPersonnelSheet = (imports: BackendEjournalImport[]) => 
   return undefined;
 };
 
+export const sheetRowsCacheKey = (sheet: BackendEjournalImportSheet) =>
+  CacheKeys.sheetRows(
+    sheet.id,
+    `${sheet.updatedAt}|${sheet.rowCount}|${sheet.columnCount}`,
+  );
+
 export const loadAllEjournalSheetRows = async (
   sheet: BackendEjournalImportSheet,
+  options?: { onCached?: (preview: DbPreviewState) => void | Promise<void> },
 ): Promise<DbPreviewState> => {
-  const pageSize = 1000;
-  const firstPage = await api.listEjournalSheetRows(sheet.id, {
-    limit: pageSize,
-    offset: 0,
-  });
-  const columns = parseDbColumns(firstPage.columns);
-  const items = [...firstPage.items];
-  const limit = firstPage.limit || pageSize;
-  const remainingOffsets: number[] = [];
+  const fetchFresh = async (): Promise<DbPreviewState> => {
+    const pageSize = 1000;
+    const firstPage = await api.listEjournalSheetRows(sheet.id, {
+      limit: pageSize,
+      offset: 0,
+    });
+    const columns = parseDbColumns(firstPage.columns);
+    const items = [...firstPage.items];
+    const limit = firstPage.limit || pageSize;
+    const remainingOffsets: number[] = [];
 
-  for (
-    let offset = firstPage.items.length;
-    offset < firstPage.total;
-    offset += limit
-  ) {
-    remainingOffsets.push(offset);
-  }
+    for (
+      let offset = firstPage.items.length;
+      offset < firstPage.total;
+      offset += limit
+    ) {
+      remainingOffsets.push(offset);
+    }
 
-  if (remainingOffsets.length > 0) {
-    const pages = await Promise.all(
-      remainingOffsets.map((offset) =>
-        api.listEjournalSheetRows(sheet.id, { limit, offset }),
-      ),
-    );
-    for (const page of pages) items.push(...page.items);
-  }
+    if (remainingOffsets.length > 0) {
+      const pages = await Promise.all(
+        remainingOffsets.map((offset) =>
+          api.listEjournalSheetRows(sheet.id, { limit, offset }),
+        ),
+      );
+      for (const page of pages) items.push(...page.items);
+    }
 
-  return {
-    sheet,
-    columns,
-    rows: items.map((row) => ({
-      __dbRowId: row.id,
-      __rowNumber: row.excelRowNumber,
-      ...row.values,
-    })),
-    total: firstPage.total,
-    offset: 0,
-    limit: items.length,
+    return {
+      sheet,
+      columns,
+      rows: items.map((row) => ({
+        __dbRowId: row.id,
+        __rowNumber: row.excelRowNumber,
+        ...row.values,
+      })),
+      total: firstPage.total,
+      offset: 0,
+      limit: items.length,
+    };
   };
+
+  return fetchWithCache({
+    key: sheetRowsCacheKey(sheet),
+    fetcher: fetchFresh,
+    onCached: options?.onCached,
+    isChanged: jsonChanged,
+  });
 };

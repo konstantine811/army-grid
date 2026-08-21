@@ -48,6 +48,7 @@ import { QuestionnaireParserPage } from "./pages/questionnaire-parser/Questionna
 import { SocPassportPage } from "./pages/soc-passport/SocPassportPage";
 import { DocumentSignatoriesSettingsPage } from "./pages/document-settings/DocumentSignatoriesSettingsPage";
 import { SciScrollbars } from "./components/sci/SciScrollbars";
+import { SciLiveFeedback } from "./components/sci/SciLiveFeedback";
 
 function App() {
   const [activePage, setActivePage] = useState<AppPage>(() =>
@@ -298,6 +299,7 @@ function App() {
 
   return (
     <div className="app-shell">
+      <SciLiveFeedback />
       <SciScrollbars />
       <Sidebar activePage={activePage} onPageChange={changePage} />
 
