@@ -1,4 +1,4 @@
-import { bucketOf, emptyBucketCounts } from "./socPassportFields";
+import { bucketOf, countsInExitMetrics, countsInNoExitsList, emptyBucketCounts } from "./socPassportFields";
 import type {
   BucketCounts,
   PassportMetricId,
@@ -230,14 +230,30 @@ export const buildSocPassportResult = ({
     else if (person.nationality === "other") bump(metrics, "natOther", person);
     else if (person.nationality === "russia") bump(metrics, "natRussia", person);
     else bump(metrics, "natUkraine", person);
-    if (person.exitBand === "none") bump(metrics, "exitsNone", person);
-    if (person.exitBand === "1-4") bump(metrics, "exits1_4", person);
-    if (person.exitBand === "5-10") bump(metrics, "exits5_10", person);
-    if (person.exitBand === "11-15") bump(metrics, "exits11_15", person);
-    if (person.exitBand === "16-20") bump(metrics, "exits16_20", person);
-    if (person.exitBand === "21-25") bump(metrics, "exits21_25", person);
-    if (person.exitBand === "26-30") bump(metrics, "exits26_30", person);
-    if (person.exitBand === "30+") bump(metrics, "exits30plus", person);
+    if (person.exitBand === "none" && countsInNoExitsList(person) && !person.ubdRosterStatus) {
+      bump(metrics, "exitsNone", person);
+    }
+    if (person.exitBand === "1-4" && countsInExitMetrics(person)) {
+      bump(metrics, "exits1_4", person);
+    }
+    if (person.exitBand === "5-10" && countsInExitMetrics(person)) {
+      bump(metrics, "exits5_10", person);
+    }
+    if (person.exitBand === "11-15" && countsInExitMetrics(person)) {
+      bump(metrics, "exits11_15", person);
+    }
+    if (person.exitBand === "16-20" && countsInExitMetrics(person)) {
+      bump(metrics, "exits16_20", person);
+    }
+    if (person.exitBand === "21-25" && countsInExitMetrics(person)) {
+      bump(metrics, "exits21_25", person);
+    }
+    if (person.exitBand === "26-30" && countsInExitMetrics(person)) {
+      bump(metrics, "exits26_30", person);
+    }
+    if (person.exitBand === "30+" && countsInExitMetrics(person)) {
+      bump(metrics, "exits30plus", person);
+    }
     if (person.region !== "unknown") bump(metrics, person.region, person);
     if (person.marital === "married") bump(metrics, "married", person);
     else if (person.marital === "civil") bump(metrics, "civil", person);
@@ -282,7 +298,14 @@ export const buildSocPassportResult = ({
       vacant: staffSlots.filter((slot) => !slot.occupied).length,
       oosMatched: people.filter((person) => person.match.oos).length,
       morningMatched: people.filter((person) => person.match.morning).length,
-      exitsMatched: people.filter((person) => person.match.exits).length,
+      exitsMatched: people.filter(
+        (person) =>
+          person.morningExitCount > 0 ||
+          person.match.jbdExits ||
+          person.match.bplaExits,
+      ).length,
+      combatDutyMatched: people.filter((person) => person.combatDutyEvidence.length > 0)
+        .length,
       relativesParsed: people.filter((person) => person.relativesRaw).length,
       unknownRegion: people.filter((person) => person.region === "unknown").length,
       unknownAge: people.filter((person) => person.age == null).length,

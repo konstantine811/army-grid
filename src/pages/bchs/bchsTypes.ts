@@ -173,10 +173,14 @@ export type BchsPersonnelAwayPerson = {
   rankCategory: string;
   rankTitle: string;
   fullName: string;
+  /** Excel O — позивний. */
+  callsign: string;
   status: string;
   roleType: string;
   combatReadiness: string;
   bzvpStatus: string;
+  /** Excel AA — «Відрядження (БРЕЗ)» («був БРЕЗ» тощо). */
+  brezAssignment: string;
   destination: string;
   /** Excel T — примітки для «Командування» (AB/AH поранення). */
   treatmentNote: string;

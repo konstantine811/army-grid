@@ -42,10 +42,10 @@ export const DEFAULT_UBD_RESTORE_REQUEST =
 export const ubdRestoreWorkflowSteps = [
   { key: "document", title: "Заповнити Рапорт" },
   { key: "fighterSign", title: "Підпис службовця" },
-  { key: "sent", title: "Відправили" },
-  { key: "approved", title: "Погоджено" },
   { key: "photo", title: "ФОТО" },
   { key: "scan", title: "Скани" },
+  { key: "sent", title: "Відправили" },
+  { key: "approved", title: "Погоджено" },
   { key: "transferred", title: "Передано ФОТО + Скани" },
   { key: "received", title: "Отримали" },
   { key: "handed", title: "Вручили" },

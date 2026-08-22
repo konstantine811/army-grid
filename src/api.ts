@@ -117,6 +117,19 @@ export type BackendPersonDocument = {
 
 export type DocumentSignatoryBlockType = 'SIGNER' | 'APPROVAL'
 
+export type BackendAnketaCellEdit = {
+  id: string
+  sheetId: string
+  gid: string
+  rowNumber: number
+  columnId: string
+  value: string
+  externalId?: string | null
+  fullName?: string | null
+  updatedAt: string
+  createdAt: string
+}
+
 export type BackendDocumentSignatoryPreset = {
   id: string
   label: string
@@ -712,5 +725,50 @@ export const api = {
 
   getLatestPersonnelRoster() {
     return request<BackendPersonnelRosterLatest | null>('/ejournals/personnel/roster/latest')
+  },
+
+  listAnketaEdits(sheetId?: string, gid?: string) {
+    const params = new URLSearchParams()
+    if (sheetId?.trim()) params.set('sheetId', sheetId.trim())
+    if (gid?.trim()) params.set('gid', gid.trim())
+    const query = params.toString()
+    return request<BackendAnketaCellEdit[]>(
+      `/anketa/edits${query ? `?${query}` : ''}`,
+    )
+  },
+
+  upsertAnketaCellEdit(payload: {
+    rowNumber: number
+    columnId: string
+    value: string
+    externalId?: string
+    fullName?: string
+    sheetId?: string
+    gid?: string
+  }) {
+    return request<BackendAnketaCellEdit>('/anketa/edits', {
+      method: 'PATCH',
+      body: JSON.stringify({ ...payload, actor: 'operator' }),
+    })
+  },
+
+  bulkUpsertAnketaEdits(
+    items: Array<{
+      rowNumber: number
+      columnId: string
+      value: string
+      externalId?: string
+      fullName?: string
+      sheetId?: string
+      gid?: string
+    }>,
+  ) {
+    return request<{ count: number; items: BackendAnketaCellEdit[] }>(
+      '/anketa/edits/bulk',
+      {
+        method: 'POST',
+        body: JSON.stringify({ items, actor: 'operator' }),
+      },
+    )
   },
 }

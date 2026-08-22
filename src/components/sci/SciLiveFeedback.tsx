@@ -53,7 +53,7 @@ const spawnRadarPing = (clientX: number, clientY: number) => {
   ping.style.left = `${clientX}px`;
   ping.style.top = `${clientY}px`;
   document.body.appendChild(ping);
-  window.setTimeout(() => ping.remove(), 900);
+  window.setTimeout(() => ping.remove(), 1200);
 };
 
 const pulseTarget = (target: EventTarget | null) => {

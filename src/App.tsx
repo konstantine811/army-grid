@@ -45,6 +45,7 @@ import { BchsPage } from "./pages/bchs/BchsPage";
 import { OverviewPage } from "./pages/overview/OverviewPage";
 import { ExcelFillPage } from "./pages/excel-fill/ExcelFillPage";
 import { QuestionnaireParserPage } from "./pages/questionnaire-parser/QuestionnaireParserPage";
+import { AnketaDataPage } from "./pages/anketa-data/AnketaDataPage";
 import { SocPassportPage } from "./pages/soc-passport/SocPassportPage";
 import { DocumentSignatoriesSettingsPage } from "./pages/document-settings/DocumentSignatoriesSettingsPage";
 import { SciScrollbars } from "./components/sci/SciScrollbars";
@@ -318,6 +319,8 @@ function App() {
         <ExcelFillPage />
       ) : activePage === "questionnaireParser" ? (
         <QuestionnaireParserPage />
+      ) : activePage === "anketaData" ? (
+        <AnketaDataPage />
       ) : activePage === "socPassport" ? (
         <SocPassportPage />
       ) : activePage === "ejournal" ? (

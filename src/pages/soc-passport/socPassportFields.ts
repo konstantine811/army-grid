@@ -1,3 +1,4 @@
+import { tryParseExcelSerialDate } from "../../shared/format";
 import type {
   AgeBand,
   ArrivalSource,
@@ -43,10 +44,16 @@ export const normalizeLooseText = (value: string) =>
 
 export const normalizePersonName = (value: string) =>
   normalizeLooseText(value)
+    .replace(/є/g, "е")
     .replace(/\([^)]*\)/g, " ")
     .replace(/[.,;:№#"/\\|()[\]{}]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+
+export const normalizeRnokpp = (value: string) => {
+  const digits = value.replace(/\D/g, "");
+  return digits.length >= 8 ? digits : "";
+};
 
 export const shortPersonName = (value: string) => {
   const parts = normalizePersonName(value).split(" ").filter(Boolean);
@@ -171,6 +178,15 @@ export const ageBandOf = (age: number | null): AgeBand => {
   return "50+";
 };
 
+/** БЗВП/БРЕЗ (X) + Відрядження (БРЕЗ) (AA) з ранкового списку. */
+export const combineMorningBrezFields = (
+  bzvpStatus: string,
+  brezAssignment = "",
+) => `${bzvpStatus} ${brezAssignment}`.trim();
+
+export const isBrezMarkerText = (value: string) =>
+  /бре[зc]|brez/.test(normalizeLooseText(value));
+
 export const classifyArrivalSource = (
   arrivedFrom: string,
   calledBy: string,
@@ -186,6 +202,36 @@ export const classifyArrivalSource = (
   if (/тцк|комісар|военкомат|військ.?ком/.test(text)) return "tck";
   if (/в\/ч|а\d{4}/.test(text) || /транзит/.test(text)) return "other";
   return text ? "other" : "unknown";
+};
+
+const UKRAINIAN_BIRTH_RE =
+  /(україн|укр\.?\s*рср|урср|дн[іi]про|днепр|дныпро|харк[іi]в|харьк[іi]в|донецьк|луганск|луганськ|одес|олеса|льв[іi]в|ки[їі]вськ|ки[їієе]в|запор[іi]зьк|запорозьк|микола[їі]в|херсон|полтав|черкас|черкасськ|в[іi]нниць|хмельниц|черн[іi]г|сумськ|р[іi]внен|рывнен|ровенськ|волин|терноп|франк[іi]в|закарпат|житомир|к[іi]ровоград|кировоград|каровоград|кропивниц|кропівниц|крим|севастопол|арк\b|б[іi]лгород.?дн[іi]стров|белгород.?дн[іi]стров|кривий\s*р[іi]г|павлоград|палоград|кам.?янськ|н[іi]копол|новомосковськ|[іi]зюм|чугу[єеїі]в|лозова|куп.?янськ|чорноморськ|[іi]зма[їі]л|южне|очак[іi]в|кобел[яе]|кременчу[кг]|св[іi]тловодськ|борисп[іi]ль|б[іi]ла\s*церква|вараш|ра[хк][іi]в|подол[ьл]ськ|гуляйпол|ор[іi]х[іi]в|волчанськ|вовчанськ|мерефа|марган[еє]ць|мрганець|п[еє]тр[іи]к[іi]вка|конотоп|глух[іi]в|охтирк|шостк|н[іi]жин|прилук|луцьк|ков[еє]ль|тернопіл|ужгород|мукачев|черн[іi]вц|житомир|бердич[іi]в|коростен|знам.?янк|нова\s*каховк|краматорськ|слов.?янськ|костянтин[іi]вк|констянтин[іi]вк|дружк[іi]вк|покровськ|мирноград|добропілл|мар[іi]упол|мак[іi][їі]вк|горл[іi]вк|алчевськ|с[іi]верськодонецьк|с[єе]в[єе]родонецьк|курах[ое]в|соледар|св[іi]тлодарськ|к[іi]вшар[іi]вка|петропавл[іi]вка|в[іi]льнянськ|нова\s*праг|новоукраїнк)/;
+
+/** Українське місце народження (національність за замовчуванням — Україна). */
+export const isUkrainianBirthPlace = (birthPlace: string) =>
+  UKRAINIAN_BIRTH_RE.test(normalizeLooseText(birthPlace));
+
+/** Громадянство РФ у тексті анкети — не «родич проживає в рф». */
+const hasRussiaCitizenshipInText = (chunk: string) => {
+  if (!chunk) return false;
+  const text = normalizeLooseText(chunk);
+  if (/україн(?:ин|ка|ськ)|громадян(?:ство|ин)?[^\n,.]{0,24}укра/.test(text)) {
+    return false;
+  }
+  return (
+    /(?:^|[^а-яіїєґ])(?:росіян(?:ин|ка|и)?|русск(?:ий|ая|ие)?)(?:[^а-яіїєґ]|$)/.test(
+      text,
+    ) ||
+    /громадян(?:ство|ин)?[^\n,.]{0,32}(?:р\.?\s*ф\.?|росі[яї])(?:[^а-яіїєґ]|$)/.test(
+      text,
+    ) ||
+    /(?:р\.?\s*ф\.?|росі[яї])[^\n,.]{0,32}громадян/.test(text) ||
+    /паспорт[^\n,.]{0,28}(?:р\.?\s*ф\.?|росі[яї])/.test(text) ||
+    /національн(?:ість|ist)?[^\n,.]{0,20}(?:р\.?\s*ф\.?|росі[яї]|росіян)/.test(
+      text,
+    ) ||
+    /(?:р\.?\s*ф\.?|росі[яї])[^\n,.]{0,20}національн/.test(text)
+  );
 };
 
 export const classifyNationality = (
@@ -212,12 +258,12 @@ export const classifyNationality = (
   if (/поляк|польщ/.test(text) && !/україн/.test(text)) {
     return { key: "poland", notes };
   }
-  if (
-    /(росіян|русск|громадян[^\n]{0,12}рф|(^|[^а-яіїєґ])рф([^а-яіїєґ]|$)|росі[яї])/.test(
-      text,
-    ) &&
-    !/україн/.test(text)
-  ) {
+  if (hasRussiaCitizenshipInText(extra)) {
+    notes.push("національність: з додаткової інформації (громадянство РФ)");
+    return { key: "russia", notes };
+  }
+  if (hasRussiaCitizenshipInText(relatives)) {
+    notes.push("національність: з тексту про родичів (громадянство РФ)");
     return { key: "russia", notes };
   }
   if (
@@ -276,9 +322,6 @@ const detectForeignCountryFromBirthPlace = (
   return null;
 };
 
-/** Українське місце народження (національність за замовчуванням — Україна). */
-const UKRAINIAN_BIRTH_RE =
-  /(україн|укр\.?\s*рср|урср|дн[іi]про|днепр|дныпро|харк[іi]в|харьк[іi]в|донецьк|луганск|луганськ|одес|олеса|льв[іi]в|ки[їі]вськ|ки[їієе]в|запор[іi]зьк|запорозьк|микола[їі]в|херсон|полтав|черкас|черкасськ|в[іi]нниць|хмельниц|черн[іi]г|сумськ|р[іi]внен|рывнен|ровенськ|волин|терноп|франк[іi]в|закарпат|житомир|к[іi]ровоград|кировоград|каровоград|кропивниц|кропівниц|крим|севастопол|арк\b|б[іi]лгород.?дн[іi]стров|белгород.?дн[іi]стров|кривий\s*р[іi]г|павлоград|палоград|кам.?янськ|н[іi]копол|новомосковськ|[іi]зюм|чугу[єеїі]в|лозова|куп.?янськ|чорноморськ|[іi]зма[їі]л|южне|очак[іi]в|кобел[яе]|кременчу[кг]|св[іi]тловодськ|борисп[іi]ль|б[іi]ла\s*церква|вараш|ра[хк][іi]в|подол[ьл]ськ|гуляйпол|ор[іi]х[іi]в|волчанськ|вовчанськ|мерефа|марган[еє]ць|мрганець|п[еє]тр[іи]к[іi]вка|конотоп|глух[іi]в|охтирк|шостк|н[іi]жин|прилук|луцьк|ков[еє]ль|тернопіл|ужгород|мукачев|черн[іi]вц|житомир|бердич[іi]в|коростен|знам.?янк|нова\s*каховк|краматорськ|слов.?янськ|костянтин[іi]вк|констянтин[іi]вк|дружк[іi]вк|покровськ|мирноград|добропілл|мар[іi]упол|мак[іi][їі]вк|горл[іi]вк|алчевськ|с[іi]верськодонецьк|с[єе]в[єе]родонецьк|курах[ое]в|соледар|св[іi]тлодарськ|к[іi]вшар[іi]вка|петропавл[іi]вка|в[іi]льнянськ|нова\s*праг|новоукраїнк)/;
 
 /** Країни поза рядками Україна / Польща / США / Британія / Португалія / Аргентина / РФ. */
 const OTHER_COUNTRY_BIRTH_RE =
@@ -603,12 +646,279 @@ export const parseRelatives = (
   };
 };
 
+export const parseUbdInfo = (extra: string, relatives = "") => {
+  const text = `${extra} ${relatives}`.trim();
+  const hasUbd = /убд|удб/i.test(text);
+  const numberMatch = text.match(
+    /(?:убд|удб)\s*(?:№|#|no\.?|номер)?\s*([0-9]{4,9})/i,
+  );
+  return { hasUbd, ubdNumber: numberMatch?.[1]?.trim() ?? "" };
+};
+
 export const hasUbdFlag = (extra: string, relatives: string) =>
-  /убд|удб/i.test(`${extra} ${relatives}`);
+  parseUbdInfo(extra, relatives).hasUbd;
+
+/** Місце дислокації з ООС або «4. Тимчасово прибулі» — зона бойових завдань. */
+export const isCombatZoneDislocation = (value: string) => {
+  const text = normalizeLooseText(value);
+  if (!text || text === "-") return false;
+  return (
+    /бойов.*(завдан|ді)/.test(text) ||
+    /зона.*бойов/.test(text) ||
+    /район.*виконан.*бойов/.test(text) ||
+    /\bлбз\b/.test(text)
+  );
+};
+
+const toIsoDateKey = (date: Date) => {
+  const year = date.getUTCFullYear();
+  const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(date.getUTCDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+};
+
+/** Ключ виходу для дедуплікації між «Статус бійців» і ЖБД (ФІО + дата). */
+export const normalizeExitDateKey = (value: unknown): string | null => {
+  if (value === undefined || value === null || value === "") return null;
+
+  const parsedSerial = tryParseExcelSerialDate(value);
+  if (parsedSerial) return toIsoDateKey(parsedSerial);
+  if (value instanceof Date) return toIsoDateKey(value);
+
+  const text = String(value).replace(/\u00a0/g, " ").trim();
+  if (!text) return null;
+
+  const ukMatch = text.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{4})$/);
+  if (ukMatch) {
+    const [, day, month, year] = ukMatch;
+    return `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
+  }
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return text;
+
+  if (/^\d{4}-\d{2}-\d{2}T/.test(text)) {
+    const parsed = new Date(text);
+    if (!Number.isNaN(parsed.getTime())) return toIsoDateKey(parsed);
+  }
+
+  return null;
+};
+
+export const mergeExitCountMaps = (
+  ...sources: Array<Map<string, Set<string>> | undefined | null>
+) => {
+  const merged = new Map<string, Set<string>>();
+  for (const source of sources) {
+    if (!source) continue;
+    for (const [key, stamps] of source) {
+      const set = merged.get(key) ?? new Set<string>();
+      for (const stamp of stamps) set.add(stamp);
+      merged.set(key, set);
+    }
+  }
+  return merged;
+};
+
+export const lookupExitStampSet = (
+  map: Map<string, Set<string>>,
+  normalizedName: string,
+  shortName: string,
+) =>
+  map.get(normalizedName) ??
+  map.get(shortName) ??
+  new Set<string>();
+
+/** ≥1 дата виходу на аркуші ранкового «Статус бійців» (до об’єднання з ЖБД). */
+export const hasMorningStatusExitRows = (person: {
+  morningExitCount: number;
+}) => person.morningExitCount > 0;
+
+export const morningStatusExitMatchLabel = (person: {
+  morningExitCount: number;
+}) => (hasMorningStatusExitRows(person) ? "так" : "ні");
+
+export type UbdRosterStatus = "submitted" | "notSubmitted";
+
+export type UbdRosterMatchRecord = {
+  name: string;
+  rnokpp: string;
+  status: UbdRosterStatus;
+  sheetName: string;
+};
+
+export type UbdRosterLookup = {
+  byFull: Map<string, UbdRosterMatchRecord>;
+  byShort: Map<string, UbdRosterMatchRecord[]>;
+  byRnokpp: Map<string, UbdRosterMatchRecord>;
+  all: UbdRosterMatchRecord[];
+};
+
+export const buildUbdRosterLookup = (
+  records: UbdRosterMatchRecord[],
+): UbdRosterLookup => {
+  const byFull = new Map<string, UbdRosterMatchRecord>();
+  const byShort = new Map<string, UbdRosterMatchRecord[]>();
+  const byRnokpp = new Map<string, UbdRosterMatchRecord>();
+
+  for (const record of records) {
+    const full = normalizePersonName(record.name);
+    const short = shortPersonName(record.name);
+    if (full) byFull.set(full, record);
+    if (short) {
+      const list = byShort.get(short) ?? [];
+      list.push(record);
+      byShort.set(short, list);
+    }
+    const rnokpp = normalizeRnokpp(record.rnokpp);
+    if (rnokpp) byRnokpp.set(rnokpp, record);
+  }
+
+  return { byFull, byShort, byRnokpp, all: records };
+};
+
+export const namesLikelySamePerson = (left: string, right: string) => {
+  const a = normalizePersonName(left).split(" ").filter(Boolean);
+  const b = normalizePersonName(right).split(" ").filter(Boolean);
+  if (a.length < 2 || b.length < 2) return false;
+  if (a[0] !== b[0] || a[1] !== b[1]) return false;
+  if (a.length >= 3 && b.length >= 3) {
+    const ap = a[2].slice(0, 3);
+    const bp = b[2].slice(0, 3);
+    return ap.startsWith(bp) || bp.startsWith(ap);
+  }
+  return true;
+};
+
+const pickLikelySamePerson = (
+  name: string,
+  candidates: UbdRosterMatchRecord[],
+) => {
+  const hits = candidates.filter((record) => namesLikelySamePerson(name, record.name));
+  if (hits.length === 1) return hits[0];
+  return undefined;
+};
+
+/** Зіставлення з реєстром УБД: ПІБ → РНОКПП → нечітке (прізвище + ім’я + по батькові). */
+export const matchUbdRosterRecord = (
+  name: string,
+  rnokpp: string,
+  lookup: UbdRosterLookup,
+  altNames: string[] = [],
+): UbdRosterMatchRecord | undefined => {
+  const candidates = [name, ...altNames].filter(Boolean);
+  const ipn = normalizeRnokpp(rnokpp);
+  if (ipn) {
+    const byIpn = lookup.byRnokpp.get(ipn);
+    if (byIpn) return byIpn;
+  }
+
+  for (const candidate of candidates) {
+    const full = normalizePersonName(candidate);
+    const direct = lookup.byFull.get(full);
+    if (direct) return direct;
+
+    const short = shortPersonName(candidate);
+    const shortHits = lookup.byShort.get(short);
+    if (shortHits?.length === 1) return shortHits[0];
+    if (shortHits && shortHits.length > 1) {
+      const likely = pickLikelySamePerson(candidate, shortHits);
+      if (likely) return likely;
+    }
+
+    const fuzzyHits = lookup.all.filter((record) =>
+      namesLikelySamePerson(candidate, record.name),
+    );
+    if (fuzzyHits.length === 1) return fuzzyHits[0];
+  }
+
+  return undefined;
+};
+
+/** Підсумкова кількість виходів: реєстр УБД = точно виконували (мін. 1). */
+export const resolveCombatExitCount = (
+  mergedExitCount: number,
+  ubdRosterStatus: UbdRosterStatus | null,
+  combatDutyEvidence: string[],
+  isTransiter: boolean,
+) => {
+  if (isTransiter) return 0;
+  if (mergedExitCount > 0) return mergedExitCount;
+  if (ubdRosterStatus) return 1;
+  return combatDutyEvidence.length > 0 ? 1 : 0;
+};
+
+export const effectiveExitCount = (
+  morningExitCount: number,
+  combatDutyEvidence: string[],
+) => {
+  if (morningExitCount > 0) return morningExitCount;
+  return combatDutyEvidence.length > 0 ? 1 : 0;
+};
 
 export const hasIdpFlag = (extra: string, relatives: string, birthPlace: string) => {
   const text = normalizeLooseText(`${extra} ${relatives} ${birthPlace}`);
   return /впо|внутрішн[ьо]*\s*переселен|переселен/.test(text);
+};
+
+/** Колонка «В якому підрозділі» — «ТРАНЗИТЕР». */
+export const isTransiterDestination = (destination: string) => {
+  const normalized = normalizeLooseText(destination);
+  return (
+    normalized === "транзитер" ||
+    normalized === "тринзитер" ||
+    normalized.includes("транзитер")
+  );
+};
+
+/** Колонка «В якому підрозділі» — РРЕБ / РЕБ. */
+export const isRrebDestination = (destination: string) => {
+  const normalized = normalizeLooseText(destination);
+  return (
+    normalized === "рреб" ||
+    normalized === "реб" ||
+    normalized === "рота реб" ||
+    normalized === "рота рреб" ||
+    /\bрреб\b/.test(normalized) ||
+    /\bрота\s+р?еб\b/.test(normalized)
+  );
+};
+
+/** Колонка «В якому підрозділі» — ППО. */
+export const isPpoDestination = (destination: string) => {
+  const normalized = normalizeLooseText(destination);
+  return normalized === "ппо" || /\bппо\b/.test(normalized);
+};
+
+/** Офіцери для аркуша «Офіцери» і рядків виходів: не транзитер. */
+export const isOfficerForLbExits = (person: {
+  rankGroup: RankGroup;
+  isTransiter: boolean;
+}) => person.rankGroup === "officer" && !person.isTransiter;
+
+/** Рядки виходів (виконували) — без транзитерів. */
+export const countsInExitMetrics = (person: { isTransiter: boolean }) =>
+  !person.isTransiter;
+
+/** «Не виконували»: без транзитерів, відком. за межі ПБ, СЗЧ, лікування, поранення. */
+export const countsInNoExitsList = (person: {
+  isTransiter: boolean;
+  morningStatus: string;
+  morningAbsenceNotes?: string;
+}) => {
+  if (person.isTransiter) return false;
+  const status = normalizeLooseText(person.morningStatus);
+  const notes = normalizeLooseText(person.morningAbsenceNotes ?? "");
+  if (status.includes("відком") && status.includes("за межі")) return false;
+  if (status.includes("сзч") || status.includes("не в сторою")) return false;
+  if (status.includes("лікуван") || notes.includes("лікуван")) return false;
+  if (
+    status.includes("поранен") ||
+    notes.includes("поранен") ||
+    notes.includes("по пораненню")
+  ) {
+    return false;
+  }
+  return true;
 };
 
 export const exitBandOf = (count: number): ExitBand => {
@@ -621,6 +931,19 @@ export const exitBandOf = (count: number): ExitBand => {
   if (count <= 30) return "26-30";
   return "30+";
 };
+
+export const EXIT_BAND_LABELS: Record<ExitBand, string> = {
+  none: "Не виконували",
+  "1-4": "До 5ти виходів (завдань на ЛБЗ)",
+  "5-10": "5–10 виходів",
+  "11-15": "11–15 виходів",
+  "16-20": "16–20 виходів",
+  "21-25": "21–25 виходів",
+  "26-30": "26–30 виходів",
+  "30+": "30 і більше",
+};
+
+export const exitBandLabel = (band: ExitBand) => EXIT_BAND_LABELS[band] ?? band;
 
 export const isPresentStatus = (status: string) => {
   const text = normalizeLooseText(status);

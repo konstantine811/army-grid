@@ -11,4 +11,15 @@ export default defineConfig({
       '@': fileURLToPath(new URL('./src', import.meta.url)),
     },
   },
+  server: {
+    proxy: {
+      // Avoid browser CORS when loading public Google Sheets CSV exports.
+      '/google-sheets': {
+        target: 'https://docs.google.com',
+        changeOrigin: true,
+        secure: true,
+        rewrite: (path) => path.replace(/^\/google-sheets/, ''),
+      },
+    },
+  },
 })

@@ -184,11 +184,25 @@ export const mergeForm6Fields = (
     return defaults;
   }
   const next = value as Partial<Form6ReportFields>;
-  return {
+  const merged = {
     ...defaults,
     ...next,
     signatories: Array.isArray(next.signatories)
       ? next.signatories
       : defaults.signatories,
+  };
+  // Personnel wins when filled; otherwise keep what was entered in the report.
+  const pick = (personnel: string, document: string) =>
+    String(personnel ?? "").trim() || String(document ?? "").trim();
+  return {
+    ...merged,
+    fullName: pick(defaults.fullName, merged.fullName),
+    rank: pick(defaults.rank, merged.rank),
+    staffPosition: pick(defaults.staffPosition, merged.staffPosition),
+    birthDate: pick(defaults.birthDate, merged.birthDate),
+    idDocument: pick(defaults.idDocument, merged.idDocument),
+    rnokpp: pick(defaults.rnokpp, merged.rnokpp),
+    address: pick(defaults.address, merged.address),
+    phone: pick(defaults.phone, merged.phone),
   };
 };

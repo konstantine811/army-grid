@@ -54,6 +54,7 @@ import {
   readStoredPersonPhones,
 } from "../personnel/personPhonesStore";
 import {
+  applyEnrichmentToPreviewRow,
   syncEnrichmentToPerson,
 } from "../personnel/personEnrichment";
 import {
@@ -670,10 +671,23 @@ const createEmptyWorkflow = (): SalaryWorkflowState => ({
 const mergeSalaryFields = (
   defaults: SalaryDocumentFields,
   value: unknown,
-): SalaryDocumentFields =>
-  value && typeof value === "object" && !Array.isArray(value)
-    ? { ...defaults, ...(value as Partial<SalaryDocumentFields>) }
-    : defaults;
+): SalaryDocumentFields => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return defaults;
+  }
+  const merged = {
+    ...defaults,
+    ...(value as Partial<SalaryDocumentFields>),
+  };
+  const pick = (personnel: string, document: string) =>
+    String(personnel ?? "").trim() || String(document ?? "").trim();
+  return {
+    ...merged,
+    fullName: pick(defaults.fullName, merged.fullName),
+    rnokpp: pick(defaults.rnokpp, merged.rnokpp),
+    rank: pick(defaults.rank, merged.rank),
+  };
+};
 
 const mergeSalaryWorkflow = (value: unknown): SalaryWorkflowState =>
   value && typeof value === "object" && !Array.isArray(value)
@@ -697,8 +711,15 @@ const mergeUbdFields = (
   const basisDate =
     String(saved.basisDate ?? "").trim() || parsed.basisDate;
   const merged = { ...defaults, ...saved };
+  const pick = (personnel: string, document: string) =>
+    String(personnel ?? "").trim() || String(document ?? "").trim();
   return {
     ...merged,
+    fullName: pick(defaults.fullName, merged.fullName),
+    rank: pick(defaults.rank, merged.rank),
+    staffPosition: pick(defaults.staffPosition, merged.staffPosition),
+    birthDate: pick(defaults.birthDate, merged.birthDate),
+    rnokpp: pick(defaults.rnokpp, merged.rnokpp),
     basisNumber,
     basisDate,
     basis: formatUbdBasisText(basisNumber, basisDate),
@@ -1288,9 +1309,24 @@ export function DocumentsPage(_props: {
   const [journalStatusFilter, setJournalStatusFilter] = useState("ALL");
   const [journalMonthFilter, setJournalMonthFilter] = useState("ALL");
   const [journalNameQuery, setJournalNameQuery] = useState("");
-  const [journalCreatedSort, setJournalCreatedSort] = useState<"desc" | "asc">(
-    "desc",
-  );
+  const [journalSortField, setJournalSortField] = useState<
+    "createdAt" | "updatedAt" | "progress"
+  >("createdAt");
+  const [journalSortDirection, setJournalSortDirection] = useState<
+    "desc" | "asc"
+  >("desc");
+  const toggleJournalSort = (
+    field: "createdAt" | "updatedAt" | "progress",
+  ) => {
+    if (journalSortField === field) {
+      setJournalSortDirection((current) =>
+        current === "desc" ? "asc" : "desc",
+      );
+      return;
+    }
+    setJournalSortField(field);
+    setJournalSortDirection("desc");
+  };
   const [isExportingDocumentJournal, setIsExportingDocumentJournal] =
     useState(false);
   const ubdWordFields = useMemo(
@@ -1384,20 +1420,32 @@ export function DocumentsPage(_props: {
       return true;
     });
 
-    const direction = journalCreatedSort === "desc" ? -1 : 1;
+    const direction = journalSortDirection === "desc" ? -1 : 1;
     return [...filtered].sort((left, right) => {
-      const leftTs = dayjs(left.createdAt).valueOf();
-      const rightTs = dayjs(right.createdAt).valueOf();
-      const leftSafe = Number.isFinite(leftTs) ? leftTs : 0;
-      const rightSafe = Number.isFinite(rightTs) ? rightTs : 0;
-      if (leftSafe !== rightSafe) return (leftSafe - rightSafe) * direction;
+      let compare = 0;
+      if (journalSortField === "progress") {
+        compare =
+          getDocumentProgressPercent(left) - getDocumentProgressPercent(right);
+      } else {
+        const leftTs = dayjs(
+          journalSortField === "updatedAt" ? left.updatedAt : left.createdAt,
+        ).valueOf();
+        const rightTs = dayjs(
+          journalSortField === "updatedAt" ? right.updatedAt : right.createdAt,
+        ).valueOf();
+        const leftSafe = Number.isFinite(leftTs) ? leftTs : 0;
+        const rightSafe = Number.isFinite(rightTs) ? rightTs : 0;
+        compare = leftSafe - rightSafe;
+      }
+      if (compare !== 0) return compare * direction;
       return left.id.localeCompare(right.id) * direction;
     });
   }, [
-    journalCreatedSort,
     journalDocuments,
     journalMonthFilter,
     journalNameQuery,
+    journalSortDirection,
+    journalSortField,
     journalStatusFilter,
     journalTypeFilter,
   ]);
@@ -2587,7 +2635,22 @@ export function DocumentsPage(_props: {
         row: selectedPerson,
         patch: { rnokpp: nextFields.rnokpp },
         existingPhones: readStoredPersonPhones()[documentSavePersonId] ?? [],
-      }).catch(() => undefined);
+      })
+        .then((enrichment) => {
+          if (
+            enrichment &&
+            Object.keys(enrichment.fieldUpdates).length &&
+            selectedPerson
+          ) {
+            setSelectedPerson(
+              applyEnrichmentToPreviewRow(
+                selectedPerson,
+                enrichment.fieldUpdates,
+              ),
+            );
+          }
+        })
+        .catch(() => undefined);
       setDocumentMessage(
         `Збережено в БД · ${new Date(updated.updatedAt).toLocaleString("uk-UA")}`,
       );
@@ -2636,7 +2699,22 @@ export function DocumentsPage(_props: {
         row: selectedPerson,
         patch: { rnokpp: nextFields.rnokpp },
         existingPhones: readStoredPersonPhones()[documentSavePersonId] ?? [],
-      }).catch(() => undefined);
+      })
+        .then((enrichment) => {
+          if (
+            enrichment &&
+            Object.keys(enrichment.fieldUpdates).length &&
+            selectedPerson
+          ) {
+            setSelectedPerson(
+              applyEnrichmentToPreviewRow(
+                selectedPerson,
+                enrichment.fieldUpdates,
+              ),
+            );
+          }
+        })
+        .catch(() => undefined);
       setDocumentMessage(
         `Збережено в БД · ${new Date(updated.updatedAt).toLocaleString("uk-UA")}`,
       );
@@ -2690,6 +2768,16 @@ export function DocumentsPage(_props: {
         },
         existingPhones: readStoredPersonPhones()[documentSavePersonId] ?? [],
       }).catch(() => null);
+
+      if (
+        enrichment &&
+        Object.keys(enrichment.fieldUpdates).length &&
+        selectedPerson
+      ) {
+        setSelectedPerson(
+          applyEnrichmentToPreviewRow(selectedPerson, enrichment.fieldUpdates),
+        );
+      }
 
       const enrichmentNote = enrichment
         ? [
@@ -3529,6 +3617,13 @@ export function DocumentsPage(_props: {
           document.type !== PERSON_SIGNATURE_DOCUMENT_TYPE,
       )
       .map((document) => document.type),
+  );
+
+  // Internal storage docs (phones / signature) stay in state for sync, but not in UI lists.
+  const visiblePersonDocuments = personDocuments.filter(
+    (document) =>
+      document.type !== PERSON_PHONES_DOCUMENT_TYPE &&
+      document.type !== PERSON_SIGNATURE_DOCUMENT_TYPE,
   );
 
   const createPersonDocumentByType = (type: string) => {
@@ -4778,7 +4873,25 @@ export function DocumentsPage(_props: {
               <span>Службовець</span>
               <span>Статус службовця</span>
               <span>Документ</span>
-              <span>Прогрес</span>
+              <button
+                type="button"
+                className="documents-journal-sort"
+                aria-label={
+                  journalSortField === "progress" &&
+                  journalSortDirection === "desc"
+                    ? "Сортувати за прогресом: спочатку менший"
+                    : "Сортувати за прогресом: спочатку більший"
+                }
+                title="Сортувати за прогресом"
+                onClick={() => toggleJournalSort("progress")}
+              >
+                Прогрес
+                {journalSortField === "progress"
+                  ? journalSortDirection === "desc"
+                    ? " ↓"
+                    : " ↑"
+                  : ""}
+              </button>
               <span>Статус</span>
               <span>Коментар</span>
               <span>Файли</span>
@@ -4786,20 +4899,40 @@ export function DocumentsPage(_props: {
                 type="button"
                 className="documents-journal-sort"
                 aria-label={
-                  journalCreatedSort === "desc"
+                  journalSortField === "createdAt" &&
+                  journalSortDirection === "desc"
                     ? "Сортувати за датою створення: спочатку старіші"
                     : "Сортувати за датою створення: спочатку новіші"
                 }
                 title="Сортувати за датою створення"
-                onClick={() =>
-                  setJournalCreatedSort((current) =>
-                    current === "desc" ? "asc" : "desc",
-                  )
-                }
+                onClick={() => toggleJournalSort("createdAt")}
               >
-                Створено {journalCreatedSort === "desc" ? "↓" : "↑"}
+                Створено
+                {journalSortField === "createdAt"
+                  ? journalSortDirection === "desc"
+                    ? " ↓"
+                    : " ↑"
+                  : ""}
               </button>
-              <span>Оновлено</span>
+              <button
+                type="button"
+                className="documents-journal-sort"
+                aria-label={
+                  journalSortField === "updatedAt" &&
+                  journalSortDirection === "desc"
+                    ? "Сортувати за датою оновлення: спочатку старіші"
+                    : "Сортувати за датою оновлення: спочатку новіші"
+                }
+                title="Сортувати за датою оновлення"
+                onClick={() => toggleJournalSort("updatedAt")}
+              >
+                Оновлено
+                {journalSortField === "updatedAt"
+                  ? journalSortDirection === "desc"
+                    ? " ↓"
+                    : " ↑"
+                  : ""}
+              </button>
               <span />
             </div>
             <div className="documents-journal-table-body">
@@ -5169,8 +5302,8 @@ export function DocumentsPage(_props: {
             </div>
             <div className="salary-person-documents-list">
               {personQuestionnaireRow}
-              {personDocuments.length ? (
-                personDocuments.map((document) => (
+              {visiblePersonDocuments.length ? (
+                visiblePersonDocuments.map((document) => (
                   <article
                     className={
                       document.id === selectedDocumentId
@@ -5280,8 +5413,8 @@ export function DocumentsPage(_props: {
             </div>
             <div className="salary-person-documents-list">
               {personQuestionnaireRow}
-              {personDocuments.length ? (
-                personDocuments.map((document) => (
+              {visiblePersonDocuments.length ? (
+                visiblePersonDocuments.map((document) => (
                   <article
                     className={
                       document.id === selectedDocumentId
@@ -5383,8 +5516,8 @@ export function DocumentsPage(_props: {
             </div>
             <div className="salary-person-documents-list">
               {personQuestionnaireRow}
-              {personDocuments.length ? (
-                personDocuments.map((document) => (
+              {visiblePersonDocuments.length ? (
+                visiblePersonDocuments.map((document) => (
                   <article
                     className={
                       document.id === selectedDocumentId
@@ -5486,8 +5619,8 @@ export function DocumentsPage(_props: {
             </div>
             <div className="salary-person-documents-list">
               {personQuestionnaireRow}
-              {personDocuments.length ? (
-                personDocuments.map((document) => (
+              {visiblePersonDocuments.length ? (
+                visiblePersonDocuments.map((document) => (
                   <article
                     className={
                       document.id === selectedDocumentId
@@ -5589,8 +5722,8 @@ export function DocumentsPage(_props: {
             </div>
             <div className="salary-person-documents-list">
               {personQuestionnaireRow}
-              {personDocuments.length ? (
-                personDocuments.map((document) => (
+              {visiblePersonDocuments.length ? (
+                visiblePersonDocuments.map((document) => (
                   <article
                     className={
                       document.id === selectedDocumentId
@@ -5700,8 +5833,8 @@ export function DocumentsPage(_props: {
             </div>
             <div className="salary-person-documents-list">
               {personQuestionnaireRow}
-              {personDocuments.length ? (
-                personDocuments.map((document) => (
+              {visiblePersonDocuments.length ? (
+                visiblePersonDocuments.map((document) => (
                   <article
                     className={
                       document.id === selectedDocumentId

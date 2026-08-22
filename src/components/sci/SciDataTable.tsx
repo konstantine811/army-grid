@@ -1,5 +1,6 @@
 import type { CSSProperties, ReactNode } from "react";
-import { useMemo, useState } from "react";
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   PushPinOutlinedIcon,
   SortArrowDownIcon,
@@ -45,6 +46,13 @@ export type SciDataTableExportContext<TData> = {
   }>;
 };
 
+export type SciDataTableCellRef = {
+  rowId: string;
+  columnId: string;
+  /** Bumps on each navigate so scroll/focus re-runs even for the same cell. */
+  focusEpoch?: number;
+};
+
 type SciTableOptions<TData> = {
   columns: MRT_ColumnDef<TData>[];
   data: TData[];
@@ -68,6 +76,23 @@ type SciTableOptions<TData> = {
   onExport?: (context: SciDataTableExportContext<TData>) => void | Promise<void>;
   emptyMessage?: string;
   getRowId?: (row: TData, index: number) => string;
+  /** Extra props/class for body cells (editing highlight, data attrs). */
+  getTdProps?: (args: {
+    row: TData;
+    rowIndex: number;
+    rowId: string;
+    columnId: string;
+  }) => {
+    className?: string;
+    style?: CSSProperties;
+    title?: string;
+  } | undefined;
+  /** Scroll/focus target cell after render. */
+  focusedCell?: SciDataTableCellRef | null;
+  /** Virtualize body rows (default: on when data length > 80). */
+  enableRowVirtualization?: boolean;
+  /** Estimated row height for virtualizer. */
+  estimatedRowHeight?: number;
   muiTableBodyCellProps?:
     | unknown
     | ((props: {
@@ -109,6 +134,7 @@ export function MaterialReactTable<TData>({
     [table],
   );
   const [globalFilter, setGlobalFilter] = useState("");
+  const deferredGlobalFilter = useDeferredValue(globalFilter);
   const [columnFilters, setColumnFilters] = useState<Record<string, string[]>>({});
   const [columnRangeFilters, setColumnRangeFilters] = useState<ColumnRangeFilters>(
     {},
@@ -121,7 +147,7 @@ export function MaterialReactTable<TData>({
   >({});
   const [openMenu, setOpenMenu] = useState<string | null>(null);
   const [sorting, setSorting] = useState<ColumnSortState | null>(null);
-
+  const scrollParentRef = useRef<HTMLDivElement | null>(null);
   const pinnedColumns = useMemo(
     () =>
       preparedColumns.map((column) => ({
@@ -149,12 +175,18 @@ export function MaterialReactTable<TData>({
         rowMatchesFilters(
           row,
           preparedColumns,
-          globalFilter,
+          deferredGlobalFilter,
           columnFilters,
           columnRangeFilters,
         ),
       ),
-    [columnFilters, columnRangeFilters, globalFilter, preparedColumns, table.data],
+    [
+      columnFilters,
+      columnRangeFilters,
+      deferredGlobalFilter,
+      preparedColumns,
+      table.data,
+    ],
   );
   const sortedRows = useMemo(() => {
     try {
@@ -163,25 +195,155 @@ export function MaterialReactTable<TData>({
       return filteredRows;
     }
   }, [filteredRows, preparedColumns, sorting]);
-  const facetedFilterOptions = useMemo(
-    () =>
-      Object.fromEntries(
-        preparedColumns.map((column) => [
+  const facetedFilterOptions = useMemo(() => {
+    const rowCount = table.data.length;
+    const facetMenuId = openMenu?.startsWith("facet:") ? openMenu.slice("facet:".length) : null;
+
+    // На великих таблицях рахуємо опції лише для відкритого фільтра (O(rows), не O(rows×cols)).
+    if (rowCount > 300) {
+      if (!facetMenuId) return {};
+      return {
+        [facetMenuId]: getFacetedColumnOptions(
+          table.data,
+          preparedColumns,
+          facetMenuId,
+          deferredGlobalFilter,
+          columnFilters,
+          columnRangeFilters,
+        ),
+      };
+    }
+
+    return Object.fromEntries(
+      preparedColumns.map((column) => [
+        column.columnId,
+        getFacetedColumnOptions(
+          table.data,
+          preparedColumns,
           column.columnId,
-          getFacetedColumnOptions(
-            table.data,
-            preparedColumns,
-            column.columnId,
-            globalFilter,
-            columnFilters,
-            columnRangeFilters,
-          ),
-        ]),
-      ),
-    [columnFilters, columnRangeFilters, globalFilter, preparedColumns, table.data],
-  );
+          deferredGlobalFilter,
+          columnFilters,
+          columnRangeFilters,
+        ),
+      ]),
+    );
+  }, [
+    columnFilters,
+    columnRangeFilters,
+    deferredGlobalFilter,
+    openMenu,
+    preparedColumns,
+    table.data,
+  ]);
+  const enableVirtualization =
+    table.enableRowVirtualization ?? table.data.length > 80;
+  const estimatedRowHeight = table.estimatedRowHeight ?? 40;
   const pageSize = table.initialState?.pagination?.pageSize ?? 200;
-  const rows = sortedRows.slice(0, pageSize);
+  const rows = enableVirtualization
+    ? sortedRows
+    : sortedRows.slice(0, pageSize);
+
+  const rowVirtualizer = useVirtualizer({
+    count: enableVirtualization ? rows.length : 0,
+    getScrollElement: () => scrollParentRef.current,
+    estimateSize: () => estimatedRowHeight,
+    overscan: 14,
+  });
+  const rowVirtualizerRef = useRef(rowVirtualizer);
+  rowVirtualizerRef.current = rowVirtualizer;
+
+  const focusedRowId = table.focusedCell?.rowId ?? "";
+  const focusedColumnId = table.focusedCell?.columnId ?? "";
+  const focusedEpoch = table.focusedCell?.focusEpoch ?? 0;
+  const hasActiveColumnFilters =
+    Object.keys(columnFilters).length > 0 ||
+    Object.keys(columnRangeFilters).length > 0;
+
+  useEffect(() => {
+    if (!focusedRowId || !focusedColumnId) return;
+
+    const rowIndex = rows.findIndex(
+      (row, index) =>
+        String(table.getRowId?.(row, index) ?? index) === focusedRowId,
+    );
+
+    // Target hidden by filters. Clear them, then wait for deferred filter flush.
+    if (rowIndex < 0) {
+      if (globalFilter.trim()) {
+        setGlobalFilter("");
+        return;
+      }
+      if (deferredGlobalFilter.trim()) {
+        // useDeferredValue still applying old search — wait for rows to update.
+        return;
+      }
+      if (hasActiveColumnFilters) {
+        setColumnFilters({});
+        setColumnRangeFilters({});
+        return;
+      }
+      return;
+    }
+
+    let cancelled = false;
+    let attempts = 0;
+    let timer = 0;
+
+    const focusCellEditor = () => {
+      if (cancelled) return;
+      const node = document.querySelector<HTMLElement>(
+        `[data-sci-cell="${CSS.escape(`${focusedRowId}::${focusedColumnId}`)}"]`,
+      );
+      if (node) {
+        node.scrollIntoView({
+          block: "nearest",
+          inline: "center",
+          behavior: "auto",
+        });
+        const input = node.querySelector<
+          HTMLInputElement | HTMLTextAreaElement
+        >(
+          "input.anketa-cell-input, textarea.anketa-cell-input, input, textarea",
+        );
+        if (input) {
+          if (input === document.activeElement) {
+            return;
+          }
+          input.focus({ preventScroll: true });
+          if ("select" in input && attempts === 0) input.select();
+          return;
+        }
+      }
+
+      if (attempts >= 30) return;
+      attempts += 1;
+      if (enableVirtualization) {
+        rowVirtualizerRef.current.scrollToIndex(rowIndex, { align: "center" });
+      }
+      timer = window.setTimeout(focusCellEditor, 48);
+    };
+
+    if (enableVirtualization) {
+      rowVirtualizerRef.current.scrollToIndex(rowIndex, { align: "center" });
+    }
+    timer = window.setTimeout(focusCellEditor, enableVirtualization ? 48 : 0);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [
+    deferredGlobalFilter,
+    enableVirtualization,
+    focusedColumnId,
+    focusedEpoch,
+    focusedRowId,
+    globalFilter,
+    hasActiveColumnFilters,
+    rows,
+    table.getRowId,
+  ]);
+
   const showToolbar =
     table.enableGlobalFilter !== false ||
     table.enableColumnVisibility !== false ||
@@ -286,7 +448,7 @@ export function MaterialReactTable<TData>({
         </div>
       ) : null}
 
-      <div className="sci-data-table-wrap">
+      <div className="sci-data-table-wrap" ref={scrollParentRef}>
         <table className="sci-data-table">
           <thead>
             <tr>
@@ -414,19 +576,130 @@ export function MaterialReactTable<TData>({
             ) : null}
           </thead>
           <tbody>
-            {rows.map((row, rowIndex) => (
-              <tr key={table.getRowId?.(row, rowIndex) ?? rowIndex}>
-                {visibleColumns.map((column) => (
-                  <td
-                    key={column.columnId}
-                    className={pinnedClassName(column.pin)}
-                    style={pinnedStyle(column, pinnedOffsets)}
-                  >
-                    {renderCell(column, row, rowIndex)}
-                  </td>
-                ))}
-              </tr>
-            ))}
+            {enableVirtualization && rows.length > 0 ? (
+              (() => {
+                const virtualItems = rowVirtualizer.getVirtualItems();
+                const paddingTop = virtualItems[0]?.start ?? 0;
+                const paddingBottom = Math.max(
+                  0,
+                  rowVirtualizer.getTotalSize() -
+                    (virtualItems.at(-1)?.end ?? 0),
+                );
+                return (
+                  <>
+                    {paddingTop > 0 ? (
+                      <tr
+                        aria-hidden
+                        className="sci-data-table-virtual-spacer"
+                        style={{ height: paddingTop }}
+                      >
+                        <td colSpan={Math.max(visibleColumns.length, 1)} />
+                      </tr>
+                    ) : null}
+                    {virtualItems.map((virtualRow) => {
+                      const rowIndex = virtualRow.index;
+                      const row = rows[rowIndex];
+                      if (!row) return null;
+                      const rowId = String(
+                        table.getRowId?.(row, rowIndex) ?? rowIndex,
+                      );
+                      return (
+                        <tr
+                          key={rowId}
+                          data-index={rowIndex}
+                          ref={rowVirtualizer.measureElement}
+                          style={{ height: virtualRow.size }}
+                        >
+                          {visibleColumns.map((column) => {
+                            const tdProps = table.getTdProps?.({
+                              row,
+                              rowIndex,
+                              rowId,
+                              columnId: column.columnId,
+                            });
+                            const focused =
+                              table.focusedCell?.rowId === rowId &&
+                              table.focusedCell?.columnId === column.columnId;
+                            return (
+                              <td
+                                key={column.columnId}
+                                data-sci-cell={`${rowId}::${column.columnId}`}
+                                className={[
+                                  pinnedClassName(column.pin),
+                                  tdProps?.className,
+                                  focused ? "is-focused-empty-cell" : "",
+                                ]
+                                  .filter(Boolean)
+                                  .join(" ")}
+                                style={{
+                                  ...pinnedStyle(column, pinnedOffsets),
+                                  ...tdProps?.style,
+                                }}
+                                title={tdProps?.title}
+                              >
+                                {renderCell(column, row, rowIndex)}
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      );
+                    })}
+                    {paddingBottom > 0 ? (
+                      <tr
+                        aria-hidden
+                        className="sci-data-table-virtual-spacer"
+                        style={{ height: paddingBottom }}
+                      >
+                        <td colSpan={Math.max(visibleColumns.length, 1)} />
+                      </tr>
+                    ) : null}
+                  </>
+                );
+              })()
+            ) : (
+              <>
+                {rows.map((row, rowIndex) => {
+                  const rowId = String(
+                    table.getRowId?.(row, rowIndex) ?? rowIndex,
+                  );
+                  return (
+                    <tr key={rowId}>
+                      {visibleColumns.map((column) => {
+                        const tdProps = table.getTdProps?.({
+                          row,
+                          rowIndex,
+                          rowId,
+                          columnId: column.columnId,
+                        });
+                        const focused =
+                          table.focusedCell?.rowId === rowId &&
+                          table.focusedCell?.columnId === column.columnId;
+                        return (
+                          <td
+                            key={column.columnId}
+                            data-sci-cell={`${rowId}::${column.columnId}`}
+                            className={[
+                              pinnedClassName(column.pin),
+                              tdProps?.className,
+                              focused ? "is-focused-empty-cell" : "",
+                            ]
+                              .filter(Boolean)
+                              .join(" ")}
+                            style={{
+                              ...pinnedStyle(column, pinnedOffsets),
+                              ...tdProps?.style,
+                            }}
+                            title={tdProps?.title}
+                          >
+                            {renderCell(column, row, rowIndex)}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  );
+                })}
+              </>
+            )}
             {rows.length === 0 && (
               <tr>
                 <td
@@ -440,7 +713,13 @@ export function MaterialReactTable<TData>({
           </tbody>
         </table>
       </div>
-      {filteredRows.length > rows.length ? (
+      {enableVirtualization ? (
+        <div className="sci-data-table-footer">
+          {globalFilter !== deferredGlobalFilter
+            ? "Фільтрація…"
+            : `Рядків: ${filteredRows.length}`}
+        </div>
+      ) : filteredRows.length > rows.length ? (
         <div className="sci-data-table-footer">
           Показано {rows.length} з {filteredRows.length}
         </div>

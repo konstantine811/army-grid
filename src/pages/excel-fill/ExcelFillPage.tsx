@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Box, Button, Stack, Typography } from "@/components/sci/SciPrimitives";
+import type { EjournalPreviewRow } from "../ejournal/ejournalTypes";
 import {
   FileDownloadOutlinedIcon,
   FileUploadOutlinedIcon,
@@ -11,6 +12,7 @@ import {
   fetchWithCache,
   jsonChanged,
   readDataCache,
+  writeDataCache,
 } from "../../data/idbDataCache";
 import {
   type CellValue,
@@ -31,6 +33,18 @@ import {
   type PositionsVozFillRule,
   type PositionsVozPerson,
 } from "./positionsVozFill";
+import {
+  mapRosterLatestToPreviewRows,
+  rosterLatestToSourceSnapshot,
+} from "./rosterSourceSnapshot";
+import {
+  pushStaffSheetToGoogle,
+  readStaffAppsScriptUrl,
+  rosterRowsToStaffSheetValues,
+  staffSheetEditUrl,
+  STAFF_APPS_SCRIPT_TEMPLATE,
+  writeStaffAppsScriptUrl,
+} from "./staffSheet";
 
 type ColumnMeta = {
   index: number;
@@ -469,8 +483,12 @@ function analyzeFill(source?: ExcelWorkbookSnapshot | null, target?: ExcelWorkbo
       weaponKind: getWeaponKind(rowValue(row.values, findColumn(sourceColumns, ["weaponName"]))),
     };
 
-    sourceByStrictKey.set(strictKey, [...(sourceByStrictKey.get(strictKey) ?? []), record]);
-    sourceByNameKey.set(nameKey, [...(sourceByNameKey.get(nameKey) ?? []), record]);
+    const strictBucket = sourceByStrictKey.get(strictKey);
+    if (strictBucket) strictBucket.push(record);
+    else sourceByStrictKey.set(strictKey, [record]);
+    const nameBucket = sourceByNameKey.get(nameKey);
+    if (nameBucket) nameBucket.push(record);
+    else sourceByNameKey.set(nameKey, [record]);
   });
 
   const changes: FillChange[] = [];
@@ -556,6 +574,9 @@ function pickSourceRecordForTargetColumn(records: SourceRecord[], targetColumn: 
 }
 
 const MORNING_REPORT_TEMPLATE_URL = "/templates/Поіменний список 1 ПБ.xlsm";
+
+const formatSourceTimestamp = (iso: string | null | undefined) =>
+  iso ? new Date(iso).toLocaleString("uk-UA") : null;
 const MORNING_REPORT_DATA_START_ROW = 5;
 const MORNING_REPORT_DATA_COLUMN_COUNT = 10;
 const MORNING_REPORT_TEMPLATE_CLEAR_UNTIL_ROW = 600;
@@ -610,7 +631,28 @@ function writeMorningReportIntoTemplate(workbook: any, result: MorningReportResu
 }
 
 export function ExcelFillPage() {
-  const [source, setSource] = useState<ExcelWorkbookSnapshot | null>(null);
+  const [sourceUpload, setSourceUpload] = useState<ExcelWorkbookSnapshot | null>(
+    null,
+  );
+  const [sourceUploadLoadedAt, setSourceUploadLoadedAt] = useState<string | null>(
+    null,
+  );
+  const [rosterSource, setRosterSource] = useState<ExcelWorkbookSnapshot | null>(
+    null,
+  );
+  const [rosterLabel, setRosterLabel] = useState("");
+  const [rosterImportedAt, setRosterImportedAt] = useState<string | null>(null);
+  const [rosterLoadedAt, setRosterLoadedAt] = useState<string | null>(null);
+  const [rosterRowCount, setRosterRowCount] = useState(0);
+  const [rosterPreviewRows, setRosterPreviewRows] = useState<EjournalPreviewRow[]>(
+    [],
+  );
+  const [staffAppsScriptUrl, setStaffAppsScriptUrl] = useState(() =>
+    readStaffAppsScriptUrl(),
+  );
+  const [staffSheetSyncedAt, setStaffSheetSyncedAt] = useState<string | null>(
+    null,
+  );
   const [target, setTarget] = useState<ExcelWorkbookSnapshot | null>(null);
   const [positionsTemplate, setPositionsTemplate] =
     useState<ExcelWorkbookSnapshot | null>(null);
@@ -627,8 +669,9 @@ export function ExcelFillPage() {
   const [morningSubmittedBy, setMorningSubmittedBy] = useState("");
   const [isBusy, setIsBusy] = useState(false);
   const [message, setMessage] = useState(
-    "Завантажте файл-джерело і файл, який треба дозаповнити.",
+    "Завантажте дані з персоналу або файл-джерело Excel.",
   );
+  const source = rosterSource ?? sourceUpload;
   const result = useMemo(() => analyzeFill(source, target), [source, target]);
   const positionsResult = useMemo(
     () =>
@@ -640,18 +683,132 @@ export function ExcelFillPage() {
     [positionsPeople, positionsRules, positionsTemplate],
   );
   const morningSubmittedByValue = morningSubmittedBy.trim();
-  const morningReport = useMemo(
-    () => analyzeMorningReport(source, morningSubmittedByValue),
-    [morningSubmittedByValue, source],
+  const morningReportBase = useMemo(
+    () => analyzeMorningReport(source, ""),
+    [source],
   );
+  const morningReport = useMemo(() => {
+    if (!morningReportBase) return null;
+    if (!morningSubmittedByValue) return morningReportBase;
+    return {
+      ...morningReportBase,
+      rows: morningReportBase.rows.map((row) => ({
+        ...row,
+        submittedBy: morningSubmittedByValue,
+      })),
+    };
+  }, [morningReportBase, morningSubmittedByValue]);
   const morningLocationCounts = useMemo(
-    () => (morningReport ? getMorningLocationCounts(morningReport.rows) : []),
-    [morningReport],
+    () => (morningReportBase ? getMorningLocationCounts(morningReportBase.rows) : []),
+    [morningReportBase],
   );
+  const staffSheetRowCount = useMemo(
+    () => rosterRowsToStaffSheetValues(rosterPreviewRows).length,
+    [rosterPreviewRows],
+  );
+  const morningSourceMeta = useMemo(() => {
+    if (rosterSource) {
+      return {
+        label: rosterLabel || "Загальний список",
+        importedAt: rosterImportedAt,
+        loadedAt: rosterLoadedAt,
+        fromPersonnel: true,
+      };
+    }
+    if (sourceUpload) {
+      return {
+        label: sourceUpload.fileName,
+        importedAt: null,
+        loadedAt: sourceUploadLoadedAt,
+        fromPersonnel: false,
+      };
+    }
+    return null;
+  }, [
+    rosterImportedAt,
+    rosterLabel,
+    rosterLoadedAt,
+    rosterSource,
+    sourceUpload,
+    sourceUploadLoadedAt,
+  ]);
 
   useEffect(() => {
     setPositionsRulesText(JSON.stringify(positionsRules, null, 2));
   }, [positionsRules]);
+
+  useEffect(() => {
+    void loadSourceFromPersonnel();
+  }, []);
+
+  const applyRosterLatest = (
+    latest: NonNullable<Awaited<ReturnType<typeof api.getLatestPersonnelRoster>>>,
+    fromCache = false,
+  ) => {
+    const snapshot = rosterLatestToSourceSnapshot(latest);
+    const rows = mapRosterLatestToPreviewRows(latest);
+    setRosterSource(snapshot);
+    setRosterPreviewRows(rows);
+    setRosterRowCount(rows.length);
+    setRosterLabel(latest.sourceFileName || latest.importName || "Загальний список");
+    setRosterImportedAt(latest.createdAt || null);
+    setRosterLoadedAt(new Date().toISOString());
+    if (snapshot) {
+      setMessage(
+        fromCache
+          ? `Кеш персоналу: ${rows.length} рядків · оновлюю з БД…`
+          : `Джерело з персоналу: ${rows.length} рядків · ${latest.sourceFileName || latest.importName}.`,
+      );
+    }
+  };
+
+  const loadSourceFromPersonnel = async (forceRefresh = false) => {
+    setIsBusy(true);
+    try {
+      if (!forceRefresh) {
+        const cached = await readDataCache<
+          Awaited<ReturnType<typeof api.getLatestPersonnelRoster>>
+        >(CacheKeys.rosterLatest);
+        if (cached?.sheet) {
+          applyRosterLatest(cached, true);
+          setIsBusy(false);
+        }
+      }
+
+      const latest = forceRefresh
+        ? await (async () => {
+            const fresh = await api.getLatestPersonnelRoster();
+            if (fresh) await writeDataCache(CacheKeys.rosterLatest, fresh);
+            return fresh;
+          })()
+        : await fetchWithCache({
+            key: CacheKeys.rosterLatest,
+            fetcher: () => api.getLatestPersonnelRoster(),
+            isChanged: jsonChanged,
+          });
+      if (!latest?.sheet) {
+        setRosterSource(null);
+        setRosterPreviewRows([]);
+        setRosterRowCount(0);
+        setRosterLabel("");
+        setRosterImportedAt(null);
+        setRosterLoadedAt(null);
+        setMessage(
+          "У БД немає «Загального списку». Імпортуйте ранковий звіт на сторінці Персонал.",
+        );
+        return;
+      }
+      applyRosterLatest(latest);
+    } catch (error) {
+      setMessage(
+        error instanceof Error
+          ? `Не вдалося завантажити персонал: ${error.message}`
+          : "Не вдалося завантажити персонал.",
+      );
+    } finally {
+      setIsBusy(false);
+    }
+  };
 
   const loadFile = async (
     file: File | undefined,
@@ -661,8 +818,10 @@ export function ExcelFillPage() {
     setIsBusy(true);
     try {
       const snapshot = await readWorkbookSnapshot(file);
-      if (role === "source") setSource(snapshot);
-      else if (role === "target") setTarget(snapshot);
+      if (role === "source") {
+        setSourceUpload(snapshot);
+        setSourceUploadLoadedAt(new Date().toISOString());
+      } else if (role === "target") setTarget(snapshot);
       else setPositionsTemplate(snapshot);
       setMessage(`Завантажено ${file.name}.`);
     } catch (error) {
@@ -854,6 +1013,35 @@ export function ExcelFillPage() {
     }
   };
 
+  const syncStaffGoogleSheet = async () => {
+    if (!rosterPreviewRows.length) {
+      setMessage("Спочатку завантажте дані з персоналу.");
+      return;
+    }
+    const values = rosterRowsToStaffSheetValues(rosterPreviewRows);
+    if (!values.length) {
+      setMessage("У персоналі немає рядків з ПІБ для Google Sheet «Штатка».");
+      return;
+    }
+    setIsBusy(true);
+    try {
+      writeStaffAppsScriptUrl(staffAppsScriptUrl);
+      const written = await pushStaffSheetToGoogle(values);
+      setStaffSheetSyncedAt(new Date().toISOString());
+      setMessage(
+        `Google Sheet «Штатка» оновлено: ${written} рядків · ${staffSheetEditUrl()}`,
+      );
+    } catch (error) {
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "Не вдалося оновити Google Sheet «Штатка».",
+      );
+    } finally {
+      setIsBusy(false);
+    }
+  };
+
   return (
     <main className="main-panel excel-fill-page">
       <header className="topbar">
@@ -884,16 +1072,49 @@ export function ExcelFillPage() {
 
       <div className="dashboard-grid">
         <section className="panel">
-          <div className="panel-heading">1. Файл-джерело</div>
+          <div className="panel-heading">1. Джерело · персонал</div>
           <Typography variant="body2" color="text.secondary">
-            Таблиця, звідки беремо дані. Наприклад, 1ПБ по ЗББР.
+            Дані з останнього «Загального списку» зі сторінки Персонал. Оновлюються
+            автоматично при відкритті.
           </Typography>
-          <Stack direction="row" spacing={1} sx={{ mt: 2, alignItems: "center" }}>
-            <Button component="label" startIcon={<FileUploadOutlinedIcon />}>
-              Завантажити
-              <input hidden type="file" accept=".xlsx,.xlsm" onChange={(event) => void loadFile(event.target.files?.[0], "source")} />
+          <Stack direction="row" spacing={1} sx={{ mt: 2, alignItems: "center", flexWrap: "wrap" }}>
+            <Button
+              variant="outlined"
+              startIcon={<SyncAltOutlinedIcon />}
+              disabled={isBusy}
+              onClick={() => void loadSourceFromPersonnel(true)}
+            >
+              Оновити з персоналу
             </Button>
-            <Typography variant="body2">{source?.fileName ?? "Файл не вибрано"}</Typography>
+            <Typography variant="body2">
+              {rosterSource
+                ? `${rosterRowCount} рядків · ${rosterLabel}`
+                : "Дані не завантажено"}
+            </Typography>
+          </Stack>
+          {rosterSource ? (
+            <Stack spacing={0.5} sx={{ mt: 1 }}>
+              <Typography variant="body2" color="text.secondary">
+                Імпорт у БД (Персонал): {formatSourceTimestamp(rosterImportedAt) ?? "—"}
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                Завантажено на сторінці: {formatSourceTimestamp(rosterLoadedAt) ?? "—"}
+              </Typography>
+            </Stack>
+          ) : null}
+          <Stack direction="row" spacing={1} sx={{ mt: 1.5, alignItems: "center", flexWrap: "wrap" }}>
+            <Button component="label" size="small" startIcon={<FileUploadOutlinedIcon />}>
+              Або Excel
+              <input
+                hidden
+                type="file"
+                accept=".xlsx,.xlsm"
+                onChange={(event) => void loadFile(event.target.files?.[0], "source")}
+              />
+            </Button>
+            <Typography variant="body2" color="text.secondary">
+              {sourceUpload?.fileName ?? "файл не вибрано"}
+            </Typography>
           </Stack>
         </section>
 
@@ -912,6 +1133,49 @@ export function ExcelFillPage() {
         </section>
 
         <section className="panel">
+          <div className="panel-heading">Google Sheet «Штатка»</div>
+          <Stack spacing={1.25}>
+            <Typography variant="body2">
+              Замість ручного завантаження — оновлення таблиці з даних персоналу.
+            </Typography>
+            <Typography variant="body2" color="text.secondary">
+              <a href={staffSheetEditUrl()} target="_blank" rel="noreferrer">
+                Відкрити «Штатка» в Google Sheets
+              </a>
+            </Typography>
+            <label className="excel-fill-inline-field">
+              <span>URL Google Apps Script Web App</span>
+              <input
+                value={staffAppsScriptUrl}
+                onChange={(event) => setStaffAppsScriptUrl(event.target.value)}
+                onBlur={() => writeStaffAppsScriptUrl(staffAppsScriptUrl)}
+                placeholder="https://script.google.com/macros/s/…/exec"
+              />
+            </label>
+            <Typography variant="body2">
+              Рядків для синхронізації: {staffSheetRowCount}
+            </Typography>
+            {staffSheetSyncedAt ? (
+              <Typography variant="body2" color="text.secondary">
+                Google Sheet відправлено: {formatSourceTimestamp(staffSheetSyncedAt)}
+              </Typography>
+            ) : null}
+            <Button
+              variant="contained"
+              startIcon={<SyncAltOutlinedIcon />}
+              disabled={!rosterPreviewRows.length || isBusy}
+              onClick={() => void syncStaffGoogleSheet()}
+            >
+              Оновити Google Sheet «Штатка»
+            </Button>
+            <details className="excel-fill-rules-editor">
+              <summary>Шаблон Apps Script</summary>
+              <textarea readOnly rows={12} value={STAFF_APPS_SCRIPT_TEMPLATE} />
+            </details>
+          </Stack>
+        </section>
+
+        <section className="panel">
           <div className="panel-heading">Ранковий звіт 1ПБ</div>
           <Stack spacing={1}>
             <Typography variant="body2">
@@ -922,6 +1186,33 @@ export function ExcelFillPage() {
               ID-файл більше не потрібен: колонка «Підрозділ за штатом»
               лишається пустою.
             </Typography>
+            <Typography variant="body2" color="text.secondary">
+              {morningSourceMeta ? (
+                <>
+                  Джерело: {morningSourceMeta.label}
+                  {morningSourceMeta.fromPersonnel && morningSourceMeta.importedAt ? (
+                    <>
+                      <br />
+                      Імпорт у БД: {formatSourceTimestamp(morningSourceMeta.importedAt)}
+                    </>
+                  ) : null}
+                  {morningSourceMeta.loadedAt ? (
+                    <>
+                      <br />
+                      Завантажено: {formatSourceTimestamp(morningSourceMeta.loadedAt)}
+                    </>
+                  ) : null}
+                </>
+              ) : (
+                "Джерело не завантажено — імпортуйте список на сторінці Персонал."
+              )}
+            </Typography>
+            {morningSourceMeta?.fromPersonnel ? (
+              <Typography variant="body2" color="text.secondary">
+                Ранковий звіт будується з БД персоналу, не з Google Sheet. Після
+                змін у Google — спочатку імпортуйте файл на сторінці Персонал.
+              </Typography>
+            ) : null}
             <label className="excel-fill-inline-field">
               <span>Хто подав / позивний</span>
               <input

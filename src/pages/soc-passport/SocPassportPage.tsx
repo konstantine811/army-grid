@@ -8,7 +8,13 @@ import {
 import { Button as SciButton } from "../../components/ui/button/button";
 import { readWorkbookSnapshot, type ExcelWorkbookSnapshot } from "../../excelRoundTrip";
 import { buildSocPassportResult } from "./socPassportCalc";
-import { exportSocPassportWorkbook } from "./socPassportExport";
+import {
+  exportSocPassportExitsWorkbook,
+  exportSocPassportNoExitsWorkbook,
+  exportSocPassportRussiaWorkbook,
+  exportSocPassportWorkbook,
+} from "./socPassportExport";
+import { countsInNoExitsList } from "./socPassportFields";
 import { parseSocPassportSources } from "./socPassportParse";
 import type { PassportTableRow, SocPassportResult } from "./socPassportTypes";
 
@@ -72,6 +78,9 @@ const CountsCells = ({ row }: { row: PassportTableRow }) => {
 export function SocPassportPage() {
   const [ejoos, setEjoos] = useState<ExcelWorkbookSnapshot | null>(null);
   const [morning, setMorning] = useState<ExcelWorkbookSnapshot | null>(null);
+  const [jbdExits, setJbdExits] = useState<ExcelWorkbookSnapshot | null>(null);
+  const [bplaExits, setBplaExits] = useState<ExcelWorkbookSnapshot | null>(null);
+  const [ubdRoster, setUbdRoster] = useState<ExcelWorkbookSnapshot | null>(null);
   const [result, setResult] = useState<SocPassportResult | null>(null);
   const [message, setMessage] = useState(
     "Завантажте ЕЖООС (ШПО + ООС) і за бажанням ранковий звіт — потім натисніть «Порахувати».",
@@ -90,21 +99,42 @@ export function SocPassportPage() {
     );
   }, [query, result]);
 
+  const noExitsPeople = useMemo(() => {
+    if (!result) return [];
+    return result.people
+      .filter(
+        (person) =>
+          person.exitBand === "none" &&
+          countsInNoExitsList(person) &&
+          !person.ubdRosterStatus,
+      )
+      .sort((left, right) => left.name.localeCompare(right.name, "uk"));
+  }, [result]);
+
   const loadWorkbook = async (
     file: File | undefined,
-    kind: "ejoos" | "morning",
+    kind: "ejoos" | "morning" | "jbd" | "bpla" | "ubd",
   ) => {
     if (!file) return;
     setIsBusy(true);
     try {
       const snapshot = await readWorkbookSnapshot(file);
       if (kind === "ejoos") setEjoos(snapshot);
-      else setMorning(snapshot);
+      else if (kind === "morning") setMorning(snapshot);
+      else if (kind === "jbd") setJbdExits(snapshot);
+      else if (kind === "bpla") setBplaExits(snapshot);
+      else setUbdRoster(snapshot);
       setResult(null);
       setMessage(
         kind === "ejoos"
           ? `ЕЖООС: ${snapshot.fileName} · аркушів ${snapshot.sheets.length}.`
-          : `Ранковий звіт: ${snapshot.fileName} · аркушів ${snapshot.sheets.length}.`,
+          : kind === "morning"
+            ? `Ранковий звіт: ${snapshot.fileName} · аркушів ${snapshot.sheets.length}.`
+            : kind === "jbd"
+              ? `ЖБД виходи: ${snapshot.fileName} · аркушів ${snapshot.sheets.length}.`
+              : kind === "bpla"
+                ? `БПЛА виходи: ${snapshot.fileName} · аркушів ${snapshot.sheets.length}.`
+                : `УБД реєстр: ${snapshot.fileName} · аркушів ${snapshot.sheets.length}.`,
       );
     } catch (error) {
       setMessage(
@@ -122,11 +152,20 @@ export function SocPassportPage() {
     }
     setIsBusy(true);
     try {
-      const parsed = parseSocPassportSources({ ejoos, morning });
+      const parsed = parseSocPassportSources({ ejoos, morning, jbdExits, bplaExits, ubdRoster });
       const warnings = [
         morning
           ? ""
           : "Ранковий звіт не завантажено: «В наявності», «В розпорядженні» і виходи на ЛБЗ будуть порожні або нульові.",
+        !jbdExits
+          ? "ЖБД не завантажено: виходи рахуються лише з «Статус бійців» ранкового звіту."
+          : "",
+        !bplaExits
+          ? "БПЛА не завантажено: екіпажі БПЛА з «Виконував БЗ» не враховуються окремо."
+          : "",
+        !ubdRoster
+          ? "УБД реєстр не завантажено: «Подавалися» / «Не подавалися» не враховуються для бойових виходів."
+          : "",
         parsed.people.length === 0 ? "На ШПО не знайдено осіб на посадах." : "",
       ].filter(Boolean);
       const next = buildSocPassportResult({
@@ -145,7 +184,7 @@ export function SocPassportPage() {
       console.log("2) З них є в ранковому (нова + звання):", brez.oosBrezKeptInMorning);
       console.log("3) Відфільтровано ранковим (немає в списку):", brez.oosBrezDroppedByMorning);
       console.log("4) У підрахунку «З Брез» з ООС:", brez.countedBrezFromOos);
-      console.log("5) У підрахунку «З Брез» лише з колонки БЗВП ранку:", brez.countedBrezFromMorningOnly);
+      console.log("5) У підрахунку «З Брез» лише з ранку (БЗВП/БРЕЗ або Відрядження БРЕЗ):", brez.countedBrezFromMorningOnly);
       console.log("6) Увесь підрахунок «З Брез»:", brez.countedBrezAll);
       console.log("counts:", brez.counts);
       console.groupEnd();
@@ -172,8 +211,56 @@ export function SocPassportPage() {
       (window as Window & { __SOC_PASSPORT_UBD__?: unknown }).__SOC_PASSPORT_UBD__ =
         ubd;
 
+      const combat = parsed.combatDutyDebug;
+      console.groupCollapsed(
+        `[Соц.паспорт] Бойові завдання: тимч. прибуття ${combat.counts.tempArrivalCombatZone}; підвищено з 0 виходів ${combat.counts.inferredExitFloor}`,
+      );
+      console.log(
+        "1) Усі «Тимчасово прибулі» у зоні бойових завдань:",
+        combat.tempArrivalAll.map((row) => row.name),
+      );
+      console.log(
+        "2) У підрахунку виходів без «Статус бійців» (УБД / дислокація / тимч. прибуття):",
+        combat.inferredFromEjoosOnly,
+      );
+      console.log("counts:", combat.counts);
+      console.groupEnd();
+      (window as Window & { __SOC_PASSPORT_COMBAT__?: unknown }).__SOC_PASSPORT_COMBAT__ =
+        combat;
+
+      const jbd = parsed.jbdExitsDebug;
+      console.groupCollapsed(
+        `[Соц.паспорт] ЖБД: ${jbd.counts.jbdStampsTotal} виходів у файлі; +${jbd.counts.peopleWithJbdMerged} осіб (нових без дубліката: ${jbd.counts.peopleWithJbdOnly})`,
+      );
+      console.log("1) Додано до підрахунку (без дублікатів з «Статус бійців»):", jbd.addedToMorning);
+      console.log("counts:", jbd.counts);
+      console.groupEnd();
+      (window as Window & { __SOC_PASSPORT_JBD__?: unknown }).__SOC_PASSPORT_JBD__ = jbd;
+
+      const bpla = parsed.bplaExitsDebug;
+      console.groupCollapsed(
+        `[Соц.паспорт] БПЛА: ${bpla.counts.performersInFile} «Виконував БЗ» у файлі; зіставлено ${bpla.counts.matchedPerformers} (піднято з 0 виходів: ${bpla.counts.liftedFromNoExits})`,
+      );
+      console.log("1) Зіставлено з ранковим:", bpla.matchedInMorning);
+      console.log("2) У файлі, але немає в ранковому:", bpla.unmatchedInFile);
+      console.log("counts:", bpla.counts);
+      console.groupEnd();
+      (window as Window & { __SOC_PASSPORT_BPLA__?: unknown }).__SOC_PASSPORT_BPLA__ = bpla;
+
+      const ubdReg = parsed.ubdRosterDebug;
+      console.groupCollapsed(
+        `[Соц.паспорт] УБД реєстр: подали ${ubdReg.counts.submittedInFile}, не подали ${ubdReg.counts.notSubmittedInFile}; у ранковому ${ubdReg.counts.matchedSubmitted + ubdReg.counts.matchedNotSubmitted}`,
+      );
+      console.log("1) Подавалися у файлі:", ubdReg.counts.submittedInFile);
+      console.log("2) Не подавалися у файлі:", ubdReg.counts.notSubmittedInFile);
+      console.log("3) Зіставлено з ранковим:", ubdReg.matchedInMorning);
+      console.log("counts:", ubdReg.counts);
+      console.groupEnd();
+      (window as Window & { __SOC_PASSPORT_UBD_ROSTER__?: unknown }).__SOC_PASSPORT_UBD_ROSTER__ =
+        ubdReg;
+
       setMessage(
-        `Пораховано: штат ${next.summary.staffSlots}, на посаді ${next.summary.occupied}, ООС ${next.summary.oosMatched}, ранок ${next.summary.morningMatched}. БРЕЗ: ${brez.counts.oosBrezAll}→${brez.counts.countedBrezAll}; УБД: ${ubd.counts.oosUbdAll}→${ubd.counts.countedUbdInMorning} (див. console).`,
+        `Пораховано: штат ${next.summary.staffSlots}, на посаді ${next.summary.occupied}, ООС ${next.summary.oosMatched}, ранок ${next.summary.morningMatched}. БРЕЗ: ${brez.counts.oosBrezAll}→${brez.counts.countedBrezAll}; УБД: ${ubd.counts.oosUbdAll}→${ubd.counts.countedUbdInMorning}; бойове (ЕЖООС): ${combat.counts.inferredExitFloor}; ЖБД: ${jbd.counts.peopleWithJbdMerged}; БПЛА: ${bpla.counts.matchedPerformers}; УБД реєстр: ${ubdReg.counts.matchedSubmitted + ubdReg.counts.matchedNotSubmitted} (див. console).`,
       );
     } catch (error) {
       setResult(null);
@@ -189,8 +276,57 @@ export function SocPassportPage() {
     if (!result) return;
     setIsBusy(true);
     try {
-      await exportSocPassportWorkbook(result);
-      setMessage("Експортовано Excel: аркуш «Соц.портрет» і розбір по людях.");
+      const stats = await exportSocPassportWorkbook(result);
+      setMessage(
+        `Експортовано Excel: «Соц.портрет», «Розбір», «Офіцери» (${stats.officersCount}), «Рф» (${stats.russiaCount}), «Виходи ЛБЗ» (${stats.exitsCount}), «Не виконували» (${stats.noExitsCount}).`,
+      );
+    } catch (error) {
+      setMessage(
+        error instanceof Error ? error.message : "Не вдалося експортувати Excel.",
+      );
+    } finally {
+      setIsBusy(false);
+    }
+  };
+
+  const exportExitsOnly = async () => {
+    if (!result) return;
+    setIsBusy(true);
+    try {
+      const stats = await exportSocPassportExitsWorkbook(result);
+      setMessage(
+        `Експортовано «Виходи ЛБЗ»: ${stats.exitsCount} + «Не виконували» (${stats.noExitsCount}) + «Офіцери» (${stats.officersCount}) + «Рф» (${stats.russiaCount}).`,
+      );
+    } catch (error) {
+      setMessage(
+        error instanceof Error ? error.message : "Не вдалося експортувати Excel.",
+      );
+    } finally {
+      setIsBusy(false);
+    }
+  };
+
+  const exportRussiaOnly = async () => {
+    if (!result) return;
+    setIsBusy(true);
+    try {
+      const count = await exportSocPassportRussiaWorkbook(result);
+      setMessage(`Експортовано «Рф»: ${count} осіб (ПІБ + підстава класифікації).`);
+    } catch (error) {
+      setMessage(
+        error instanceof Error ? error.message : "Не вдалося експортувати Excel.",
+      );
+    } finally {
+      setIsBusy(false);
+    }
+  };
+
+  const exportNoExitsOnly = async () => {
+    if (!result) return;
+    setIsBusy(true);
+    try {
+      const count = await exportSocPassportNoExitsWorkbook(result);
+      setMessage(`Експортовано «Не виконували»: ${count} осіб (ПІБ + примітки).`);
     } catch (error) {
       setMessage(
         error instanceof Error ? error.message : "Не вдалося експортувати Excel.",
@@ -224,6 +360,24 @@ export function SocPassportPage() {
             disabled={isBusy}
             onFile={(file) => void loadWorkbook(file, "morning")}
           />
+          <FileButton
+            label="ЖБД виходи"
+            loadedName={jbdExits?.fileName}
+            disabled={isBusy}
+            onFile={(file) => void loadWorkbook(file, "jbd")}
+          />
+          <FileButton
+            label="БПЛА виходи"
+            loadedName={bplaExits?.fileName}
+            disabled={isBusy}
+            onFile={(file) => void loadWorkbook(file, "bpla")}
+          />
+          <FileButton
+            label="УБД реєстр"
+            loadedName={ubdRoster?.fileName}
+            disabled={isBusy}
+            onFile={(file) => void loadWorkbook(file, "ubd")}
+          />
           <SciButton variant="EXEC" disabled={isBusy || !ejoos || !morning} onClick={calculate}>
             <TableChartOutlinedIcon fontSize="small" />
             {isBusy ? "Рахую…" : "Порахувати"}
@@ -235,6 +389,33 @@ export function SocPassportPage() {
           >
             <FileDownloadOutlinedIcon fontSize="small" />
             Excel
+          </SciButton>
+          <SciButton
+            variant="OUTLINE"
+            disabled={isBusy || !result}
+            onClick={() => void exportExitsOnly()}
+            title="Виходи на ЛБЗ + аркуш «Не виконували»"
+          >
+            <FileDownloadOutlinedIcon fontSize="small" />
+            Виходи ЛБЗ
+          </SciButton>
+          <SciButton
+            variant="OUTLINE"
+            disabled={isBusy || !result}
+            onClick={() => void exportNoExitsOnly()}
+            title="Окремий файл: ПІБ з рядка «Не виконували»"
+          >
+            <FileDownloadOutlinedIcon fontSize="small" />
+            Не виконували
+          </SciButton>
+          <SciButton
+            variant="OUTLINE"
+            disabled={isBusy || !result}
+            onClick={() => void exportRussiaOnly()}
+            title="Окремий файл: хто потрапив у рядок «Рф»"
+          >
+            <FileDownloadOutlinedIcon fontSize="small" />
+            Рф (ПІБ)
           </SciButton>
         </Stack>
       </header>
@@ -250,12 +431,35 @@ export function SocPassportPage() {
             <strong>Ранковий звіт</strong> — основа підрахунку, як у БЧС: лише
             батальйон «нова». За штатом — усі рядки посад; за списком — є звання
             (колонка M); в наявності — «В строю» + «Відком. за межі ПБ»; в
-            розпорядженні — решта списку. «Статус бійців» дає виходи на ЛБЗ.
+            розпорядженні — решта списку. «Статус бійців» дає виходи на ЛБЗ;
+            <strong> ЖБД</strong> (напр. «ВИХІД ПОКРОВСЬК») — додаткові виходи; якщо
+            дата і ФІО збігаються з «Статус бійців», рахується як один вихід.
+            Якщо виходів немає — підставляємо з ЕЖООС: УБД в анкеті ООС,
+            «Місце дислокації» та аркуш «4. Тимчасово прибулі» (зона бойових
+            завдань). <strong>УБД реєстр</strong> («Подавалися» / «Не
+            подавалися») — означає наявність бойових виходів; обидві групи
+            рахуються як «виконували» (мін. 1 вихід, якщо інших джерел немає).
+            <strong> БПЛА виходи</strong> (таблиця з колонкою «Виконував БЗ» /
+            «Не виконував БЗ») — хто позначений як виконував, теж рахується як
+            «виконували» (мін. 1 вихід), якщо немає інших джерел. Статус ранкового
+            звіту <strong>«Зниклі безвісти»</strong> також зараховується як
+            «виконували» (мін. 1 вихід). Колонка <strong>«В якому
+            підрозділі» = РРЕБ</strong> (РЕБ / рота РРЕБ) або <strong>ППО</strong> —
+            теж «виконували» (мін. 1 вихід).
+          </p>
+          <p>
+            <strong>Колонка «Є в «Статус бійців»»</strong> у Excel — чи є для
+            цієї людини <em>хоча б одна дата виходу</em> на аркуші ранкового
+            звіту «Статус бійців» (до об’єднання з ЖБД). У таблиці «Виходи ЛБЗ»
+            майже завжди «так»; у «Не виконували» — «ні». З «Не виконували»
+            виключені транзитери, «Відком. за межі ПБ», СЗЧ, «Лікування» і
+            «по пораненню».
           </p>
           <p>
             <strong>ЕЖООС:</strong> {formatFileLabel(ejoos?.fileName)}. ООС —
-            анкети (регіон, родичі, діти, УБД). ШПО лише підклеює індекс посади,
-            штат із нього більше не береться.
+            анкети (регіон, родичі, діти, УБД, дислокація). ШПО лише підклеює
+            індекс посади, штат із нього більше не береться. «Тимчасово
+            прибулі» — хто був у зоні виконання бойових завдань.
           </p>
           <p>
             Діти, сімейний стан, національність і регіон — regex по анкетах.
@@ -279,10 +483,10 @@ export function SocPassportPage() {
                 </strong>
               </Typography>
               <Typography variant="body2">
-                Збіги ООС / ранок / виходи:{" "}
+                Збіги ООС / ранок / виходи (ранок) / бойове (ЕЖООС):{" "}
                 <strong>
                   {result.summary.oosMatched} / {result.summary.morningMatched} /{" "}
-                  {result.summary.exitsMatched}
+                  {result.summary.exitsMatched} / {result.summary.combatDutyMatched}
                 </strong>
               </Typography>
               <Typography variant="body2">
@@ -295,6 +499,14 @@ export function SocPassportPage() {
                 {result.sheets.morning ? ` · ${result.sheets.morning}` : ""}
                 {result.sheets.fighterStatus
                   ? ` · ${result.sheets.fighterStatus}`
+                  : ""}
+                {result.sheets.tempArrived
+                  ? ` · ${result.sheets.tempArrived}`
+                  : ""}
+                {result.sheets.jbdExits ? ` · ЖБД: ${result.sheets.jbdExits}` : ""}
+                {result.sheets.bplaExits ? ` · БПЛА: ${result.sheets.bplaExits}` : ""}
+                {result.sheets.ubdRoster
+                  ? ` · УБД: ${result.sheets.ubdRoster}`
                   : ""}
               </Typography>
               {result.warnings.map((warning) => (
@@ -341,6 +553,55 @@ export function SocPassportPage() {
                 </tbody>
               </table>
             </div>
+          </section>
+
+          <section className="analytics-panel">
+            <div className="panel-heading">
+              Не виконували ({noExitsPeople.length})
+            </div>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+              Особи з 0 виходів (без транзитерів). Повний список — кнопка «Не
+              виконували» або аркуш у загальному Excel.
+            </Typography>
+            <div className="bchs-analytics-table-wrap soc-passport-table-wrap">
+              <table className="bchs-analytics-table">
+                <thead>
+                  <tr>
+                    <th>ПІБ</th>
+                    <th>Позивний</th>
+                    <th>Посада</th>
+                    <th>Звання</th>
+                    <th>Кат.</th>
+                    <th>Статус (ранок)</th>
+                    <th>Є в «Статус бійців»</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {noExitsPeople.slice(0, 200).map((person) => (
+                    <tr key={person.id}>
+                      <td>{person.name}</td>
+                      <td>{person.callsign || "—"}</td>
+                      <td>{person.position}</td>
+                      <td>{person.rank}</td>
+                      <td>
+                        {person.rankGroup === "officer"
+                          ? "оф."
+                          : person.rankGroup === "sergeant"
+                            ? "серж."
+                            : "солд."}
+                      </td>
+                      <td>{person.morningStatus}</td>
+                      <td>{person.morningExitCount > 0 ? "так" : "ні"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {noExitsPeople.length > 200 ? (
+              <Typography variant="caption" color="text.secondary">
+                Показано 200 з {noExitsPeople.length}. Решта — у Excel.
+              </Typography>
+            ) : null}
           </section>
 
           <section className="analytics-panel">

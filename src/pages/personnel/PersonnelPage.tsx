@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Box,
@@ -97,6 +97,7 @@ import {
   type PersonnelRecord,
 } from "./personnelUtils";
 import { downloadBlob, sanitizeFileName } from "../../shared/browserExport";
+import { notifyPersonnelAttachmentChanged } from "../../shared/personnelAttachmentSync";
 import type { QuestionnairePdfSource } from "./questionnaireShare";
 import {
   extractPhonesFromDocuments,
@@ -382,6 +383,10 @@ export function PersonnelPage({
   const [rosterLabels, setRosterLabels] = useState<Record<string, string>>({});
   const [rosterImportName, setRosterImportName] = useState("");
   const [selectedRowId, setSelectedRowId] = useState("");
+  const personnelFocusLockRef = useRef<{
+    rowId: string;
+    externalId: string;
+  } | null>(null);
   const [query, setQuery] = useState("");
   const [editValues, setEditValues] = useState<Record<string, string>>({});
   const [activePersonAction, setActivePersonAction] =
@@ -917,7 +922,14 @@ export function PersonnelPage({
       mergedPreview = preview;
     }
     const rows = mergedPreview.rows.filter(isLikelyPersonnelRow);
-    const focusTarget = readPersonnelFocusTarget();
+    const storedFocus = readPersonnelFocusTarget();
+    if (storedFocus.rowId || storedFocus.externalId) {
+      personnelFocusLockRef.current = storedFocus;
+    }
+    const focusTarget = personnelFocusLockRef.current ?? {
+      rowId: "",
+      externalId: "",
+    };
     const focusedRow =
       (focusTarget.rowId &&
         rows.find((row) => row.__dbRowId === focusTarget.rowId)) ||
@@ -928,8 +940,18 @@ export function PersonnelPage({
       null;
 
     setDbPreview(mergedPreview);
-    setSelectedRowId(focusedRow?.__dbRowId ?? rows[0]?.__dbRowId ?? "");
-    if (focusedRow) clearPersonnelFocusTarget();
+    setSelectedRowId((current) => {
+      if (focusedRow?.__dbRowId) return focusedRow.__dbRowId;
+      if (current && rows.some((row) => row.__dbRowId === current)) {
+        return current;
+      }
+      return rows[0]?.__dbRowId ?? "";
+    });
+    // Keep focus through cache→network reload; clear only after fresh apply.
+    if (focusedRow && !options?.fromCache) {
+      personnelFocusLockRef.current = null;
+      clearPersonnelFocusTarget();
+    }
 
     setMessage(
       focusedRow
@@ -1392,6 +1414,7 @@ export function PersonnelPage({
         ...photos,
         [externalId]: savedPhoto?.photoData || dataUrl,
       }));
+      notifyPersonnelAttachmentChanged(externalId, "photo");
       setMessage(`Фото збережено в БД: ${selectedSummary.name}.`);
     } catch (error) {
       setMessage(
@@ -1416,6 +1439,7 @@ export function PersonnelPage({
         delete next[externalId];
         return next;
       });
+      notifyPersonnelAttachmentChanged(externalId, "photo");
       setMessage(`Фото видалено: ${selectedSummary.name}.`);
     } catch (error) {
       setMessage(
@@ -1613,6 +1637,7 @@ export function PersonnelPage({
         delete next[externalId];
         return next;
       });
+      notifyPersonnelAttachmentChanged(externalId, "questionnaire");
       closeQuestionnairePreview();
       setMessage(`Анкету видалено: ${selectedSummary.name}.`);
     } catch (error) {
@@ -1771,6 +1796,7 @@ export function PersonnelPage({
         ...current,
         [externalId]: true,
       }));
+      notifyPersonnelAttachmentChanged(externalId, "questionnaire");
       setMessage(
         `Анкету збережено в БД: ${selectedSummary.name} · ${exportFileName}.`,
       );
@@ -2595,6 +2621,7 @@ export function PersonnelPage({
             [externalId]: true,
           }));
           focusPersonByExternalId(externalId);
+          notifyPersonnelAttachmentChanged(externalId, "questionnaire");
           void api.getPersonQuestionnaire(externalId).then((next) => {
             setQuestionnaire(next);
           }).catch(() => undefined);

@@ -297,17 +297,17 @@
 
 @media (hover: hover) {
   .panel:hover {
-    border-color: rgba(0, 237, 63, 0.45);
+    border-color: rgba(0, 237, 63, 0.35);
     background: rgba(18, 18, 18, 0.78);
     box-shadow:
       0 0 0 1px rgba(0, 0, 0, 0.55),
-      0 0 28px rgba(0, 237, 63, 0.12);
+      0 0 18px rgba(0, 237, 63, 0.08);
   }
 
   .panel:hover::before,
   .panel:hover::after {
-    width: 100%;
-    height: 100%;
+    width: 14px;
+    height: 14px;
     border-color: rgba(0, 237, 63, 0.55);
   }
 }
@@ -602,6 +602,12 @@
   background: rgba(7, 5, 15, 0.72);
 }
 
+.sci-data-table-virtual-spacer td {
+  padding: 0 !important;
+  border: 0 !important;
+  background: transparent !important;
+}
+
 .sci-data-table {
   width: 100%;
   min-width: max-content;
@@ -877,17 +883,17 @@
 .sci-data-table-pinned {
   position: sticky;
   z-index: 3;
-  background: #090909;
+  background: #000 !important;
 }
 
 .sci-data-table th.sci-data-table-pinned {
   z-index: 6;
-  background: #090909;
+  background: #000 !important;
 }
 
 .sci-data-table-filter-row th.sci-data-table-pinned {
   z-index: 7;
-  background: #090909;
+  background: #000 !important;
 }
 
 .sci-data-table th.sci-data-table-pinned {
@@ -899,11 +905,11 @@
 }
 
 .sci-data-table-pinned.pinned-left {
-  box-shadow: 8px 0 16px rgba(0, 0, 0, 0.28);
+  box-shadow: 8px 0 16px rgba(0, 0, 0, 0.55);
 }
 
 .sci-data-table-pinned.pinned-right {
-  box-shadow: -8px 0 16px rgba(0, 0, 0, 0.28);
+  box-shadow: -8px 0 16px rgba(0, 0, 0, 0.55);
 }
 
 .sci-data-table tbody tr:hover td {
@@ -2001,6 +2007,72 @@
   flex: 1 1 0;
   min-height: 0;
   margin-bottom: 12px;
+}
+
+@media (max-width: 1400px) {
+  .personnel-layout {
+    grid-template-columns: minmax(240px, 0.9fr) minmax(0, 1.4fr);
+  }
+
+  .personnel-layout .person-side-panel {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 980px) {
+  .personnel-layout {
+    grid-template-columns: 1fr;
+    overflow: auto;
+  }
+
+  .personnel-list-panel {
+    max-height: min(42vh, 420px);
+  }
+
+  .person-card-hero {
+    grid-template-columns: 140px minmax(0, 1fr) !important;
+    gap: 12px;
+  }
+
+  .person-card-panel,
+  .person-side-panel .analytics-panel {
+    padding: 12px;
+  }
+
+  .personnel-list strong,
+  .person-card-panel,
+  .person-card-panel input,
+  .person-card-panel textarea,
+  .person-edit-grid label,
+  .person-edit-grid input,
+  .person-edit-grid textarea {
+    font-size: 0.95rem;
+  }
+
+  .personnel-list-meta > span {
+    font-size: 0.82rem;
+  }
+
+  .main-panel.personnel-page .topbar {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+}
+
+@media (max-width: 640px) {
+  .person-card-hero {
+    grid-template-columns: 1fr !important;
+  }
+
+  .personnel-list button {
+    grid-template-columns: 40px minmax(0, 1fr);
+    padding: 8px;
+  }
+
+  .personnel-list-thumb {
+    width: 40px;
+    height: 40px;
+  }
 }
 
 .personnel-list-panel {
@@ -7112,7 +7184,7 @@ body.combat-fs-open {
 }
 
 .bchs-page .sci-data-table tbody tr:hover td.sci-data-table-pinned {
-  background: #0d1c12;
+  background: #000;
 }
 
 .bchs-page .bchs-comparison-row strong,
@@ -7622,7 +7694,7 @@ select:focus {
 }
 
 .sci-data-table tbody tr:hover td.sci-data-table-pinned {
-  background: #0d1c12 !important;
+  background: #000 !important;
 }
 
 .overview-avatar,
@@ -7886,7 +7958,7 @@ select {
 }
 
 .sci-custom-scroll-target {
-  --sci-scrollbar-gutter: 18px;
+  --sci-scrollbar-gutter: 12px;
   scrollbar-gutter: stable;
   scrollbar-width: none !important;
 }
@@ -7925,32 +7997,30 @@ select {
   z-index: 40;
   display: none;
   pointer-events: auto;
-  background:
-    linear-gradient(90deg, rgba(0, 237, 63, 0.04), rgba(224, 213, 190, 0.08)),
-    rgba(7, 7, 7, 0.96);
-  border-left: 1px solid rgba(255, 255, 255, 0.12);
-  border-right: 1px solid rgba(0, 237, 63, 0.12);
+  background: rgba(12, 12, 12, 0.92);
+  border-left: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 0 !important;
-  box-shadow:
-    inset 0 0 0 1px rgba(0, 237, 63, 0.06),
-    0 0 14px rgba(0, 237, 63, 0.08);
+  box-shadow: none;
 }
 
 .sci-custom-scrollbar-thumb {
   position: absolute;
-  left: 2px;
-  right: 2px;
-  min-height: 34px;
+  left: 3px;
+  right: 3px;
+  min-height: 28px;
   cursor: grab;
-  background: var(--app-green);
+  background: rgba(255, 255, 255, 0.22);
   border-radius: 0 !important;
-  box-shadow:
-    0 0 12px rgba(0, 237, 63, 0.54),
-    inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+  box-shadow: inset 0 0 0 1px rgba(0, 237, 63, 0.28);
+}
+
+.sci-custom-scrollbar-thumb:hover {
+  background: rgba(0, 237, 63, 0.42);
 }
 
 .sci-custom-scrollbar-thumb:active {
   cursor: grabbing;
+  background: rgba(0, 237, 63, 0.55);
 }
 
 .personnel-list,
@@ -7959,8 +8029,8 @@ select {
 .sci-data-table,
 .document-page-preview,
 .sci-select-viewport {
-  scrollbar-color: var(--app-green) rgba(255, 255, 255, 0.08);
-  scrollbar-width: auto;
+  scrollbar-color: rgba(255, 255, 255, 0.28) rgba(255, 255, 255, 0.06);
+  scrollbar-width: thin;
 }
 
 /* Message-area textareas: avoid scrollbar-color so WebKit square thumbs apply. */
@@ -8021,16 +8091,13 @@ textarea::-webkit-scrollbar-track {
 .text-report-card textarea::-webkit-scrollbar-thumb,
 .sci-message-area::-webkit-scrollbar-thumb,
 textarea::-webkit-scrollbar-thumb {
-  min-height: 44px;
-  background: var(--app-green);
+  min-height: 36px;
+  background: rgba(255, 255, 255, 0.22);
   border: 0 !important;
   border-radius: 0 !important;
   -webkit-border-radius: 0 !important;
   background-clip: border-box !important;
-  box-shadow:
-    0 0 12px rgba(0, 237, 63, 0.54),
-    inset 0 0 0 2px rgba(7, 7, 7, 0.22),
-    inset 0 0 0 3px rgba(255, 255, 255, 0.08);
+  box-shadow: inset 0 0 0 1px rgba(0, 237, 63, 0.25);
 }
 
 .personnel-list::-webkit-scrollbar-thumb:vertical,
@@ -8647,17 +8714,15 @@ textarea::-webkit-scrollbar-corner {
 
 .sci-radar-ping {
   position: fixed;
-  width: 160px;
-  height: 160px;
+  width: 120px;
+  height: 120px;
   margin: 0;
-  border: 1.5px solid rgba(0, 237, 63, 0.78);
+  border: 1px solid rgba(0, 237, 63, 0.38);
   border-radius: 50% !important;
   -webkit-border-radius: 50% !important;
   transform: translate(-50%, -50%) scale(0);
-  box-shadow:
-    0 0 0 1px rgba(0, 237, 63, 0.12),
-    0 0 14px rgba(0, 237, 63, 0.28);
-  animation: sci-radar-ping 0.85s cubic-bezier(0, 0.2, 0.8, 1) forwards;
+  box-shadow: 0 0 10px rgba(0, 237, 63, 0.12);
+  animation: sci-radar-ping 1.15s cubic-bezier(0.1, 0.55, 0.25, 1) forwards;
   pointer-events: none;
   z-index: 9999;
 }
@@ -8705,15 +8770,15 @@ textarea::-webkit-scrollbar-corner {
 
 @keyframes sci-radar-ping {
   0% {
-    opacity: 0.95;
-    transform: translate(-50%, -50%) scale(0.12);
+    opacity: 0.5;
+    transform: translate(-50%, -50%) scale(0);
   }
-  70% {
-    opacity: 0.35;
+  55% {
+    opacity: 0.22;
   }
   100% {
     opacity: 0;
-    transform: translate(-50%, -50%) scale(1.15);
+    transform: translate(-50%, -50%) scale(1);
   }
 }
 
@@ -8821,4 +8886,435 @@ select:focus,
 .sci-button[data-variant="GHOST"]::before,
 .sci-button[data-variant="GHOST"]::after {
   display: none;
+}
+
+/* —— Анкетні дані —— */
+.anketa-data-page {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+}
+
+.anketa-data-page .topbar {
+  flex: 0 0 auto;
+}
+
+.anketa-data-table-panel {
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.anketa-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+  flex: 1 1 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.anketa-workspace.has-person-panel {
+  grid-template-columns: minmax(0, 1.45fr) minmax(320px, 0.85fr);
+}
+
+.anketa-person-side-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.anketa-person-side-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.anketa-person-hero {
+  flex: 0 0 auto;
+}
+
+.anketa-person-scroll {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow: auto;
+}
+
+.anketa-person-focus-banner {
+  display: grid;
+  gap: 2px;
+  margin-bottom: 12px;
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 80, 80, 0.35);
+  background: rgba(255, 60, 60, 0.08);
+  color: rgba(255, 190, 190, 0.95);
+  font-size: 0.78rem;
+}
+
+.anketa-person-field-gap {
+  outline: 1px solid rgba(255, 80, 80, 0.35);
+  background: rgba(255, 60, 60, 0.06);
+}
+
+.anketa-person-gap-list {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.anketa-person-gap-list li {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  color: var(--text-secondary);
+  font-size: 0.76rem;
+}
+
+.anketa-person-gap-list small {
+  color: var(--text-muted);
+}
+
+.anketa-person-side-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+@media (max-width: 1200px) {
+  .anketa-workspace.has-person-panel {
+    grid-template-columns: 1fr;
+    overflow: auto;
+  }
+
+  .anketa-person-side-panel {
+    max-height: min(52vh, 560px);
+  }
+}
+
+.anketa-data-table-wrap {
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  min-height: 0;
+  padding: 0 0 12px;
+  overflow: hidden;
+}
+
+.anketa-data-table-wrap .sci-data-table-shell {
+  min-height: 0;
+  height: 100%;
+}
+
+.anketa-data-table-wrap .sci-data-table-wrap {
+  max-height: none;
+  flex: 1 1 0;
+}
+
+/* —— Anketa empty-cell walk / edit —— */
+.anketa-td-empty {
+  background: rgba(204, 34, 0, 0.06);
+}
+
+.sci-data-table td.is-focused-empty-cell {
+  outline: 2px solid rgba(255, 72, 56, 0.95);
+  outline-offset: -2px;
+  background: rgba(255, 64, 48, 0.18) !important;
+  box-shadow: inset 0 0 0 1px rgba(255, 90, 70, 0.55);
+  z-index: 3;
+}
+
+.anketa-cell-readonly {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 4px 2px;
+  color: rgba(220, 255, 220, 0.92);
+  cursor: default;
+  user-select: text;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.anketa-gap-columns-option.is-readonly {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.anketa-cell-button {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 4px 2px;
+  color: inherit;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  cursor: text;
+  font: inherit;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.anketa-cell-button.is-empty {
+  color: rgba(255, 120, 100, 0.85);
+}
+
+.anketa-row-number {
+  display: block;
+  min-width: 2.5ch;
+  color: var(--color-green);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  opacity: 0.9;
+}
+
+.sci-data-table td.anketa-td-row-number {
+  text-align: right;
+  background: #000 !important;
+}
+
+.anketa-cell-input {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  padding: 4px 6px;
+  color: #fff;
+  background: rgba(20, 8, 8, 0.92);
+  border: 1px solid rgba(255, 90, 70, 0.75);
+  outline: none;
+  font: inherit;
+}
+
+.anketa-cell-input.is-active {
+  box-shadow: 0 0 0 1px rgba(255, 90, 70, 0.35);
+}
+
+.anketa-cell-textarea {
+  min-height: 88px;
+  max-width: 100%;
+  resize: vertical;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  line-height: 1.35;
+}
+
+.anketa-cell-editor {
+  position: relative;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+.anketa-cell-editor.is-multiline {
+  min-width: 0;
+}
+
+.sci-data-table td:has(> .anketa-cell-editor) {
+  overflow: visible;
+  max-width: 260px;
+}
+
+.anketa-cell-editor-hint {
+  margin: 4px 0 0;
+  font-size: 10px;
+  line-height: 1.35;
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.anketa-cell-editor-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.anketa-cell-action {
+  padding: 3px 10px;
+  font-size: 11px;
+  line-height: 1.3;
+  color: rgba(255, 255, 255, 0.88);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  cursor: pointer;
+}
+
+.anketa-cell-action.is-primary {
+  color: #fff;
+  border-color: rgba(120, 255, 120, 0.55);
+  background: rgba(40, 120, 40, 0.35);
+}
+
+.anketa-cell-action:hover {
+  border-color: rgba(120, 255, 120, 0.75);
+}
+
+.anketa-missing-presets {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 60;
+  display: grid;
+  gap: 6px;
+  width: max(260px, 100%);
+  max-width: 340px;
+  padding: 8px;
+  border: 1px solid var(--border-active);
+  background: rgba(5, 5, 5, 0.98);
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.5);
+}
+
+.anketa-missing-presets-inline {
+  position: static;
+  width: auto;
+  max-width: none;
+  margin-top: 8px;
+  box-shadow: none;
+  background: rgba(0, 0, 0, 0.35);
+}
+
+.anketa-missing-presets-title {
+  color: var(--color-green);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.anketa-missing-presets-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.anketa-missing-presets-list button {
+  padding: 4px 8px;
+  color: var(--text-secondary);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.72rem;
+  line-height: 1.3;
+}
+
+.anketa-missing-presets-list button:hover {
+  color: var(--color-green);
+  border-color: var(--border-active);
+  background: rgba(0, 255, 90, 0.08);
+}
+
+.anketa-sync-panel {
+  flex: 0 0 auto;
+  margin-bottom: 12px;
+}
+
+.anketa-sync-body {
+  display: grid;
+  gap: 8px;
+  padding: 12px 16px 16px;
+}
+
+.anketa-apps-script-template {
+  max-height: 220px;
+  margin: 0;
+  padding: 10px 12px;
+  overflow: auto;
+  color: rgba(224, 224, 224, 0.82);
+  background: rgba(0, 0, 0, 0.45);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
+.anketa-gap-columns {
+  position: relative;
+}
+
+.anketa-gap-columns-menu {
+  position: fixed;
+  z-index: 10020;
+  display: grid;
+  gap: 8px;
+  width: min(360px, calc(100vw - 24px));
+  max-height: min(420px, 60vh);
+  padding: 10px;
+  overflow: auto;
+  border: 1px solid var(--border-active);
+  background: rgba(5, 5, 5, 0.98);
+  box-shadow: 0 20px 44px rgba(0, 0, 0, 0.45);
+}
+
+.anketa-gap-columns-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.anketa-gap-columns-actions button {
+  padding: 6px 10px;
+  color: var(--text-secondary);
+  background: rgba(2, 2, 2, 0.62);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  font: inherit;
+  text-transform: uppercase;
+  font-size: 0.72rem;
+}
+
+.anketa-gap-columns-actions button:hover {
+  border-color: var(--border-active);
+  color: var(--color-green);
+}
+
+.anketa-gap-columns-list {
+  display: grid;
+  gap: 2px;
+}
+
+.anketa-gap-columns-option {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  width: 100%;
+  min-height: 28px;
+  padding: 6px 8px;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 0;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.76rem;
+  line-height: 1.35;
+}
+
+.anketa-gap-columns-option:hover,
+.anketa-gap-columns-option.is-active {
+  background: rgba(0, 255, 90, 0.08);
+  color: var(--color-green);
+}
+
+.anketa-gap-columns-option .sci-data-table-check {
+  width: 14px;
+  text-align: center;
 }

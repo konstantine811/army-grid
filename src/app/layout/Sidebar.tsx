@@ -28,6 +28,7 @@ const navItems: Array<{ label: string; page?: AppPage; icon: ReactNode }> = [
   { label: "Аналітика", page: "analytics", icon: <AnalyticsOutlinedIcon /> },
   { label: "Імпорт", page: "import", icon: <FileDownloadOutlinedIcon /> },
   { label: "Парсинг анкет", page: "questionnaireParser", icon: <ArticleOutlinedIcon /> },
+  { label: "Анкетні дані", page: "anketaData", icon: <TableChartOutlinedIcon /> },
   { label: "Соц. паспорт", page: "socPassport", icon: <TableChartOutlinedIcon /> },
   { label: "Документи", page: "documents", icon: <ArticleOutlinedIcon /> },
   {

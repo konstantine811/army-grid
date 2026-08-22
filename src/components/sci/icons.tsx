@@ -25,6 +25,8 @@ import {
   ArrowDown,
   ArrowUp,
   ArrowUpDown,
+  ArrowRight,
+  SkipForward,
   Plane,
   Search,
   Settings,
@@ -101,6 +103,8 @@ export const PushPinOutlinedIcon = withCompatIcon(Pin);
 export const SortArrowDownIcon = withCompatIcon(ArrowDown);
 export const SortArrowUpIcon = withCompatIcon(ArrowUp);
 export const SortArrowUpDownIcon = withCompatIcon(ArrowUpDown);
+export const ArrowRightOutlinedIcon = withCompatIcon(ArrowRight);
+export const SkipNextOutlinedIcon = withCompatIcon(SkipForward);
 export const SearchOutlinedIcon = withCompatIcon(Search);
 export const SettingsOutlinedIcon = withCompatIcon(Settings);
 export const ShareOutlinedIcon = withCompatIcon(Share2);

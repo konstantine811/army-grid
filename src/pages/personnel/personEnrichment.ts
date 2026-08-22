@@ -32,6 +32,16 @@ const cellText = (value: unknown) => previewValueToDisplay(value).trim();
 
 export const isBlankPersonValue = (value: unknown) => !cellText(value);
 
+/** Prefer personnel value when present; otherwise keep document-entered text. */
+export const preferPersonnelText = (
+  personnelValue: unknown,
+  documentValue: unknown,
+) => {
+  const fromPersonnel = cellText(personnelValue);
+  if (fromPersonnel) return fromPersonnel;
+  return cellText(documentValue);
+};
+
 /** Union phones; never drop existing numbers. */
 export const mergePhonesAppendOnly = (
   ...lists: Array<Iterable<string> | undefined>
@@ -60,12 +70,20 @@ export const buildEmptyPersonFieldUpdates = (
 
   const rnokpp = String(patch.rnokpp ?? "").replace(/\D/g, "").trim();
   if (rnokpp.length >= 8) {
-    const current = getPersonFieldValue(row, ["рнокпп_за_наявності"]);
+    const current =
+      getPersonFieldValue(row, ["рнокпп_за_наявності"]) ||
+      getPersonFieldValue(row, ["рнокпп"]);
     if (isBlankPersonValue(current)) {
       const key =
         resolvePersonFieldKey(row, ["рнокпп_за_наявності"]) ||
+        resolvePersonFieldKey(row, ["рнокпп"]) ||
         "рнокпп_за_наявності";
-      updates[key] = rnokpp;
+      // Avoid writing into «відмова від РНОКПП».
+      if (!key.toLocaleLowerCase("uk-UA").includes("відмова")) {
+        updates[key] = rnokpp;
+      } else {
+        updates["рнокпп_за_наявності"] = rnokpp;
+      }
     }
   }
 
@@ -122,9 +140,47 @@ export const syncEnrichmentToPerson = async (options: {
     );
   }
 
-  const fieldUpdates = buildEmptyPersonFieldUpdates(options.row, options.patch);
-  if (options.rowId && Object.keys(fieldUpdates).length) {
-    await api.updateEjournalRowValues(options.rowId, fieldUpdates);
+  let row = options.row ?? null;
+  let rowId = options.rowId ? String(options.rowId) : "";
+
+  // Resolve ООС row when documents opened without a full personnel snapshot.
+  if ((!row || !rowId) && personExternalId) {
+    try {
+      const profile = await api.getPersonnelProfile(personExternalId);
+      const oos = profile.ejournal?.oosRow;
+      const roster = profile.roster?.row;
+      const source =
+        oos && typeof oos === "object"
+          ? oos
+          : roster && typeof roster === "object"
+            ? roster
+            : null;
+      if (source) {
+        const id = String(
+          (source as { id?: unknown }).id ??
+            (source as { __dbRowId?: unknown }).__dbRowId ??
+            "",
+        ).trim();
+        const values =
+          (source as { values?: Record<string, unknown> }).values &&
+          typeof (source as { values?: unknown }).values === "object"
+            ? (source as { values: Record<string, unknown> }).values
+            : (source as Record<string, unknown>);
+        const resolved = {
+          __dbRowId: id || undefined,
+          ...values,
+        } as EjournalPreviewRow;
+        if (!row) row = resolved;
+        if (!rowId && id) rowId = id;
+      }
+    } catch {
+      /* keep local row if profile unavailable */
+    }
+  }
+
+  const fieldUpdates = buildEmptyPersonFieldUpdates(row, options.patch);
+  if (rowId && Object.keys(fieldUpdates).length) {
+    await api.updateEjournalRowValues(rowId, fieldUpdates);
   }
 
   return { phones, phonesAdded, fieldUpdates, phoneDocument };

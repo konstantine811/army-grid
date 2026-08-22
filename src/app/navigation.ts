@@ -7,6 +7,7 @@ export type AppPage =
   | "bchsLab"
   | "excelFill"
   | "questionnaireParser"
+  | "anketaData"
   | "socPassport"
   | "personnel"
   | "documents"
@@ -22,6 +23,7 @@ export const pagePaths: Record<AppPage, string> = {
   bchsLab: "/bchs-lab",
   excelFill: "/excel-fill",
   questionnaireParser: "/questionnaire-parser",
+  anketaData: "/anketa-data",
   socPassport: "/soc-passport",
   personnel: "/personnel",
   documents: "/documents",
