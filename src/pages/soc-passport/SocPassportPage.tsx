@@ -16,7 +16,16 @@ import {
 } from "./socPassportExport";
 import { countsInNoExitsList } from "./socPassportFields";
 import { parseSocPassportSources } from "./socPassportParse";
+import {
+  STATIC_COMBAT_EXIT_OVERRIDE_SOURCE,
+  STATIC_COMBAT_EXIT_OVERRIDES,
+  findStaticCombatExitOverride,
+} from "./staticCombatExitOverrides";
 import type { PassportTableRow, SocPassportResult } from "./socPassportTypes";
+import {
+  parseUbdRegistryStats,
+  type UbdRegistryStatsResult,
+} from "./ubdRegistryStats";
 
 const formatFileLabel = (fileName?: string) => fileName || "не завантажено";
 
@@ -82,12 +91,16 @@ export function SocPassportPage() {
   const [bplaExits, setBplaExits] = useState<ExcelWorkbookSnapshot | null>(null);
   const [ubdRoster, setUbdRoster] = useState<ExcelWorkbookSnapshot | null>(null);
   const [result, setResult] = useState<SocPassportResult | null>(null);
+  const [ubdStats, setUbdStats] = useState<UbdRegistryStatsResult | null>(null);
   const [message, setMessage] = useState(
     "Завантажте ЕЖООС (ШПО + ООС) і за бажанням ранковий звіт — потім натисніть «Порахувати».",
   );
   const [isBusy, setIsBusy] = useState(false);
   const [query, setQuery] = useState("");
-
+  const [ubdYearFilter, setUbdYearFilter] = useState<number | "unknown" | null>(
+    null,
+  );
+  const [batchListSheet, setBatchListSheet] = useState<string | null>(null);
   const filteredPeople = useMemo(() => {
     if (!result) return [];
     const needle = query.trim().toLocaleLowerCase("uk-UA");
@@ -106,10 +119,30 @@ export function SocPassportPage() {
         (person) =>
           person.exitBand === "none" &&
           countsInNoExitsList(person) &&
-          !person.ubdRosterStatus,
+          !person.ubdRosterStatus &&
+          !person.staticCombatExitOverride,
       )
       .sort((left, right) => left.name.localeCompare(right.name, "uk"));
   }, [result]);
+
+  const staticCombatExitRows = useMemo(() => {
+    const people = result?.people ?? [];
+    return STATIC_COMBAT_EXIT_OVERRIDES.map((row) => {
+      const matched = people.find(
+        (person) => findStaticCombatExitOverride(person.name)?.name === row.name,
+      );
+      return {
+        ...row,
+        inMorning: Boolean(matched),
+        exitCount: matched?.exitCount ?? null,
+        morningStatus: matched?.morningStatus ?? "",
+      };
+    });
+  }, [result]);
+
+  const staticCombatMatchedCount = staticCombatExitRows.filter(
+    (row) => row.inMorning,
+  ).length;
 
   const loadWorkbook = async (
     file: File | undefined,
@@ -123,7 +156,12 @@ export function SocPassportPage() {
       else if (kind === "morning") setMorning(snapshot);
       else if (kind === "jbd") setJbdExits(snapshot);
       else if (kind === "bpla") setBplaExits(snapshot);
-      else setUbdRoster(snapshot);
+      else {
+        setUbdRoster(snapshot);
+        setUbdStats(null);
+        setUbdYearFilter(null);
+        setBatchListSheet(null);
+      }
       setResult(null);
       setMessage(
         kind === "ejoos"
@@ -134,7 +172,7 @@ export function SocPassportPage() {
               ? `ЖБД виходи: ${snapshot.fileName} · аркушів ${snapshot.sheets.length}.`
               : kind === "bpla"
                 ? `БПЛА виходи: ${snapshot.fileName} · аркушів ${snapshot.sheets.length}.`
-                : `УБД реєстр: ${snapshot.fileName} · аркушів ${snapshot.sheets.length}.`,
+                : `УБД реєстр: ${snapshot.fileName} · аркушів ${snapshot.sheets.length}. Натисніть «Підрахунок УБД».`,
       );
     } catch (error) {
       setMessage(
@@ -272,6 +310,49 @@ export function SocPassportPage() {
     }
   };
 
+  const calculateUbdStats = async () => {
+    if (!ubdRoster) {
+      setMessage("Спочатку завантажте файл «УБД реєстр».");
+      return;
+    }
+    setIsBusy(true);
+    try {
+      const next = await parseUbdRegistryStats(ubdRoster);
+      setUbdStats(next);
+      setUbdYearFilter(null);
+      setBatchListSheet(null);
+      const yearParts = next.byYear
+        .filter((row) => row.year !== "unknown")
+        .map((row) => `${row.year}: ${row.submitted}`)
+        .join(", ");
+      const batchPart = next.colorBatches.length
+        ? ` Пакети (отримали 2026): ${next.totals.batchReceived2026} (${next.colorBatches
+            .map((batch) => `${batch.sheetName}: ${batch.received2026}`)
+            .join("; ")}).`
+        : "";
+      setMessage(
+        `УБД реєстр «${next.fileName}»: подавалися ${next.totals.submitted}, не подавалися ${next.totals.notSubmitted}. По роках (Подавалися): ${yearParts || "немає даних"}${next.totals.yearUnknown ? `; без року: ${next.totals.yearUnknown}` : ""}.${batchPart}`,
+      );
+      (
+        window as Window & { __SOC_PASSPORT_UBD_STATS__?: unknown }
+      ).__SOC_PASSPORT_UBD_STATS__ = next;
+    } catch (error) {
+      setUbdStats(null);
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "Не вдалося порахувати статистику УБД.",
+      );
+    } finally {
+      setIsBusy(false);
+    }
+  };
+
+  const ubdYearPeople = useMemo(() => {
+    if (!ubdStats || ubdYearFilter == null) return [];
+    return ubdStats.people.filter((person) => person.year === ubdYearFilter);
+  }, [ubdStats, ubdYearFilter]);
+
   const exportWorkbook = async () => {
     if (!result) return;
     setIsBusy(true);
@@ -384,6 +465,15 @@ export function SocPassportPage() {
           </SciButton>
           <SciButton
             variant="OUTLINE"
+            disabled={isBusy || !ubdRoster}
+            onClick={() => void calculateUbdStats()}
+            title="Окремий підрахунок по файлу УБД реєстру: скільки подано / зроблено по роках"
+          >
+            <TableChartOutlinedIcon fontSize="small" />
+            Підрахунок УБД
+          </SciButton>
+          <SciButton
+            variant="OUTLINE"
             disabled={isBusy || !result}
             onClick={() => void exportWorkbook()}
           >
@@ -437,15 +527,19 @@ export function SocPassportPage() {
             Якщо виходів немає — підставляємо з ЕЖООС: УБД в анкеті ООС,
             «Місце дислокації» та аркуш «4. Тимчасово прибулі» (зона бойових
             завдань). <strong>УБД реєстр</strong> («Подавалися» / «Не
-            подавалися») — означає наявність бойових виходів; обидві групи
+            подавалися») — хто є в цьому файлі і також у штатці (ранковий
+            список), потрапляє в рядок статистики «УБД»; обидві групи також
             рахуються як «виконували» (мін. 1 вихід, якщо інших джерел немає).
-            <strong> БПЛА виходи</strong> (таблиця з колонкою «Виконував БЗ» /
+            Додатково в «УБД» лишається позначка з анкети ООС.            <strong> БПЛА виходи</strong> (таблиця з колонкою «Виконував БЗ» /
             «Не виконував БЗ») — хто позначений як виконував, теж рахується як
             «виконували» (мін. 1 вихід), якщо немає інших джерел. Статус ранкового
             звіту <strong>«Зниклі безвісти»</strong> також зараховується як
             «виконували» (мін. 1 вихід). Колонка <strong>«В якому
             підрозділі» = РРЕБ</strong> (РЕБ / рота РРЕБ) або <strong>ППО</strong> —
-            теж «виконували» (мін. 1 вихід).
+            теж «виконували» (мін. 1 вихід).{" "}
+            <strong>Статичний список</strong> (14 осіб, прибрані вручну з Excel
+            «Не виконували» 22.08 vs повна 23.08) — теж «виконували» (мін. 1
+            вихід); список нижче на сторінці.
           </p>
           <p>
             <strong>Колонка «Є в «Статус бійців»»</strong> у Excel — чи є для
@@ -468,6 +562,358 @@ export function SocPassportPage() {
             порожнім. Перевірка — аркуш «Розбір» у Excel.
           </p>
         </Typography>
+      </section>
+
+      {ubdStats ? (
+        <section className="analytics-panel">
+          <div className="panel-heading">
+            Підрахунок УБД реєстру · {ubdStats.fileName}
+          </div>
+          <Typography variant="body2" sx={{ mb: 1.5, lineHeight: 1.7 }}>
+            Рік для «Подавалися»: спочатку дата видачі / отримання / відправки
+            посвідчення; якщо їх немає — рік початку періоду участі в БД.
+            Пакети документів: <strong>Июль-август</strong> — усе крім зелених =
+            отримали в 2026; <strong>Июнь / май-июнь / апрель-май</strong> —
+            зелені = отримали в 2026.
+          </Typography>
+          {ubdStats.warnings.length ? (
+            <Alert severity="warning" sx={{ mb: 1.5 }}>
+              {ubdStats.warnings.join(" ")}
+            </Alert>
+          ) : null}
+          <Stack spacing={0.5} sx={{ mb: 2 }}>
+            <Typography variant="body2">
+              Подавалися: <strong>{ubdStats.totals.submitted}</strong>
+              {" · "}
+              статус УБД «так»: <strong>{ubdStats.totals.statusTak}</strong>
+              {" · "}
+              є отримання/видача:{" "}
+              <strong>{ubdStats.totals.issuedOrReceived}</strong>
+              {" · "}
+              з періодом БД: <strong>{ubdStats.totals.withCombatPeriod}</strong>
+            </Typography>
+            <Typography variant="body2">
+              Не подавалися: <strong>{ubdStats.totals.notSubmitted}</strong>
+              {" · "}
+              пакети документів: <strong>{ubdStats.totals.batchRows}</strong>
+              {" · "}
+              проблемні: <strong>{ubdStats.totals.problems}</strong>
+              {" · "}
+              «УБД у мене»: <strong>{ubdStats.totals.onHand}</strong>
+            </Typography>
+            {ubdStats.colorBatches.length ? (
+              <Typography variant="body2">
+                Отримали в 2026 (пакети за кольором):{" "}
+                <strong>{ubdStats.totals.batchReceived2026}</strong>
+              </Typography>
+            ) : null}
+          </Stack>
+
+          {ubdStats.colorBatches.length ? (
+            <>
+              <div className="panel-heading" style={{ marginTop: 8 }}>
+                Пакети документів · отримали в 2026
+              </div>
+              <div className="bchs-analytics-table-wrap soc-passport-table-wrap">
+                <table className="bchs-analytics-table">
+                  <thead>
+                    <tr>
+                      <th>Аркуш</th>
+                      <th>Правило</th>
+                      <th>Отримали 2026</th>
+                      <th>Зелені</th>
+                      <th>У списку</th>
+                      <th />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {ubdStats.colorBatches.map((batch) => (
+                      <tr key={batch.sheetName}>
+                        <td>{batch.sheetName}</td>
+                        <td>{batch.ruleLabel}</td>
+                        <td>
+                          <strong>{batch.received2026}</strong>
+                        </td>
+                        <td>{batch.green}</td>
+                        <td>{batch.total}</td>
+                        <td>
+                          <SciButton
+                            variant="OUTLINE"
+                            size="SM"
+                            onClick={() =>
+                              setBatchListSheet((current) =>
+                                current === batch.sheetName
+                                  ? null
+                                  : batch.sheetName,
+                              )
+                            }
+                          >
+                            {batchListSheet === batch.sheetName
+                              ? "Сховати"
+                              : "Список"}
+                          </SciButton>
+                        </td>
+                      </tr>
+                    ))}
+                    <tr>
+                      <td>
+                        <strong>Разом</strong>
+                      </td>
+                      <td />
+                      <td>
+                        <strong>{ubdStats.totals.batchReceived2026}</strong>
+                      </td>
+                      <td />
+                      <td />
+                      <td />
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </>
+          ) : null}
+
+          {batchListSheet
+            ? (() => {
+                const batch = ubdStats.colorBatches.find(
+                  (item) => item.sheetName === batchListSheet,
+                );
+                if (!batch) return null;
+                const rows = batch.rows.filter((row) => row.received2026);
+                return (
+                  <>
+                    <div className="panel-heading" style={{ marginTop: 8 }}>
+                      {batch.sheetName} · отримали в 2026 ({rows.length})
+                    </div>
+                    <div className="bchs-analytics-table-wrap soc-passport-table-wrap">
+                      <table className="bchs-analytics-table">
+                        <thead>
+                          <tr>
+                            <th>#</th>
+                            <th>Позивний</th>
+                            <th>ПІБ</th>
+                            <th>Мітка</th>
+                            <th>Примітка</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {rows.map((row) => (
+                            <tr key={`${row.excelRow}-${row.name}`}>
+                              <td>{row.excelRow}</td>
+                              <td>{row.callsign || "—"}</td>
+                              <td>{row.name}</td>
+                              <td>{row.mark || "—"}</td>
+                              <td>{row.note || "—"}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </>
+                );
+              })()
+            : null}
+
+          <div className="panel-heading" style={{ marginTop: 8 }}>
+            УБД по роках (аркуш «Подавалися»; видані 2026 + пакети за кольором)
+          </div>
+          <div className="bchs-analytics-table-wrap soc-passport-table-wrap">
+            <table className="bchs-analytics-table">
+              <thead>
+                <tr>
+                  <th>Рік</th>
+                  <th>Усього подано</th>
+                  <th>З датою процесу</th>
+                  <th>З періоду БД</th>
+                  <th>Отримано / видано</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {ubdStats.byYear.map((row) => (
+                  <tr key={String(row.year)}>
+                    <td>{row.year === "unknown" ? "без року" : row.year}</td>
+                    <td>
+                      <strong>{row.submitted}</strong>
+                    </td>
+                    <td>{row.fromProcessDate || ""}</td>
+                    <td>{row.fromCombatPeriod || ""}</td>
+                    <td>
+                      <strong>{row.issuedOrReceived || ""}</strong>
+                      {row.year === 2026 && row.issuedFromBatches > 0 ? (
+                        <span style={{ opacity: 0.75 }}>
+                          {" "}
+                          (+{row.issuedFromBatches} з пакетів)
+                        </span>
+                      ) : null}
+                    </td>
+                    <td>
+                        <SciButton
+                          variant="OUTLINE"
+                          size="SM"
+                          onClick={() =>
+                            setUbdYearFilter(
+                              ubdYearFilter === row.year ? null : row.year,
+                            )
+                          }
+                        >
+                        {ubdYearFilter === row.year ? "Сховати" : "Список"}
+                      </SciButton>
+                    </td>
+                  </tr>
+                ))}
+                <tr>
+                  <td>
+                    <strong>Разом</strong>
+                  </td>
+                  <td>
+                    <strong>{ubdStats.totals.submitted}</strong>
+                  </td>
+                  <td />
+                  <td />
+                  <td>
+                    <strong>{ubdStats.totals.issuedOrReceived}</strong>
+                  </td>
+                  <td />
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          {ubdYearFilter != null ? (
+            <>
+              <div className="panel-heading" style={{ marginTop: 16 }}>
+                Список ·{" "}
+                {ubdYearFilter === "unknown" ? "без року" : ubdYearFilter} (
+                {ubdYearPeople.length})
+              </div>
+              <div className="bchs-analytics-table-wrap soc-passport-table-wrap">
+                <table className="bchs-analytics-table">
+                  <thead>
+                    <tr>
+                      <th>ПІБ</th>
+                      <th>Звання</th>
+                      <th>Період БД</th>
+                      <th>Джерело року</th>
+                      <th>Статус УБД</th>
+                      <th>Отримано / видано</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {ubdYearPeople.map((person) => (
+                      <tr key={`${person.name}-${person.rnokpp}`}>
+                        <td>{person.name}</td>
+                        <td>{person.rank}</td>
+                        <td>{person.combatPeriod || "—"}</td>
+                        <td>
+                          {person.yearSource === "issue"
+                            ? "дата видачі"
+                            : person.yearSource === "received"
+                              ? "отримано"
+                              : person.yearSource === "sent"
+                                ? "відправлено"
+                                : person.yearSource === "combat"
+                                  ? "період БД"
+                                  : "—"}
+                        </td>
+                        <td>{person.ubdStatus || "—"}</td>
+                        <td>
+                          {[person.received, person.issued]
+                            .filter(Boolean)
+                            .join(" · ") || "—"}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          ) : null}
+
+          <div className="panel-heading" style={{ marginTop: 16 }}>
+            Усі аркуші файлу
+          </div>
+          <div className="bchs-analytics-table-wrap soc-passport-table-wrap">
+            <table className="bchs-analytics-table">
+              <thead>
+                <tr>
+                  <th>Аркуш</th>
+                  <th>Тип</th>
+                  <th>Людей</th>
+                  <th>З періодом БД</th>
+                  <th>Статус «так»</th>
+                  <th>Отримано</th>
+                  <th>Видано</th>
+                </tr>
+              </thead>
+              <tbody>
+                {ubdStats.bySheet.map((sheet) => (
+                  <tr key={sheet.sheetName}>
+                    <td>{sheet.sheetName}</td>
+                    <td>
+                      {sheet.bucket === "submitted"
+                        ? "Подавалися"
+                        : sheet.bucket === "notSubmitted"
+                          ? "Не подавалися"
+                          : sheet.bucket === "batch"
+                            ? "Пакет документів"
+                            : sheet.bucket === "problems"
+                              ? "Проблемні"
+                              : sheet.bucket === "onHand"
+                                ? "УБД у мене"
+                                : "Інше"}
+                    </td>
+                    <td>{sheet.peopleCount}</td>
+                    <td>{sheet.withCombatPeriod || ""}</td>
+                    <td>{sheet.statusTak || ""}</td>
+                    <td>{sheet.withReceived || ""}</td>
+                    <td>{sheet.withIssued || ""}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      ) : null}
+
+      <section className="analytics-panel">
+        <div className="panel-heading">
+          Статичні бойові виходи ({STATIC_COMBAT_EXIT_OVERRIDES.length}
+          {result ? ` · у ранковому: ${staticCombatMatchedCount}` : ""})
+        </div>
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+          {STATIC_COMBAT_EXIT_OVERRIDE_SOURCE} У статистиці «По виконанню бойових
+          завдань» рахуються як мін. 1 вихід (навіть якщо в «Статус бійців» /
+          ЖБД порожньо).
+        </Typography>
+        <div className="bchs-analytics-table-wrap soc-passport-table-wrap">
+          <table className="bchs-analytics-table">
+            <thead>
+              <tr>
+                <th>ПІБ</th>
+                <th>Позивний</th>
+                <th>Звання</th>
+                <th>У ранковому</th>
+                <th>Виходів (після override)</th>
+                <th>Примітка</th>
+              </tr>
+            </thead>
+            <tbody>
+              {staticCombatExitRows.map((row) => (
+                <tr key={row.name}>
+                  <td>{row.name}</td>
+                  <td>{row.callsign || "—"}</td>
+                  <td>{row.rank}</td>
+                  <td>
+                    {result ? (row.inMorning ? "так" : "ні") : "—"}
+                  </td>
+                  <td>{row.exitCount == null ? "—" : row.exitCount}</td>
+                  <td>{row.note}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       </section>
 
       {result ? (

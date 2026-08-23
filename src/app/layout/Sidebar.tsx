@@ -5,7 +5,8 @@ import { ArticleOutlinedIcon } from "@/components/sci/icons";
 import { DashboardOutlinedIcon } from "@/components/sci/icons";
 import { FileDownloadOutlinedIcon } from "@/components/sci/icons";
 import { GridViewOutlinedIcon } from "@/components/sci/icons";
-import { HelpOutlineOutlinedIcon } from "@/components/sci/icons";
+import { GroupsOutlinedIcon } from "@/components/sci/icons";
+import { LogoutOutlinedIcon } from "@/components/sci/icons";
 import { MenuOutlinedIcon } from "@/components/sci/icons";
 import { MenuOpenOutlinedIcon } from "@/components/sci/icons";
 import { PersonSearchOutlinedIcon } from "@/components/sci/icons";
@@ -13,11 +14,12 @@ import { SettingsOutlinedIcon } from "@/components/sci/icons";
 import { ShieldOutlinedIcon } from "@/components/sci/icons";
 import { SyncAltOutlinedIcon } from "@/components/sci/icons";
 import { TableChartOutlinedIcon } from "@/components/sci/icons";
+import { useAuth } from "../../auth/AuthProvider";
 import type { AppPage } from "../navigation";
 
 const SIDEBAR_COLLAPSED_KEY = "army-grid.sidebar-collapsed";
 
-const navItems: Array<{ label: string; page?: AppPage; icon: ReactNode }> = [
+const navItems: Array<{ label: string; page?: AppPage; icon: ReactNode; adminOnly?: boolean }> = [
   { label: "Огляд", page: "overview", icon: <DashboardOutlinedIcon /> },
   { label: "Особовий склад", page: "personnel", icon: <PersonSearchOutlinedIcon /> },
   { label: "Статуси", icon: <GridViewOutlinedIcon /> },
@@ -36,15 +38,34 @@ const navItems: Array<{ label: string; page?: AppPage; icon: ReactNode }> = [
     page: "documentSettings",
     icon: <SettingsOutlinedIcon />,
   },
+  {
+    label: "Доступи",
+    page: "usersAccess",
+    icon: <GroupsOutlinedIcon />,
+    adminOnly: true,
+  },
 ];
+
+export const APP_PAGE_LABELS: Record<AppPage, string> = Object.fromEntries(
+  navItems
+    .filter((item): item is { label: string; page: AppPage; icon: ReactNode; adminOnly?: boolean } =>
+      Boolean(item.page),
+    )
+    .map((item) => [item.page, item.label]),
+) as Record<AppPage, string>;
 
 export function Sidebar({
   activePage,
   onPageChange,
+  mobileOpen = false,
+  onMobileClose,
 }: {
   activePage: AppPage;
   onPageChange: (page: AppPage) => void;
+  mobileOpen?: boolean;
+  onMobileClose?: () => void;
 }) {
+  const { user, isAdmin, canEdit, logout } = useAuth();
   const [collapsed, setCollapsed] = useState(() => {
     try {
       return window.localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1";
@@ -61,8 +82,18 @@ export function Sidebar({
     }
   }, [collapsed]);
 
+  const selectPage = (page: AppPage) => {
+    onPageChange(page);
+    onMobileClose?.();
+  };
+
+  const visibleNav = navItems.filter((item) => !item.adminOnly || isAdmin);
+
   return (
-    <aside className={`sidebar${collapsed ? " collapsed" : ""}`}>
+    <aside
+      id="app-sidebar"
+      className={`sidebar${collapsed ? " collapsed" : ""}${mobileOpen ? " mobile-open" : ""}`}
+    >
       <div className="brand-block">
         <Stack
           direction="row"
@@ -80,7 +111,7 @@ export function Sidebar({
           <IconButton
             aria-label={collapsed ? "Розгорнути меню" : "Згорнути меню"}
             aria-expanded={!collapsed}
-            className="sidebar-toggle"
+            className="sidebar-toggle sidebar-toggle-desktop"
             size="small"
             onClick={() => setCollapsed((value) => !value)}
           >
@@ -90,24 +121,32 @@ export function Sidebar({
               <MenuOpenOutlinedIcon fontSize="small" />
             )}
           </IconButton>
+          <IconButton
+            aria-label="Закрити меню"
+            className="sidebar-toggle sidebar-toggle-mobile-close"
+            size="small"
+            onClick={() => onMobileClose?.()}
+          >
+            <MenuOpenOutlinedIcon fontSize="small" />
+          </IconButton>
         </Stack>
         <Box className="brand-status" sx={{ mt: 2 }}>
           <Typography variant="caption" color="text.secondary">
             <span className="status-dot" />
-            Оператор
+            {user?.displayName || user?.email || "Користувач"}
           </Typography>
           <Typography
             variant="caption"
             color="text.secondary"
             sx={{ display: "block", ml: 2.2 }}
           >
-            Онлайн
+            {isAdmin ? "Адміністратор" : canEdit ? "Редактор" : "Лише перегляд"}
           </Typography>
         </Box>
       </div>
 
       <nav className="nav-list" aria-label="Головна навігація">
-        {navItems.map((item) => (
+        {visibleNav.map((item) => (
           <button
             className={`nav-item${item.page === activePage ? " active" : ""}`}
             disabled={!item.page}
@@ -116,7 +155,7 @@ export function Sidebar({
             aria-label={item.label}
             aria-current={item.page === activePage ? "page" : undefined}
             type="button"
-            onClick={() => item.page && onPageChange(item.page)}
+            onClick={() => item.page && selectPage(item.page)}
           >
             {item.icon}
             <Typography className="nav-item-label" variant="body2">
@@ -127,18 +166,21 @@ export function Sidebar({
       </nav>
 
       <div className="sidebar-footer">
-        <div className="nav-item" title="Налаштування" aria-label="Налаштування">
-          <SettingsOutlinedIcon />
+        <button
+          className="nav-item"
+          type="button"
+          title="Вийти"
+          aria-label="Вийти"
+          onClick={() => {
+            logout();
+            onMobileClose?.();
+          }}
+        >
+          <LogoutOutlinedIcon />
           <Typography className="nav-item-label" variant="body2">
-            Налаштування
+            Вийти
           </Typography>
-        </div>
-        <div className="nav-item" title="Довідка" aria-label="Довідка">
-          <HelpOutlineOutlinedIcon />
-          <Typography className="nav-item-label" variant="body2">
-            Довідка
-          </Typography>
-        </div>
+        </button>
       </div>
     </aside>
   );

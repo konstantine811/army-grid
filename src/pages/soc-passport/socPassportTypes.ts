@@ -174,6 +174,8 @@ export type SocPerson = {
   hasUbd: boolean;
   ubdNumber: string;
   ubdRosterStatus: "submitted" | "notSubmitted" | null;
+  /** Вручну виключені з «Не виконували» → мін. 1 бойовий вихід у статистиці. */
+  staticCombatExitOverride: boolean;
   oosDislocation: string;
   combatDutyEvidence: string[];
   isIdp: boolean;

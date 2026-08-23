@@ -96,10 +96,10 @@ const bodyStyleForValue = (
   return { ...zebra, wrap: true, align: "left" as const };
 };
 
-export type AnketaExcelExportColumn = {
+export type AnketaExcelExportColumn<TRow = unknown> = {
   id: string;
   label: string;
-  value: (row: unknown) => string;
+  value: (row: TRow) => string;
 };
 
 export const exportAnketaSheetExcel = async <TRow>({
@@ -107,7 +107,7 @@ export const exportAnketaSheetExcel = async <TRow>({
   rows,
   fileName,
 }: {
-  columns: AnketaExcelExportColumn[];
+  columns: AnketaExcelExportColumn<TRow>[];
   rows: TRow[];
   fileName?: string;
 }) => {

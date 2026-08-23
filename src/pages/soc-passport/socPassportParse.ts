@@ -47,6 +47,10 @@ import {
   type UbdRosterMatchRecord,
   type UbdRosterStatus,
 } from "./socPassportFields";
+import {
+  findStaticCombatExitOverride,
+  isStaticCombatExitOverride,
+} from "./staticCombatExitOverrides";
 import type {
   RankGroup,
   ServiceType,
@@ -154,6 +158,7 @@ type OosColumns = {
   rank: number;
   name: number;
   id: number;
+  rnokpp: number;
   positionIndex: number;
   arrivedFrom: number;
   serviceType: number;
@@ -1032,11 +1037,14 @@ export const parseSocPassportSources = ({
       ? 0
       : [...jbdExitSet].filter((stamp) => !morningExitSet.has(stamp)).length;
     const mergedExitCount = isTransiter ? 0 : mergedExitSet.size;
+    const staticCombatExitOverride =
+      !isTransiter && isStaticCombatExitOverride(name);
     const exitCount = resolveCombatExitCount(
       mergedExitCount,
       ubdRosterStatus,
       combatDutyEvidence,
       isTransiter,
+      staticCombatExitOverride,
     );
     if (isTransiter) {
       parseNotes.push(
@@ -1049,6 +1057,13 @@ export const parseSocPassportSources = ({
         ubdRosterStatus === "submitted"
           ? "УБД реєстр: подавалися"
           : "УБД реєстр: не подавалися",
+      );
+    } else if (staticCombatExitOverride && mergedExitCount === 0) {
+      const override = findStaticCombatExitOverride(name);
+      parseNotes.push(
+        override
+          ? `статичний список бойових виходів: ${override.note}`
+          : "статичний список бойових виходів (мін. 1)",
       );
     } else if (mergedExitCount === 0 && combatDutyEvidence.length > 0) {
       parseNotes.push(
@@ -1089,9 +1104,10 @@ export const parseSocPassportSources = ({
       arrivedFrom: oos?.arrivedFrom ?? "",
       calledBy: oos?.calledBy ?? "",
       arrivalSource,
-      hasUbd: ubdInfo.hasUbd,
+      hasUbd: ubdInfo.hasUbd || Boolean(ubdRosterStatus),
       ubdNumber: ubdInfo.ubdNumber,
       ubdRosterStatus,
+      staticCombatExitOverride,
       oosDislocation,
       combatDutyEvidence,
       isIdp: hasIdpFlag(oos?.extra ?? "", oos?.relatives ?? "", oos?.birthPlace ?? ""),

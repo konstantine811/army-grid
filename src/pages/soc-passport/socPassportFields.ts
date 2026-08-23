@@ -834,16 +834,17 @@ export const matchUbdRosterRecord = (
   return undefined;
 };
 
-/** Підсумкова кількість виходів: реєстр УБД = точно виконували (мін. 1). */
+/** Підсумкова кількість виходів: реєстр УБД / статичний override = точно виконували (мін. 1). */
 export const resolveCombatExitCount = (
   mergedExitCount: number,
   ubdRosterStatus: UbdRosterStatus | null,
   combatDutyEvidence: string[],
   isTransiter: boolean,
+  staticCombatExitOverride = false,
 ) => {
   if (isTransiter) return 0;
   if (mergedExitCount > 0) return mergedExitCount;
-  if (ubdRosterStatus) return 1;
+  if (ubdRosterStatus || staticCombatExitOverride) return 1;
   return combatDutyEvidence.length > 0 ? 1 : 0;
 };
 

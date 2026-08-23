@@ -230,7 +230,12 @@ export const buildSocPassportResult = ({
     else if (person.nationality === "other") bump(metrics, "natOther", person);
     else if (person.nationality === "russia") bump(metrics, "natRussia", person);
     else bump(metrics, "natUkraine", person);
-    if (person.exitBand === "none" && countsInNoExitsList(person) && !person.ubdRosterStatus) {
+    if (
+      person.exitBand === "none" &&
+      countsInNoExitsList(person) &&
+      !person.ubdRosterStatus &&
+      !person.staticCombatExitOverride
+    ) {
       bump(metrics, "exitsNone", person);
     }
     if (person.exitBand === "1-4" && countsInExitMetrics(person)) {
@@ -263,7 +268,7 @@ export const buildSocPassportResult = ({
     if (person.relativesServing) bump(metrics, "relativesServing", person);
     if (person.relativesAbroad) bump(metrics, "relativesAbroad", person);
     if (person.relativesHostile) bump(metrics, "relativesHostile", person);
-    if (person.hasUbd) bump(metrics, "ubd", person);
+    if (person.hasUbd || person.ubdRosterStatus) bump(metrics, "ubd", person);
     if (person.isIdp) bump(metrics, "idp", person);
   }
 

@@ -3,8 +3,31 @@ import {
   invalidateDataCache,
   invalidatePersonnelCaches,
 } from './data/idbDataCache'
+import {
+  clearAuthToken,
+  emitAuthLogout,
+  getAuthToken,
+  type AuthSession,
+  type AuthUser,
+  type RegisteredUser,
+} from './auth/authTypes'
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:4000'
+const resolveApiBaseUrl = () => {
+  const fromEnv = import.meta.env.VITE_API_BASE_URL
+  if (typeof fromEnv === 'string' && fromEnv.trim()) return fromEnv.trim()
+
+  // Through Vite proxy (/api → :4000): same origin, works on LAN without CORS.
+  if (typeof window !== 'undefined') {
+    const host = window.location.hostname
+    if (host && host !== 'localhost' && host !== '127.0.0.1') {
+      return '/api'
+    }
+  }
+
+  return 'http://127.0.0.1:4000'
+}
+
+const API_BASE_URL = resolveApiBaseUrl()
 
 type JsonRecord = Record<string, unknown>
 
@@ -289,23 +312,45 @@ export type BackendPersonnelOverview = {
   todayUpdates: number
 }
 
+const authHeaders = (): HeadersInit => {
+  const token = getAuthToken()
+  return token ? { Authorization: `Bearer ${token}` } : {}
+}
+
+const parseApiError = async (response: Response) => {
+  const text = await response.text()
+  if (response.status === 401) {
+    clearAuthToken()
+    emitAuthLogout()
+  }
+  if (response.status === 413) {
+    return 'Файл або запит завеликий для API. Спробуйте менший PDF або перезапустіть backend з більшим REQUEST_BODY_LIMIT.'
+  }
+  try {
+    const json = JSON.parse(text) as { message?: string | string[] }
+    if (Array.isArray(json.message)) return json.message.join(', ')
+    if (typeof json.message === 'string' && json.message.trim()) return json.message
+  } catch {
+    // plain text
+  }
+  return text || `API request failed: ${response.status}`
+}
+
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     ...options,
     headers: {
       'Content-Type': 'application/json',
+      ...authHeaders(),
       ...options.headers,
     },
   })
 
   if (!response.ok) {
-    const text = await response.text()
-    if (response.status === 413) {
-      throw new Error('Файл або запит завеликий для API. Спробуйте менший PDF або перезапустіть backend з більшим REQUEST_BODY_LIMIT.')
-    }
-    throw new Error(text || `API request failed: ${response.status}`)
+    throw new Error(await parseApiError(response))
   }
 
+  if (response.status === 204) return undefined as T
   return response.json() as Promise<T>
 }
 
@@ -313,10 +358,18 @@ async function requestBinary<T>(path: string, body: Blob, options: RequestInit =
   const response = await fetch(`${API_BASE_URL}${path}`, {
     ...options,
     body,
+    headers: {
+      ...authHeaders(),
+      ...options.headers,
+    },
   })
 
   if (!response.ok) {
     const text = await response.text()
+    if (response.status === 401) {
+      clearAuthToken()
+      emitAuthLogout()
+    }
     if (response.status === 413) {
       throw new Error('PDF завеликий для API. Спробуйте стиснути файл або збільшити QUESTIONNAIRE_BODY_LIMIT на backend.')
     }
@@ -328,6 +381,39 @@ async function requestBinary<T>(path: string, body: Blob, options: RequestInit =
 
 export const api = {
   baseUrl: API_BASE_URL,
+
+  register(body: { email: string; password: string; displayName: string }) {
+    return request<AuthSession>('/auth/register', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    })
+  },
+
+  login(body: { email: string; password: string }) {
+    return request<AuthSession>('/auth/login', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    })
+  },
+
+  getAuthMe() {
+    return request<AuthUser>('/auth/me')
+  },
+
+  refreshAuth() {
+    return request<AuthSession>('/auth/refresh', { method: 'POST' })
+  },
+
+  listAuthUsers() {
+    return request<RegisteredUser[]>('/auth/users')
+  },
+
+  setUserAccess(userId: string, accessGranted: boolean) {
+    return request<RegisteredUser>(`/auth/users/${encodeURIComponent(userId)}/access`, {
+      method: 'PATCH',
+      body: JSON.stringify({ accessGranted }),
+    })
+  },
 
   getHealth() {
     return request<BackendHealth>('/health')
@@ -460,6 +546,29 @@ export const api = {
     }`
   },
 
+  async fetchPersonQuestionnaireFile(
+    personExternalId: string,
+    fileName?: string,
+    download = false,
+  ) {
+    const response = await fetch(
+      this.getPersonQuestionnaireFileUrl(personExternalId, fileName, download),
+      { headers: { ...authHeaders() } },
+    )
+    if (!response.ok) {
+      throw new Error(await parseApiError(response))
+    }
+    return response.blob()
+  },
+
+  async getPersonQuestionnaireObjectUrl(
+    personExternalId: string,
+    fileName?: string,
+  ) {
+    const blob = await this.fetchPersonQuestionnaireFile(personExternalId, fileName)
+    return URL.createObjectURL(blob)
+  },
+
   listPersonQuestionnaires() {
     return request<BackendPersonQuestionnaireMeta[]>('/ejournals/personnel/questionnaires')
   },
@@ -488,11 +597,18 @@ export const api = {
       `${API_BASE_URL}/ejournals/personnel/questionnaire-disk/file`,
       {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...authHeaders(),
+        },
         body: JSON.stringify({ relativePath }),
       },
     )
     if (!response.ok) {
+      if (response.status === 401) {
+        clearAuthToken()
+        emitAuthLogout()
+      }
       const text = await response.text()
       let message = text || `API request failed: ${response.status}`
       try {

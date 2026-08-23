@@ -11,7 +11,8 @@ export type AppPage =
   | "socPassport"
   | "personnel"
   | "documents"
-  | "documentSettings";
+  | "documentSettings"
+  | "usersAccess";
 export type BchsAnalyticsTab = "overview" | "comparison" | "combat" | "supplement";
 
 export const pagePaths: Record<AppPage, string> = {
@@ -28,6 +29,7 @@ export const pagePaths: Record<AppPage, string> = {
   personnel: "/personnel",
   documents: "/documents",
   documentSettings: "/document-settings",
+  usersAccess: "/users-access",
 };
 
 const pathPages = Object.fromEntries(
@@ -105,6 +107,9 @@ export const buildDocumentRoute = ({
   if (type === "ubdRestoreReport") params.set("type", "ubd-restore-report");
   if (type === "form6Report") params.set("type", "form6-report");
   if (type === "form12Report") params.set("type", "form12-report");
+  if (type === "serviceCharacteristic")
+    params.set("type", "service-characteristic");
+  if (type === "zhbdCertificate") params.set("type", "zhbd-certificate");
   if (type === "temporaryMilitaryId")
     params.set("type", "temporary-military-id");
 

@@ -13,7 +13,7 @@ import {
 } from "../personnel/personnelUtils";
 import type { AnketaRow } from "./anketaSheet";
 
-const normalizeNameKey = (value: unknown) =>
+export const normalizeAnketaNameKey = (value: unknown) =>
   String(value ?? "")
     .replace(/[ʼ’']/g, "")
     .replace(/\([^)]*\)/g, " ")
@@ -21,6 +21,8 @@ const normalizeNameKey = (value: unknown) =>
     .replace(/\s+/g, " ")
     .trim()
     .toLocaleLowerCase("uk-UA");
+
+const normalizeNameKey = normalizeAnketaNameKey;
 
 export type AnketaPersonnelMatch = {
   row: EjournalPreviewRow;

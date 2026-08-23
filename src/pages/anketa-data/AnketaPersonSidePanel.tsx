@@ -1,12 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  api,
-  type BackendPersonQuestionnaire,
-} from "../../api";
+import { useMemo } from "react";
 import { buildPersonnelRoute } from "../../app/navigation";
-import {
-  subscribePersonnelAttachmentChanges,
-} from "../../shared/personnelAttachmentSync";
 import {
   Button,
   Chip,
@@ -17,24 +10,14 @@ import {
   PictureAsPdfOutlinedIcon,
 } from "@/components/sci/icons";
 import { FloatingQuestionnairePreview } from "../personnel/FloatingQuestionnairePreview";
-import {
-  buildQuestionnaireExportFileName,
-  downloadQuestionnairePdf,
-  revokeQuestionnairePreviewUrl,
-} from "../personnel/personnelUtils";
-import type { QuestionnairePdfSource } from "../personnel/questionnaireShare";
-import {
-  loadPersonnelIndexForAnketa,
-  matchAnketaRowToPersonnel,
-  matchLabel,
-  type AnketaPersonnelMatch,
-} from "./anketaPersonMatch";
+import { matchLabel } from "./anketaPersonMatch";
 import type { AnketaColumnKey, AnketaRow } from "./anketaSheet";
 import type { AnketaEmptyCell } from "./anketaGaps";
 import {
   ANKETA_MISSING_VALUE_PRESETS,
   listAnketaEmptyCells,
 } from "./anketaGaps";
+import { useAnketaPersonPanel } from "./hooks/useAnketaPersonPanel";
 
 type AnketaPersonSidePanelProps = {
   anketaRow: AnketaRow | null;
@@ -42,6 +25,7 @@ type AnketaPersonSidePanelProps = {
   gapColumnKeys: AnketaColumnKey[];
   onClose: () => void;
   onFillMissing?: (value: string) => void;
+  onMessage?: (message: string) => void;
 };
 
 const FIELD_ROWS: Array<{ key: AnketaColumnKey; label: string }> = [
@@ -70,161 +54,14 @@ export function AnketaPersonSidePanel({
   gapColumnKeys,
   onClose,
   onFillMissing,
+  onMessage,
 }: AnketaPersonSidePanelProps) {
-  const [match, setMatch] = useState<AnketaPersonnelMatch | null>(null);
-  const [matchStatus, setMatchStatus] = useState<"idle" | "loading" | "ready">(
-    "idle",
-  );
-  const [photoData, setPhotoData] = useState("");
-  const [questionnaire, setQuestionnaire] =
-    useState<BackendPersonQuestionnaire | null>(null);
-  const [isLoadingAttachments, setIsLoadingAttachments] = useState(false);
-  const [previewOpen, setPreviewOpen] = useState(false);
-  const [previewUrl, setPreviewUrl] = useState("");
-  const [previewTitle, setPreviewTitle] = useState("");
-  const attachmentsEpochRef = useRef(0);
-
-  const reloadAttachments = useCallback(async (externalId: string) => {
-    const epoch = ++attachmentsEpochRef.current;
-    setIsLoadingAttachments(true);
-    try {
-      const [photo, nextQuestionnaire] = await Promise.all([
-        api.getPersonPhoto(externalId).catch(() => null),
-        api.getPersonQuestionnaire(externalId).catch(() => null),
-      ]);
-      if (epoch !== attachmentsEpochRef.current) return;
-      setPhotoData(photo?.photoData?.trim() || "");
-      setQuestionnaire(nextQuestionnaire);
-    } finally {
-      if (epoch === attachmentsEpochRef.current) {
-        setIsLoadingAttachments(false);
-      }
-    }
-  }, []);
+  const panel = useAnketaPersonPanel(anketaRow, onMessage);
 
   const rowGaps = useMemo(() => {
     if (!anketaRow) return [];
     return listAnketaEmptyCells([anketaRow], gapColumnKeys);
   }, [anketaRow, gapColumnKeys]);
-
-  useEffect(() => {
-    let cancelled = false;
-    if (!anketaRow) {
-      setMatch(null);
-      setMatchStatus("idle");
-      return;
-    }
-    setMatchStatus("loading");
-    void loadPersonnelIndexForAnketa()
-      .then((index) => {
-        if (cancelled) return;
-        setMatch(matchAnketaRowToPersonnel(anketaRow, index));
-        setMatchStatus("ready");
-      })
-      .catch(() => {
-        if (cancelled) return;
-        setMatch(null);
-        setMatchStatus("ready");
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [anketaRow]);
-
-  const personnelExternalId = match?.summary.externalId ?? "";
-  const displayName =
-    anketaRow?.fullName?.trim() || match?.summary.name || "Службовець";
-  const exportFileName = useMemo(
-    () =>
-      buildQuestionnaireExportFileName(
-        displayName,
-        match?.summary.callSign ?? "",
-      ),
-    [displayName, match?.summary.callSign],
-  );
-
-  const shareSource = useMemo<QuestionnairePdfSource | null>(() => {
-    if (!questionnaire?.fileData) return null;
-    return { fileData: questionnaire.fileData };
-  }, [questionnaire]);
-
-  useEffect(() => {
-    setPhotoData("");
-    setQuestionnaire(null);
-    setPreviewOpen(false);
-    setPreviewUrl((current) => {
-      if (current) revokeQuestionnairePreviewUrl(current);
-      return "";
-    });
-
-    if (!personnelExternalId) return;
-
-    void reloadAttachments(personnelExternalId);
-  }, [personnelExternalId, reloadAttachments]);
-
-  useEffect(() => {
-    if (!personnelExternalId) return;
-
-    return subscribePersonnelAttachmentChanges((change) => {
-      if (change.externalId !== personnelExternalId) return;
-      void reloadAttachments(personnelExternalId);
-    });
-  }, [personnelExternalId, reloadAttachments]);
-
-  useEffect(() => {
-    if (!personnelExternalId) return;
-
-    const refreshOnFocus = () => {
-      if (document.visibilityState !== "visible") return;
-      void reloadAttachments(personnelExternalId);
-    };
-
-    window.addEventListener("focus", refreshOnFocus);
-    document.addEventListener("visibilitychange", refreshOnFocus);
-    return () => {
-      window.removeEventListener("focus", refreshOnFocus);
-      document.removeEventListener("visibilitychange", refreshOnFocus);
-    };
-  }, [personnelExternalId, reloadAttachments]);
-
-  useEffect(() => {
-    return () => {
-      setPreviewUrl((current) => {
-        if (current) revokeQuestionnairePreviewUrl(current);
-        return "";
-      });
-    };
-  }, []);
-
-  const openQuestionnairePreview = () => {
-    if (!questionnaire?.fileData || !personnelExternalId) return;
-    const nextUrl = api.getPersonQuestionnaireFileUrl(
-      personnelExternalId,
-      exportFileName,
-    );
-    setPreviewTitle(`Анкета · ${displayName} · ${exportFileName}`);
-    setPreviewUrl((current) => {
-      if (current) revokeQuestionnairePreviewUrl(current);
-      return nextUrl;
-    });
-    setPreviewOpen(true);
-  };
-
-  const openQuestionnaireTab = () => {
-    if (!questionnaire?.fileData || !personnelExternalId) return;
-    window.open(
-      api.getPersonQuestionnaireFileUrl(personnelExternalId, exportFileName),
-      "_blank",
-      "noopener,noreferrer",
-    );
-  };
-
-  const downloadQuestionnaire = () => {
-    if (!questionnaire?.fileData) return;
-    downloadQuestionnairePdf(exportFileName, {
-      fileData: questionnaire.fileData,
-    });
-  };
 
   if (!anketaRow) return null;
 
@@ -240,51 +77,51 @@ export function AnketaPersonSidePanel({
 
         <div className="person-card-hero anketa-person-hero">
           <div className="person-avatar">
-            {photoData ? (
-              <img alt={displayName} src={photoData} />
+            {panel.photoData ? (
+              <img alt={panel.displayName} src={panel.photoData} />
             ) : (
               <PersonSearchOutlinedIcon />
             )}
           </div>
           <div>
-            {match?.summary.callSign ? (
+            {panel.match?.summary.callSign ? (
               <div className="person-callsign-row">
                 <span className="person-callsign" title="Позивний">
                   <span className="person-callsign-label">позивний</span>
-                  <strong>{match.summary.callSign}</strong>
+                  <strong>{panel.match.summary.callSign}</strong>
                 </span>
               </div>
             ) : null}
             <Typography component="h2" variant="h5">
-              {displayName}
+              {panel.displayName}
             </Typography>
             <div className="person-action-tags">
-              {(anketaRow.rank || match?.summary.rank) && (
+              {(anketaRow.rank || panel.match?.summary.rank) && (
                 <Chip
-                  label={anketaRow.rank || match?.summary.rank}
+                  label={anketaRow.rank || panel.match?.summary.rank}
                   size="small"
                 />
               )}
-              {(anketaRow.positionIndex || match?.summary.positionIndex) && (
+              {(anketaRow.positionIndex || panel.match?.summary.positionIndex) && (
                 <Chip
                   label={`Посада: ${
-                    anketaRow.positionIndex || match?.summary.positionIndex
+                    anketaRow.positionIndex || panel.match?.summary.positionIndex
                   }`}
                   size="small"
                 />
               )}
-              {(anketaRow.serviceType || match?.summary.serviceType) && (
+              {(anketaRow.serviceType || panel.match?.summary.serviceType) && (
                 <Chip
-                  label={anketaRow.serviceType || match?.summary.serviceType}
+                  label={anketaRow.serviceType || panel.match?.summary.serviceType}
                   size="small"
                 />
               )}
             </div>
             <Typography variant="caption" color="text.secondary">
-              {matchStatus === "loading"
+              {panel.matchStatus === "loading"
                 ? "Шукаю в особовому складі…"
-                : match
-                  ? `Знайдено в ООС · ${matchLabel(match.matchBy)}`
+                : panel.match
+                  ? `Знайдено в ООС · ${matchLabel(panel.match.matchBy)}`
                   : "У кеші особового складу не знайдено"}
             </Typography>
           </div>
@@ -352,19 +189,19 @@ export function AnketaPersonSidePanel({
 
           <div className="person-edit-section">
             <div className="panel-heading">Анкета (PDF)</div>
-            {isLoadingAttachments ? (
+            {panel.isLoadingAttachments ? (
               <div className="person-document-empty">Завантаження…</div>
-            ) : questionnaire?.fileData ? (
+            ) : panel.questionnaire ? (
               <article className="person-document-shell is-ready">
                 <button
                   className="person-document-item is-ready"
                   type="button"
-                  onClick={openQuestionnairePreview}
+                  onClick={() => void panel.openQuestionnairePreview()}
                 >
                   <PictureAsPdfOutlinedIcon />
                   <span>
                     <strong>Анкета (PDF)</strong>
-                    <small>{exportFileName} · переглянути</small>
+                    <small>{panel.exportFileName} · переглянути</small>
                   </span>
                 </button>
               </article>
@@ -372,7 +209,7 @@ export function AnketaPersonSidePanel({
               <div className="person-document-empty">
                 <PictureAsPdfOutlinedIcon />
                 <span>
-                  {personnelExternalId
+                  {panel.match
                     ? "Анкета ще не додана в БД"
                     : "Потрібен зв’язок з особовим складом"}
                 </span>
@@ -382,14 +219,27 @@ export function AnketaPersonSidePanel({
 
           <div className="anketa-person-side-actions">
             <Button
+              variant="contained"
+              size="small"
+              disabled={!panel.match || panel.isMerging || !panel.mergePreview?.labels.length}
+              onClick={() => void panel.mergeToPersonnel()}
+            >
+              {panel.isMerging
+                ? "Переношу…"
+                : panel.mergePreview?.labels.length
+                  ? `Перенести в ООС · ${panel.mergePreview.labels.length}`
+                  : "Перенести в ООС"}
+            </Button>
+            <Button
               variant="outlined"
               size="small"
-              disabled={!match}
+              disabled={!panel.match}
               onClick={() => {
-                if (!match) return;
+                if (!panel.match) return;
                 const target = {
-                  rowId: match.row.__dbRowId,
-                  externalId: match.summary.externalId,
+                  rowId: panel.match.row.__dbRowId,
+                  externalId:
+                    panel.personnelExternalId || panel.match.summary.externalId,
                 };
                 try {
                   window.localStorage.setItem(
@@ -413,24 +263,23 @@ export function AnketaPersonSidePanel({
       </aside>
 
       <FloatingQuestionnairePreview
-        open={previewOpen}
-        title={previewTitle}
-        previewUrl={previewUrl}
+        open={panel.previewOpen}
+        title={panel.previewTitle}
+        previewUrl={panel.previewUrl}
         pendingFile={false}
         isUploading={false}
         placement="right"
-        shareFileName={exportFileName}
-        sharePersonName={displayName}
-        shareSource={shareSource}
-        onClose={() => {
-          setPreviewOpen(false);
-          setPreviewUrl((current) => {
-            if (current) revokeQuestionnairePreviewUrl(current);
-            return "";
-          });
-        }}
-        onOpenTab={openQuestionnaireTab}
-        onDownload={downloadQuestionnaire}
+        defaultWidth={720}
+        defaultHeight={920}
+        minWidth={480}
+        minHeight={420}
+        className="floating-questionnaire-preview is-anketa-edge"
+        shareFileName={panel.exportFileName}
+        sharePersonName={panel.displayName}
+        shareSource={panel.shareSource}
+        onClose={panel.closePreview}
+        onOpenTab={panel.openQuestionnaireTab}
+        onDownload={panel.downloadQuestionnaire}
       />
     </>
   );

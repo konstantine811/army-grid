@@ -43,7 +43,6 @@ export function AnketaCellEditor({
   const sharedProps = {
     className: "anketa-cell-input is-active",
     value: draft,
-    autoFocus: true,
     "aria-label": `${columnHeader} · рядок ${rowNumber}`,
     onChange: (
       event: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>,

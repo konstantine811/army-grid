@@ -257,7 +257,8 @@ const filterNoExitsPeople = (people: SocPerson[]) =>
       (person) =>
         person.exitBand === "none" &&
         countsInNoExitsList(person) &&
-        !person.ubdRosterStatus,
+        !person.ubdRosterStatus &&
+        !person.staticCombatExitOverride,
     )
     .sort((left, right) => left.name.localeCompare(right.name, "uk"));
 
@@ -496,7 +497,8 @@ export const exportSocPassportWorkbook = async (result: SocPassportResult) => {
     (person) =>
       person.exitBand === "none" &&
       countsInNoExitsList(person) &&
-      !person.ubdRosterStatus,
+      !person.ubdRosterStatus &&
+      !person.staticCombatExitOverride,
   ).length;
   const officersCount = filterOfficersForLbExits(result.people).length;
   const russiaCount = result.people.filter((person) => person.nationality === "russia").length;

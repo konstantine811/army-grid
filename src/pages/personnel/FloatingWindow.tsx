@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { Button } from "@/components/sci/SciPrimitives";
 
-export type FloatingPlacement = "center" | "left" | "right";
+export type FloatingPlacement = "center" | "left" | "right" | "top";
 
 type FloatingWindowProps = {
   open: boolean;
@@ -35,10 +35,16 @@ function resolvePlacement(
   const maxX = Math.max(8, window.innerWidth - width - 8);
   const maxY = Math.max(8, window.innerHeight - height - 8);
   if (placement === "left") {
-    return { x: 16, y: Math.min(56, maxY) };
+    return { x: 8, y: 8 };
   }
   if (placement === "right") {
-    return { x: maxX, y: Math.min(56, maxY) };
+    return { x: maxX, y: 8 };
+  }
+  if (placement === "top") {
+    return {
+      x: Math.max(8, Math.round((window.innerWidth - width) / 2)),
+      y: 8,
+    };
   }
   return {
     x: Math.max(8, Math.round((window.innerWidth - width) / 2)),

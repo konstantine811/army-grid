@@ -43,6 +43,8 @@ import {
   downloadQuestionnairePdf,
   formatUaPhoneDisplay,
   getPersonFieldValue,
+  getPersonFullPositionTitle,
+  getPersonDisplayName,
   isUnstablePersonExternalId,
   migratePersonAttachmentsBetweenIds,
   pickPreferredPersonRank,
@@ -70,6 +72,7 @@ import {
   buildFighterTaskPeriodText,
   getFighterTaskPlace,
 } from "../personnel/fighterStatusImport";
+import { mapRosterLatestToPreviewRows } from "../excel-fill/rosterSourceSnapshot";
 import { Spinner } from "@/components/ui/spinner/spinner";
 import {
   copyPngDataUrlToClipboard,
@@ -94,6 +97,27 @@ import {
 } from "./form12Report";
 import { createForm12WordBlob } from "./form12WordExport";
 import {
+  createServiceCharacteristicFields,
+  mergeServiceCharacteristicFields,
+  serviceCharacteristicWorkflowSteps,
+  type ServiceCharacteristicFields,
+  type ServiceCharacteristicSignatory,
+} from "./serviceCharacteristicReport";
+import { createServiceCharacteristicWordBlob } from "./serviceCharacteristicWordExport";
+import {
+  buildZhbdBodyParagraph,
+  createZhbdCertificateFields,
+  getFullPositionFromPersonnelProfileRoster,
+  mergeZhbdCertificateFields,
+  readStoredSelectedPersonFullPosition,
+  resolveZhbdCombatStaffPosition,
+  storeSelectedPersonFullPosition,
+  zhbdCertificateWorkflowSteps,
+  type ZhbdCertificateFields,
+  type ZhbdCertificateSignatory,
+} from "./zhbdCertificateReport";
+import { createZhbdCertificateWordBlob } from "./zhbdCertificateWordExport";
+import {
   WordDocumentPreview,
   printRenderedWordPreview,
   useWordPreviewBlob,
@@ -116,6 +140,8 @@ type DocumentMode =
   | "ubdRestoreReport"
   | "form6Report"
   | "form12Report"
+  | "serviceCharacteristic"
+  | "zhbdCertificate"
   | "temporaryMilitaryId";
 
 type DefaultDocumentFieldKey = "pib" | "rank" | "unit" | "date";
@@ -424,6 +450,44 @@ const loadForm6SignatoryRecords = async () => {
 const toForm6Signatories = (
   records: DocumentSignatorySnapshot[],
 ): Form6Signatory[] =>
+  records.map((record) => ({
+    blockType: record.blockType === "APPROVAL" ? "APPROVAL" : "SIGNER",
+    title: record.title,
+    rank: record.rank,
+    fullName: record.fullName,
+    signatureData: record.signatureData ?? null,
+  }));
+
+const loadServiceCharacteristicSignatoryRecords = async () => {
+  const own = await api.listDocumentSignatories("serviceCharacteristic");
+  if (own.length) return own;
+  const form6 = await api.listDocumentSignatories("form6Report");
+  if (form6.length) return form6;
+  return api.listDocumentSignatories("ubdReport");
+};
+
+const toServiceCharacteristicSignatories = (
+  records: DocumentSignatorySnapshot[],
+): ServiceCharacteristicSignatory[] =>
+  records.map((record) => ({
+    blockType: record.blockType === "APPROVAL" ? "APPROVAL" : "SIGNER",
+    title: record.title,
+    rank: record.rank,
+    fullName: record.fullName,
+    signatureData: record.signatureData ?? null,
+  }));
+
+const loadZhbdCertificateSignatoryRecords = async () => {
+  const own = await api.listDocumentSignatories("zhbdCertificate");
+  if (own.length) return own;
+  const form6 = await api.listDocumentSignatories("form6Report");
+  if (form6.length) return form6;
+  return api.listDocumentSignatories("ubdReport");
+};
+
+const toZhbdCertificateSignatories = (
+  records: DocumentSignatorySnapshot[],
+): ZhbdCertificateSignatory[] =>
   records.map((record) => ({
     blockType: record.blockType === "APPROVAL" ? "APPROVAL" : "SIGNER",
     title: record.title,
@@ -810,6 +874,8 @@ const CREATE_PERSON_DOCUMENT_TYPES = [
   { value: "ubdRestoreReport", label: "Рапорт на відновлення УБД" },
   { value: "form6Report", label: "Форма 6" },
   { value: "form12Report", label: "Форма 12" },
+  { value: "serviceCharacteristic", label: "Службова характеристика" },
+  { value: "zhbdCertificate", label: "Довідка ЖБД" },
   { value: "temporaryMilitaryId", label: "Тимчасовий військовий квиток" },
 ] as const;
 
@@ -819,6 +885,8 @@ const JOURNAL_DOCUMENT_TYPE_FILTERS = [
   { value: "ubdRestoreReport", label: "Рапорт на відновлення УБД" },
   { value: "form6Report", label: "Форма 6" },
   { value: "form12Report", label: "Форма 12" },
+  { value: "serviceCharacteristic", label: "Службова характеристика" },
+  { value: "zhbdCertificate", label: "Довідка ЖБД" },
   { value: "temporaryMilitaryId", label: "Тимчасовий військовий квиток" },
   { value: "salaryPowerAttorney", label: "Довіреність зарплати" },
 ] as const;
@@ -834,6 +902,10 @@ const salaryDocumentTypeLabel = (type: string) =>
           ? "Форма 6"
           : type === "form12Report"
             ? "Форма 12"
+            : type === "serviceCharacteristic"
+              ? "Службова характеристика"
+              : type === "zhbdCertificate"
+                ? "Довідка ЖБД"
           : type === "temporaryMilitaryId"
             ? "Тимчасовий військовий квиток"
             : type;
@@ -857,6 +929,8 @@ const buildPersonDocumentDraft = (
     ubdFields: UbdReportFields;
     form6Fields: Form6ReportFields;
     form12Fields: Form12ReportFields;
+    serviceCharacteristicFields: ServiceCharacteristicFields;
+    zhbdCertificateFields: ZhbdCertificateFields;
     restoreFields: UbdRestoreReportFields;
     ticketFields: TemporaryMilitaryIdFields;
   },
@@ -905,6 +979,34 @@ const buildPersonDocumentDraft = (
       files: { ubdScans: [] },
     };
   }
+  if (type === "serviceCharacteristic") {
+    const workflow = { ...createEmptyWorkflow(), currentStatus: "created" };
+    return {
+      type,
+      title: `Службова характеристика · ${now}`,
+      status: "created",
+      fields: {
+        ...input.serviceCharacteristicFields,
+        personStatus: input.personStatus,
+      },
+      workflow: workflow as unknown as Record<string, unknown>,
+      files: { ubdScans: [] },
+    };
+  }
+  if (type === "zhbdCertificate") {
+    const workflow = { ...createEmptyWorkflow(), currentStatus: "created" };
+    return {
+      type,
+      title: `Довідка ЖБД · ${now}`,
+      status: "created",
+      fields: {
+        ...input.zhbdCertificateFields,
+        personStatus: input.personStatus,
+      },
+      workflow: workflow as unknown as Record<string, unknown>,
+      files: { ubdScans: [] },
+    };
+  }
   if (type === "ubdRestoreReport") {
     const workflow = { ...createEmptyWorkflow(), currentStatus: "document" };
     return {
@@ -940,6 +1042,8 @@ const workflowStatusLabel = (status?: string | null) =>
     ...ubdRestoreWorkflowSteps,
     ...form6WorkflowSteps,
     ...form12WorkflowSteps,
+    ...serviceCharacteristicWorkflowSteps,
+    ...zhbdCertificateWorkflowSteps,
     ...temporaryMilitaryIdWorkflowSteps,
   ].find((step) => step.key === status)?.title ||
   status ||
@@ -950,6 +1054,10 @@ const documentWorkflowSteps = (type?: string | null) =>
     ? ubdRestoreWorkflowSteps
     : type === "form12Report"
       ? form12WorkflowSteps
+      : type === "serviceCharacteristic"
+        ? serviceCharacteristicWorkflowSteps
+      : type === "zhbdCertificate"
+        ? zhbdCertificateWorkflowSteps
       : type === "ubdReport" || type === "form6Report"
         ? ubdWorkflowSteps
         : type === "temporaryMilitaryId"
@@ -977,6 +1085,12 @@ const resolveDocumentWorkflowStatus = (
     ) {
       return "sent";
     }
+    return status ?? "";
+  }
+  if (type === "serviceCharacteristic" || type === "zhbdCertificate") {
+    if (status === "ready") return "sent";
+    if (status === "signed") return "confirmed";
+    if (status === "handed") return "forCharacteristic";
     return status ?? "";
   }
   if (
@@ -1267,6 +1381,16 @@ export function DocumentsPage(_props: {
   const [form12Fields, setForm12Fields] = useState<Form12ReportFields>(() =>
     createForm12Fields(null, buildPersonSummary(null)),
   );
+  const [serviceCharacteristicFields, setServiceCharacteristicFields] =
+    useState<ServiceCharacteristicFields>(() =>
+      createServiceCharacteristicFields(null, buildPersonSummary(null)),
+    );
+  const [zhbdCertificateFields, setZhbdCertificateFields] =
+    useState<ZhbdCertificateFields>(() =>
+      createZhbdCertificateFields(null, buildPersonSummary(null)),
+    );
+  const [rosterResolvedFullPosition, setRosterResolvedFullPosition] =
+    useState(() => readStoredSelectedPersonFullPosition());
   const [ubdRestoreFields, setUbdRestoreFields] =
     useState<UbdRestoreReportFields>(() =>
       createUbdRestoreFields(null, buildPersonSummary(null)),
@@ -1344,16 +1468,32 @@ export function DocumentsPage(_props: {
     mode === "ubdReport" ||
     mode === "form6Report" ||
     mode === "form12Report" ||
+    mode === "serviceCharacteristic" ||
+    mode === "zhbdCertificate" ||
     mode === "ubdRestoreReport";
   const buildActiveWordBlob = useCallback(() => {
     if (mode === "ubdReport") return createUbdWordBlob(ubdWordFields);
     if (mode === "form6Report") return createForm6WordBlob(form6Fields);
     if (mode === "form12Report") return createForm12WordBlob(form12Fields);
+    if (mode === "serviceCharacteristic") {
+      return createServiceCharacteristicWordBlob(serviceCharacteristicFields);
+    }
+    if (mode === "zhbdCertificate") {
+      return createZhbdCertificateWordBlob(zhbdCertificateFields);
+    }
     if (mode === "ubdRestoreReport") {
       return createUbdRestoreWordBlob(ubdRestoreFields);
     }
     return Promise.reject(new Error("Немає Word-шаблону для цього документа."));
-  }, [form12Fields, form6Fields, mode, ubdRestoreFields, ubdWordFields]);
+  }, [
+    form12Fields,
+    form6Fields,
+    mode,
+    serviceCharacteristicFields,
+    zhbdCertificateFields,
+    ubdRestoreFields,
+    ubdWordFields,
+  ]);
   const wordPreview = useWordPreviewBlob(buildActiveWordBlob, wordPreviewEnabled);
 
 
@@ -1552,6 +1692,10 @@ export function DocumentsPage(_props: {
             ? "form6Report"
             : requestedDocumentType === "form12-report"
               ? "form12Report"
+            : requestedDocumentType === "service-characteristic"
+              ? "serviceCharacteristic"
+            : requestedDocumentType === "zhbd-certificate"
+              ? "zhbdCertificate"
             : requestedDocumentType === "temporary-military-id"
               ? "temporaryMilitaryId"
               : requestedDocumentType === "salary-power-attorney" ||
@@ -1565,6 +1709,10 @@ export function DocumentsPage(_props: {
                       ? "form6Report"
                       : savedMode === "form12Report"
                         ? "form12Report"
+                      : savedMode === "serviceCharacteristic"
+                        ? "serviceCharacteristic"
+                      : savedMode === "zhbdCertificate"
+                        ? "zhbdCertificate"
                       : savedMode === "temporaryMilitaryId"
                         ? "temporaryMilitaryId"
                         : "default",
@@ -1596,13 +1744,28 @@ export function DocumentsPage(_props: {
         return;
       }
       setSelectedPerson(person);
+      const zhbdDefaults = createZhbdCertificateFields(person, nextSummary);
+      const storedFull = readStoredSelectedPersonFullPosition();
+      const personFull = getPersonFullPositionTitle(person);
+      setZhbdCertificateFields({
+        ...zhbdDefaults,
+        actualFullPosition:
+          zhbdDefaults.actualFullPosition.trim() || personFull || storedFull,
+      });
       setFields(createDefaultFields(nextSummary));
       setSalaryFields(createSalaryFields(person, nextSummary));
       setUbdFields(createUbdFields(person, nextSummary));
       setForm6Fields(createForm6Fields(person, nextSummary));
       setForm12Fields(createForm12Fields(person, nextSummary));
+      setServiceCharacteristicFields(
+        createServiceCharacteristicFields(person, nextSummary),
+      );
       setUbdRestoreFields(createUbdRestoreFields(person, nextSummary));
       setTicketFields(createTemporaryMilitaryIdFields(nextSummary));
+      if (personFull || storedFull) {
+        storeSelectedPersonFullPosition(personFull || storedFull);
+        setRosterResolvedFullPosition(personFull || storedFull);
+      }
       const key = personWorkflowKey(person, nextSummary);
       setWorkflow(loadWorkflowMap()[key] ?? createEmptyWorkflow());
     } catch {
@@ -1614,6 +1777,13 @@ export function DocumentsPage(_props: {
     () => buildPersonSummary(selectedPerson),
     [selectedPerson],
   );
+  const zhbdDisplayedFullPosition =
+    zhbdCertificateFields.actualFullPosition?.trim() ||
+    rosterResolvedFullPosition ||
+    getPersonFullPositionTitle(selectedPerson) ||
+    readStoredSelectedPersonFullPosition() ||
+    "";
+
   const selectedDocument = useMemo(
     () =>
       personDocuments.find((document) => document.id === selectedDocumentId) ??
@@ -1634,6 +1804,128 @@ export function DocumentsPage(_props: {
       selectedDocument?.personExternalId ||
       "",
   );
+
+  useEffect(() => {
+    if (!isPersonDocumentMode || mode !== "zhbdCertificate") return;
+
+    const lookupName =
+      zhbdCertificateFields.fullName.trim() ||
+      getPersonDisplayName(selectedPerson) ||
+      summary.name;
+
+    const applyFull = (full: string) => {
+      const text = full.trim();
+      if (!text) return false;
+      setRosterResolvedFullPosition(text);
+      storeSelectedPersonFullPosition(text);
+      setZhbdCertificateFields((current) => {
+        const nextStaff = resolveZhbdCombatStaffPosition(current.rank, text);
+        const staffLooksGeneric =
+          !current.staffPosition.trim() ||
+          /^командир\s+(відділення|взводу)$/i.test(current.staffPosition.trim());
+        const next = {
+          ...current,
+          actualFullPosition: text,
+          staffPosition: staffLooksGeneric ? nextStaff : current.staffPosition,
+        };
+        if (staffLooksGeneric || current.actualFullPosition !== text) {
+          next.bodyParagraph = buildZhbdBodyParagraph(next);
+        }
+        return next;
+      });
+      return true;
+    };
+
+    const fromStore = readStoredSelectedPersonFullPosition();
+    const fromPerson = getPersonFullPositionTitle(selectedPerson);
+    const fromFields = zhbdCertificateFields.actualFullPosition?.trim() || "";
+    if (applyFull(fromFields || fromPerson || fromStore)) return;
+
+    if (!lookupName || lookupName === "Особа не вибрана") return;
+
+    let cancelled = false;
+    const normalize = (value: string) =>
+      value
+        .replace(/[ʼ’']/g, "")
+        .replace(/\s+/g, " ")
+        .trim()
+        .toLocaleLowerCase("uk-UA");
+
+    void (async () => {
+      try {
+        // 1) Той самий ранковий «Загальний список», що на картці особи
+        const latest = await fetchWithCache({
+          key: CacheKeys.rosterLatest,
+          fetcher: () => api.getLatestPersonnelRoster(),
+          isChanged: jsonChanged,
+        });
+        if (cancelled) return;
+        const rows = mapRosterLatestToPreviewRows(latest);
+        const wanted = normalize(lookupName);
+        const wantedSurname = wanted.split(" ")[0] || "";
+        const match =
+          rows.find((row) => {
+            const rowName = normalize(String(row["піб"] ?? row["ПІБ"] ?? ""));
+            return rowName && rowName === wanted;
+          }) ||
+          rows.find((row) => {
+            const rowName = normalize(
+              getPersonDisplayName(row) || String(row["піб"] ?? ""),
+            );
+            return rowName && rowName === wanted;
+          }) ||
+          rows.find((row) => {
+            const rowName = normalize(String(row["піб"] ?? ""));
+            return (
+              wantedSurname.length >= 3 &&
+              rowName.startsWith(wantedSurname) &&
+              wanted.split(" ").every((part) => !part || rowName.includes(part))
+            );
+          });
+
+        const fromRosterRow = match
+          ? String(
+              match["повна_посада"] ??
+                match["Повна посада"] ??
+                match["roster__повна_посада"] ??
+                "",
+            ).trim() || getPersonFullPositionTitle(match)
+          : "";
+        if (applyFull(fromRosterRow)) return;
+
+        // 2) Профіль з БД (roster.values)
+        const profileId = personExternalId || summary.externalId;
+        if (profileId) {
+          const profile = await api.getPersonnelProfile(
+            profileId,
+            lookupName || undefined,
+          );
+          if (cancelled) return;
+          if (
+            applyFull(getFullPositionFromPersonnelProfileRoster(profile?.roster))
+          ) {
+            return;
+          }
+        }
+      } catch (error) {
+        console.warn("[Довідка ЖБД] не вдалося взяти повну посаду з ранкового:", error);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    isPersonDocumentMode,
+    mode,
+    personExternalId,
+    selectedPerson,
+    summary.externalId,
+    summary.name,
+    zhbdCertificateFields.actualFullPosition,
+    zhbdCertificateFields.fullName,
+  ]);
+
   const workflowKey = useMemo(
     () =>
       [personWorkflowKey(selectedPerson, summary), selectedDocumentId]
@@ -1655,6 +1947,10 @@ export function DocumentsPage(_props: {
           ? "form6Report"
           : requestedDocumentType === "form12-report"
             ? "form12Report"
+          : requestedDocumentType === "service-characteristic"
+            ? "serviceCharacteristic"
+          : requestedDocumentType === "zhbd-certificate"
+            ? "zhbdCertificate"
           : requestedDocumentType === "temporary-military-id"
             ? "temporaryMilitaryId"
             : requestedDocumentType === "salary-power-attorney"
@@ -1669,6 +1965,8 @@ export function DocumentsPage(_props: {
         targetDocumentType !== "ubdRestoreReport" &&
         targetDocumentType !== "form6Report" &&
         targetDocumentType !== "form12Report" &&
+        targetDocumentType !== "serviceCharacteristic" &&
+        targetDocumentType !== "zhbdCertificate" &&
         targetDocumentType !== "temporaryMilitaryId") ||
       !personExternalId
     )
@@ -1719,6 +2017,10 @@ export function DocumentsPage(_props: {
                 ? loadForm6SignatoryRecords()
               : targetDocumentType === "form12Report"
                 ? loadForm12SignatoryRecords()
+              : targetDocumentType === "serviceCharacteristic"
+                ? loadServiceCharacteristicSignatoryRecords()
+              : targetDocumentType === "zhbdCertificate"
+                ? loadZhbdCertificateSignatoryRecords()
                 : Promise.resolve([]),
             api.getPersonPhoto(personExternalId).catch(() => null),
             api.listPersonQuestionnaires().catch(() => []),
@@ -1748,6 +2050,20 @@ export function DocumentsPage(_props: {
           selectedPerson,
           summary,
           toForm12Signatories(
+            configured.length ? configured : legacyUbdSignatories(),
+          ),
+        );
+        const serviceCharacteristicDefaults = createServiceCharacteristicFields(
+          selectedPerson,
+          summary,
+          toServiceCharacteristicSignatories(
+            configured.length ? configured : legacyUbdSignatories(),
+          ),
+        );
+        const zhbdCertificateDefaults = createZhbdCertificateFields(
+          selectedPerson,
+          summary,
+          toZhbdCertificateSignatories(
             configured.length ? configured : legacyUbdSignatories(),
           ),
         );
@@ -1793,6 +2109,8 @@ export function DocumentsPage(_props: {
             ubdFields: ubdDefaults,
             form6Fields: form6Defaults,
             form12Fields: form12Defaults,
+            serviceCharacteristicFields: serviceCharacteristicDefaults,
+            zhbdCertificateFields: zhbdCertificateDefaults,
             restoreFields: restoreDefaults,
             ticketFields: ticketDefaults,
           });
@@ -1802,6 +2120,8 @@ export function DocumentsPage(_props: {
             setUbdFields(ubdDefaults);
             setForm6Fields(form6Defaults);
             setForm12Fields(form12Defaults);
+            setServiceCharacteristicFields(serviceCharacteristicDefaults);
+            setZhbdCertificateFields(zhbdCertificateDefaults);
             setUbdRestoreFields(restoreDefaults);
             setTicketFields(ticketDefaults);
             setDocumentFiles({});
@@ -1838,6 +2158,8 @@ export function DocumentsPage(_props: {
             setUbdFields(ubdDefaults);
             setForm6Fields(form6Defaults);
             setForm12Fields(form12Defaults);
+            setServiceCharacteristicFields(serviceCharacteristicDefaults);
+            setZhbdCertificateFields(zhbdCertificateDefaults);
             setUbdRestoreFields(restoreDefaults);
             setTicketFields(ticketDefaults);
             setDocumentFiles({});
@@ -1886,6 +2208,27 @@ export function DocumentsPage(_props: {
         setForm12Fields({
           ...mergedForm12,
           signatories: form12Defaults.signatories,
+        });
+        setServiceCharacteristicFields({
+          ...mergeServiceCharacteristicFields(
+            serviceCharacteristicDefaults,
+            active.fields,
+          ),
+          signatories: serviceCharacteristicDefaults.signatories,
+        });
+        setZhbdCertificateFields(() => {
+          const merged = mergeZhbdCertificateFields(
+            zhbdCertificateDefaults,
+            active.fields,
+          );
+          return {
+            ...merged,
+            actualFullPosition:
+              merged.actualFullPosition.trim() ||
+              getPersonFullPositionTitle(selectedPerson) ||
+              readStoredSelectedPersonFullPosition(),
+            signatories: zhbdCertificateDefaults.signatories,
+          };
         });
         const mergedRestore = withPersonSignature(
           mergeUbdRestoreFields(restoreDefaults, active.fields),
@@ -2112,6 +2455,47 @@ export function DocumentsPage(_props: {
       );
       setForm12Fields({ ...merged, signatories: defaults.signatories });
       setDocumentFiles(mergeDocumentFiles(document.files));
+    } else if (document.type === "serviceCharacteristic") {
+      setMode("serviceCharacteristic");
+      const configured = snapshotSignatories(
+        await loadServiceCharacteristicSignatoryRecords(),
+      );
+      const defaults = createServiceCharacteristicFields(
+        selectedPerson,
+        summary,
+        toServiceCharacteristicSignatories(
+          configured.length ? configured : legacyUbdSignatories(),
+        ),
+      );
+      setServiceCharacteristicFields({
+        ...mergeServiceCharacteristicFields(defaults, document.fields),
+        signatories: defaults.signatories,
+      });
+      setDocumentFiles(mergeDocumentFiles(document.files));
+    } else if (document.type === "zhbdCertificate") {
+      setMode("zhbdCertificate");
+      const configured = snapshotSignatories(
+        await loadZhbdCertificateSignatoryRecords(),
+      );
+      const defaults = createZhbdCertificateFields(
+        selectedPerson,
+        summary,
+        toZhbdCertificateSignatories(
+          configured.length ? configured : legacyUbdSignatories(),
+        ),
+      );
+      setZhbdCertificateFields(() => {
+        const merged = mergeZhbdCertificateFields(defaults, document.fields);
+        return {
+          ...merged,
+          actualFullPosition:
+            merged.actualFullPosition.trim() ||
+            getPersonFullPositionTitle(selectedPerson) ||
+            readStoredSelectedPersonFullPosition(),
+          signatories: defaults.signatories,
+        };
+      });
+      setDocumentFiles(mergeDocumentFiles(document.files));
     } else if (document.type === "ubdRestoreReport") {
       setMode("ubdRestoreReport");
       const configured = snapshotSignatories(
@@ -2313,6 +2697,118 @@ export function DocumentsPage(_props: {
     }
   };
 
+
+  const createServiceCharacteristicDocument = async () => {
+    if (!personExternalId) return;
+    const nextWorkflow = {
+      ...createEmptyWorkflow(),
+      currentStatus: "created",
+    };
+    setIsSavingDocument(true);
+    setDocumentMessage("Створюю службову характеристику...");
+    try {
+      const configured = snapshotSignatories(
+        await loadServiceCharacteristicSignatoryRecords(),
+      );
+      const defaults = createServiceCharacteristicFields(
+        selectedPerson,
+        summary,
+        toServiceCharacteristicSignatories(
+          configured.length ? configured : legacyUbdSignatories(),
+        ),
+      );
+      const fieldPayload = {
+        ...defaults,
+        personStatus: createPersonStatusSnapshot(selectedPerson, summary).label,
+      };
+      const created = await api.createPersonDocument(personExternalId, {
+        type: "serviceCharacteristic",
+        title: `Службова характеристика · ${dayjs().format("DD.MM.YYYY HH:mm")}`,
+        status: "created",
+        fields: fieldPayload as unknown as Record<string, unknown>,
+        workflow: nextWorkflow as unknown as Record<string, unknown>,
+        files: { ubdScans: [] },
+      });
+      setPersonDocuments((current) => [created, ...current]);
+      setAllPersonDocuments((current) => [created, ...current]);
+      setSelectedDocumentId(created.id);
+      setServiceCharacteristicFields({
+        ...mergeServiceCharacteristicFields(defaults, created.fields),
+        signatories: defaults.signatories,
+      });
+      setDocumentFiles(mergeDocumentFiles(created.files));
+      setWorkflow(mergeSalaryWorkflow(created.workflow));
+      setMode("serviceCharacteristic");
+      setDocumentMessage(
+        `Створено документ: ${created.title} · ${new Date(created.updatedAt).toLocaleString("uk-UA")}`,
+      );
+    } catch (error) {
+      setDocumentMessage(
+        error instanceof Error
+          ? `Не вдалося створити службову характеристику: ${error.message}`
+          : "Не вдалося створити службову характеристику.",
+      );
+    } finally {
+      setIsSavingDocument(false);
+    }
+  };
+
+  const createZhbdCertificateDocument = async () => {
+    if (!personExternalId) return;
+    const nextWorkflow = {
+      ...createEmptyWorkflow(),
+      currentStatus: "created",
+    };
+    setIsSavingDocument(true);
+    setDocumentMessage("Створюю довідку ЖБД...");
+    try {
+      const configured = snapshotSignatories(
+        await loadZhbdCertificateSignatoryRecords(),
+      );
+      const defaults = createZhbdCertificateFields(
+        selectedPerson,
+        summary,
+        toZhbdCertificateSignatories(
+          configured.length ? configured : legacyUbdSignatories(),
+        ),
+      );
+      const fieldPayload = {
+        ...defaults,
+        personStatus: createPersonStatusSnapshot(selectedPerson, summary).label,
+      };
+      const created = await api.createPersonDocument(personExternalId, {
+        type: "zhbdCertificate",
+        title: `Довідка ЖБД · ${dayjs().format("DD.MM.YYYY HH:mm")}`,
+        status: "created",
+        fields: fieldPayload as unknown as Record<string, unknown>,
+        workflow: nextWorkflow as unknown as Record<string, unknown>,
+        files: { ubdScans: [] },
+      });
+      setPersonDocuments((current) => [created, ...current]);
+      setAllPersonDocuments((current) => [created, ...current]);
+      setSelectedDocumentId(created.id);
+      setZhbdCertificateFields({
+        ...mergeZhbdCertificateFields(defaults, created.fields),
+        // Always use fresh presets (API may strip large signatureData on create).
+        signatories: defaults.signatories,
+      });
+      setDocumentFiles(mergeDocumentFiles(created.files));
+      setWorkflow(mergeSalaryWorkflow(created.workflow));
+      setMode("zhbdCertificate");
+      setDocumentMessage(
+        `Створено документ: ${created.title} · ${new Date(created.updatedAt).toLocaleString("uk-UA")}`,
+      );
+    } catch (error) {
+      setDocumentMessage(
+        error instanceof Error
+          ? `Не вдалося створити довідку ЖБД: ${error.message}`
+          : "Не вдалося створити довідку ЖБД.",
+      );
+    } finally {
+      setIsSavingDocument(false);
+    }
+  };
+
   const createForm12ReportDocument = async () => {
     if (!personExternalId) return;
     const nextWorkflow = {
@@ -2498,6 +2994,19 @@ export function DocumentsPage(_props: {
       } else if (selectedDocument.type === "form12Report" || mode === "form12Report") {
         await saveForm12Document(form12Fields, nextFiles);
       } else if (
+        selectedDocument.type === "serviceCharacteristic" ||
+        mode === "serviceCharacteristic"
+      ) {
+        await saveServiceCharacteristicDocument(
+          serviceCharacteristicFields,
+          nextFiles,
+        );
+      } else if (
+        selectedDocument.type === "zhbdCertificate" ||
+        mode === "zhbdCertificate"
+      ) {
+        await saveZhbdCertificateDocument(zhbdCertificateFields, nextFiles);
+      } else if (
         selectedDocument.type === "ubdRestoreReport" ||
         mode === "ubdRestoreReport"
       ) {
@@ -2545,6 +3054,19 @@ export function DocumentsPage(_props: {
       void saveForm6Document(form6Fields, nextFiles);
     } else if (selectedDocument?.type === "form12Report" || mode === "form12Report") {
       void saveForm12Document(form12Fields, nextFiles);
+    } else if (
+      selectedDocument?.type === "serviceCharacteristic" ||
+      mode === "serviceCharacteristic"
+    ) {
+      void saveServiceCharacteristicDocument(
+        serviceCharacteristicFields,
+        nextFiles,
+      );
+    } else if (
+      selectedDocument?.type === "zhbdCertificate" ||
+      mode === "zhbdCertificate"
+    ) {
+      void saveZhbdCertificateDocument(zhbdCertificateFields, nextFiles);
     } else if (
       selectedDocument?.type === "ubdRestoreReport" ||
       mode === "ubdRestoreReport"
@@ -2808,6 +3330,85 @@ export function DocumentsPage(_props: {
     }
   };
 
+
+  const saveServiceCharacteristicDocument = async (
+    nextFields: ServiceCharacteristicFields,
+    nextFiles = documentFiles,
+    nextWorkflow = workflow,
+  ) => {
+    if (!documentSavePersonId || !selectedDocumentId) return;
+
+    setIsSavingDocument(true);
+    try {
+      const fieldPayload = {
+        ...nextFields,
+        personStatus: nextPersonStatusLabel(),
+      };
+      const updated = await api.updatePersonDocument(
+        documentSavePersonId,
+        selectedDocumentId,
+        {
+          title: selectedDocument?.title || "Службова характеристика",
+          status: nextWorkflow.currentStatus,
+          fields: fieldPayload as unknown as Record<string, unknown>,
+          workflow: nextWorkflow as unknown as Record<string, unknown>,
+          files: nextFiles as unknown as Record<string, unknown>,
+        },
+      );
+      applyUpdatedDocument(updated);
+      setDocumentMessage(
+        `Збережено в БД · ${new Date(updated.updatedAt).toLocaleString("uk-UA")}`,
+      );
+    } catch (error) {
+      setDocumentMessage(
+        error instanceof Error
+          ? `Не вдалося зберегти службову характеристику: ${error.message}`
+          : "Не вдалося зберегти службову характеристику.",
+      );
+    } finally {
+      setIsSavingDocument(false);
+    }
+  };
+
+  const saveZhbdCertificateDocument = async (
+    nextFields: ZhbdCertificateFields,
+    nextFiles = documentFiles,
+    nextWorkflow = workflow,
+  ) => {
+    if (!documentSavePersonId || !selectedDocumentId) return;
+
+    setIsSavingDocument(true);
+    try {
+      const fieldPayload = {
+        ...nextFields,
+        personStatus: nextPersonStatusLabel(),
+      };
+      const updated = await api.updatePersonDocument(
+        documentSavePersonId,
+        selectedDocumentId,
+        {
+          title: selectedDocument?.title || "Довідка ЖБД",
+          status: nextWorkflow.currentStatus,
+          fields: fieldPayload as unknown as Record<string, unknown>,
+          workflow: nextWorkflow as unknown as Record<string, unknown>,
+          files: nextFiles as unknown as Record<string, unknown>,
+        },
+      );
+      applyUpdatedDocument(updated);
+      setDocumentMessage(
+        `Збережено в БД · ${new Date(updated.updatedAt).toLocaleString("uk-UA")}`,
+      );
+    } catch (error) {
+      setDocumentMessage(
+        error instanceof Error
+          ? `Не вдалося зберегти довідку ЖБД: ${error.message}`
+          : "Не вдалося зберегти довідку ЖБД.",
+      );
+    } finally {
+      setIsSavingDocument(false);
+    }
+  };
+
   const saveForm12Document = async (
     nextFields: Form12ReportFields,
     nextFiles = documentFiles,
@@ -2959,6 +3560,45 @@ export function DocumentsPage(_props: {
     setForm6Fields((current) => {
       const next = { ...current, [key]: value };
       void saveForm6Document(next);
+      return next;
+    });
+  };
+
+
+  const updateServiceCharacteristicField = (
+    key: Exclude<keyof ServiceCharacteristicFields, "signatories">,
+    value: string,
+  ) => {
+    setServiceCharacteristicFields((current) => {
+      const next = { ...current, [key]: value };
+      void saveServiceCharacteristicDocument(next);
+      return next;
+    });
+  };
+
+  const updateZhbdCertificateField = (
+    key: Exclude<keyof ZhbdCertificateFields, "signatories">,
+    value: string,
+  ) => {
+    setZhbdCertificateFields((current) => {
+      const next = { ...current, [key]: value };
+      if (key === "rank") {
+        next.staffPosition = resolveZhbdCombatStaffPosition(
+          value,
+          current.staffPosition,
+        );
+      }
+      if (
+        key === "rank" ||
+        key === "fullName" ||
+        key === "staffPosition" ||
+        key === "periodFrom" ||
+        key === "periodTo" ||
+        key === "periodNote"
+      ) {
+        next.bodyParagraph = buildZhbdBodyParagraph(next);
+      }
+      void saveZhbdCertificateDocument(next);
       return next;
     });
   };
@@ -3287,7 +3927,7 @@ export function DocumentsPage(_props: {
       });
   };
 
-  const openPersonQuestionnaireInNewTab = () => {
+  const openPersonQuestionnaireInNewTab = async () => {
     const targetId = String(
       selectedDocument?.personExternalId ||
         personQuestionnaire?.personExternalId ||
@@ -3302,14 +3942,20 @@ export function DocumentsPage(_props: {
       return;
     }
     if (!targetId || !personQuestionnaire) return;
-    window.open(
-      api.getPersonQuestionnaireFileUrl(
+    try {
+      const url = await api.getPersonQuestionnaireObjectUrl(
         targetId,
         personQuestionnaire.fileName || questionnaireFileName,
-      ),
-      "_blank",
-      "noopener,noreferrer",
-    );
+      );
+      window.open(url, "_blank", "noopener,noreferrer");
+      window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } catch (error) {
+      setDocumentMessage(
+        error instanceof Error
+          ? `Не вдалося відкрити анкету: ${error.message}`
+          : "Не вдалося відкрити анкету.",
+      );
+    }
   };
 
   const updateSalaryField = (
@@ -3354,6 +4000,8 @@ export function DocumentsPage(_props: {
       | UbdReportFields
       | Form6ReportFields
       | Form12ReportFields
+      | ServiceCharacteristicFields
+      | ZhbdCertificateFields
       | UbdRestoreReportFields
       | TemporaryMilitaryIdFields,
     nextWorkflow: SalaryWorkflowState,
@@ -3380,6 +4028,30 @@ export function DocumentsPage(_props: {
     if (selectedDocument?.type === "form12Report" || mode === "form12Report") {
       void saveForm12Document(
         nextFields as Form12ReportFields,
+        nextFiles,
+        nextWorkflow,
+      );
+      return;
+    }
+
+    if (
+      selectedDocument?.type === "serviceCharacteristic" ||
+      mode === "serviceCharacteristic"
+    ) {
+      void saveServiceCharacteristicDocument(
+        nextFields as ServiceCharacteristicFields,
+        nextFiles,
+        nextWorkflow,
+      );
+      return;
+    }
+
+    if (
+      selectedDocument?.type === "zhbdCertificate" ||
+      mode === "zhbdCertificate"
+    ) {
+      void saveZhbdCertificateDocument(
+        nextFields as ZhbdCertificateFields,
         nextFiles,
         nextWorkflow,
       );
@@ -3420,6 +4092,10 @@ export function DocumentsPage(_props: {
           ? form6Fields
           : mode === "form12Report"
             ? form12Fields
+          : mode === "serviceCharacteristic"
+            ? serviceCharacteristicFields
+          : mode === "zhbdCertificate"
+            ? zhbdCertificateFields
           : mode === "ubdRestoreReport"
             ? ubdRestoreFields
             : mode === "temporaryMilitaryId"
@@ -3496,6 +4172,29 @@ export function DocumentsPage(_props: {
     setDocumentMessage(`Word-файл «${fileName}» збережено.`);
     setWorkflowStep("document");
     void saveForm6Document(form6Fields);
+  };
+
+
+  const saveServiceCharacteristicAsWord = async () => {
+    setDocumentMessage("Формую Word-документ службової характеристики...");
+    const blob = await createServiceCharacteristicWordBlob(
+      serviceCharacteristicFields,
+    );
+    const fileName = `${safeFilePart(serviceCharacteristicFields.folderName)}.docx`;
+    downloadBlob(fileName, blob);
+    setDocumentMessage(`Word-файл «${fileName}» збережено.`);
+    setWorkflowStep("document");
+    void saveServiceCharacteristicDocument(serviceCharacteristicFields);
+  };
+
+  const saveZhbdCertificateAsWord = async () => {
+    setDocumentMessage("Формую Word-документ довідки ЖБД...");
+    const blob = await createZhbdCertificateWordBlob(zhbdCertificateFields);
+    const fileName = `${safeFilePart(zhbdCertificateFields.folderName)}.docx`;
+    downloadBlob(fileName, blob);
+    setDocumentMessage(`Word-файл «${fileName}» збережено.`);
+    setWorkflowStep("document");
+    void saveZhbdCertificateDocument(zhbdCertificateFields);
   };
 
   const saveForm12AsWord = async () => {
@@ -3632,6 +4331,9 @@ export function DocumentsPage(_props: {
     if (type === "ubdRestoreReport") return createUbdRestoreReportDocument();
     if (type === "form6Report") return createForm6ReportDocument();
     if (type === "form12Report") return createForm12ReportDocument();
+    if (type === "serviceCharacteristic")
+      return createServiceCharacteristicDocument();
+    if (type === "zhbdCertificate") return createZhbdCertificateDocument();
     if (type === "temporaryMilitaryId")
       return createTemporaryMilitaryIdDocument();
   };
@@ -3714,6 +4416,10 @@ export function DocumentsPage(_props: {
     if (mode === "ubdReport") return ubdFields.statusNote.trim();
     if (mode === "form6Report") return form6Fields.statusNote.trim();
     if (mode === "form12Report") return form12Fields.statusNote.trim();
+    if (mode === "serviceCharacteristic")
+      return serviceCharacteristicFields.statusNote.trim();
+    if (mode === "zhbdCertificate")
+      return zhbdCertificateFields.statusNote.trim();
     if (mode === "ubdRestoreReport") return ubdRestoreFields.statusNote.trim();
     if (mode === "temporaryMilitaryId") return ticketFields.statusNote.trim();
     if (mode === "salaryPowerAttorney") return salaryFields.statusNote.trim();
@@ -4182,6 +4888,210 @@ export function DocumentsPage(_props: {
               )}
             </div>
           </div>
+        </section>
+      ) : null}
+
+      {wordPreviewPanel}
+    </>
+  );
+
+
+  const serviceCharacteristicWorkspace = (
+    <>
+      {selectedDocument ? (
+        <section className="analytics-panel document-fields">
+          <div className="panel-heading">Дані для службової характеристики</div>
+          <div className="document-placeholder-map salary-document-map ubd-document-map">
+            {(
+              [
+                ["rank", "Звання"],
+                ["lastName", "Прізвище"],
+                ["firstName", "Ім’я"],
+                ["patronymic", "По батькові"],
+                ["staffPosition", "Займає посаду"],
+                ["introParagraph", "Вступний абзац"],
+                ["professionalParagraph", "Професійна підготовка"],
+                ["combatParagraph", "Дії в складних умовах"],
+                ["moralParagraph", "Моральні якості"],
+                ["drillParagraph", "Стройова / фізична підготовка"],
+                ["conclusion", "Висновок"],
+                ["date", "Дата"],
+                ["folderName", "Папка"],
+              ] as Array<
+                [
+                  Exclude<keyof ServiceCharacteristicFields, "signatories">,
+                  string,
+                ]
+              >
+            ).map(([key, label]) => (
+              <label
+                key={key}
+                className={
+                  key === "staffPosition" ||
+                  key.endsWith("Paragraph") ||
+                  key === "conclusion"
+                    ? "wide"
+                    : undefined
+                }
+              >
+                <code>{label}</code>
+                <TextField
+                  size="small"
+                  fullWidth
+                  multiline={
+                    key === "staffPosition" ||
+                    key.endsWith("Paragraph") ||
+                    key === "conclusion"
+                  }
+                  rows={
+                    key.endsWith("Paragraph")
+                      ? 4
+                      : key === "staffPosition" || key === "conclusion"
+                        ? 2
+                        : undefined
+                  }
+                  value={serviceCharacteristicFields[key]}
+                  onChange={(event) =>
+                    updateServiceCharacteristicField(key, event.target.value)
+                  }
+                />
+              </label>
+            ))}
+          </div>
+          {documentStatusNotePanel(
+            serviceCharacteristicFields.statusNote,
+            (value) => updateServiceCharacteristicField("statusNote", value),
+          )}
+          {personQuestionnaireRow}
+        </section>
+      ) : null}
+
+      {wordPreviewPanel}
+    </>
+  );
+
+  const zhbdCertificateWorkspace = (
+    <>
+      {selectedDocument ? (
+        <section className="analytics-panel document-fields">
+          <div className="panel-heading">Дані для довідки ЖБД</div>
+          <div className="zhbd-full-position-banner">
+            <code>Повна посада (з загального списку)</code>
+            <strong>
+              {zhbdDisplayedFullPosition || "немає в ранковому списку"}
+            </strong>
+          </div>
+          <div className="document-placeholder-map salary-document-map ubd-document-map">
+            {(
+              [
+                ["rank", "Звання"],
+                ["fullName", "ПІБ"],
+                [
+                  "staffPosition",
+                  "Посада на момент БЗ",
+                ],
+                ["periodFrom", "Період з"],
+                ["periodTo", "Період по"],
+                ["periodNote", "Примітка до періоду"],
+                ["bodyParagraph", "Текст довідки"],
+                ["basisOrders", "Підстава · розпорядження"],
+                ["basisJournal", "Підстава · журнал"],
+                ["headerDate", "Дата в шапці"],
+                ["documentNumber", "Номер документа"],
+                ["date", "Дата"],
+                ["folderName", "Папка"],
+              ] as Array<
+                [
+                  Exclude<
+                    keyof ZhbdCertificateFields,
+                    "signatories" | "actualFullPosition"
+                  >,
+                  string,
+                ]
+              >
+            ).map(([key, label]) => (
+              <label
+                key={key}
+                className={
+                  key === "staffPosition" ||
+                  key === "bodyParagraph" ||
+                  key === "basisOrders" ||
+                  key === "basisJournal" ||
+                  key === "periodNote"
+                    ? "wide"
+                    : undefined
+                }
+              >
+                <code>{label}</code>
+                <div className="document-field-with-hint">
+                  <TextField
+                    size="small"
+                    fullWidth
+                    multiline={
+                      key === "staffPosition" ||
+                      key === "bodyParagraph" ||
+                      key === "basisOrders" ||
+                      key === "basisJournal" ||
+                      key === "periodNote"
+                    }
+                    rows={
+                      key === "bodyParagraph"
+                        ? 4
+                        : key === "basisOrders" ||
+                            key === "basisJournal" ||
+                            key === "staffPosition"
+                          ? 2
+                          : undefined
+                    }
+                    value={zhbdCertificateFields[key]}
+                    onChange={(event) =>
+                      updateZhbdCertificateField(key, event.target.value)
+                    }
+                  />
+                  {key === "staffPosition" ? (
+                    <span className="document-field-hint">
+                      Повна посада:{" "}
+                      <strong>
+                        {zhbdDisplayedFullPosition || "немає в ранковому списку"}
+                      </strong>
+                    </span>
+                  ) : null}
+                </div>
+              </label>
+            ))}
+            <div className="wide document-default-signatories">
+              <code>Підписант (з налаштувань)</code>
+              {zhbdCertificateFields.signatories.length ? (
+                zhbdCertificateFields.signatories.map((signatory, index) => (
+                  <article
+                    key={`${signatory.blockType}-${signatory.fullName}-${index}`}
+                  >
+                    <strong>
+                      {signatory.blockType === "APPROVAL"
+                        ? "ЗАТВЕРДЖУЮ · "
+                        : "Підписант · "}
+                      {signatory.fullName || "—"}
+                    </strong>
+                    <span>{signatory.title}</span>
+                    <small>
+                      {signatory.rank}
+                      {signatory.signatureData
+                        ? " · є зображення підпису"
+                        : " · немає зображення підпису"}
+                    </small>
+                  </article>
+                ))
+              ) : (
+                <p>
+                  Немає записів. Увімкни «Довідка ЖБД» у налаштуваннях підписів.
+                </p>
+              )}
+            </div>
+          </div>
+          {documentStatusNotePanel(zhbdCertificateFields.statusNote, (value) =>
+            updateZhbdCertificateField("statusNote", value),
+          )}
+          {personQuestionnaireRow}
         </section>
       ) : null}
 
@@ -4726,6 +5636,10 @@ export function DocumentsPage(_props: {
       selectedDocument?.type === "ubdRestoreReport") ||
     (mode === "form6Report" && selectedDocument?.type === "form6Report") ||
     (mode === "form12Report" && selectedDocument?.type === "form12Report") ||
+    (mode === "serviceCharacteristic" &&
+      selectedDocument?.type === "serviceCharacteristic") ||
+    (mode === "zhbdCertificate" &&
+      selectedDocument?.type === "zhbdCertificate") ||
     (mode === "temporaryMilitaryId" &&
       selectedDocument?.type === "temporaryMilitaryId") ||
     (mode === "salaryPowerAttorney" &&
@@ -5149,6 +6063,76 @@ export function DocumentsPage(_props: {
             </header>
             <section className="salary-documents-layout ubd-report-layout documents-journal-ubd-layout">
               {form12Workspace}
+            </section>
+          </section>
+        ) : null}
+        {mode === "serviceCharacteristic" &&
+        selectedDocument?.type === "serviceCharacteristic" ? (
+          <section className="documents-journal-ubd" id="documents-journal-ubd">
+            <header className="topbar analytics-topbar salary-document-topbar">
+              <div className="salary-document-main-row">
+                <Box className="salary-document-title">
+                  <Typography component="h1" variant="h4">
+                    Службова характеристика
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    {getDocumentPersonName(selectedDocument)}
+                    {selectedDocument.personExternalId
+                      ? ` · ID ${selectedDocument.personExternalId}`
+                      : ""}
+                    {selectedDocument.title ? ` · ${selectedDocument.title}` : ""}
+                  </Typography>
+                </Box>
+                <Stack direction="row" spacing={1}>
+                  {questionnaireHeaderButton}
+                  <Button
+                    variant="outlined"
+                    startIcon={<ArticleOutlinedIcon />}
+                    onClick={() => void saveServiceCharacteristicAsWord()}
+                  >
+                    Зберегти у Word
+                  </Button>
+                </Stack>
+              </div>
+              {documentStepProgress}
+            </header>
+            <section className="salary-documents-layout ubd-report-layout documents-journal-ubd-layout">
+              {serviceCharacteristicWorkspace}
+            </section>
+          </section>
+        ) : null}
+        {mode === "zhbdCertificate" &&
+        selectedDocument?.type === "zhbdCertificate" ? (
+          <section className="documents-journal-ubd" id="documents-journal-ubd">
+            <header className="topbar analytics-topbar salary-document-topbar">
+              <div className="salary-document-main-row">
+                <Box className="salary-document-title">
+                  <Typography component="h1" variant="h4">
+                    Довідка ЖБД
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    {getDocumentPersonName(selectedDocument)}
+                    {selectedDocument.personExternalId
+                      ? ` · ID ${selectedDocument.personExternalId}`
+                      : ""}
+                    {selectedDocument.title ? ` · ${selectedDocument.title}` : ""}
+                  </Typography>
+                </Box>
+                <Stack direction="row" spacing={1}>
+                  {questionnaireHeaderButton}
+                  <Button
+                    variant="outlined"
+                    startIcon={<ArticleOutlinedIcon />}
+                    onClick={() => void saveZhbdCertificateAsWord()}
+                  >
+                    Зберегти у Word
+                  </Button>
+                </Stack>
+              </div>
+              {documentStepProgress}
+            </header>
+            <section className="salary-documents-layout ubd-report-layout documents-journal-ubd-layout">
+              {zhbdCertificateWorkspace}
             </section>
           </section>
         ) : null}
@@ -5664,6 +6648,216 @@ export function DocumentsPage(_props: {
           </section>
 
           {form12Workspace}
+        </section>
+      </main>
+      {questionnairePreviewDialog}
+      </>
+    );
+  }
+
+  if (mode === "serviceCharacteristic") {
+    return (
+      <>
+      <main className="main-panel documents-ubd-page">
+        <header className="topbar analytics-topbar salary-document-topbar">
+          <div className="salary-document-main-row">
+            <Box className="salary-document-title">
+              <Typography component="h1" variant="h4">
+                Службова характеристика
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                {summary.name} ·{" "}
+                {summary.externalId
+                  ? `ID ${summary.externalId}`
+                  : "дані з картки особи"}
+                {selectedDocument ? ` · ${selectedDocument.title}` : ""}
+              </Typography>
+            </Box>
+            {selectedDocument ? (
+              <Stack direction="row" spacing={1}>
+                {questionnaireHeaderButton}
+                <Button
+                  variant="outlined"
+                  startIcon={<ArticleOutlinedIcon />}
+                  onClick={() => void saveServiceCharacteristicAsWord()}
+                >
+                  Зберегти у Word
+                </Button>
+              </Stack>
+            ) : (
+              questionnaireHeaderButton
+            )}
+          </div>
+          {documentStepProgress}
+        </header>
+
+        <section
+          className={
+            selectedDocument
+              ? "salary-documents-layout ubd-report-layout"
+              : "salary-documents-layout empty"
+          }
+        >
+          <section className="analytics-panel salary-person-documents-panel">
+            <div className="panel-heading">Документи службовця</div>
+            <div className="salary-document-sync">
+              <span>
+                {isSavingDocument ? "збереження..." : "БД синхронізована"}
+              </span>
+              <p>{documentMessage || "Виберіть документ зі списку."}</p>
+            </div>
+            <div className="salary-person-documents-list">
+              {personQuestionnaireRow}
+              {visiblePersonDocuments.length ? (
+                visiblePersonDocuments.map((document) => (
+                  <article
+                    className={
+                      document.id === selectedDocumentId
+                        ? "salary-person-document-shell active"
+                        : "salary-person-document-shell"
+                    }
+                    key={document.id}
+                  >
+                    <button
+                      className="salary-person-document"
+                      type="button"
+                      onClick={() => openPersonDocument(document)}
+                    >
+                      <strong>{document.title}</strong>
+                      <span>{salaryDocumentTypeLabel(document.type)}</span>
+                      <em>{documentWorkflowStatusLabel(document)}</em>
+                      {documentListStatusNote(document)}
+                      <small>
+                        {new Date(document.updatedAt).toLocaleString("uk-UA")}
+                      </small>
+                    </button>
+                    <button
+                      aria-label="Видалити документ"
+                      className="salary-person-document-delete"
+                      disabled={isSavingDocument}
+                      onClick={() => void deleteDocument(document)}
+                      title="Видалити документ"
+                      type="button"
+                    >
+                      <DeleteOutlineOutlinedIcon />
+                    </button>
+                  </article>
+                ))
+              ) : (
+                <p className="salary-empty-documents">
+                  Документів по цьому службовцю ще немає.
+                </p>
+              )}
+            </div>
+            {personDocumentCreateSelect}
+          </section>
+
+          {serviceCharacteristicWorkspace}
+        </section>
+      </main>
+      {questionnairePreviewDialog}
+      </>
+    );
+  }
+
+  if (mode === "zhbdCertificate") {
+    return (
+      <>
+      <main className="main-panel documents-ubd-page">
+        <header className="topbar analytics-topbar salary-document-topbar">
+          <div className="salary-document-main-row">
+            <Box className="salary-document-title">
+              <Typography component="h1" variant="h4">
+                Довідка ЖБД
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                {summary.name} ·{" "}
+                {summary.externalId
+                  ? `ID ${summary.externalId}`
+                  : "дані з картки особи"}
+                {selectedDocument ? ` · ${selectedDocument.title}` : ""}
+              </Typography>
+            </Box>
+            {selectedDocument ? (
+              <Stack direction="row" spacing={1}>
+                {questionnaireHeaderButton}
+                <Button
+                  variant="outlined"
+                  startIcon={<ArticleOutlinedIcon />}
+                  onClick={() => void saveZhbdCertificateAsWord()}
+                >
+                  Зберегти у Word
+                </Button>
+              </Stack>
+            ) : (
+              questionnaireHeaderButton
+            )}
+          </div>
+          {documentStepProgress}
+        </header>
+
+        <section
+          className={
+            selectedDocument
+              ? "salary-documents-layout ubd-report-layout"
+              : "salary-documents-layout empty"
+          }
+        >
+          <section className="analytics-panel salary-person-documents-panel">
+            <div className="panel-heading">Документи службовця</div>
+            <div className="salary-document-sync">
+              <span>
+                {isSavingDocument ? "збереження..." : "БД синхронізована"}
+              </span>
+              <p>{documentMessage || "Виберіть документ зі списку."}</p>
+            </div>
+            <div className="salary-person-documents-list">
+              {personQuestionnaireRow}
+              {visiblePersonDocuments.length ? (
+                visiblePersonDocuments.map((document) => (
+                  <article
+                    className={
+                      document.id === selectedDocumentId
+                        ? "salary-person-document-shell active"
+                        : "salary-person-document-shell"
+                    }
+                    key={document.id}
+                  >
+                    <button
+                      className="salary-person-document"
+                      type="button"
+                      onClick={() => openPersonDocument(document)}
+                    >
+                      <strong>{document.title}</strong>
+                      <span>{salaryDocumentTypeLabel(document.type)}</span>
+                      <em>{documentWorkflowStatusLabel(document)}</em>
+                      {documentListStatusNote(document)}
+                      <small>
+                        {new Date(document.updatedAt).toLocaleString("uk-UA")}
+                      </small>
+                    </button>
+                    <button
+                      aria-label="Видалити документ"
+                      className="salary-person-document-delete"
+                      disabled={isSavingDocument}
+                      onClick={() => void deleteDocument(document)}
+                      title="Видалити документ"
+                      type="button"
+                    >
+                      <DeleteOutlineOutlinedIcon />
+                    </button>
+                  </article>
+                ))
+              ) : (
+                <p className="salary-empty-documents">
+                  Документів по цьому службовцю ще немає.
+                </p>
+              )}
+            </div>
+            {personDocumentCreateSelect}
+          </section>
+
+          {zhbdCertificateWorkspace}
         </section>
       </main>
       {questionnairePreviewDialog}

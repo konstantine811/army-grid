@@ -73,7 +73,9 @@ type SciTableOptions<TData> = {
   enableGlobalFilter?: boolean;
   globalFilterPlaceholder?: string;
   exportLabel?: string;
-  onExport?: (context: SciDataTableExportContext<TData>) => void | Promise<void>;
+  onExport?: (
+    context: SciDataTableExportContext<TData>,
+  ) => void | Promise<void>;
   emptyMessage?: string;
   getRowId?: (row: TData, index: number) => string;
   /** Extra props/class for body cells (editing highlight, data attrs). */
@@ -82,11 +84,13 @@ type SciTableOptions<TData> = {
     rowIndex: number;
     rowId: string;
     columnId: string;
-  }) => {
-    className?: string;
-    style?: CSSProperties;
-    title?: string;
-  } | undefined;
+  }) =>
+    | {
+        className?: string;
+        style?: CSSProperties;
+        title?: string;
+      }
+    | undefined;
   /** Scroll/focus target cell after render. */
   focusedCell?: SciDataTableCellRef | null;
   /** Virtualize body rows (default: on when data length > 80). */
@@ -130,18 +134,20 @@ export function MaterialReactTable<TData>({
   table: SciTableOptions<TData>;
 }) {
   const preparedColumns = useMemo(
-    () => table.columns.map((column, index) => prepareColumn(column, index, table)),
-    [table],
+    () =>
+      table.columns.map((column, index) => prepareColumn(column, index, table)),
+    [table.columns, table.initialState?.columnPinning],
   );
   const [globalFilter, setGlobalFilter] = useState("");
   const deferredGlobalFilter = useDeferredValue(globalFilter);
-  const [columnFilters, setColumnFilters] = useState<Record<string, string[]>>({});
-  const [columnRangeFilters, setColumnRangeFilters] = useState<ColumnRangeFilters>(
+  const [columnFilters, setColumnFilters] = useState<Record<string, string[]>>(
     {},
   );
-  const [columnVisibility, setColumnVisibility] = useState<Record<string, boolean>>(
-    () => table.initialState?.columnVisibility ?? {},
-  );
+  const [columnRangeFilters, setColumnRangeFilters] =
+    useState<ColumnRangeFilters>({});
+  const [columnVisibility, setColumnVisibility] = useState<
+    Record<string, boolean>
+  >(() => table.initialState?.columnVisibility ?? {});
   const [pinOverrides, setPinOverrides] = useState<
     Record<string, SciDataTablePin | "off">
   >({});
@@ -197,7 +203,9 @@ export function MaterialReactTable<TData>({
   }, [filteredRows, preparedColumns, sorting]);
   const facetedFilterOptions = useMemo(() => {
     const rowCount = table.data.length;
-    const facetMenuId = openMenu?.startsWith("facet:") ? openMenu.slice("facet:".length) : null;
+    const facetMenuId = openMenu?.startsWith("facet:")
+      ? openMenu.slice("facet:".length)
+      : null;
 
     // На великих таблицях рахуємо опції лише для відкритого фільтра (O(rows), не O(rows×cols)).
     if (rowCount > 300) {
@@ -255,39 +263,52 @@ export function MaterialReactTable<TData>({
   const focusedRowId = table.focusedCell?.rowId ?? "";
   const focusedColumnId = table.focusedCell?.columnId ?? "";
   const focusedEpoch = table.focusedCell?.focusEpoch ?? 0;
+  const filterClearAttemptRef = useRef<string>("");
   const hasActiveColumnFilters =
     Object.keys(columnFilters).length > 0 ||
     Object.keys(columnRangeFilters).length > 0;
 
   useEffect(() => {
-    if (!focusedRowId || !focusedColumnId) return;
+    if (!focusedRowId || !focusedColumnId) {
+      filterClearAttemptRef.current = "";
+      return;
+    }
 
+    const focusKey = `${focusedRowId}::${focusedColumnId}::${focusedEpoch}`;
     const rowIndex = rows.findIndex(
       (row, index) =>
         String(table.getRowId?.(row, index) ?? index) === focusedRowId,
     );
 
-    // Target hidden by filters. Clear them, then wait for deferred filter flush.
+    // Target hidden by filters. Clear them once, then wait for deferred filter flush.
     if (rowIndex < 0) {
+      if (filterClearAttemptRef.current === focusKey) return;
+
       if (globalFilter.trim()) {
-        setGlobalFilter("");
+        filterClearAttemptRef.current = focusKey;
+        queueMicrotask(() => setGlobalFilter(""));
         return;
       }
       if (deferredGlobalFilter.trim()) {
-        // useDeferredValue still applying old search — wait for rows to update.
         return;
       }
       if (hasActiveColumnFilters) {
-        setColumnFilters({});
-        setColumnRangeFilters({});
+        filterClearAttemptRef.current = focusKey;
+        queueMicrotask(() => {
+          setColumnFilters({});
+          setColumnRangeFilters({});
+        });
         return;
       }
       return;
     }
 
+    filterClearAttemptRef.current = "";
+
     let cancelled = false;
     let attempts = 0;
     let timer = 0;
+    let raf = 0;
 
     const focusCellEditor = () => {
       if (cancelled) return;
@@ -315,21 +336,24 @@ export function MaterialReactTable<TData>({
         }
       }
 
-      if (attempts >= 30) return;
+      if (attempts >= 12) return;
       attempts += 1;
       if (enableVirtualization) {
         rowVirtualizerRef.current.scrollToIndex(rowIndex, { align: "center" });
       }
-      timer = window.setTimeout(focusCellEditor, 48);
+      timer = window.setTimeout(focusCellEditor, 64);
     };
 
-    if (enableVirtualization) {
-      rowVirtualizerRef.current.scrollToIndex(rowIndex, { align: "center" });
-    }
-    timer = window.setTimeout(focusCellEditor, enableVirtualization ? 48 : 0);
+    raf = window.requestAnimationFrame(() => {
+      if (enableVirtualization) {
+        rowVirtualizerRef.current.scrollToIndex(rowIndex, { align: "center" });
+      }
+      timer = window.setTimeout(focusCellEditor, enableVirtualization ? 64 : 0);
+    });
 
     return () => {
       cancelled = true;
+      window.cancelAnimationFrame(raf);
       window.clearTimeout(timer);
     };
   }, [
@@ -392,36 +416,11 @@ export function MaterialReactTable<TData>({
               <input
                 value={globalFilter}
                 onChange={(event) => setGlobalFilter(event.target.value)}
-                placeholder={table.globalFilterPlaceholder ?? "Пошук по таблиці"}
+                placeholder={
+                  table.globalFilterPlaceholder ?? "Пошук по таблиці"
+                }
               />
             </label>
-          ) : null}
-          {table.enableColumnVisibility !== false ? (
-            <TableSelectMenu
-              id="columns"
-              openId={openMenu}
-              onOpenIdChange={setOpenMenu}
-              trigger="Колонки"
-              triggerClassName="sci-data-table-columns-trigger"
-              contentClassName="sci-data-table-columns-menu"
-            >
-              {preparedColumns.map((column) => (
-                <label key={column.columnId}>
-                  <input
-                    type="checkbox"
-                    checked={columnVisibility[column.columnId] !== false}
-                    disabled={column.enableHiding === false}
-                    onChange={(event) =>
-                      setColumnVisibility((current) => ({
-                        ...current,
-                        [column.columnId]: event.target.checked,
-                      }))
-                    }
-                  />
-                  <span>{column.label}</span>
-                </label>
-              ))}
-            </TableSelectMenu>
           ) : null}
           {table.onExport ? (
             <button
@@ -431,19 +430,51 @@ export function MaterialReactTable<TData>({
                 void table.onExport?.({
                   rows: filteredRows,
                   columns: preparedColumns
-                    .filter((column) => columnVisibility[column.columnId] !== false)
+                    .filter(
+                      (column) => columnVisibility[column.columnId] !== false,
+                    )
                     .filter((column) => column.columnId !== "actions")
                     .map((column) => ({
-                    id: column.columnId,
-                    label: column.label,
-                    value: (row) =>
-                      column.exportValue?.(row) ?? getPlainCellValue(column, row),
-                  })),
+                      id: column.columnId,
+                      label: column.label,
+                      value: (row) =>
+                        column.exportValue?.(row) ??
+                        getPlainCellValue(column, row),
+                    })),
                 })
               }
             >
               {table.exportLabel ?? "Експорт"}
             </button>
+          ) : null}
+          {table.enableColumnVisibility !== false ? (
+            <div className="sci-data-table-columns">
+              <TableSelectMenu
+                id="columns"
+                openId={openMenu}
+                onOpenIdChange={setOpenMenu}
+                trigger="Колонки"
+                triggerClassName="sci-data-table-columns-trigger"
+                contentClassName="sci-data-table-columns-menu"
+              >
+                {preparedColumns.map((column) => (
+                  <label key={column.columnId}>
+                    <input
+                      type="checkbox"
+                      checked={columnVisibility[column.columnId] !== false}
+                      disabled={column.enableHiding === false}
+                      onChange={(event) =>
+                        setColumnVisibility((current) => ({
+                          ...current,
+                          [column.columnId]: event.target.checked,
+                        }))
+                      }
+                    />
+                    <span>{column.label}</span>
+                  </label>
+                ))}
+              </TableSelectMenu>
+            </div>
           ) : null}
         </div>
       ) : null}
@@ -513,7 +544,9 @@ export function MaterialReactTable<TData>({
                         }
                         aria-pressed={Boolean(column.pin)}
                         title={
-                          column.pin ? "Відкріпити колонку" : "Закріпити колонку"
+                          column.pin
+                            ? "Відкріпити колонку"
+                            : "Закріпити колонку"
                         }
                         onClick={() => toggleColumnPin(column)}
                       >
@@ -532,14 +565,19 @@ export function MaterialReactTable<TData>({
                     className={pinnedClassName(column.pin)}
                     style={pinnedStyle(column, pinnedOffsets)}
                   >
-                    {column.enableColumnFilter === false ? null : column.filterVariant ===
-                      "number-range" ? (
+                    {column.enableColumnFilter ===
+                    false ? null : column.filterVariant === "number-range" ? (
                       <ColumnNumberRangeFilter
                         label={column.label}
                         openId={openMenu}
                         menuId={`range:${column.columnId}`}
                         onOpenIdChange={setOpenMenu}
-                        value={columnRangeFilters[column.columnId] ?? { min: "", max: "" }}
+                        value={
+                          columnRangeFilters[column.columnId] ?? {
+                            min: "",
+                            max: "",
+                          }
+                        }
                         onChange={(range) =>
                           setColumnRangeFilters((current) => {
                             const next = { ...current };
@@ -563,7 +601,8 @@ export function MaterialReactTable<TData>({
                         onChange={(selected) =>
                           setColumnFilters((current) => {
                             const next = { ...current };
-                            if (selected.length) next[column.columnId] = selected;
+                            if (selected.length)
+                              next[column.columnId] = selected;
                             else delete next[column.columnId];
                             return next;
                           })
@@ -734,16 +773,20 @@ function prepareColumn<TData>(
   table: SciTableOptions<TData>,
 ): PreparedColumn<TData> {
   const columnId =
-    column.id ?? (column.accessorKey ? String(column.accessorKey) : `column_${index}`);
-  const leftPinned = table.initialState?.columnPinning?.left?.includes(columnId);
-  const rightPinned = table.initialState?.columnPinning?.right?.includes(columnId);
+    column.id ??
+    (column.accessorKey ? String(column.accessorKey) : `column_${index}`);
+  const leftPinned =
+    table.initialState?.columnPinning?.left?.includes(columnId);
+  const rightPinned =
+    table.initialState?.columnPinning?.right?.includes(columnId);
 
   return {
     ...column,
     columnId,
     label: labelText(column.header ?? columnId),
     width: column.size ?? column.minSize ?? 160,
-    pin: column.pin ?? (leftPinned ? "left" : rightPinned ? "right" : undefined),
+    pin:
+      column.pin ?? (leftPinned ? "left" : rightPinned ? "right" : undefined),
     sortable:
       column.enableSorting !== false &&
       columnId !== "actions" &&
@@ -797,8 +840,10 @@ function pinnedStyle<TData>(
     minWidth: column.width,
     maxWidth: column.width,
   };
-  if (column.pin === "left") style.left = offsets.left.get(column.columnId) ?? 0;
-  if (column.pin === "right") style.right = offsets.right.get(column.columnId) ?? 0;
+  if (column.pin === "left")
+    style.left = offsets.left.get(column.columnId) ?? 0;
+  if (column.pin === "right")
+    style.right = offsets.right.get(column.columnId) ?? 0;
   return style;
 }
 
@@ -813,7 +858,9 @@ function TableSelectMenu({
 }: {
   id: string;
   openId: string | null;
-  onOpenIdChange: (id: string | null | ((current: string | null) => string | null)) => void;
+  onOpenIdChange: (
+    id: string | null | ((current: string | null) => string | null),
+  ) => void;
   trigger: ReactNode;
   children: ReactNode;
   triggerClassName?: string;
@@ -828,11 +875,16 @@ function TableSelectMenu({
         )
       }
     >
-      <SelectTrigger className={triggerClassName ?? "sci-data-table-facet-trigger"}>
+      <SelectTrigger
+        className={triggerClassName ?? "sci-data-table-facet-trigger"}
+      >
         {trigger}
       </SelectTrigger>
       <SelectContent
-        className={contentClassName ?? "sci-data-table-facet-menu sci-data-table-select-content"}
+        className={
+          contentClassName ??
+          "sci-data-table-facet-menu sci-data-table-select-content"
+        }
         position="popper"
         align="start"
         onCloseAutoFocus={(event) => event.preventDefault()}
@@ -858,13 +910,13 @@ function ColumnFacetFilter({
   onChange: (selected: string[]) => void;
   openId: string | null;
   menuId: string;
-  onOpenIdChange: (id: string | null | ((current: string | null) => string | null)) => void;
+  onOpenIdChange: (
+    id: string | null | ((current: string | null) => string | null),
+  ) => void;
 }) {
   const [optionQuery, setOptionQuery] = useState("");
   const selectedSet = new Set(selected);
-  const caption = selected.length
-    ? `Обрано: ${selected.length}`
-    : "Фільтр";
+  const caption = selected.length ? `Обрано: ${selected.length}` : "Фільтр";
   const monthGroups = useMemo(() => buildFacetMonthGroups(options), [options]);
   const query = normalizeFilter(optionQuery);
   const filteredOptions = options.filter((option) =>
@@ -1001,7 +1053,9 @@ function ColumnNumberRangeFilter({
   onChange: (value: { min: string; max: string }) => void;
   openId: string | null;
   menuId: string;
-  onOpenIdChange: (id: string | null | ((current: string | null) => string | null)) => void;
+  onOpenIdChange: (
+    id: string | null | ((current: string | null) => string | null),
+  ) => void;
 }) {
   const hasRange = Boolean(value.min.trim() || value.max.trim());
   const caption = hasRange
@@ -1023,9 +1077,7 @@ function ColumnNumberRangeFilter({
           className="sci-data-table-facet-search"
           inputMode="numeric"
           value={value.min}
-          onChange={(event) =>
-            onChange({ ...value, min: event.target.value })
-          }
+          onChange={(event) => onChange({ ...value, min: event.target.value })}
           onKeyDown={(event) => event.stopPropagation()}
           onPointerDown={(event) => event.stopPropagation()}
           placeholder="0"
@@ -1037,9 +1089,7 @@ function ColumnNumberRangeFilter({
           className="sci-data-table-facet-search"
           inputMode="numeric"
           value={value.max}
-          onChange={(event) =>
-            onChange({ ...value, max: event.target.value })
-          }
+          onChange={(event) => onChange({ ...value, max: event.target.value })}
           onKeyDown={(event) => event.stopPropagation()}
           onPointerDown={(event) => event.stopPropagation()}
           placeholder="без межі"
@@ -1076,14 +1126,18 @@ function rowMatchesFilters<TData>(
     if (!rowText.includes(global)) return false;
   }
 
-  const matchesFacets = Object.entries(columnFilters).every(([columnId, filter]) => {
-    if (columnId === ignoredColumnId) return true;
-    const normalizedFilter = filter.map(normalizeFilter).filter(Boolean);
-    if (!normalizedFilter.length) return true;
-    const column = columns.find((item) => item.columnId === columnId);
-    if (!column) return true;
-    return normalizedFilter.includes(normalizeFilter(getPlainCellValue(column, row)));
-  });
+  const matchesFacets = Object.entries(columnFilters).every(
+    ([columnId, filter]) => {
+      if (columnId === ignoredColumnId) return true;
+      const normalizedFilter = filter.map(normalizeFilter).filter(Boolean);
+      if (!normalizedFilter.length) return true;
+      const column = columns.find((item) => item.columnId === columnId);
+      if (!column) return true;
+      return normalizedFilter.includes(
+        normalizeFilter(getPlainCellValue(column, row)),
+      );
+    },
+  );
   if (!matchesFacets) return false;
 
   return Object.entries(columnRangeFilters).every(([columnId, range]) => {
@@ -1153,7 +1207,8 @@ function renderCell<TData>(
 
 function getPlainCellValue<TData>(column: MRT_ColumnDef<TData>, row: TData) {
   const value = getCellValue(column, row);
-  if (typeof value === "string" || typeof value === "number") return String(value);
+  if (typeof value === "string" || typeof value === "number")
+    return String(value);
   if (value == null || typeof value === "boolean") return String(value ?? "");
   return "";
 }
@@ -1161,13 +1216,16 @@ function getPlainCellValue<TData>(column: MRT_ColumnDef<TData>, row: TData) {
 function getCellValue<TData>(column: MRT_ColumnDef<TData>, row: TData) {
   if (column.accessorFn) return column.accessorFn(row);
   if (column.accessorKey) {
-    return (row as Record<string, unknown>)[String(column.accessorKey)] as ReactNode;
+    return (row as Record<string, unknown>)[
+      String(column.accessorKey)
+    ] as ReactNode;
   }
   return null;
 }
 
 function labelText(value: ReactNode) {
-  if (typeof value === "string" || typeof value === "number") return String(value);
+  if (typeof value === "string" || typeof value === "number")
+    return String(value);
   return "Колонка";
 }
 
@@ -1213,7 +1271,10 @@ function compareSortValues(left: string, right: string) {
     return leftNumber - rightNumber;
   }
 
-  return left.localeCompare(right, "uk", { numeric: true, sensitivity: "base" });
+  return left.localeCompare(right, "uk", {
+    numeric: true,
+    sensitivity: "base",
+  });
 }
 
 function sortRows<TData>(
@@ -1309,8 +1370,12 @@ function buildFacetMonthGroups(options: string[]): FacetMonthGroup[] {
   const dated = options
     .map((option) => ({ option, parsed: parseFacetDate(option) }))
     .filter(
-      (item): item is { option: string; parsed: NonNullable<ReturnType<typeof parseFacetDate>> } =>
-        Boolean(item.parsed),
+      (
+        item,
+      ): item is {
+        option: string;
+        parsed: NonNullable<ReturnType<typeof parseFacetDate>>;
+      } => Boolean(item.parsed),
     );
   if (dated.length < 2 || dated.length < options.length / 2) return [];
 
@@ -1329,5 +1394,7 @@ function buildFacetMonthGroups(options: string[]): FacetMonthGroup[] {
     });
   });
 
-  return [...groups.values()].sort((left, right) => right.key.localeCompare(left.key));
+  return [...groups.values()].sort((left, right) =>
+    right.key.localeCompare(left.key),
+  );
 }

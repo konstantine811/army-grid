@@ -635,6 +635,73 @@ export const resolveMorningGeneralListColumnLabel = (
   return fallback;
 };
 
+/** Повна посада з ранкового (`повна_посада` / `roster__повна_посада`) або коротка посада. */
+export const getPersonFullPositionTitle = (row: EjournalPreviewRow | null) => {
+  if (!row) return "";
+
+  const read = (value: unknown) => previewValueToDisplay(value).trim();
+
+  // Явно передано з картки особи при відкритті довідки.
+  const explicit = read(row.__zhbdFullPosition);
+  if (explicit) return explicit;
+
+  const keyNorm = (key: string) =>
+    rosterSourceKey(key).toLocaleLowerCase("uk-UA").replace(/[\s-]+/g, "_");
+
+  let shortFallback = "";
+
+  for (const [key, raw] of Object.entries(row)) {
+    if (key.startsWith("__") && key !== "__zhbdFullPosition") continue;
+    const text = read(raw);
+    if (!text) continue;
+    const norm = keyNorm(key);
+
+    if (
+      norm === "повна_посада" ||
+      norm.endsWith("_повна_посада") ||
+      (norm.includes("повна") && norm.includes("посада"))
+    ) {
+      return text;
+    }
+
+    if (
+      !shortFallback &&
+      (norm === "посада" ||
+        norm.endsWith("_посада") ||
+        /^column_5(_|$)/i.test(rosterSourceKey(key))) &&
+      !norm.includes("повна") &&
+      !norm.includes("індекс") &&
+      !norm.includes("прийняття") &&
+      !norm.includes("наказу")
+    ) {
+      shortFallback = text;
+    }
+  }
+
+  return shortFallback || getPersonFieldValue(row, ["чим", "займається"]).trim();
+};
+
+/** Значення «Повна посада» з рядка картки (як у блоці Загальний список). */
+export const pickFullPositionFromPersonRow = (row: EjournalPreviewRow | null) => {
+  if (!row) return "";
+  const read = (value: unknown) => previewValueToDisplay(value).trim();
+  for (const [key, raw] of Object.entries(row)) {
+    const text = read(raw);
+    if (!text) continue;
+    const norm = key
+      .replace(/^roster__/i, "")
+      .toLocaleLowerCase("uk-UA")
+      .replace(/[\s-]+/g, "_");
+    if (
+      norm === "повна_посада" ||
+      (norm.includes("повна") && norm.includes("посада"))
+    ) {
+      return text;
+    }
+  }
+  return getPersonFullPositionTitle(row);
+};
+
 /** Excel I: оф. / серж. / солд. — категорія складу, не військове звання. */
 const RANK_CATEGORY_VALUE_RE = /^(оф|сер[жh]|солд)\.?$/i;
 const RANK_TITLE_VALUE_RE =
@@ -789,7 +856,7 @@ const collectRosterFieldEntries = (row: EjournalPreviewRow | null) => {
     .filter((entry) => entry.value);
 };
 
-const resolvePersonBirthDate = (row: EjournalPreviewRow | null) => {
+export const resolvePersonBirthDate = (row: EjournalPreviewRow | null) => {
   const fromOos = formatExcelDateDisplay(
     getPersonFieldValue(row, ["дата_народження"]),
   ).trim();
@@ -964,7 +1031,7 @@ const resolveDirectCallSignValue = (value: string) => {
   return isLikelyCallSignToken(text) ? text : "";
 };
 
-const resolvePersonCallSign = (row: EjournalPreviewRow | null) => {
+export const resolvePersonCallSign = (row: EjournalPreviewRow | null) => {
   for (const fieldValue of collectPersonCallSignFieldValues(row)) {
     const resolved = resolveDirectCallSignValue(fieldValue);
     if (resolved) return resolved;
@@ -1074,272 +1141,22 @@ export const collectPersonExternalIdCandidates = (
     getPersonFieldValue(row, ["піб"]);
   const nameKey = normalizePersonIdentityText(name);
   const spreadsheetId = getPersonExternalId(row);
+  const birthKey = normalizePersonBirthKey(resolvePersonBirthDate(row));
+  const callSignKey = normalizePersonIdentityText(resolvePersonCallSign(row));
   if (nameKey) {
     push(`roster:${nameKey}`);
     push(`roster:${String(name).trim()}`);
+    push(`name:${nameKey}`);
+    if (birthKey) push(`name-birth:${nameKey}:${birthKey}`);
+    if (callSignKey) push(`name-call:${nameKey}:${callSignKey}`);
   }
+  if (callSignKey) push(`call:${callSignKey}`);
   if (spreadsheetId) push(`roster:${spreadsheetId}`);
 
   const identityKey = resolvePersonIdentityKey(row);
   if (identityKey) push(identityKey);
 
   return [...values];
-};
-
-export type PersonAttachmentMigrationPair = {
-  name: string;
-  fromExternalId: string;
-  toExternalId: string;
-};
-
-export const dedupePersonAttachmentMigrationPairs = (
-  pairs: PersonAttachmentMigrationPair[],
-) => {
-  const seen = new Set<string>();
-  return pairs.filter((pair) => {
-    const fromExternalId = pair.fromExternalId.trim();
-    const toExternalId = pair.toExternalId.trim();
-    if (!fromExternalId || !toExternalId || fromExternalId === toExternalId) {
-      return false;
-    }
-    const key = `${fromExternalId}=>${toExternalId}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-};
-
-export const buildSelfAttachmentMigrationPairs = (
-  rows: EjournalPreviewRow[],
-) => {
-  const pairs: PersonAttachmentMigrationPair[] = [];
-  for (const row of rows) {
-    if (!isLikelyPersonnelRow(row)) continue;
-    const summary = buildPersonSummary(row);
-    const toExternalId = summary.externalId;
-    if (!toExternalId) continue;
-    for (const fromExternalId of collectPersonExternalIdCandidates(row)) {
-      pairs.push({
-        name: summary.name,
-        fromExternalId,
-        toExternalId,
-      });
-    }
-  }
-  return dedupePersonAttachmentMigrationPairs(pairs);
-};
-
-export const buildOrphanAttachmentMigrationPairs = (
-  rows: EjournalPreviewRow[],
-  orphanIds: Set<string>,
-) => {
-  if (!orphanIds.size) return [];
-
-  const pairs: PersonAttachmentMigrationPair[] = [];
-  for (const row of rows) {
-    if (!isLikelyPersonnelRow(row)) continue;
-    const toExternalId = resolvePersonIdentityKey(row);
-    if (!toExternalId) continue;
-    const name =
-      getPersonFieldValue(row, ["прізвище"]) ||
-      getPersonFieldValue(row, ["піб"]);
-    for (const fromExternalId of collectPersonExternalIdCandidates(row)) {
-      if (!orphanIds.has(fromExternalId) || fromExternalId === toExternalId) {
-        continue;
-      }
-      pairs.push({
-        name,
-        fromExternalId,
-        toExternalId,
-      });
-    }
-  }
-  return dedupePersonAttachmentMigrationPairs(pairs);
-};
-
-export type PersonAttachmentMigrationOptions = {
-  includeDocuments?: boolean;
-  photos?: Array<{ personExternalId: string; photoData: string }>;
-  questionnaires?: Array<{ personExternalId: string }>;
-  documents?: BackendPersonDocument[];
-};
-
-const migrateTargetedPersonAttachments = async (
-  pairs: PersonAttachmentMigrationPair[],
-  includeDocuments: boolean,
-) => {
-  let migrated = 0;
-  for (const pair of pairs) {
-    try {
-      const [oldPhoto, newPhoto] = await Promise.all([
-        api.getPersonPhoto(pair.fromExternalId).catch(() => null),
-        api.getPersonPhoto(pair.toExternalId).catch(() => null),
-      ]);
-      if (oldPhoto?.photoData && !newPhoto?.photoData) {
-        await api.upsertPersonPhoto(pair.toExternalId, {
-          photoData: oldPhoto.photoData,
-          fileName: `${pair.name}.jpg`,
-        });
-        migrated += 1;
-      }
-
-      const [oldQuestionnaire, newQuestionnaire] = await Promise.all([
-        api.getPersonQuestionnaire(pair.fromExternalId).catch(() => null),
-        api.getPersonQuestionnaire(pair.toExternalId).catch(() => null),
-      ]);
-      if (oldQuestionnaire?.fileData && !newQuestionnaire?.fileData) {
-        await api.upsertPersonQuestionnaire(pair.toExternalId, {
-          fileData: oldQuestionnaire.fileData,
-          fileName: sanitizeFileName(
-            buildQuestionnaireExportFileName(pair.name),
-          ),
-          mimeType: oldQuestionnaire.mimeType ?? "application/pdf",
-        });
-        migrated += 1;
-      }
-
-      if (!includeDocuments) continue;
-      const [oldDocs, newDocs] = await Promise.all([
-        api.listPersonDocuments(pair.fromExternalId).catch(() => []),
-        api.listPersonDocuments(pair.toExternalId).catch(() => []),
-      ]);
-      const existing = [...newDocs];
-      for (const document of oldDocs) {
-        const already = existing.some(
-          (item) => item.type === document.type && item.title === document.title,
-        );
-        if (already) continue;
-        const created = await api.createPersonDocument(pair.toExternalId, {
-          type: document.type,
-          title: document.title,
-          ...(document.status ? { status: document.status } : {}),
-          ...(document.fields ? { fields: document.fields } : {}),
-          ...(document.workflow ? { workflow: document.workflow } : {}),
-          ...(document.files ? { files: document.files } : {}),
-        });
-        existing.push(created);
-        migrated += 1;
-      }
-    } catch {
-      // One broken ID must not block the rest.
-    }
-  }
-  return migrated;
-};
-
-export const migratePersonAttachmentsBetweenIds = async (
-  pairs: PersonAttachmentMigrationPair[],
-  options: PersonAttachmentMigrationOptions = {},
-) => {
-  const unique = dedupePersonAttachmentMigrationPairs(pairs);
-  if (!unique.length) return 0;
-
-  const includeDocuments = options.includeDocuments !== false;
-  if (
-    unique.length <= 16 &&
-    !options.photos &&
-    !options.questionnaires &&
-    !options.documents
-  ) {
-    return migrateTargetedPersonAttachments(unique, includeDocuments);
-  }
-
-  const [photos, questionnaires, documents] = await Promise.all([
-    options.photos
-      ? Promise.resolve(options.photos)
-      : api.listPersonPhotos().catch(() => []),
-    options.questionnaires
-      ? Promise.resolve(options.questionnaires)
-      : api.listPersonQuestionnaires().catch(() => []),
-    includeDocuments
-      ? options.documents
-        ? Promise.resolve(options.documents)
-        : api.listAllPersonDocuments().catch(() => [])
-      : Promise.resolve([] as BackendPersonDocument[]),
-  ]);
-
-  const photoById = new Map(
-    photos
-      .filter((item) => item.personExternalId && item.photoData)
-      .map((item) => [item.personExternalId, item.photoData]),
-  );
-  const questionnaireIds = new Set(
-    questionnaires
-      .map((item) => item.personExternalId)
-      .filter((item): item is string => Boolean(item)),
-  );
-  const documentsById = new Map<string, BackendPersonDocument[]>();
-  for (const document of documents) {
-    const id = document.personExternalId?.trim();
-    if (!id) continue;
-    documentsById.set(id, [...(documentsById.get(id) ?? []), document]);
-  }
-
-  let migrated = 0;
-  for (const pair of unique) {
-    try {
-      const hasWork =
-        photoById.has(pair.fromExternalId) ||
-        questionnaireIds.has(pair.fromExternalId) ||
-        (documentsById.get(pair.fromExternalId)?.length ?? 0) > 0;
-      if (!hasWork) continue;
-
-      const oldPhoto = photoById.get(pair.fromExternalId);
-      if (oldPhoto && !photoById.has(pair.toExternalId)) {
-        await api.upsertPersonPhoto(pair.toExternalId, {
-          photoData: oldPhoto,
-          fileName: `${pair.name}.jpg`,
-        });
-        photoById.set(pair.toExternalId, oldPhoto);
-        migrated += 1;
-      }
-
-      if (
-        questionnaireIds.has(pair.fromExternalId) &&
-        !questionnaireIds.has(pair.toExternalId)
-      ) {
-        const oldQuestionnaire = await api.getPersonQuestionnaire(
-          pair.fromExternalId,
-        );
-        if (oldQuestionnaire?.fileData) {
-          await api.upsertPersonQuestionnaire(pair.toExternalId, {
-            fileData: oldQuestionnaire.fileData,
-            fileName: sanitizeFileName(
-              buildQuestionnaireExportFileName(pair.name),
-            ),
-            mimeType: oldQuestionnaire.mimeType ?? "application/pdf",
-          });
-          questionnaireIds.add(pair.toExternalId);
-          migrated += 1;
-        }
-      }
-
-      if (!includeDocuments) continue;
-      const oldDocs = documentsById.get(pair.fromExternalId) ?? [];
-      const newDocs = [...(documentsById.get(pair.toExternalId) ?? [])];
-      for (const document of oldDocs) {
-        const already = newDocs.some(
-          (item) => item.type === document.type && item.title === document.title,
-        );
-        if (already) continue;
-        const created = await api.createPersonDocument(pair.toExternalId, {
-          type: document.type,
-          title: document.title,
-          ...(document.status ? { status: document.status } : {}),
-          ...(document.fields ? { fields: document.fields } : {}),
-          ...(document.workflow ? { workflow: document.workflow } : {}),
-          ...(document.files ? { files: document.files } : {}),
-        });
-        newDocs.push(created);
-        migrated += 1;
-      }
-      documentsById.set(pair.toExternalId, newDocs);
-    } catch {
-      // Keep going so one broken attachment cannot empty the personnel list.
-    }
-  }
-
-  return migrated;
 };
 
 const capitalizePersonNamePart = (word: string) => {
@@ -1533,3 +1350,5 @@ export const loadAllEjournalSheetRows = async (
     isChanged: jsonChanged,
   });
 };
+
+export * from "./personAttachments";

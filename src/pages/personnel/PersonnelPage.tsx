@@ -14,9 +14,12 @@ import {
 } from "@/components/sci/SciPrimitives";
 import { AddPhotoAlternateOutlinedIcon } from "@/components/sci/icons";
 import { ArticleOutlinedIcon } from "@/components/sci/icons";
+import { ArrowLeftOutlinedIcon } from "@/components/sci/icons";
 import { DeleteOutlineOutlinedIcon } from "@/components/sci/icons";
 import { FileUploadOutlinedIcon } from "@/components/sci/icons";
 import { FileDownloadOutlinedIcon } from "@/components/sci/icons";
+import { FormatListBulletedOutlinedIcon } from "@/components/sci/icons";
+import { PersonOutlinedIcon } from "@/components/sci/icons";
 import { PersonSearchOutlinedIcon } from "@/components/sci/icons";
 import { PictureAsPdfOutlinedIcon } from "@/components/sci/icons";
 import { SearchOutlinedIcon } from "@/components/sci/icons";
@@ -27,6 +30,7 @@ import {
   type BackendPersonQuestionnaire,
   type BackendPersonnelRosterLatest,
 } from "../../api";
+import { useAuth } from "../../auth/AuthProvider";
 import {
   CacheKeys,
   fetchWithCache,
@@ -81,6 +85,7 @@ import {
   migratePersonAttachmentsBetweenIds,
   normalizePersonBirthKey,
   normalizeUaPhone,
+  pickFullPositionFromPersonRow,
   resolveMorningGeneralListColumnLabel,
   resolvePersonIdentityKey,
   resolvePersonRankTitle,
@@ -374,15 +379,20 @@ export function PersonnelPage({
       | "ubdReport"
       | "form6Report"
       | "form12Report"
+      | "serviceCharacteristic"
+      | "zhbdCertificate"
       | "ubdRestoreReport"
       | "temporaryMilitaryId",
+    meta?: { fullPosition?: string },
   ) => void;
 }) {
+  const { canEdit } = useAuth();
   const [imports, setImports] = useState<BackendEjournalImport[]>([]);
   const [dbPreview, setDbPreview] = useState<DbPreviewState | null>(null);
   const [rosterLabels, setRosterLabels] = useState<Record<string, string>>({});
   const [rosterImportName, setRosterImportName] = useState("");
   const [selectedRowId, setSelectedRowId] = useState("");
+  const [mobilePane, setMobilePane] = useState<"list" | "card" | "side">("list");
   const personnelFocusLockRef = useRef<{
     rowId: string;
     externalId: string;
@@ -784,17 +794,12 @@ export function PersonnelPage({
       !diskPreviewFile
     ) {
       try {
-        const response = await fetch(
-          api.getPersonQuestionnaireFileUrl(
-            externalId,
-            questionnaireExportFileName,
-            true,
-          ),
+        const blob = await api.fetchPersonQuestionnaireFile(
+          externalId,
+          questionnaireExportFileName,
+          true,
         );
-        if (!response.ok) {
-          throw new Error("Не вдалося завантажити PDF з сервера.");
-        }
-        downloadBlob(await response.blob(), questionnaireExportFileName);
+        downloadBlob(blob, questionnaireExportFileName);
         setMessage(`Експортовано: ${questionnaireExportFileName}`);
         return;
       } catch (error) {
@@ -947,6 +952,9 @@ export function PersonnelPage({
       }
       return rows[0]?.__dbRowId ?? "";
     });
+    if (focusedRow?.__dbRowId) {
+      setMobilePane("card");
+    }
     // Keep focus through cache→network reload; clear only after fresh apply.
     if (focusedRow && !options?.fromCache) {
       personnelFocusLockRef.current = null;
@@ -1653,7 +1661,10 @@ export function PersonnelPage({
     const record = personnelRows.find(
       (item) => item.summary.externalId === externalId,
     );
-    if (record?.row.__dbRowId) setSelectedRowId(record.row.__dbRowId);
+    if (record?.row.__dbRowId) {
+      setSelectedRowId(record.row.__dbRowId);
+      setMobilePane("card");
+    }
   };
 
   const openDiskQuestionnairePreview = (file: File, title: string) => {
@@ -1687,23 +1698,32 @@ export function PersonnelPage({
     });
   };
 
-  const openQuestionnairePreview = (fileData = questionnaire?.fileData) => {
+  const openQuestionnairePreview = async (fileData = questionnaire?.fileData) => {
     const externalId = selectedSummary.externalId;
     let nextUrl = "";
 
-    if (
-      externalId &&
-      fileData &&
-      !pendingQuestionnaireFile &&
-      !diskPreviewFile
-    ) {
-      nextUrl = api.getPersonQuestionnaireFileUrl(
-        externalId,
-        questionnaireExportFileName,
+    try {
+      if (
+        externalId &&
+        fileData &&
+        !pendingQuestionnaireFile &&
+        !diskPreviewFile
+      ) {
+        nextUrl = await api.getPersonQuestionnaireObjectUrl(
+          externalId,
+          questionnaireExportFileName,
+        );
+      } else if (fileData) {
+        nextUrl = dataUrlToObjectUrl(fileData);
+      } else {
+        return;
+      }
+    } catch (error) {
+      setMessage(
+        error instanceof Error
+          ? `Не вдалося відкрити анкету: ${error.message}`
+          : "Не вдалося відкрити анкету.",
       );
-    } else if (fileData) {
-      nextUrl = dataUrlToObjectUrl(fileData);
-    } else {
       return;
     }
 
@@ -1722,7 +1742,7 @@ export function PersonnelPage({
     setIsQuestionnairePreviewOpen(true);
   };
 
-  const openQuestionnaireInNewTab = () => {
+  const openQuestionnaireInNewTab = async () => {
     const externalId = selectedSummary.externalId;
     if (
       externalId &&
@@ -1730,12 +1750,22 @@ export function PersonnelPage({
       !pendingQuestionnaireFile &&
       !diskPreviewFile
     ) {
-      window.open(
-        api.getPersonQuestionnaireFileUrl(externalId, questionnaireExportFileName),
-        "_blank",
-        "noopener,noreferrer",
-      );
-      return;
+      try {
+        const url = await api.getPersonQuestionnaireObjectUrl(
+          externalId,
+          questionnaireExportFileName,
+        );
+        window.open(url, "_blank", "noopener,noreferrer");
+        window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+        return;
+      } catch (error) {
+        setMessage(
+          error instanceof Error
+            ? `Не вдалося відкрити анкету: ${error.message}`
+            : "Не вдалося відкрити анкету.",
+        );
+        return;
+      }
     }
     downloadCurrentQuestionnaire();
   };
@@ -1841,7 +1871,7 @@ export function PersonnelPage({
 
   return (
     <main className="main-panel personnel-page">
-      <header className="topbar analytics-topbar">
+      <header className="topbar analytics-topbar personnel-topbar">
         <Box>
           <Typography component="h1" variant="h4">
             Особовий склад
@@ -1850,17 +1880,17 @@ export function PersonnelPage({
             Список із ЕЖООС · картка особи · редагування staging-даних
           </Typography>
         </Box>
-        <Stack direction="row" spacing={1}>
+        <Stack className="personnel-topbar-actions" direction="row" spacing={1}>
           <Button
             variant="outlined"
-            disabled={!missingDiskSearchPeople.length}
+            disabled={!canEdit || !missingDiskSearchPeople.length}
             onClick={() => setIsDiskSearchOpen(true)}
           >
             Пошук усіх анкет
           </Button>
           <Button
             component="label"
-            disabled={isLoading}
+            disabled={isLoading || !canEdit}
             startIcon={<FileUploadOutlinedIcon />}
             variant="outlined"
           >
@@ -1869,13 +1899,18 @@ export function PersonnelPage({
               hidden
               type="file"
               accept=".xlsx,.xlsm"
+              disabled={!canEdit}
               onChange={(event) => {
                 void importPersonnelRoster(event.target.files?.[0]);
                 event.target.value = "";
               }}
             />
           </Button>
-          <Button variant="outlined" onClick={() => void loadPersonnel()}>
+          <Button
+            variant="outlined"
+            disabled={!canEdit}
+            onClick={() => void loadPersonnel()}
+          >
             Оновити з БД
           </Button>
         </Stack>
@@ -1885,7 +1920,42 @@ export function PersonnelPage({
         {message}
       </Alert>
 
-      <section className="personnel-layout">
+      <div className="personnel-mobile-tabs" role="tablist" aria-label="Розділи особового складу">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={mobilePane === "list"}
+          className={mobilePane === "list" ? "is-active" : undefined}
+          onClick={() => setMobilePane("list")}
+        >
+          <FormatListBulletedOutlinedIcon fontSize="small" />
+          Список
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={mobilePane === "card"}
+          className={mobilePane === "card" ? "is-active" : undefined}
+          disabled={!selectedRowId}
+          onClick={() => selectedRowId && setMobilePane("card")}
+        >
+          <PersonOutlinedIcon fontSize="small" />
+          Картка
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={mobilePane === "side"}
+          className={mobilePane === "side" ? "is-active" : undefined}
+          disabled={!selectedRowId}
+          onClick={() => selectedRowId && setMobilePane("side")}
+        >
+          <ArticleOutlinedIcon fontSize="small" />
+          Дії
+        </button>
+      </div>
+
+      <section className={`personnel-layout mobile-pane-${mobilePane}`}>
         <aside className="analytics-panel personnel-list-panel">
           <div className="panel-heading">
             Військовослужбовці · {filteredPersonnel.length}
@@ -1906,7 +1976,10 @@ export function PersonnelPage({
             items={filteredPersonnel}
             selectedRowId={selectedRowId}
             photoByExternalId={photoByExternalId}
-            onSelect={setSelectedRowId}
+            onSelect={(rowId) => {
+              setSelectedRowId(rowId);
+              setMobilePane("card");
+            }}
             keyboardEnabled={
               !isPhotoCropOpen &&
               !isQuestionnairePreviewOpen &&
@@ -1917,6 +1990,24 @@ export function PersonnelPage({
         </aside>
 
         <section className="person-card-panel">
+          <div className="personnel-mobile-card-nav">
+            <Button
+              size="small"
+              variant="outlined"
+              startIcon={<ArrowLeftOutlinedIcon fontSize="small" />}
+              onClick={() => setMobilePane("list")}
+            >
+              До списку
+            </Button>
+            <Button
+              size="small"
+              variant="outlined"
+              disabled={!selectedRowId}
+              onClick={() => setMobilePane("side")}
+            >
+              Статус / документи
+            </Button>
+          </div>
           <div className="person-card-hero">
             <div className="person-avatar">
               {selectedPhoto ? (
@@ -2209,6 +2300,23 @@ export function PersonnelPage({
         </section>
 
         <aside className="person-side-panel">
+          <div className="personnel-mobile-card-nav">
+            <Button
+              size="small"
+              variant="outlined"
+              startIcon={<ArrowLeftOutlinedIcon fontSize="small" />}
+              onClick={() => setMobilePane("card")}
+            >
+              До картки
+            </Button>
+            <Button
+              size="small"
+              variant="outlined"
+              onClick={() => setMobilePane("list")}
+            >
+              До списку
+            </Button>
+          </div>
           <div className="analytics-panel">
             <div className="panel-heading">Зміна статусу</div>
             <div className="person-action-buttons">
@@ -2274,7 +2382,7 @@ export function PersonnelPage({
                   <button
                     className="person-document-item is-ready"
                     type="button"
-                    onClick={() => openQuestionnairePreview()}
+                    onClick={() => void openQuestionnairePreview()}
                   >
                     <PictureAsPdfOutlinedIcon />
                     <span>
@@ -2434,6 +2542,70 @@ export function PersonnelPage({
                 <span>
                   <strong>Форма 12</strong>
                   <small>рапорт Ф-12, дані бійця, підпис PNG</small>
+                </span>
+              </button>
+              <button
+                className={[
+                  "person-document-item",
+                  personRelatedDocuments.some(
+                    (document) => document.type === "serviceCharacteristic",
+                  )
+                    ? "is-ready"
+                    : "",
+                ]
+                  .filter(Boolean)
+                  .join(" ")}
+                disabled={!selectedRow}
+                type="button"
+                onClick={() =>
+                  selectedRow &&
+                  onOpenDocuments(selectedRow, "serviceCharacteristic")
+                }
+              >
+                <ArticleOutlinedIcon />
+                <span>
+                  <strong>Службова характеристика</strong>
+                  <small>звання, ПІБ, посада, текст, підпис командира</small>
+                </span>
+              </button>
+              <button
+                className={[
+                  "person-document-item",
+                  personRelatedDocuments.some(
+                    (document) => document.type === "zhbdCertificate",
+                  )
+                    ? "is-ready"
+                    : "",
+                ]
+                  .filter(Boolean)
+                  .join(" ")}
+                disabled={!selectedRow}
+                type="button"
+                onClick={() => {
+                  if (!selectedRow) return;
+                  const fullPosition =
+                    rosterFieldRows.find((field) =>
+                      field.label
+                        .trim()
+                        .toLocaleLowerCase("uk-UA")
+                        .replace(/_/g, " ")
+                        .includes("повна посада"),
+                    )?.value ||
+                    pickFullPositionFromPersonRow(selectedRow) ||
+                    rosterFieldRows.find((field) =>
+                      field.label.trim().toLocaleLowerCase("uk-UA").replace(/_/g, " ") ===
+                      "посада",
+                    )?.value ||
+                    "";
+                  onOpenDocuments(selectedRow, "zhbdCertificate", {
+                    fullPosition,
+                  });
+                }}
+              >
+                <ArticleOutlinedIcon />
+                <span>
+                  <strong>Довідка ЖБД</strong>
+                  <small>період, посада, підстава, підпис</small>
                 </span>
               </button>
               <button
@@ -2730,7 +2902,7 @@ export function PersonnelPage({
             <Button
               variant="outlined"
               disabled={!questionnairePreviewUrl}
-              onClick={openQuestionnaireInNewTab}
+              onClick={() => void openQuestionnaireInNewTab()}
             >
               Відкрити в новій вкладці
             </Button>

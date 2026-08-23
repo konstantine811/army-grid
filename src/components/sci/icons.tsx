@@ -15,6 +15,7 @@ import {
   ImagePlus,
   Info,
   ListChecks,
+  LogOut,
   Maximize2,
   Menu,
   MenuSquare,
@@ -26,12 +27,15 @@ import {
   ArrowUp,
   ArrowUpDown,
   ArrowRight,
+  ArrowLeft,
   SkipForward,
   Plane,
   Search,
   Settings,
   Share2,
   Shield,
+  Eye,
+  EyeOff,
   Swords,
   Upload,
   User,
@@ -81,6 +85,8 @@ export const DashboardOutlinedIcon = withCompatIcon(Grid2X2);
 export const DeleteOutlineOutlinedIcon = withCompatIcon(XCircle);
 export const DescriptionOutlinedIcon = withCompatIcon(FileText);
 export const ErrorOutlineOutlinedIcon = withCompatIcon(XCircle);
+export const VisibilityOutlinedIcon = withCompatIcon(Eye);
+export const VisibilityOffOutlinedIcon = withCompatIcon(EyeOff);
 export const FileDownloadOutlinedIcon = withCompatIcon(Download);
 export const FileUploadOutlinedIcon = withCompatIcon(Upload);
 export const FormatListBulletedOutlinedIcon = withCompatIcon(ListChecks);
@@ -91,6 +97,7 @@ export const GroupsOutlinedIcon = withCompatIcon(Users);
 export const HelpOutlineOutlinedIcon = withCompatIcon(HelpCircle);
 export const InfoOutlinedIcon = withCompatIcon(Info);
 export const LocalHospitalOutlinedIcon = withCompatIcon(Ambulance);
+export const LogoutOutlinedIcon = withCompatIcon(LogOut);
 export const MenuOpenOutlinedIcon = withCompatIcon(MenuSquare);
 export const MenuOutlinedIcon = withCompatIcon(Menu);
 export const MilitaryTechOutlinedIcon = withCompatIcon(Swords);
@@ -104,6 +111,7 @@ export const SortArrowDownIcon = withCompatIcon(ArrowDown);
 export const SortArrowUpIcon = withCompatIcon(ArrowUp);
 export const SortArrowUpDownIcon = withCompatIcon(ArrowUpDown);
 export const ArrowRightOutlinedIcon = withCompatIcon(ArrowRight);
+export const ArrowLeftOutlinedIcon = withCompatIcon(ArrowLeft);
 export const SkipNextOutlinedIcon = withCompatIcon(SkipForward);
 export const SearchOutlinedIcon = withCompatIcon(Search);
 export const SettingsOutlinedIcon = withCompatIcon(Settings);

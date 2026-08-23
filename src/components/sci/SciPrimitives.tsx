@@ -189,6 +189,9 @@ type ButtonProps = Omit<React.ComponentProps<typeof SciButton>, "variant" | "siz
   startIcon?: ReactNode;
   endIcon?: ReactNode;
   component?: ElementType;
+  href?: string;
+  target?: string;
+  rel?: string;
   fullWidth?: boolean;
   size?: "small" | "medium" | "large" | "SM" | "MD" | "LG";
   sx?: Sx;
@@ -309,6 +312,7 @@ type TextFieldProps = Omit<React.InputHTMLAttributes<HTMLInputElement>, "size" |
   children?: ReactNode;
   sx?: Sx;
   slotProps?: Record<string, unknown>;
+  suffix?: ReactNode;
   onChange?: (event: ChangeEvent<HTMLInputElement | HTMLSelectElement>) => void;
 };
 
@@ -325,6 +329,7 @@ export function TextField({
   size: _size,
   fullWidth: _fullWidth,
   slotProps: _slotProps,
+  suffix,
   ...props
 }: TextFieldProps) {
   if (select) {
@@ -368,6 +373,7 @@ export function TextField({
       className={className}
       style={{ ...sxToStyle(sx), ...style }}
       onChange={onChange as React.ChangeEventHandler<HTMLInputElement>}
+      suffix={suffix}
       {...props}
     />
   );

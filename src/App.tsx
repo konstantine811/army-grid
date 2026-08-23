@@ -5,8 +5,7 @@ import {
   type SetStateAction,
 } from "react";
 import { Box, Button, Stack, Typography } from "@/components/sci/SciPrimitives";
-import { DescriptionOutlinedIcon } from "@/components/sci/icons";
-import { HelpOutlineOutlinedIcon } from "@/components/sci/icons";
+import { DescriptionOutlinedIcon, HelpOutlineOutlinedIcon, MenuOutlinedIcon } from "@/components/sci/icons";
 import {
   type ExcelRow,
   type ExcelWorkbookSnapshot,
@@ -27,7 +26,7 @@ import {
   pushAppRoute,
   type AppPage,
 } from "./app/navigation";
-import { Sidebar } from "./app/layout/Sidebar";
+import { Sidebar, APP_PAGE_LABELS } from "./app/layout/Sidebar";
 import { formatDateTime, formatFileSize } from "./shared/format";
 import { DataSources } from "./pages/import/DataSources";
 import { MappingPanel } from "./pages/import/MappingPanel";
@@ -37,6 +36,11 @@ import type { DataSourceFile } from "./pages/import/types";
 import { AnalyticsPage } from "./pages/analytics/AnalyticsPage";
 import { PersonnelPage } from "./pages/personnel/PersonnelPage";
 import { DocumentsPage } from "./pages/documents/DocumentsPage";
+import { storeSelectedPersonFullPosition } from "./pages/documents/zhbdCertificateReport";
+import {
+  getPersonFullPositionTitle,
+  pickFullPositionFromPersonRow,
+} from "./pages/personnel/personnelUtils";
 import { EjournalPage } from "./pages/ejournal/EjournalPage";
 import type { EjournalPreviewRow } from "./pages/ejournal/ejournalTypes";
 import { buildPersonSummary } from "./pages/personnel/personnelUtils";
@@ -50,12 +54,20 @@ import { SocPassportPage } from "./pages/soc-passport/SocPassportPage";
 import { DocumentSignatoriesSettingsPage } from "./pages/document-settings/DocumentSignatoriesSettingsPage";
 import { SciScrollbars } from "./components/sci/SciScrollbars";
 import { SciLiveFeedback } from "./components/sci/SciLiveFeedback";
+import { useAuth } from "./auth/AuthProvider";
+import { AuthPage } from "./auth/AuthPage";
+import { PendingAccessPage } from "./auth/PendingAccessPage";
+import { useAuthScrollLock } from "./auth/useAuthScrollLock";
+import { UsersAccessPage } from "./pages/users/UsersAccessPage";
 
 function App() {
+  const { loading, user, canView, canEdit, isAdmin } = useAuth();
+  useAuthScrollLock(loading || !user || !canView);
   const [activePage, setActivePage] = useState<AppPage>(() =>
     getPageFromPath(window.location.pathname),
   );
   const [routeKey, setRouteKey] = useState(getCurrentRouteKey);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [snapshot, setSnapshot] = useState<ExcelWorkbookSnapshot | null>(null);
   const [activeSheetIndex, setActiveSheetIndex] = useState(0);
   const [sheetRowsByIndex, setSheetRowsByIndex] = useState<
@@ -246,14 +258,46 @@ function App() {
     }
   }, [activePage]);
 
+  useEffect(() => {
+    if (!mobileNavOpen) return;
+    const previous = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMobileNavOpen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.body.style.overflow = previous;
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [mobileNavOpen]);
+
+  useEffect(() => {
+    const media = window.matchMedia("(max-width: 980px)");
+    const onChange = () => {
+      if (!media.matches) setMobileNavOpen(false);
+    };
+    onChange();
+    media.addEventListener("change", onChange);
+    return () => media.removeEventListener("change", onChange);
+  }, []);
+
   const applyRoute = (route: { page: AppPage; routeKey: string }) => {
     setActivePage(route.page);
     setRouteKey(route.routeKey);
+    setMobileNavOpen(false);
   };
 
   const changePage = (page: AppPage) => {
     applyRoute(navigateToPage(page));
   };
+
+  useEffect(() => {
+    if (!isAdmin && activePage === "usersAccess") {
+      applyRoute(navigateToPage("overview"));
+    }
+  }, [isAdmin, activePage]);
+
   const openPersonnelForPerson = (target: {
     rowId: string;
     externalId: string;
@@ -278,14 +322,32 @@ function App() {
       | "ubdRestoreReport"
       | "form6Report"
       | "form12Report"
+      | "serviceCharacteristic"
+      | "zhbdCertificate"
       | "temporaryMilitaryId" = "default",
+    meta?: { fullPosition?: string },
   ) => {
     const externalId = buildPersonSummary(row).externalId;
+    const fullPosition =
+      meta?.fullPosition?.trim() ||
+      pickFullPositionFromPersonRow(row) ||
+      getPersonFullPositionTitle(row);
+    const rowForDocuments: EjournalPreviewRow = {
+      ...row,
+      ...(fullPosition
+        ? {
+            __zhbdFullPosition: fullPosition,
+            roster__повна_посада: fullPosition,
+            повна_посада: fullPosition,
+          }
+        : {}),
+    };
     window.localStorage.setItem(
       "army-grid:selected-person",
-      JSON.stringify(row),
+      JSON.stringify(rowForDocuments),
     );
     window.localStorage.setItem("army-grid:selected-document-mode", mode);
+    storeSelectedPersonFullPosition(fullPosition);
     applyRoute(
       pushAppRoute(
         buildDocumentRoute({
@@ -298,11 +360,69 @@ function App() {
     );
   };
 
+  if (loading) {
+    return (
+      <div className="auth-shell auth-shell--loading">
+        <Typography variant="body2" color="text.secondary">
+          Завантаження…
+        </Typography>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <AuthPage />;
+  }
+
+  if (!canView) {
+    return <PendingAccessPage />;
+  }
+
   return (
-    <div className="app-shell">
+    <div
+      className={`app-shell${mobileNavOpen ? " mobile-nav-open" : ""}${canEdit ? "" : " app-shell--readonly"}`}
+    >
       <SciLiveFeedback />
       <SciScrollbars />
-      <Sidebar activePage={activePage} onPageChange={changePage} />
+      {!canEdit ? (
+        <div className="readonly-banner" role="status">
+          Режим перегляду — зміни може вносити лише адміністратор
+        </div>
+      ) : null}
+      <header className="mobile-topbar">
+        <Button
+          className="mobile-burger-btn"
+          variant="outlined"
+          size="small"
+          aria-label="Відкрити меню"
+          aria-expanded={mobileNavOpen}
+          aria-controls="app-sidebar"
+          onClick={() => setMobileNavOpen(true)}
+        >
+          <MenuOutlinedIcon fontSize="small" />
+        </Button>
+        <div className="mobile-topbar-copy">
+          <Typography variant="overline" color="text.secondary">
+            Army Grid
+          </Typography>
+          <Typography variant="body2">
+            {APP_PAGE_LABELS[activePage] ?? activePage}
+          </Typography>
+        </div>
+      </header>
+      <button
+        type="button"
+        className="mobile-nav-backdrop"
+        aria-label="Закрити меню"
+        tabIndex={mobileNavOpen ? 0 : -1}
+        onClick={() => setMobileNavOpen(false)}
+      />
+      <Sidebar
+        activePage={activePage}
+        onPageChange={changePage}
+        mobileOpen={mobileNavOpen}
+        onMobileClose={() => setMobileNavOpen(false)}
+      />
 
       {activePage === "overview" ? (
         <OverviewPage
@@ -336,6 +456,8 @@ function App() {
         />
       ) : activePage === "documentSettings" ? (
         <DocumentSignatoriesSettingsPage />
+      ) : activePage === "usersAccess" ? (
+        isAdmin ? <UsersAccessPage /> : null
       ) : (
         <main className="main-panel">
           <header className="topbar">

@@ -1,3 +1,4 @@
+import { isAnketaRowMissingQuestionnaire } from "./anketaMissingList";
 import {
   ANKETA_COLUMNS,
   ANKETA_SHEET_GID,
@@ -6,6 +7,11 @@ import {
   type AnketaColumnKey,
   type AnketaRow,
 } from "./anketaSheet";
+
+export type AnketaGapSearchOptions = {
+  skipKeys?: Iterable<string> | null;
+  excludeNameKeys?: Set<string> | null;
+};
 
 export type AnketaEmptyCell = {
   rowId: string;
@@ -116,7 +122,7 @@ export const anketaGoogleCellUrl = (rowNumber: number, columnIndex: number) =>
 export const listAnketaEmptyCells = (
   rows: AnketaRow[],
   columnKeys?: Iterable<AnketaColumnKey> | null,
-  options?: { skipKeys?: Iterable<string> | null },
+  options?: AnketaGapSearchOptions,
 ): AnketaEmptyCell[] => {
   const allowed = columnKeys
     ? new Set(
@@ -127,9 +133,11 @@ export const listAnketaEmptyCells = (
     : null;
   if (allowed && allowed.size === 0) return [];
   const skip = options?.skipKeys ? new Set([...options.skipKeys]) : null;
+  const excludeNameKeys = options?.excludeNameKeys ?? null;
 
   const gaps: AnketaEmptyCell[] = [];
   for (const row of rows) {
+    if (isAnketaRowMissingQuestionnaire(row, excludeNameKeys)) continue;
     ANKETA_COLUMNS.forEach((column, columnIndex) => {
       if (isAnketaColumnReadonly(column.key)) return;
       if (allowed && !allowed.has(column.key)) return;
@@ -161,9 +169,10 @@ export type AnketaGapStats = {
 export const summarizeAnketaGaps = (
   rows: AnketaRow[],
   columnKeys?: Iterable<AnketaColumnKey> | null,
+  options?: Pick<AnketaGapSearchOptions, "excludeNameKeys">,
 ): AnketaGapStats => {
   const keys = columnKeys ? [...new Set(columnKeys)] : [];
-  const gaps = listAnketaEmptyCells(rows, keys);
+  const gaps = listAnketaEmptyCells(rows, keys, options);
   const personIds = new Set(gaps.map((gap) => gap.rowId));
   return {
     emptyCells: gaps.length,
@@ -180,7 +189,7 @@ export const findNextAnketaEmptyCell = (
   rows: AnketaRow[],
   current: AnketaEmptyCell | null,
   columnKeys?: Iterable<AnketaColumnKey> | null,
-  options?: { skipKeys?: Iterable<string> | null },
+  options?: AnketaGapSearchOptions,
 ): AnketaEmptyCell | null => {
   const gaps = listAnketaEmptyCells(rows, columnKeys, options);
   if (!gaps.length) return null;
@@ -208,7 +217,7 @@ export const findNextAnketaPersonEmptyCell = (
   rows: AnketaRow[],
   current: AnketaEmptyCell | null,
   columnKeys?: Iterable<AnketaColumnKey> | null,
-  options?: { skipKeys?: Iterable<string> | null },
+  options?: AnketaGapSearchOptions,
 ): AnketaEmptyCell | null => {
   const gaps = listAnketaEmptyCells(rows, columnKeys, options);
   if (!gaps.length) return null;
@@ -236,7 +245,7 @@ export const listAnketaPersonGapSkipKeys = (
   rows: AnketaRow[],
   rowId: string,
   columnKeys?: Iterable<AnketaColumnKey> | null,
-  options?: { skipKeys?: Iterable<string> | null },
+  options?: AnketaGapSearchOptions,
 ) => {
   const personRows = rows.filter((row) => row.__rowId === rowId);
   return listAnketaEmptyCells(personRows, columnKeys, options).map(
