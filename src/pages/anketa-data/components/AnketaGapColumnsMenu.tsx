@@ -34,8 +34,14 @@ export function AnketaGapColumnsMenu({
         aria-expanded={gapColumnsOpen}
         aria-haspopup="listbox"
         onClick={() => setGapColumnsOpen((value) => !value)}
+        title={`Колонки пропусків · ${gapColumnKeys.length}`}
       >
-        Колонки пропусків · {gapColumnKeys.length}
+        <span className="anketa-label-full">
+          Колонки пропусків · {gapColumnKeys.length}
+        </span>
+        <span className="anketa-label-short" aria-hidden="true">
+          Колонки · {gapColumnKeys.length}
+        </span>
       </Button>
       {gapColumnsOpen
         ? createPortal(

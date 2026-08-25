@@ -38,6 +38,8 @@ export function useAnketaPersonPanel(
   const [previewUrl, setPreviewUrl] = useState("");
   const [previewTitle, setPreviewTitle] = useState("");
   const attachmentsEpochRef = useRef(0);
+  const prevAnketaRowIdRef = useRef("");
+  const shouldAutoOpenPreviewRef = useRef(false);
 
   const reloadAttachments = useCallback(
     async (personMatch: AnketaPersonnelMatch, row: AnketaRow) => {
@@ -53,18 +55,43 @@ export function useAnketaPersonPanel(
           loadPersonPhotoForRow(personMatch.row, hints),
           loadPersonQuestionnaireForRow(personMatch.row, hints),
         ]);
-        if (epoch !== attachmentsEpochRef.current) return;
+        if (epoch !== attachmentsEpochRef.current) return null;
         setPhotoData(photoResult.photoData);
         setQuestionnaire(questionnaireResult.questionnaire);
-        setAttachmentExternalId(
+        const resolvedExternalId =
           questionnaireResult.resolvedExternalId ||
-            photoResult.resolvedExternalId ||
-            personMatch.summary.externalId,
-        );
+          photoResult.resolvedExternalId ||
+          personMatch.summary.externalId;
+        setAttachmentExternalId(resolvedExternalId);
+        return {
+          questionnaire: questionnaireResult.questionnaire,
+          resolvedExternalId,
+        };
       } finally {
         if (epoch === attachmentsEpochRef.current) {
           setIsLoadingAttachments(false);
         }
+      }
+    },
+    [],
+  );
+
+  const openPreviewForExternalId = useCallback(
+    async (externalId: string, name: string, callSign: string) => {
+      const fileName = buildQuestionnaireExportFileName(name, callSign);
+      try {
+        const nextUrl = await api.getPersonQuestionnaireObjectUrl(
+          externalId,
+          fileName,
+        );
+        setPreviewTitle(`Анкета · ${name} · ${fileName}`);
+        setPreviewUrl((current) => {
+          if (current) revokeQuestionnairePreviewUrl(current);
+          return nextUrl;
+        });
+        setPreviewOpen(true);
+      } catch {
+        /* keep panel usable */
       }
     },
     [],
@@ -135,6 +162,7 @@ export function useAnketaPersonPanel(
     if (!anketaRow) {
       setMatch(null);
       setMatchStatus("idle");
+      prevAnketaRowIdRef.current = "";
       return;
     }
     setMatchStatus("loading");
@@ -152,22 +180,57 @@ export function useAnketaPersonPanel(
     return () => {
       cancelled = true;
     };
-  }, [anketaRow]);
+  }, [anketaRow?.__rowId]);
 
   useEffect(() => {
-    setPhotoData("");
-    setQuestionnaire(null);
-    setAttachmentExternalId("");
-    setPreviewOpen(false);
-    setPreviewUrl((current) => {
-      if (current) revokeQuestionnairePreviewUrl(current);
-      return "";
+    if (!anketaRow) {
+      setPhotoData("");
+      setQuestionnaire(null);
+      setAttachmentExternalId("");
+      setPreviewOpen(false);
+      setPreviewUrl((current) => {
+        if (current) revokeQuestionnairePreviewUrl(current);
+        return "";
+      });
+      return;
+    }
+
+    const rowId = anketaRow.__rowId;
+    if (prevAnketaRowIdRef.current !== rowId) {
+      if (prevAnketaRowIdRef.current) {
+        shouldAutoOpenPreviewRef.current = true;
+      }
+      prevAnketaRowIdRef.current = rowId;
+      setPhotoData("");
+      setQuestionnaire(null);
+      setAttachmentExternalId("");
+      setPreviewOpen(false);
+      setPreviewUrl((current) => {
+        if (current) revokeQuestionnairePreviewUrl(current);
+        return "";
+      });
+    }
+  }, [anketaRow?.__rowId]);
+
+  useEffect(() => {
+    if (!anketaRow || !match) return;
+
+    void reloadAttachments(match, anketaRow).then((result) => {
+      if (
+        !shouldAutoOpenPreviewRef.current ||
+        !result?.questionnaire ||
+        !result.resolvedExternalId
+      ) {
+        return;
+      }
+      shouldAutoOpenPreviewRef.current = false;
+      void openPreviewForExternalId(
+        result.resolvedExternalId,
+        anketaRow.fullName?.trim() || match.summary.name,
+        match.summary.callSign ?? "",
+      );
     });
-
-    if (!match || !anketaRow) return;
-
-    void reloadAttachments(match, anketaRow);
-  }, [anketaRow, match, reloadAttachments]);
+  }, [anketaRow?.__rowId, match, reloadAttachments, openPreviewForExternalId]);
 
   useEffect(() => {
     if (!personnelExternalId || !match || !anketaRow) return;
@@ -205,20 +268,11 @@ export function useAnketaPersonPanel(
 
   const openQuestionnairePreview = async () => {
     if (!questionnaire || !personnelExternalId) return;
-    try {
-      const nextUrl = await api.getPersonQuestionnaireObjectUrl(
-        personnelExternalId,
-        exportFileName,
-      );
-      setPreviewTitle(`Анкета · ${displayName} · ${exportFileName}`);
-      setPreviewUrl((current) => {
-        if (current) revokeQuestionnairePreviewUrl(current);
-        return nextUrl;
-      });
-      setPreviewOpen(true);
-    } catch {
-      /* keep panel usable */
-    }
+    await openPreviewForExternalId(
+      personnelExternalId,
+      displayName,
+      match?.summary.callSign ?? "",
+    );
   };
 
   const openQuestionnaireTab = async () => {

@@ -158,8 +158,8 @@ export type BchsDataIssue = {
   destination?: string;
   rankTitle?: string;
   rankCategory?: string;
-  /** status | destination | rank */
-  kind?: "status" | "destination" | "rank";
+  /** status | destination | rank | anomaly | brez */
+  kind?: "status" | "destination" | "rank" | "anomaly" | "brez";
   reason: string;
 };
 

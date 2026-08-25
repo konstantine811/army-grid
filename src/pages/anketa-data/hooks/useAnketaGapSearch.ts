@@ -25,6 +25,7 @@ type UseAnketaGapSearchOptions = {
   gapColumnKeys: AnketaColumnKey[];
   missingQuestionnaireNames: Set<string>;
   appsScriptUrl: string;
+  canEdit?: boolean;
   persistSnapshot: (
     updater: (current: AnketaSheetSnapshot) => AnketaSheetSnapshot,
     note?: string,
@@ -41,6 +42,7 @@ export function useAnketaGapSearch({
   gapColumnKeys,
   missingQuestionnaireNames,
   appsScriptUrl,
+  canEdit = true,
   persistSnapshot,
   setMessage,
   setIsSyncing,
@@ -135,6 +137,10 @@ export function useAnketaGapSearch({
     value: string,
     options?: { advance?: boolean },
   ) => {
+    if (!canEdit) {
+      setMessage("Немає права редагувати анкетні дані.");
+      return;
+    }
     if (isAnketaColumnReadonly(columnId)) return;
     const columnIndex = ANKETA_COLUMNS.findIndex(
       (column) => column.key === columnId,

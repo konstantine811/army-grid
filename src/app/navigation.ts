@@ -12,8 +12,40 @@ export type AppPage =
   | "personnel"
   | "documents"
   | "documentSettings"
-  | "usersAccess";
+  | "usersAccess"
+  | "profile";
 export type BchsAnalyticsTab = "overview" | "comparison" | "combat" | "supplement";
+
+/** Pages available to non-admin users (USER). Admins see all pages. */
+export const USER_ALLOWED_PAGES: readonly AppPage[] = [
+  "overview",
+  "personnel",
+  "bchs",
+  "anketaData",
+  "documents",
+  "profile",
+] as const;
+
+export const isUserAllowedPage = (page: AppPage) =>
+  (USER_ALLOWED_PAGES as readonly string[]).includes(page);
+
+/** Write permission required to mutate data on a page (null = no page-level writes). */
+export const writeAreaForPage = (
+  page: AppPage,
+): "personnel" | "bchs" | "anketaData" | "documents" | null => {
+  switch (page) {
+    case "personnel":
+      return "personnel";
+    case "bchs":
+      return "bchs";
+    case "anketaData":
+      return "anketaData";
+    case "documents":
+      return "documents";
+    default:
+      return null;
+  }
+};
 
 export const pagePaths: Record<AppPage, string> = {
   overview: "/overview",
@@ -30,6 +62,7 @@ export const pagePaths: Record<AppPage, string> = {
   documents: "/documents",
   documentSettings: "/document-settings",
   usersAccess: "/users-access",
+  profile: "/profile",
 };
 
 const pathPages = Object.fromEntries(

@@ -4,7 +4,6 @@ import {
   Box,
   Button,
   LinearProgress,
-  Stack,
   Typography,
 } from "@/components/sci/SciPrimitives";
 import {
@@ -33,9 +32,13 @@ import { AnketaSyncPanel } from "./components/AnketaSyncPanel";
 import { useAnketaGapColumnsMenu } from "./hooks/useAnketaGapColumnsMenu";
 import { useAnketaGapSearch } from "./hooks/useAnketaGapSearch";
 import { useAnketaSheetLoader } from "./hooks/useAnketaSheetLoader";
+import { useAuth } from "../../auth/AuthProvider";
 
 export function AnketaDataPage() {
+  const { canEditArea, isAdmin } = useAuth();
+  const canEdit = canEditArea("anketaData");
   const [showSyncHelp, setShowSyncHelp] = useState(false);
+  const [syncExpanded, setSyncExpanded] = useState(false);
 
   const sheet = useAnketaSheetLoader();
   const gapColumns = useAnketaGapColumnsMenu();
@@ -48,6 +51,7 @@ export function AnketaDataPage() {
     setMessage: sheet.setMessage,
     setIsSyncing: sheet.setIsSyncing,
     setEditsCount: sheet.setEditsCount,
+    canEdit,
     setGapColumnsOpen: gapColumns.setGapColumnsOpen,
     gapColumnsOpen: gapColumns.gapColumnsOpen,
   });
@@ -126,117 +130,176 @@ export function AnketaDataPage() {
     },
   });
 
+  const personPanelVisible = Boolean(
+    gap.personPanelOpen && gap.focusedAnketaRow,
+  );
+
   return (
     <main className="main-panel anketa-data-page">
-      <header className="topbar">
-        <Box>
+      <header className="topbar anketa-topbar">
+        <Box className="anketa-topbar-copy">
           <Typography component="h1" variant="h4">
             Анкетні дані
           </Typography>
-          <Typography variant="body2" color="text.secondary">
+          <Typography
+            variant="body2"
+            color="text.secondary"
+            className="anketa-topbar-subtitle"
+          >
             Заповнення пропусків · локальне редагування · експорт / Google sync
           </Typography>
         </Box>
-        <Stack direction="row" spacing={1} sx={{ flexWrap: "wrap", alignItems: "center" }}>
-          <AnketaGapColumnsMenu
-            gapColumnKeys={gapColumns.gapColumnKeys}
-            gapKeySet={gapColumns.gapKeySet}
-            gapColumnsOpen={gapColumns.gapColumnsOpen}
-            setGapColumnsOpen={gapColumns.setGapColumnsOpen}
-            gapMenuPos={gapColumns.gapMenuPos}
-            gapTriggerRef={gapColumns.gapTriggerRef}
-            gapMenuRef={gapColumns.gapMenuRef}
-            onToggleColumn={gapColumns.toggleGapColumn}
-            onSelectAll={gapColumns.selectAllGapColumns}
-            onClear={gapColumns.clearGapColumns}
-          />
-          <Button
-            variant="outlined"
-            startIcon={<SkipNextOutlinedIcon />}
-            disabled={sheet.isLoading || !sheet.rows.length}
-            onMouseDown={(event) => event.preventDefault()}
-            onClick={() => gap.goToEmptyCell("first")}
-          >
-            Перша порожня
-          </Button>
-          <Button
-            variant="outlined"
-            startIcon={<ArrowRightOutlinedIcon />}
-            disabled={sheet.isLoading || !sheet.rows.length}
-            onMouseDown={(event) => event.preventDefault()}
-            onClick={() => gap.goToEmptyCell("next")}
-          >
-            Наступна порожня
-          </Button>
-          <Button
-            variant="outlined"
-            startIcon={<SkipNextOutlinedIcon />}
-            disabled={sheet.isLoading || !sheet.rows.length}
-            onMouseDown={(event) => event.preventDefault()}
-            onClick={() => gap.goToEmptyCell("nextPerson")}
-            title="Пропустити поточного службовця і перейти до наступного з пропусками"
-          >
-            Наступний службовець
-          </Button>
-          <Button
-            variant="outlined"
-            disabled={!gap.emptySearchActive}
-            onClick={gap.stopEmptySearch}
-            title="Esc"
-          >
-            Стоп · Esc
-          </Button>
-          <Button
-            variant="outlined"
-            startIcon={<SyncAltOutlinedIcon />}
-            disabled={sheet.isLoading || sheet.isMergingPersonnel || !sheet.rows.length}
-            onClick={() => void sheet.mergeToPersonnel()}
-          >
-            {sheet.isMergingPersonnel ? "Злиття…" : "Оновити особовий склад"}
-          </Button>
-          <Button
-            variant="outlined"
-            startIcon={<SyncAltOutlinedIcon />}
-            disabled={sheet.isLoading}
-            onClick={() => void handleLoadFromGoogle()}
-          >
-            Оновити з Google
-          </Button>
-          <Button
-            component="label"
-            variant="outlined"
-            startIcon={<FileUploadOutlinedIcon />}
-            disabled={sheet.isLoading}
-          >
-            CSV файл
-            <input
-              hidden
-              type="file"
-              accept=".csv,text/csv"
-              onChange={(event) => {
-                void handleLoadFromCsv(event.target.files?.[0]);
-                event.currentTarget.value = "";
-              }}
+
+        <div className="anketa-toolbar">
+          <div className="anketa-toolbar-group" aria-label="Пропуски">
+            <AnketaGapColumnsMenu
+              gapColumnKeys={gapColumns.gapColumnKeys}
+              gapKeySet={gapColumns.gapKeySet}
+              gapColumnsOpen={gapColumns.gapColumnsOpen}
+              setGapColumnsOpen={gapColumns.setGapColumnsOpen}
+              gapMenuPos={gapColumns.gapMenuPos}
+              gapTriggerRef={gapColumns.gapTriggerRef}
+              gapMenuRef={gapColumns.gapMenuRef}
+              onToggleColumn={gapColumns.toggleGapColumn}
+              onSelectAll={gapColumns.selectAllGapColumns}
+              onClear={gapColumns.clearGapColumns}
             />
-          </Button>
-          <Button
-            variant="outlined"
-            startIcon={<FileDownloadOutlinedIcon />}
-            component="a"
-            href={
-              gap.focusedEmpty
-                ? anketaGoogleCellUrl(
-                    gap.focusedEmpty.rowNumber,
-                    gap.focusedEmpty.columnIndex,
-                  )
-                : anketaSheetEditUrl()
-            }
-            target="_blank"
-            rel="noreferrer"
-          >
-            {gap.focusedEmpty ? `Google · ${gap.focusedEmpty.a1}` : "Відкрити таблицю"}
-          </Button>
-        </Stack>
+            <Button
+              variant="outlined"
+              startIcon={<SkipNextOutlinedIcon />}
+              disabled={sheet.isLoading || !sheet.rows.length}
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => gap.goToEmptyCell("first")}
+              title="Перша порожня"
+            >
+              <span className="anketa-label-full">Перша порожня</span>
+              <span className="anketa-label-short" aria-hidden="true">
+                1-ша ∅
+              </span>
+            </Button>
+            <Button
+              variant="outlined"
+              startIcon={<ArrowRightOutlinedIcon />}
+              disabled={sheet.isLoading || !sheet.rows.length}
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => gap.goToEmptyCell("next")}
+              title="Наступна порожня"
+            >
+              <span className="anketa-label-full">Наступна порожня</span>
+              <span className="anketa-label-short" aria-hidden="true">
+                Далі ∅
+              </span>
+            </Button>
+            <Button
+              variant="outlined"
+              startIcon={<SkipNextOutlinedIcon />}
+              disabled={sheet.isLoading || !sheet.rows.length}
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => gap.goToEmptyCell("nextPerson")}
+              title="Пропустити поточного службовця і перейти до наступного з пропусками"
+            >
+              <span className="anketa-label-full">Наступний службовець</span>
+              <span className="anketa-label-short" aria-hidden="true">
+                Наст. особа
+              </span>
+            </Button>
+            <Button
+              variant="outlined"
+              disabled={!gap.emptySearchActive}
+              onClick={gap.stopEmptySearch}
+              title="Стоп · Esc"
+            >
+              Стоп
+            </Button>
+          </div>
+
+          <div className="anketa-toolbar-group" aria-label="Дані">
+            <Button
+              variant="outlined"
+              startIcon={<SyncAltOutlinedIcon />}
+              disabled={
+                sheet.isLoading ||
+                sheet.isMergingPersonnel ||
+                !sheet.rows.length ||
+                !canEdit
+              }
+              onClick={() => void sheet.mergeToPersonnel()}
+              title="Оновити особовий склад"
+            >
+              <span className="anketa-label-full">
+                {sheet.isMergingPersonnel
+                  ? "Злиття…"
+                  : "Оновити особовий склад"}
+              </span>
+              <span className="anketa-label-short" aria-hidden="true">
+                {sheet.isMergingPersonnel ? "Злиття…" : "→ ООС"}
+              </span>
+            </Button>
+            <Button
+              variant="outlined"
+              startIcon={<SyncAltOutlinedIcon />}
+              disabled={sheet.isLoading}
+              onClick={() => void handleLoadFromGoogle()}
+              title="Оновити з Google"
+            >
+              <span className="anketa-label-full">Оновити з Google</span>
+              <span className="anketa-label-short" aria-hidden="true">
+                Google
+              </span>
+            </Button>
+            <Button
+              component="label"
+              variant="outlined"
+              startIcon={<FileUploadOutlinedIcon />}
+              disabled={sheet.isLoading || !canEdit}
+              title="Імпорт CSV"
+            >
+              <span className="anketa-label-full">CSV файл</span>
+              <span className="anketa-label-short" aria-hidden="true">
+                CSV
+              </span>
+              <input
+                hidden
+                type="file"
+                accept=".csv,text/csv"
+                disabled={!canEdit}
+                onChange={(event) => {
+                  void handleLoadFromCsv(event.target.files?.[0]);
+                  event.currentTarget.value = "";
+                }}
+              />
+            </Button>
+            <Button
+              variant="outlined"
+              startIcon={<FileDownloadOutlinedIcon />}
+              component="a"
+              href={
+                gap.focusedEmpty
+                  ? anketaGoogleCellUrl(
+                      gap.focusedEmpty.rowNumber,
+                      gap.focusedEmpty.columnIndex,
+                    )
+                  : anketaSheetEditUrl()
+              }
+              target="_blank"
+              rel="noreferrer"
+              title={
+                gap.focusedEmpty
+                  ? `Google · ${gap.focusedEmpty.a1}`
+                  : "Відкрити таблицю"
+              }
+            >
+              <span className="anketa-label-full">
+                {gap.focusedEmpty
+                  ? `Google · ${gap.focusedEmpty.a1}`
+                  : "Відкрити таблицю"}
+              </span>
+              <span className="anketa-label-short" aria-hidden="true">
+                {gap.focusedEmpty ? gap.focusedEmpty.a1 : "Таблиця"}
+              </span>
+            </Button>
+          </div>
+        </div>
       </header>
 
       {sheet.isLoading || sheet.isSyncing || sheet.isMergingPersonnel ? (
@@ -244,35 +307,63 @@ export function AnketaDataPage() {
       ) : null}
 
       <Alert severity="info" className="personnel-page-alert anketa-status-alert">
-        {sheet.message}
-        {sheet.snapshot
-          ? ` · вибрані колонки: ${gap.gapStats.columns} · порожніх ячійок: ${gap.gapStats.emptyCells} · осіб з пропусками: ${gap.gapStats.personsWithGaps} · усього рядків/осіб: ${gap.gapStats.totalRows} · правок у БД: ${sheet.editsCount}${
-              gap.emptySearchActive
-                ? ` · у пошуку лишилось: ${gap.emptyCount}`
-                : ""
-            }${
-              gap.deferredGapKeys.length
-                ? ` · відкладено: ${gap.deferredGapKeys.length}`
-                : ""
-            }${sheet.dirtyCount ? ` · сесія: ${sheet.dirtyCount}` : ""}${
-              sheet.missingQuestionnaireNames.size
-                ? ` · без анкет (пропущено): ${sheet.missingQuestionnaireNames.size}`
-                : ""
-            }`
-          : ""}
+        <div className="anketa-status-bar">
+          <p className="anketa-status-message">{sheet.message}</p>
+          {sheet.snapshot ? (
+            <div className="anketa-status-metrics" aria-label="Статистика">
+              <span title="Вибрані колонки пропусків">
+                кол. {gap.gapStats.columns}
+              </span>
+              <span title="Порожніх ячійок">
+                ∅ {gap.gapStats.emptyCells}
+              </span>
+              <span title="Осіб з пропусками">
+                осіб {gap.gapStats.personsWithGaps}
+              </span>
+              <span title="Усього рядків">
+                рядків {gap.gapStats.totalRows}
+              </span>
+              <span title="Правок у БД">правок {sheet.editsCount}</span>
+              {gap.emptySearchActive ? (
+                <span title="Залишилось у пошуку">
+                  пошук {gap.emptyCount}
+                </span>
+              ) : null}
+              {gap.deferredGapKeys.length ? (
+                <span title="Відкладено">
+                  відкл. {gap.deferredGapKeys.length}
+                </span>
+              ) : null}
+              {sheet.dirtyCount ? (
+                <span title="Несинхронізовані в сесії">
+                  сесія {sheet.dirtyCount}
+                </span>
+              ) : null}
+              {sheet.missingQuestionnaireNames.size ? (
+                <span title="Без анкет (пропущено)">
+                  без анкет {sheet.missingQuestionnaireNames.size}
+                </span>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
       </Alert>
 
-      <AnketaSyncPanel
-        appsScriptUrl={sheet.appsScriptUrl}
-        onAppsScriptUrlChange={sheet.setAppsScriptUrl}
-        showSyncHelp={showSyncHelp}
-        onToggleSyncHelp={() => setShowSyncHelp((value) => !value)}
-      />
+      {isAdmin ? (
+        <AnketaSyncPanel
+          appsScriptUrl={sheet.appsScriptUrl}
+          onAppsScriptUrlChange={sheet.setAppsScriptUrl}
+          expanded={syncExpanded}
+          onToggleExpanded={() => setSyncExpanded((value) => !value)}
+          showSyncHelp={showSyncHelp}
+          onToggleSyncHelp={() => setShowSyncHelp((value) => !value)}
+        />
+      ) : null}
 
       <div
         className={[
           "anketa-workspace",
-          gap.personPanelOpen && gap.focusedAnketaRow ? "has-person-panel" : "",
+          personPanelVisible ? "has-person-panel" : "",
         ]
           .filter(Boolean)
           .join(" ")}
@@ -292,26 +383,34 @@ export function AnketaDataPage() {
           </div>
         </section>
 
-        {gap.personPanelOpen && gap.focusedAnketaRow ? (
-          <AnketaPersonSidePanel
-            anketaRow={gap.focusedAnketaRow}
-            focusedEmpty={gap.focusedEmpty}
-            gapColumnKeys={gapColumns.gapColumnKeys}
-            onClose={() => gap.setPersonPanelOpen(false)}
-            onFillMissing={
-              gap.focusedEmpty && gap.emptySearchActive
-                ? (value) => {
-                    void gap.patchCell(
-                      gap.focusedEmpty!.rowId,
-                      gap.focusedEmpty!.columnId,
-                      value,
-                      { advance: true },
-                    );
-                  }
-                : undefined
-            }
-            onMessage={sheet.setMessage}
-          />
+        {personPanelVisible ? (
+          <>
+            <button
+              type="button"
+              className="anketa-person-panel-backdrop"
+              aria-label="Закрити картку службовця"
+              onClick={() => gap.setPersonPanelOpen(false)}
+            />
+            <AnketaPersonSidePanel
+              anketaRow={gap.focusedAnketaRow}
+              focusedEmpty={gap.focusedEmpty}
+              gapColumnKeys={gapColumns.gapColumnKeys}
+              onClose={() => gap.setPersonPanelOpen(false)}
+              onFillMissing={
+                gap.focusedEmpty && gap.emptySearchActive
+                  ? (value) => {
+                      void gap.patchCell(
+                        gap.focusedEmpty!.rowId,
+                        gap.focusedEmpty!.columnId,
+                        value,
+                        { advance: true },
+                      );
+                    }
+                  : undefined
+              }
+              onMessage={sheet.setMessage}
+            />
+          </>
         ) : null}
       </div>
     </main>

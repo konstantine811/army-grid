@@ -33,6 +33,7 @@ import {
   useMaterialReactTable,
 } from "@/components/sci/SciDataTable";
 import { api, type BackendEjournalImport } from "../../api";
+import { useAuth } from "../../auth/AuthProvider";
 import { Button as SciButton } from "../../components/ui/button/button";
 import {
   type ExcelWorkbookSnapshot,
@@ -344,6 +345,8 @@ const writeMainBchsCalculationSheet = (
 };
 
 export function BchsPage() {
+  const { canEditArea } = useAuth();
+  const canEdit = canEditArea("bchs");
   const [snapshot, setSnapshot] = useState<ExcelWorkbookSnapshot | null>(null);
   const [imports, setImports] = useState<BackendEjournalImport[]>([]);
   const [dbPreview, setDbPreview] = useState<DbPreviewState | null>(null);
@@ -405,10 +408,14 @@ export function BchsPage() {
       issue.kind === "rank" ||
       /званн|капітан|капитан|латиниц/i.test(issue.reason),
   );
+  const anomalyDataIssues = dataIssues.filter(
+    (issue) => issue.kind === "anomaly" || issue.kind === "brez",
+  );
   const statusDataIssues = dataIssues.filter(
     (issue) =>
       !detachedDestinationIssues.includes(issue) &&
-      !rankDataIssues.includes(issue),
+      !rankDataIssues.includes(issue) &&
+      !anomalyDataIssues.includes(issue),
   );
   const personnelSupplementForExport = useMemo(() => {
     if (analytics.supplement?.kind === "personnel-bzvp")
@@ -1276,7 +1283,7 @@ export function BchsPage() {
           </Typography>
         </Box>
         <Stack direction="row" spacing={1}>
-          <SciButton asChild variant="OUTLINE">
+          <SciButton asChild variant="OUTLINE" disabled={!canEdit}>
             <label>
               <UploadFileOutlinedIcon fontSize="small" />
               Завантажити Excel
@@ -1284,6 +1291,7 @@ export function BchsPage() {
                 hidden
                 type="file"
                 accept=".xlsx,.xls"
+                disabled={!canEdit}
                 onChange={(event) => void loadFile(event.target.files?.[0])}
               />
             </label>
@@ -1301,7 +1309,7 @@ export function BchsPage() {
           </SciButton>
           <SciButton
             variant="EXEC"
-            disabled={!workbookPayload}
+            disabled={!workbookPayload || !canEdit}
             onClick={() => void saveImport()}
           >
             Записати в БД
@@ -1722,6 +1730,35 @@ export function BchsPage() {
                   <em>{item.label}</em>
                 </div>
               ))}
+              {anomalyDataIssues.length > 0 && (
+                <div className="bchs-data-issues bchs-anomaly-issues">
+                  <div className="combat-attention-row">
+                    <span>
+                      <WarningAmberOutlinedIcon />
+                    </span>
+                    <strong>{anomalyDataIssues.length}</strong>
+                    <em>БРЕЗ / аномалії підрахунку</em>
+                  </div>
+                  <div className="bchs-data-issues-list">
+                    {anomalyDataIssues.slice(0, 10).map((issue, index) => (
+                      <div
+                        className="bchs-data-issue"
+                        key={`${issue.fullName}-anomaly-${index}`}
+                      >
+                        <strong>{issue.fullName}</strong>
+                        <span>
+                          {issue.rosterUnit}
+                          {issue.status ? ` · ${issue.status}` : ""}
+                        </span>
+                        <em>{issue.reason}</em>
+                      </div>
+                    ))}
+                    {anomalyDataIssues.length > 10 && (
+                      <p>ще {anomalyDataIssues.length - 10} у списку</p>
+                    )}
+                  </div>
+                </div>
+              )}
               {statusDataIssues.length > 0 && (
                 <div className="bchs-data-issues">
                   <div className="combat-attention-row">
@@ -2514,7 +2551,7 @@ export function BchsPage() {
                 </Select>
                 <IconButton
                   aria-label="Видалити імпорт БЧС"
-                  disabled={!selectedImport || isLoading}
+                  disabled={!selectedImport || isLoading || !canEdit}
                   onClick={() => void deleteSelectedImport()}
                   sx={{
                     width: 40,

@@ -83,7 +83,7 @@ export function AnketaPersonSidePanel({
               <PersonSearchOutlinedIcon />
             )}
           </div>
-          <div>
+            <div className="anketa-person-hero-meta">
             {panel.match?.summary.callSign ? (
               <div className="person-callsign-row">
                 <span className="person-callsign" title="Позивний">
@@ -100,6 +100,7 @@ export function AnketaPersonSidePanel({
                 <Chip
                   label={anketaRow.rank || panel.match?.summary.rank}
                   size="small"
+                  className="anketa-person-tag"
                 />
               )}
               {(anketaRow.positionIndex || panel.match?.summary.positionIndex) && (
@@ -108,12 +109,14 @@ export function AnketaPersonSidePanel({
                     anketaRow.positionIndex || panel.match?.summary.positionIndex
                   }`}
                   size="small"
+                  className="anketa-person-tag"
                 />
               )}
               {(anketaRow.serviceType || panel.match?.summary.serviceType) && (
                 <Chip
                   label={anketaRow.serviceType || panel.match?.summary.serviceType}
                   size="small"
+                  className="anketa-person-tag"
                 />
               )}
             </div>

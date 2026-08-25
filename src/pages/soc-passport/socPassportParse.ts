@@ -1,4 +1,8 @@
-import type { CellValue, ExcelSheetSnapshot, ExcelWorkbookSnapshot } from "../../excelRoundTrip";
+import type {
+  CellValue,
+  ExcelSheetSnapshot,
+  ExcelWorkbookSnapshot,
+} from "../../excelRoundTrip";
 import { valueToDisplay } from "../../excelRoundTrip";
 import {
   extractBchsAwayPeopleFromSheet,
@@ -59,7 +63,9 @@ import type {
 } from "./socPassportTypes";
 
 const cellText = (value: CellValue | undefined) =>
-  valueToDisplay(value ?? null).replace(/\s+/g, " ").trim();
+  valueToDisplay(value ?? null)
+    .replace(/\s+/g, " ")
+    .trim();
 
 const normalizeHeader = (value: CellValue | undefined) =>
   normalizeLooseText(cellText(value)).replace(/[.]/g, " ");
@@ -85,7 +91,10 @@ const headerLooksLike = (row: CellValue[], partsGroups: string[][]) => {
   );
 };
 
-const findHeaderRow = (sheet: ExcelSheetSnapshot, partsGroups: string[][]) => {
+const findHeaderRow = (
+  sheet: ExcelSheetSnapshot,
+  partsGroups: string[][],
+): number => {
   const limit = Math.min(sheet.rawRows.length, 12);
   for (let index = 0; index < limit; index += 1) {
     const row = sheet.rawRows[index] ?? [];
@@ -114,7 +123,10 @@ type NamedRow = {
   values: CellValue[];
 };
 
-const sheetDataRows = (sheet: ExcelSheetSnapshot, headerRowIndex: number): NamedRow[] =>
+const sheetDataRows = (
+  sheet: ExcelSheetSnapshot,
+  headerRowIndex: number,
+): NamedRow[] =>
   sheet.rawRows.slice(headerRowIndex + 1).map((values, offset) => ({
     excelRowNumber: headerRowIndex + 2 + offset,
     values,
@@ -294,7 +306,7 @@ const indexByName = <T extends { name: string }>(rows: T[]) => {
   return { full, short };
 };
 
-const pickMatch = <T,>(
+const pickMatch = <T>(
   name: string,
   indexes: { full: Map<string, T[]>; short: Map<string, T[]> },
 ) => {
@@ -324,7 +336,9 @@ const parseOosRows = (sheet: ExcelSheetSnapshot): OosRecord[] => {
         rnokpp: normalizeRnokpp(readCell(row.values, columns.rnokpp)),
         positionIndex: readCell(row.values, columns.positionIndex),
         arrivedFrom: readCell(row.values, columns.arrivedFrom),
-        serviceType: classifyServiceType(readCell(row.values, columns.serviceType)),
+        serviceType: classifyServiceType(
+          readCell(row.values, columns.serviceType),
+        ),
         birthDate: readCell(row.values, columns.birthDate),
         birthPlace: readCell(row.values, columns.birthPlace),
         sex: classifySex(readCell(row.values, columns.sex)),
@@ -347,7 +361,9 @@ type TempArrivalColumns = {
   extra: number;
 };
 
-const resolveTempArrivalColumns = (headerRow: CellValue[]): TempArrivalColumns => ({
+const resolveTempArrivalColumns = (
+  headerRow: CellValue[],
+): TempArrivalColumns => ({
   rank: columnIndex(headerRow, ["звання"]),
   name:
     columnIndex(headerRow, ["прізвищ"]) >= 0
@@ -360,10 +376,18 @@ const resolveTempArrivalColumns = (headerRow: CellValue[]): TempArrivalColumns =
   extra: columnIndex(headerRow, ["додатков", "інформ"]),
 });
 
-const parseTempArrivalRows = (sheet: ExcelSheetSnapshot): TempArrivalRecord[] => {
-  const headerRowIndex = findHeaderRow(sheet, [["піб"], ["звання"], ["прибув"]]);
+const parseTempArrivalRows = (
+  sheet: ExcelSheetSnapshot,
+): TempArrivalRecord[] => {
+  const headerRowIndex = findHeaderRow(sheet, [
+    ["піб"],
+    ["звання"],
+    ["прибув"],
+  ]);
   if (headerRowIndex < 0) return [];
-  const columns = resolveTempArrivalColumns(sheet.rawRows[headerRowIndex] ?? []);
+  const columns = resolveTempArrivalColumns(
+    sheet.rawRows[headerRowIndex] ?? [],
+  );
   if (columns.name < 0) return [];
 
   return sheetDataRows(sheet, headerRowIndex).flatMap((row) => {
@@ -422,7 +446,9 @@ const collectCombatDutyEvidence = ({
   }
   for (const row of tempArrivals) {
     if (!row.inCombatZone) continue;
-    const period = [row.arrivalDate, row.departureDate].filter(Boolean).join("–");
+    const period = [row.arrivalDate, row.departureDate]
+      .filter(Boolean)
+      .join("–");
     evidence.push(
       `Тимч. прибуття${period ? ` (${period})` : ""}: ${row.dislocation}`,
     );
@@ -446,7 +472,9 @@ type UbdRosterNameColumns = {
   rnokpp: number;
 };
 
-const resolveUbdSubmittedColumns = (headerRow: CellValue[]): UbdRosterNameColumns => {
+const resolveUbdSubmittedColumns = (
+  headerRow: CellValue[],
+): UbdRosterNameColumns => {
   const combined = headerRow.findIndex((cell) => {
     const header = normalizeHeader(cell);
     return header.includes("прізвищ") && header.includes("ім");
@@ -463,7 +491,9 @@ const resolveUbdSubmittedColumns = (headerRow: CellValue[]): UbdRosterNameColumn
   };
 };
 
-const resolveUbdNotSubmittedColumns = (headerRow: CellValue[]): UbdRosterNameColumns => {
+const resolveUbdNotSubmittedColumns = (
+  headerRow: CellValue[],
+): UbdRosterNameColumns => {
   const combined = headerRow.findIndex((cell, index) => {
     const header = normalizeHeader(cell);
     return index <= 3 && header.includes("прізвищ") && header.includes("ім");
@@ -605,7 +635,8 @@ const parseJbdExitSheet = (sheet: ExcelSheetSnapshot) => {
   const headerRowIndex = findHeaderRow(sheet, [["фіо"], ["дата", "вих"]]);
   if (headerRowIndex < 0) return new Map<string, Set<string>>();
   const columns = resolveJbdExitColumns(sheet.rawRows[headerRowIndex] ?? []);
-  if (columns.name < 0 || columns.exitDate < 0) return new Map<string, Set<string>>();
+  if (columns.name < 0 || columns.exitDate < 0)
+    return new Map<string, Set<string>>();
 
   const counts = new Map<string, Set<string>>();
   for (const row of sheetDataRows(sheet, headerRowIndex)) {
@@ -655,7 +686,11 @@ type BplaPerformerLookup = {
 
 const isBplaPerformedStatus = (status: string) => {
   const text = normalizeLooseText(status);
-  return text.includes("виконував") && text.includes("бз") && !text.includes("не виконував");
+  return (
+    text.includes("виконував") &&
+    text.includes("бз") &&
+    !text.includes("не виконував")
+  );
 };
 
 const isBplaStatusCell = (value: string) => {
@@ -755,7 +790,9 @@ const parseBplaExitSheet = (sheet: ExcelSheetSnapshot) => {
   return performers;
 };
 
-const parseBplaPerformers = (workbook: ExcelWorkbookSnapshot): BplaPerformerLookup => {
+const parseBplaPerformers = (
+  workbook: ExcelWorkbookSnapshot,
+): BplaPerformerLookup => {
   const records = new Map<string, BplaPerformerRecord>();
   for (const sheet of workbook.sheets) {
     const partial = parseBplaExitSheet(sheet);
@@ -807,7 +844,10 @@ const isBchsStaffSlot = (person: BchsPersonnelAwayPerson) => {
 };
 
 const parseShpoNameIndex = (sheet: ExcelSheetSnapshot | undefined) => {
-  const map = new Map<string, { positionIndex: string; position: string; rank: string; staffRank: string }>();
+  const map = new Map<
+    string,
+    { positionIndex: string; position: string; rank: string; staffRank: string }
+  >();
   if (!sheet) return map;
   const headerRowIndex = findHeaderRow(sheet, [["посад"], ["прізвищ"]]);
   if (headerRowIndex < 0) return map;
@@ -845,7 +885,9 @@ export const parseSocPassportSources = ({
   asOf?: Date;
 }) => {
   if (!morning) {
-    throw new Error("Завантажте ранковий звіт — штат, список і наявність рахуються як у БЧС.");
+    throw new Error(
+      "Завантажте ранковий звіт — штат, список і наявність рахуються як у БЧС.",
+    );
   }
 
   const shpoSheet = findShpoSheet(ejoos);
@@ -860,7 +902,9 @@ export const parseSocPassportSources = ({
     throw new Error("У файлі ЕЖООС не знайдено аркуш «2. ООС».");
   }
   if (!morningSheet) {
-    throw new Error("У ранковому звіті не знайдено аркуш «1.ОС Загальний список».");
+    throw new Error(
+      "У ранковому звіті не знайдено аркуш «1.ОС Загальний список».",
+    );
   }
 
   const oosRows = parseOosRows(oosSheet);
@@ -869,7 +913,9 @@ export const parseSocPassportSources = ({
     : [];
   const tempArrivalIndex = indexByName(tempArrivalRows);
   const morningYearRows = parseMorningRows(morningSheet);
-  const morningExitCounts = statusSheet ? parseExitCounts(statusSheet) : new Map();
+  const morningExitCounts = statusSheet
+    ? parseExitCounts(statusSheet)
+    : new Map();
   const jbdExitCounts = jbdExits ? parseJbdExitCounts(jbdExits) : new Map();
   const bplaPerformers = bplaExits ? parseBplaPerformers(bplaExits) : null;
   const exitCounts = mergeExitCountMaps(morningExitCounts, jbdExitCounts);
@@ -884,15 +930,24 @@ export const parseSocPassportSources = ({
   const yearIndex = indexByName(morningYearRows);
   const shpoByName = parseShpoNameIndex(shpoSheet);
 
-  const novaPeople = filterBchsNovaPeople(extractBchsAwayPeopleFromSheet(morningSheet));
-  const staffSlots: SocStaffSlot[] = novaPeople.filter(isBchsStaffSlot).map((person) => ({
-    position: person.position,
-    positionIndex: "",
-    staffRank: person.shpkFact || person.rankCategory,
-    rankGroup: rankGroupOf(person.rankTitle, person.shpkFact, person.position, person.rankCategory),
-    occupied: looksLikePersonName(person.fullName),
-    name: looksLikePersonName(person.fullName) ? person.fullName : "",
-  }));
+  const novaPeople = filterBchsNovaPeople(
+    extractBchsAwayPeopleFromSheet(morningSheet),
+  );
+  const staffSlots: SocStaffSlot[] = novaPeople
+    .filter(isBchsStaffSlot)
+    .map((person) => ({
+      position: person.position,
+      positionIndex: "",
+      staffRank: person.shpkFact || person.rankCategory,
+      rankGroup: rankGroupOf(
+        person.rankTitle,
+        person.shpkFact,
+        person.position,
+        person.rankCategory,
+      ),
+      occupied: looksLikePersonName(person.fullName),
+      name: looksLikePersonName(person.fullName) ? person.fullName : "",
+    }));
 
   const people: SocPerson[] = [];
   const seenNames = new Set<string>();
@@ -940,7 +995,8 @@ export const parseSocPassportSources = ({
 
     const shpo = shpoByName.get(normalizedName);
     const oos =
-      (shpo?.positionIndex && oosByPosition.get(shpo.positionIndex.replace(/\s+/g, ""))) ||
+      (shpo?.positionIndex &&
+        oosByPosition.get(shpo.positionIndex.replace(/\s+/g, ""))) ||
       pickMatch(name, oosIndex);
     if (oos && isBrezMarkerText(oos.arrivedFrom)) {
       matchedOosBrezKeys.add(normalizePersonName(oos.name));
@@ -967,7 +1023,8 @@ export const parseSocPassportSources = ({
       "",
       morningBrez,
     );
-    const regionOccupied = region.occupied || /Occupied|crimea/.test(region.key);
+    const regionOccupied =
+      region.occupied || /Occupied|crimea/.test(region.key);
     const parseNotes = [
       ...relatives.notes,
       ...region.notes,
@@ -980,8 +1037,16 @@ export const parseSocPassportSources = ({
       normalizedName,
       shortName,
     );
-    const jbdExitSet = lookupExitStampSet(jbdExitCounts, normalizedName, shortName);
-    const mergedExitSet = lookupExitStampSet(exitCounts, normalizedName, shortName);
+    const jbdExitSet = lookupExitStampSet(
+      jbdExitCounts,
+      normalizedName,
+      shortName,
+    );
+    const mergedExitSet = lookupExitStampSet(
+      exitCounts,
+      normalizedName,
+      shortName,
+    );
     const ubdInfo = parseUbdInfo(oos?.extra ?? "", oos?.relatives ?? "");
     const ubdRosterRecord = matchUbdRosterRecord(
       name,
@@ -1011,9 +1076,11 @@ export const parseSocPassportSources = ({
       shortName,
     );
     const bplaPerformed = !isTransiter && Boolean(bplaMatch);
-    const callsign = (roster.callsign ?? "").trim() || bplaMatch?.callsign || "";
+    const callsign =
+      (roster.callsign ?? "").trim() || bplaMatch?.callsign || "";
     const morningMissing = !isTransiter && isBchsMissingStatus(roster.status);
-    const rrebDestination = !isTransiter && isRrebDestination(roster.destination);
+    const rrebDestination =
+      !isTransiter && isRrebDestination(roster.destination);
     const ppoDestination = !isTransiter && isPpoDestination(roster.destination);
     const combatDutyEvidence = collectCombatDutyEvidence({
       ubdNumber: ubdInfo.ubdNumber,
@@ -1051,7 +1118,9 @@ export const parseSocPassportSources = ({
         `транзитер (${roster.destination.trim() || "ТРАНЗИТЕР"}): не входить у «Не виконували» / виходи`,
       );
     } else if (jbdExitCount > 0) {
-      parseNotes.push(`ЖБД: +${jbdExitCount} виход(ів) без дублікатів з «Статус бійців»`);
+      parseNotes.push(
+        `ЖБД: +${jbdExitCount} виход(ів) без дублікатів з «Статус бійців»`,
+      );
     } else if (ubdRosterStatus) {
       parseNotes.push(
         ubdRosterStatus === "submitted"
@@ -1110,7 +1179,11 @@ export const parseSocPassportSources = ({
       staticCombatExitOverride,
       oosDislocation,
       combatDutyEvidence,
-      isIdp: hasIdpFlag(oos?.extra ?? "", oos?.relatives ?? "", oos?.birthPlace ?? ""),
+      isIdp: hasIdpFlag(
+        oos?.extra ?? "",
+        oos?.relatives ?? "",
+        oos?.birthPlace ?? "",
+      ),
       morningStatus: roster.status,
       morningAbsenceNotes: [roster.treatmentNote, roster.medicalNote]
         .filter(Boolean)
@@ -1131,7 +1204,8 @@ export const parseSocPassportSources = ({
         oos: Boolean(oos),
         morning: true,
         exits: morningExitCount > 0,
-        jbdExits: jbdExitCount > 0 || (jbdExitSet.size > 0 && morningExitCount === 0),
+        jbdExits:
+          jbdExitCount > 0 || (jbdExitSet.size > 0 && morningExitCount === 0),
         bplaExits: bplaPerformed,
         ubdRoster: Boolean(ubdRosterStatus),
         tempArrival: tempArrivals.some((row) => row.inCombatZone),
@@ -1149,7 +1223,8 @@ export const parseSocPassportSources = ({
 
   const countedBrezFromOos = people
     .filter(
-      (person) => person.arrivalSource === "brez" && isBrezMarkerText(person.arrivedFrom),
+      (person) =>
+        person.arrivalSource === "brez" && isBrezMarkerText(person.arrivedFrom),
     )
     .map((person) => ({
       name: person.name,
@@ -1164,7 +1239,8 @@ export const parseSocPassportSources = ({
   const countedBrezFromMorningOnly = people
     .filter(
       (person) =>
-        person.arrivalSource === "brez" && !isBrezMarkerText(person.arrivedFrom),
+        person.arrivalSource === "brez" &&
+        !isBrezMarkerText(person.arrivedFrom),
     )
     .map((person) => ({
       name: person.name,
@@ -1187,7 +1263,10 @@ export const parseSocPassportSources = ({
       source: isBrezMarkerText(person.arrivedFrom)
         ? "oos"
         : isBrezMarkerText(
-              combineMorningBrezFields(person.bzvpStatus, person.brezAssignment),
+              combineMorningBrezFields(
+                person.bzvpStatus,
+                person.brezAssignment,
+              ),
             )
           ? "morning"
           : "both/unknown",
@@ -1250,7 +1329,9 @@ export const parseSocPassportSources = ({
     loaded: Boolean(ubdRoster),
     fileName: ubdRoster?.fileName ?? "",
     submittedAll: ubdRosterRows.filter((row) => row.status === "submitted"),
-    notSubmittedAll: ubdRosterRows.filter((row) => row.status === "notSubmitted"),
+    notSubmittedAll: ubdRosterRows.filter(
+      (row) => row.status === "notSubmitted",
+    ),
     matchedInMorning: people
       .filter((person) => person.ubdRosterStatus)
       .map((person) => ({
@@ -1260,11 +1341,14 @@ export const parseSocPassportSources = ({
         morningExitCount: person.morningExitCount,
       })),
     counts: {
-      submittedInFile: ubdRosterRows.filter((row) => row.status === "submitted").length,
-      notSubmittedInFile: ubdRosterRows.filter((row) => row.status === "notSubmitted")
+      submittedInFile: ubdRosterRows.filter((row) => row.status === "submitted")
         .length,
-      matchedSubmitted: people.filter((person) => person.ubdRosterStatus === "submitted")
-        .length,
+      notSubmittedInFile: ubdRosterRows.filter(
+        (row) => row.status === "notSubmitted",
+      ).length,
+      matchedSubmitted: people.filter(
+        (person) => person.ubdRosterStatus === "submitted",
+      ).length,
       matchedNotSubmitted: people.filter(
         (person) => person.ubdRosterStatus === "notSubmitted",
       ).length,
@@ -1274,7 +1358,10 @@ export const parseSocPassportSources = ({
   const jbdExitsDebug = {
     loaded: Boolean(jbdExits),
     fileName: jbdExits?.fileName ?? "",
-    totalStamps: [...jbdExitCounts.values()].reduce((sum, set) => sum + set.size, 0),
+    totalStamps: [...jbdExitCounts.values()].reduce(
+      (sum, set) => sum + set.size,
+      0,
+    ),
     addedToMorning: people
       .filter((person) => person.jbdExitCount > 0)
       .map((person) => ({
@@ -1287,8 +1374,12 @@ export const parseSocPassportSources = ({
       peopleWithJbdOnly: people.filter(
         (person) => person.jbdExitCount > 0 && person.morningExitCount === 0,
       ).length,
-      peopleWithJbdMerged: people.filter((person) => person.jbdExitCount > 0).length,
-      jbdStampsTotal: [...jbdExitCounts.values()].reduce((sum, set) => sum + set.size, 0),
+      peopleWithJbdMerged: people.filter((person) => person.jbdExitCount > 0)
+        .length,
+      jbdStampsTotal: [...jbdExitCounts.values()].reduce(
+        (sum, set) => sum + set.size,
+        0,
+      ),
     },
   };
 
@@ -1313,7 +1404,8 @@ export const parseSocPassportSources = ({
       .map((record) => record.name),
     counts: {
       performersInFile: bplaPerformers?.records.size ?? 0,
-      matchedPerformers: people.filter((person) => person.match.bplaExits).length,
+      matchedPerformers: people.filter((person) => person.match.bplaExits)
+        .length,
       liftedFromNoExits: people.filter(
         (person) =>
           person.match.bplaExits &&
@@ -1339,7 +1431,8 @@ export const parseSocPassportSources = ({
         ubdNumber: person.ubdNumber,
       })),
     counts: {
-      tempArrivalCombatZone: tempArrivalRows.filter((row) => row.inCombatZone).length,
+      tempArrivalCombatZone: tempArrivalRows.filter((row) => row.inCombatZone)
+        .length,
       inferredExitFloor: people.filter(
         (person) =>
           person.morningExitCount === 0 &&

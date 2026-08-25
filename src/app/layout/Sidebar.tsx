@@ -9,13 +9,14 @@ import { GroupsOutlinedIcon } from "@/components/sci/icons";
 import { LogoutOutlinedIcon } from "@/components/sci/icons";
 import { MenuOutlinedIcon } from "@/components/sci/icons";
 import { MenuOpenOutlinedIcon } from "@/components/sci/icons";
+import { PersonOutlinedIcon } from "@/components/sci/icons";
 import { PersonSearchOutlinedIcon } from "@/components/sci/icons";
 import { SettingsOutlinedIcon } from "@/components/sci/icons";
 import { ShieldOutlinedIcon } from "@/components/sci/icons";
 import { SyncAltOutlinedIcon } from "@/components/sci/icons";
 import { TableChartOutlinedIcon } from "@/components/sci/icons";
 import { useAuth } from "../../auth/AuthProvider";
-import type { AppPage } from "../navigation";
+import { isUserAllowedPage, type AppPage } from "../navigation";
 
 const SIDEBAR_COLLAPSED_KEY = "army-grid.sidebar-collapsed";
 
@@ -37,6 +38,11 @@ const navItems: Array<{ label: string; page?: AppPage; icon: ReactNode; adminOnl
     label: "Записи документів",
     page: "documentSettings",
     icon: <SettingsOutlinedIcon />,
+  },
+  {
+    label: "Мій профіль",
+    page: "profile",
+    icon: <PersonOutlinedIcon />,
   },
   {
     label: "Доступи",
@@ -87,7 +93,12 @@ export function Sidebar({
     onMobileClose?.();
   };
 
-  const visibleNav = navItems.filter((item) => !item.adminOnly || isAdmin);
+  const visibleNav = navItems.filter((item) => {
+    if (item.adminOnly && !isAdmin) return false;
+    if (isAdmin) return true;
+    // Non-admins: only the allowlisted pages (hide placeholders without a page).
+    return Boolean(item.page && isUserAllowedPage(item.page));
+  });
 
   return (
     <aside
@@ -133,7 +144,7 @@ export function Sidebar({
         <Box className="brand-status" sx={{ mt: 2 }}>
           <Typography variant="caption" color="text.secondary">
             <span className="status-dot" />
-            {user?.displayName || user?.email || "Користувач"}
+            {user?.nickname || user?.displayName || user?.email || "Користувач"}
           </Typography>
           <Typography
             variant="caption"

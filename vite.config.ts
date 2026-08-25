@@ -27,13 +27,16 @@ export default defineConfig({
     },
   },
   server: {
-    host: true,
+    // Explicit IPv4 bind so phones/other PCs on Wi‑Fi can reach the Mac.
+    host: '0.0.0.0',
     port: 5173,
+    strictPort: true,
     proxy: { ...sharedProxy },
   },
   preview: {
-    host: true,
+    host: '0.0.0.0',
     port: 4173,
+    strictPort: true,
     proxy: { ...sharedProxy },
   },
 })

@@ -63,17 +63,23 @@ export function useAnketaSheetLoader() {
         onCached: (cached) => {
           setSnapshot(cached);
           setIsLoading(false);
+          const origin =
+            cached.source === "db"
+              ? "БД"
+              : cached.source === "cache"
+                ? "локальний кеш"
+                : "кеш";
           setMessage(
-            `Кеш + локальні правки · ${cached.rows.length} анкет · оновлюю з Google…`,
+            `${origin} + правки · ${cached.rows.length} анкет · оновлюю з Google…`,
           );
         },
       });
       setSnapshot(next);
       setDirtyCount(0);
       setMessage(
-        next.source === "cache"
-          ? `Показано кеш + локальні правки (${next.rows.length}). Мережа недоступна.`
-          : `Оновлено з Google + накладено локальні правки · ${new Date(next.fetchedAt).toLocaleString("uk-UA")}.`,
+        next.source === "cache" || next.source === "db"
+          ? `Показано ${next.source === "db" ? "БД" : "кеш"} + правки (${next.rows.length}). Мережа Google недоступна.`
+          : `Оновлено з Google + накладено правки · ${new Date(next.fetchedAt).toLocaleString("uk-UA")}.`,
       );
       return resetGapFocus();
     } catch (error) {

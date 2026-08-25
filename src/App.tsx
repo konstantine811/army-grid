@@ -21,9 +21,11 @@ import {
   buildPersonnelRoute,
   getCurrentRouteKey,
   getPageFromPath,
+  isUserAllowedPage,
   navigateToPage,
   pagePaths,
   pushAppRoute,
+  writeAreaForPage,
   type AppPage,
 } from "./app/navigation";
 import { Sidebar, APP_PAGE_LABELS } from "./app/layout/Sidebar";
@@ -54,14 +56,16 @@ import { SocPassportPage } from "./pages/soc-passport/SocPassportPage";
 import { DocumentSignatoriesSettingsPage } from "./pages/document-settings/DocumentSignatoriesSettingsPage";
 import { SciScrollbars } from "./components/sci/SciScrollbars";
 import { SciLiveFeedback } from "./components/sci/SciLiveFeedback";
+import { AppToastHost } from "./components/AppToastHost";
 import { useAuth } from "./auth/AuthProvider";
 import { AuthPage } from "./auth/AuthPage";
 import { PendingAccessPage } from "./auth/PendingAccessPage";
 import { useAuthScrollLock } from "./auth/useAuthScrollLock";
 import { UsersAccessPage } from "./pages/users/UsersAccessPage";
+import { ProfilePage } from "./pages/profile/ProfilePage";
 
 function App() {
-  const { loading, user, canView, canEdit, isAdmin } = useAuth();
+  const { loading, user, canView, canEdit, canEditArea, isAdmin } = useAuth();
   useAuthScrollLock(loading || !user || !canView);
   const [activePage, setActivePage] = useState<AppPage>(() =>
     getPageFromPath(window.location.pathname),
@@ -293,7 +297,8 @@ function App() {
   };
 
   useEffect(() => {
-    if (!isAdmin && activePage === "usersAccess") {
+    if (isAdmin) return;
+    if (!isUserAllowedPage(activePage)) {
       applyRoute(navigateToPage("overview"));
     }
   }, [isAdmin, activePage]);
@@ -378,17 +383,18 @@ function App() {
     return <PendingAccessPage />;
   }
 
+  const pageWriteArea = writeAreaForPage(activePage);
+  const canEditActivePage = pageWriteArea
+    ? canEditArea(pageWriteArea)
+    : canEdit || isAdmin;
+  const pageReadonly = Boolean(pageWriteArea) && !canEditActivePage;
+
   return (
+    <>
     <div
-      className={`app-shell${mobileNavOpen ? " mobile-nav-open" : ""}${canEdit ? "" : " app-shell--readonly"}`}
+      className={`app-shell${mobileNavOpen ? " mobile-nav-open" : ""}${pageReadonly ? " app-shell--readonly" : ""}`}
     >
-      <SciLiveFeedback />
       <SciScrollbars />
-      {!canEdit ? (
-        <div className="readonly-banner" role="status">
-          Режим перегляду — зміни може вносити лише адміністратор
-        </div>
-      ) : null}
       <header className="mobile-topbar">
         <Button
           className="mobile-burger-btn"
@@ -458,6 +464,8 @@ function App() {
         <DocumentSignatoriesSettingsPage />
       ) : activePage === "usersAccess" ? (
         isAdmin ? <UsersAccessPage /> : null
+      ) : activePage === "profile" ? (
+        <ProfilePage />
       ) : (
         <main className="main-panel">
           <header className="topbar">
@@ -521,6 +529,9 @@ function App() {
         </main>
       )}
     </div>
+    <SciLiveFeedback />
+    <AppToastHost />
+    </>
   );
 }
 

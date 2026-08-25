@@ -34,6 +34,7 @@ import {
   jsonChanged,
   readDataCache,
 } from "../../data/idbDataCache";
+import { useAuth } from "../../auth/AuthProvider";
 import type { EjournalPreviewRow } from "../ejournal/ejournalTypes";
 import {
   buildPersonSummary,
@@ -68,11 +69,24 @@ import {
   type PersonSignatureRecord,
 } from "../personnel/personSignatureStore";
 import { exportDocumentsJournalExcel } from "./documentsJournalExcel";
+import { loadAnketaEdits, applyAnketaEditsToRows } from "../anketa-data/anketaEdits";
+import { normalizeAnketaNameKey } from "../anketa-data/anketaPersonMatch";
+import {
+  loadAnketaSheetPreferCache,
+  type AnketaRow,
+} from "../anketa-data/anketaSheet";
+import {
+  buildUbdNotSubmittedRowFromDocument,
+  exportUbdNotSubmittedExcel,
+  exportUbdStatusExcel,
+} from "./ubdNotSubmittedExcel";
 import {
   buildFighterTaskPeriodText,
+  formatUbdTaskPeriodEndDate,
   getFighterTaskPlace,
+  parseUbdTaskPeriodEndDate,
 } from "../personnel/fighterStatusImport";
-import { mapRosterLatestToPreviewRows } from "../excel-fill/rosterSourceSnapshot";
+import { mapRosterLatestToPreviewRows, readRosterColumnValue } from "../excel-fill/rosterSourceSnapshot";
 import { Spinner } from "@/components/ui/spinner/spinner";
 import {
   copyPngDataUrlToClipboard,
@@ -563,18 +577,45 @@ const createSalaryFields = (
 };
 
 const UBD_BASIS_KIND = "бойове розпорядження";
-const DEFAULT_UBD_BASIS_NUMBER = "4862/ОКП/1162/дск";
-const DEFAULT_UBD_BASIS_DATE = "09.05.2026";
+/** Поки без номера/дати — підставлятимуть вручну, коли будуть вірні дані. */
+const DEFAULT_UBD_BASIS_NUMBER = "";
+const DEFAULT_UBD_BASIS_DATE = "";
+/** Старі автопідстановки — прибираємо з документів і експорту. */
+const LEGACY_UBD_BASIS_NUMBERS = new Set([
+  "4862/ОКП/1162/дск",
+  "4862/ОКП/1162/дск".toLocaleLowerCase("uk-UA"),
+]);
+const LEGACY_UBD_BASIS_DATES = new Set(["09.05.2026", "09.05.26"]);
 
 const stripUbdBasisNumber = (value: string) =>
   String(value ?? "")
     .trim()
     .replace(/^№\s*/, "");
 
+const sanitizeUbdBasisNumber = (value: string) => {
+  const cleaned = stripUbdBasisNumber(value);
+  if (!cleaned) return "";
+  if (LEGACY_UBD_BASIS_NUMBERS.has(cleaned)) return "";
+  if (LEGACY_UBD_BASIS_NUMBERS.has(cleaned.toLocaleLowerCase("uk-UA"))) {
+    return "";
+  }
+  return cleaned;
+};
+
+const sanitizeUbdBasisDate = (value: string) => {
+  const cleaned = String(value ?? "").trim();
+  if (!cleaned) return "";
+  if (LEGACY_UBD_BASIS_DATES.has(cleaned)) return "";
+  return cleaned;
+};
+
 const formatUbdBasisText = (number: string, date: string) => {
-  const orderNumber = stripUbdBasisNumber(number);
-  const orderDate = String(date ?? "").trim();
-  const reference = [orderNumber ? `№${orderNumber}` : "", orderDate ? `від ${orderDate}` : ""]
+  const orderNumber = sanitizeUbdBasisNumber(number);
+  const orderDate = sanitizeUbdBasisDate(date);
+  const reference = [
+    orderNumber ? `№${orderNumber}` : "",
+    orderDate ? `від ${orderDate}` : "",
+  ]
     .filter(Boolean)
     .join(" ");
   return [UBD_BASIS_KIND, reference].filter(Boolean).join(" ");
@@ -592,8 +633,10 @@ const parseUbdBasisParts = (value: string) => {
     };
   }
   return {
-    basisNumber: match[1],
-    basisDate: match[2].replaceAll("/", ".").replaceAll("-", "."),
+    basisNumber: sanitizeUbdBasisNumber(match[1]),
+    basisDate: sanitizeUbdBasisDate(
+      match[2].replaceAll("/", ".").replaceAll("-", "."),
+    ),
   };
 };
 
@@ -771,9 +814,11 @@ const mergeUbdFields = (
     String(saved.basisNumber ? "" : saved.basis ?? defaults.basis),
   );
   const basisNumber =
-    stripUbdBasisNumber(String(saved.basisNumber ?? "")) || parsed.basisNumber;
+    sanitizeUbdBasisNumber(String(saved.basisNumber ?? "")) ||
+    sanitizeUbdBasisNumber(parsed.basisNumber);
   const basisDate =
-    String(saved.basisDate ?? "").trim() || parsed.basisDate;
+    sanitizeUbdBasisDate(String(saved.basisDate ?? "")) ||
+    sanitizeUbdBasisDate(parsed.basisDate);
   const merged = { ...defaults, ...saved };
   const pick = (personnel: string, document: string) =>
     String(personnel ?? "").trim() || String(document ?? "").trim();
@@ -1109,6 +1154,22 @@ const documentWorkflowStatusLabel = (document: BackendPersonDocument) =>
       resolveDocumentWorkflowStatus(document.type, document.status),
   )?.title || workflowStatusLabel(document.status);
 
+/** УБД-експорт: не включати від кроку «Відправили» і далі. */
+const isUbdDocumentSentOrLater = (document: BackendPersonDocument) => {
+  const workflow =
+    document.workflow && typeof document.workflow === "object"
+      ? (document.workflow as { currentStatus?: unknown })
+      : {};
+  const status = resolveDocumentWorkflowStatus(
+    document.type,
+    document.status ||
+      (typeof workflow.currentStatus === "string"
+        ? workflow.currentStatus
+        : null),
+  );
+  return status === "sent" || status === "received" || status === "handed";
+};
+
 const getDocumentProgressPercent = (document: BackendPersonDocument) => {
   const workflow = mergeSalaryWorkflow(document.workflow);
   const steps = documentWorkflowSteps(document.type);
@@ -1136,6 +1197,24 @@ const getDocumentPersonName = (document: BackendPersonDocument) => {
     ? value.trim()
     : `ID ${document.personExternalId}`;
 };
+
+const readDocumentUbdTaskPeriod = (document: BackendPersonDocument) => {
+  if (document.type !== "ubdReport") return "";
+  const value = document.fields?.taskPeriod;
+  return typeof value === "string" ? value.trim() : "";
+};
+
+const readDocumentUbdTaskPeriodEndLabel = (document: BackendPersonDocument) =>
+  formatUbdTaskPeriodEndDate(readDocumentUbdTaskPeriod(document));
+
+const readDocumentUbdTaskPeriodEndTimestamp = (
+  document: BackendPersonDocument,
+) => {
+  const date = parseUbdTaskPeriodEndDate(readDocumentUbdTaskPeriod(document));
+  return date ? date.getTime() : 0;
+};
+
+type JournalSortField = "createdAt" | "updatedAt" | "progress" | "taskPeriodEnd";
 
 const normalizeJournalSearchText = (value: string) =>
   value
@@ -1357,6 +1436,32 @@ const getDocumentRouteState = (): DocumentRouteState => {
 export function DocumentsPage(_props: {
   onNavigate?: (path: string) => void;
 }) {
+  const { canEditArea, user } = useAuth();
+  const canEdit = canEditArea("documents");
+  const isDocumentOwner = useCallback(
+    (document: BackendPersonDocument | null | undefined) => {
+      if (!user || !document) return false;
+      if (document.createdByUserId) {
+        return document.createdByUserId === user.id;
+      }
+      if (document.createdByEmail) {
+        return (
+          document.createdByEmail.toLowerCase() === user.email.toLowerCase()
+        );
+      }
+      return false;
+    },
+    [user],
+  );
+  const canMutateDocument = useCallback(
+    (document: BackendPersonDocument | null | undefined) =>
+      Boolean(canEdit && isDocumentOwner(document)),
+    [canEdit, isDocumentOwner],
+  );
+  const documentCreatorLabel = (document: BackendPersonDocument) =>
+    document.createdByDisplayName?.trim() ||
+    document.createdByEmail?.trim() ||
+    "Невідомий автор";
   const {
     requestedPersonId,
     requestedDocumentType,
@@ -1418,6 +1523,8 @@ export function DocumentsPage(_props: {
   const [isLoadingQuestionnairePreview, setIsLoadingQuestionnairePreview] =
     useState(false);
   const questionnaireLoadSeqRef = useRef(0);
+  const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingFieldSaveRef = useRef<(() => void) | null>(null);
   const [selectedDocumentId, setSelectedDocumentId] = useState("");
   const [documentMessage, setDocumentMessage] = useState("");
   const [isSavingDocument, setIsSavingDocument] = useState(false);
@@ -1432,16 +1539,16 @@ export function DocumentsPage(_props: {
   const [journalTypeFilter, setJournalTypeFilter] = useState("ALL");
   const [journalStatusFilter, setJournalStatusFilter] = useState("ALL");
   const [journalMonthFilter, setJournalMonthFilter] = useState("ALL");
+  const [journalCreatorFilter, setJournalCreatorFilter] = useState("MINE");
   const [journalNameQuery, setJournalNameQuery] = useState("");
-  const [journalSortField, setJournalSortField] = useState<
-    "createdAt" | "updatedAt" | "progress"
-  >("createdAt");
+  const showUbdExitDateColumn = journalTypeFilter === "ubdReport";
+  const [journalSortField, setJournalSortField] = useState<JournalSortField>(
+    "createdAt",
+  );
   const [journalSortDirection, setJournalSortDirection] = useState<
     "desc" | "asc"
   >("desc");
-  const toggleJournalSort = (
-    field: "createdAt" | "updatedAt" | "progress",
-  ) => {
+  const toggleJournalSort = (field: JournalSortField) => {
     if (journalSortField === field) {
       setJournalSortDirection((current) =>
         current === "desc" ? "asc" : "desc",
@@ -1534,6 +1641,28 @@ export function DocumentsPage(_props: {
     return [...months].sort((left, right) => right.localeCompare(left));
   }, [journalDocuments]);
 
+  const journalCreatorOptions = useMemo(() => {
+    const byId = new Map<
+      string,
+      { id: string; label: string; email: string }
+    >();
+    for (const document of journalDocuments) {
+      const id =
+        document.createdByUserId?.trim() ||
+        document.createdByEmail?.trim() ||
+        "";
+      if (!id || byId.has(id)) continue;
+      byId.set(id, {
+        id,
+        label: documentCreatorLabel(document),
+        email: document.createdByEmail?.trim() || "",
+      });
+    }
+    return [...byId.values()].sort((left, right) =>
+      left.label.localeCompare(right.label, "uk"),
+    );
+  }, [journalDocuments]);
+
   const filteredJournalDocuments = useMemo(() => {
     const filtered = journalDocuments.filter((document) => {
       if (!documentMatchesJournalNameQuery(document, journalNameQuery)) {
@@ -1557,6 +1686,15 @@ export function DocumentsPage(_props: {
       ) {
         return false;
       }
+      if (journalCreatorFilter === "MINE") {
+        if (!isDocumentOwner(document)) return false;
+      } else if (journalCreatorFilter !== "ALL") {
+        const creatorKey =
+          document.createdByUserId?.trim() ||
+          document.createdByEmail?.trim() ||
+          "";
+        if (creatorKey !== journalCreatorFilter) return false;
+      }
       return true;
     });
 
@@ -1566,6 +1704,10 @@ export function DocumentsPage(_props: {
       if (journalSortField === "progress") {
         compare =
           getDocumentProgressPercent(left) - getDocumentProgressPercent(right);
+      } else if (journalSortField === "taskPeriodEnd") {
+        compare =
+          readDocumentUbdTaskPeriodEndTimestamp(left) -
+          readDocumentUbdTaskPeriodEndTimestamp(right);
       } else {
         const leftTs = dayjs(
           journalSortField === "updatedAt" ? left.updatedAt : left.createdAt,
@@ -1581,6 +1723,8 @@ export function DocumentsPage(_props: {
       return left.id.localeCompare(right.id) * direction;
     });
   }, [
+    isDocumentOwner,
+    journalCreatorFilter,
     journalDocuments,
     journalMonthFilter,
     journalNameQuery,
@@ -1589,6 +1733,151 @@ export function DocumentsPage(_props: {
     journalStatusFilter,
     journalTypeFilter,
   ]);
+
+  const liveJournalDocument = (document: BackendPersonDocument) =>
+    document.id === selectedDocumentId
+      ? {
+          ...document,
+          status: workflow.currentStatus || document.status,
+          workflow: {
+            ...(document.workflow && typeof document.workflow === "object"
+              ? document.workflow
+              : {}),
+            ...workflow,
+          },
+        }
+      : document;
+
+  const buildFilteredUbdExportRows = async () => {
+    const exportDocuments = filteredJournalDocuments.filter(
+      (document) => !isUbdDocumentSentOrLater(liveJournalDocument(document)),
+    );
+    if (!exportDocuments.length) {
+      throw new Error(
+        "Немає рядків для експорту: усі відфільтровані вже від статусу «Відправили».",
+      );
+    }
+
+    const normalizeName = (value: string) =>
+      value
+        .replace(/[ʼ’']/g, "")
+        .replace(/\s+/g, " ")
+        .trim()
+        .toLocaleLowerCase("uk-UA");
+
+    const [rosterLatest, anketaSnapshot] = await Promise.all([
+      fetchWithCache({
+        key: CacheKeys.rosterLatest,
+        fetcher: () => api.getLatestPersonnelRoster(),
+        isChanged: jsonChanged,
+      }).catch(() => null),
+      loadAnketaSheetPreferCache().catch(() => null),
+    ]);
+
+    const rosterRows = mapRosterLatestToPreviewRows(rosterLatest);
+    const rosterByName = new Map<string, (typeof rosterRows)[number]>();
+    const rosterById = new Map<string, (typeof rosterRows)[number]>();
+    for (const row of rosterRows) {
+      const name = normalizeName(
+        String(row["піб"] ?? row["ПІБ"] ?? row["прізвище"] ?? ""),
+      );
+      if (name) rosterByName.set(name, row);
+      const id = String(row.__dbRowId ?? row.id ?? "").trim();
+      if (id) rosterById.set(id, row);
+    }
+
+    const anketaEdits = await loadAnketaEdits().catch(() => ({}));
+    const anketaRows =
+      anketaSnapshot?.rows?.length
+        ? applyAnketaEditsToRows(anketaSnapshot.rows, anketaEdits)
+        : [];
+    const anketaById = new Map<string, AnketaRow>();
+    const anketaByRnokpp = new Map<string, AnketaRow>();
+    const anketaByName = new Map<string, AnketaRow>();
+    for (const row of anketaRows) {
+      const externalId = String(row.externalId ?? "").trim();
+      if (externalId) anketaById.set(externalId, row);
+      const rnokpp = String(row.rnokpp ?? "").replace(/\D/g, "");
+      if (rnokpp.length >= 8) anketaByRnokpp.set(rnokpp, row);
+      const nameKey = normalizeAnketaNameKey(row.fullName);
+      if (nameKey) anketaByName.set(nameKey, row);
+    }
+
+    const uniquePeople = [
+      ...new Map(
+        exportDocuments.map((document) => [
+          document.personExternalId,
+          {
+            personId: document.personExternalId,
+            fullName: getDocumentPersonName(document),
+          },
+        ]),
+      ).values(),
+    ];
+    const profileById = new Map<
+      string,
+      Awaited<ReturnType<typeof api.getPersonnelProfile>> | null
+    >();
+    const concurrency = 4;
+    for (let index = 0; index < uniquePeople.length; index += concurrency) {
+      const chunk = uniquePeople.slice(index, index + concurrency);
+      const results = await Promise.all(
+        chunk.map(async ({ personId, fullName }) => {
+          try {
+            const profile = await api.getPersonnelProfile(
+              personId,
+              fullName && !fullName.startsWith("ID ") ? fullName : undefined,
+            );
+            return [personId, profile] as const;
+          } catch {
+            return [personId, null] as const;
+          }
+        }),
+      );
+      for (const [personId, profile] of results) {
+        profileById.set(personId, profile);
+      }
+    }
+
+    return exportDocuments.map((document) => {
+      const journalDocument = liveJournalDocument(document);
+      const personName = getDocumentPersonName(journalDocument);
+      const profile = profileById.get(journalDocument.personExternalId) ?? null;
+      const rosterRow =
+        rosterById.get(journalDocument.personExternalId) ||
+        rosterByName.get(normalizeName(personName)) ||
+        null;
+      const rosterCallSign = rosterRow
+        ? readRosterColumnValue(rosterRow, 15) ||
+          String(rosterRow["позивний"] ?? rosterRow["Позивний"] ?? "").trim()
+        : "";
+
+      const fields = (journalDocument.fields || {}) as Record<string, unknown>;
+      const rnokppDigits = String(fields.rnokpp ?? "").replace(/\D/g, "");
+      const anketaRow =
+        anketaById.get(journalDocument.personExternalId) ||
+        (rnokppDigits.length >= 8 ? anketaByRnokpp.get(rnokppDigits) : null) ||
+        anketaByName.get(normalizeAnketaNameKey(personName)) ||
+        null;
+
+      return buildUbdNotSubmittedRowFromDocument({
+        document: journalDocument,
+        profile,
+        personnelStatus: readDocumentPersonStatus(
+          journalDocument,
+          personStatusById,
+        ),
+        rosterRow,
+        rosterCallSign,
+        anketaRow,
+      });
+    });
+  };
+
+  const journalPeriodFilterLabel =
+    journalMonthFilter === "ALL"
+      ? "Усі місяці"
+      : formatJournalMonthLabel(journalMonthFilter);
 
   const exportDocumentJournal = async () => {
     if (!filteredJournalDocuments.length) {
@@ -1600,20 +1889,7 @@ export function DocumentsPage(_props: {
     try {
       const { fileName, rowCount } = await exportDocumentsJournalExcel({
         rows: filteredJournalDocuments.map((document) => {
-          const journalDocument =
-            document.id === selectedDocumentId
-              ? {
-                  ...document,
-                  status: workflow.currentStatus || document.status,
-                  workflow: {
-                    ...(document.workflow &&
-                    typeof document.workflow === "object"
-                      ? document.workflow
-                      : {}),
-                    ...workflow,
-                  },
-                }
-              : document;
+          const journalDocument = liveJournalDocument(document);
           return {
             personName: getDocumentPersonName(journalDocument),
             personId: journalDocument.personExternalId,
@@ -1628,8 +1904,10 @@ export function DocumentsPage(_props: {
             files: getDocumentFileSummary(journalDocument),
             createdAt: journalDocument.createdAt,
             updatedAt: journalDocument.updatedAt,
+            taskPeriodEnd: readDocumentUbdTaskPeriodEndLabel(journalDocument),
           };
         }),
+        includeUbdExitDate: showUbdExitDateColumn,
         typeFilterLabel:
           JOURNAL_DOCUMENT_TYPE_FILTERS.find(
             (item) => item.value === journalTypeFilter,
@@ -1638,10 +1916,7 @@ export function DocumentsPage(_props: {
           journalStatusFilter === "ALL"
             ? "Усі статуси"
             : journalStatusFilter,
-        periodFilterLabel:
-          journalMonthFilter === "ALL"
-            ? "Усі місяці"
-            : formatJournalMonthLabel(journalMonthFilter),
+        periodFilterLabel: journalPeriodFilterLabel,
         totalCount: journalDocuments.length,
       });
       setDocumentMessage(`Експортовано журнал: ${rowCount} рядків · ${fileName}`);
@@ -1650,6 +1925,60 @@ export function DocumentsPage(_props: {
         error instanceof Error
           ? `Не вдалося експортувати Excel: ${error.message}`
           : "Не вдалося експортувати Excel.",
+      );
+    } finally {
+      setIsExportingDocumentJournal(false);
+    }
+  };
+
+  const exportUbdRegistryTable = async () => {
+    if (!filteredJournalDocuments.length) {
+      setDocumentMessage("Немає рядків для експорту за поточними фільтрами.");
+      return;
+    }
+    setIsExportingDocumentJournal(true);
+    try {
+      setDocumentMessage("Готую таблицю УБД «Не подавалися»…");
+      const rows = await buildFilteredUbdExportRows();
+      const { fileName, rowCount } = await exportUbdNotSubmittedExcel({
+        rows,
+        periodFilterLabel: journalPeriodFilterLabel,
+      });
+      setDocumentMessage(
+        `Експортовано УБД «Не подавалися»: ${rowCount} рядків · ${fileName}`,
+      );
+    } catch (error) {
+      setDocumentMessage(
+        error instanceof Error
+          ? `Не вдалося експортувати УБД: ${error.message}`
+          : "Не вдалося експортувати УБД.",
+      );
+    } finally {
+      setIsExportingDocumentJournal(false);
+    }
+  };
+
+  const exportUbdStatusTable = async () => {
+    if (!filteredJournalDocuments.length) {
+      setDocumentMessage("Немає рядків для експорту за поточними фільтрами.");
+      return;
+    }
+    setIsExportingDocumentJournal(true);
+    try {
+      setDocumentMessage("Готую експорт статусу УБД…");
+      const rows = await buildFilteredUbdExportRows();
+      const { fileName, rowCount } = await exportUbdStatusExcel({
+        rows,
+        periodFilterLabel: journalPeriodFilterLabel,
+      });
+      setDocumentMessage(
+        `Експортовано статус УБД: ${rowCount} рядків · ${fileName}`,
+      );
+    } catch (error) {
+      setDocumentMessage(
+        error instanceof Error
+          ? `Не вдалося експортувати статус УБД: ${error.message}`
+          : "Не вдалося експортувати статус УБД.",
       );
     } finally {
       setIsExportingDocumentJournal(false);
@@ -1791,6 +2120,11 @@ export function DocumentsPage(_props: {
       null,
     [allPersonDocuments, personDocuments, selectedDocumentId],
   );
+  const canMutateSelected = canMutateDocument(selectedDocument);
+  const selectedDocumentAuthor = selectedDocument
+    ? documentCreatorLabel(selectedDocument)
+    : "";
+  const foreignReadonlyClass = canMutateSelected ? "" : "is-foreign-readonly";
   const personExternalId = String(
     summary.externalId ||
       (requestedPersonId && !isUnstablePersonExternalId(requestedPersonId)
@@ -3127,6 +3461,7 @@ export function DocumentsPage(_props: {
     nextFields: SalaryDocumentFields,
     nextWorkflow: SalaryWorkflowState,
   ) => {
+    if (!canMutateSelected) return;
     if (!documentSavePersonId || !selectedDocumentId) {
       saveWorkflowForPerson(workflowKey, nextWorkflow);
       return;
@@ -3193,7 +3528,7 @@ export function DocumentsPage(_props: {
     nextFiles = documentFiles,
     nextWorkflow = workflow,
   ) => {
-    if (!documentSavePersonId || !selectedDocumentId) return;
+    if (!canMutateSelected || !documentSavePersonId || !selectedDocumentId) return;
 
     setIsSavingDocument(true);
     try {
@@ -3256,7 +3591,7 @@ export function DocumentsPage(_props: {
     nextFiles = documentFiles,
     nextWorkflow = workflow,
   ) => {
-    if (!documentSavePersonId || !selectedDocumentId) return;
+    if (!canMutateSelected || !documentSavePersonId || !selectedDocumentId) return;
 
     setIsSavingDocument(true);
     try {
@@ -3336,7 +3671,7 @@ export function DocumentsPage(_props: {
     nextFiles = documentFiles,
     nextWorkflow = workflow,
   ) => {
-    if (!documentSavePersonId || !selectedDocumentId) return;
+    if (!canMutateSelected || !documentSavePersonId || !selectedDocumentId) return;
 
     setIsSavingDocument(true);
     try {
@@ -3375,7 +3710,7 @@ export function DocumentsPage(_props: {
     nextFiles = documentFiles,
     nextWorkflow = workflow,
   ) => {
-    if (!documentSavePersonId || !selectedDocumentId) return;
+    if (!canMutateSelected || !documentSavePersonId || !selectedDocumentId) return;
 
     setIsSavingDocument(true);
     try {
@@ -3414,7 +3749,7 @@ export function DocumentsPage(_props: {
     nextFiles = documentFiles,
     nextWorkflow = workflow,
   ) => {
-    if (!documentSavePersonId || !selectedDocumentId) return;
+    if (!canMutateSelected || !documentSavePersonId || !selectedDocumentId) return;
 
     setIsSavingDocument(true);
     try {
@@ -3453,7 +3788,7 @@ export function DocumentsPage(_props: {
     nextFiles = documentFiles,
     nextWorkflow = workflow,
   ) => {
-    if (!documentSavePersonId || !selectedDocumentId) return;
+    if (!canMutateSelected || !documentSavePersonId || !selectedDocumentId) return;
 
     setIsSavingDocument(true);
     try {
@@ -3492,7 +3827,7 @@ export function DocumentsPage(_props: {
     nextFiles = documentFiles,
     nextWorkflow = workflow,
   ) => {
-    if (!documentSavePersonId || !selectedDocumentId) return;
+    if (!canMutateSelected || !documentSavePersonId || !selectedDocumentId) return;
 
     setIsSavingDocument(true);
     try {
@@ -3526,10 +3861,39 @@ export function DocumentsPage(_props: {
     }
   };
 
+  const flushDocumentFieldSave = () => {
+    if (autoSaveTimerRef.current) {
+      clearTimeout(autoSaveTimerRef.current);
+      autoSaveTimerRef.current = null;
+    }
+    const pending = pendingFieldSaveRef.current;
+    pendingFieldSaveRef.current = null;
+    pending?.();
+  };
+
+  const scheduleDocumentFieldSave = (run: () => void) => {
+    pendingFieldSaveRef.current = run;
+    if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+    autoSaveTimerRef.current = setTimeout(() => {
+      autoSaveTimerRef.current = null;
+      const pending = pendingFieldSaveRef.current;
+      pendingFieldSaveRef.current = null;
+      pending?.();
+    }, 700);
+  };
+
+  useEffect(() => {
+    return () => {
+      flushDocumentFieldSave();
+    };
+  }, [selectedDocumentId]);
+
   const updateUbdField = (key: keyof UbdReportFields, value: string) => {
     setUbdFields((current) => {
       const next = { ...current, [key]: value };
-      void saveUbdDocument(next);
+      scheduleDocumentFieldSave(() => {
+        void saveUbdDocument(next);
+      });
       return next;
     });
   };
@@ -3548,7 +3912,9 @@ export function DocumentsPage(_props: {
         basisDate,
         basis: formatUbdBasisText(basisNumber, basisDate),
       };
-      void saveUbdDocument(next);
+      scheduleDocumentFieldSave(() => {
+        void saveUbdDocument(next);
+      });
       return next;
     });
   };
@@ -3559,7 +3925,9 @@ export function DocumentsPage(_props: {
   ) => {
     setForm6Fields((current) => {
       const next = { ...current, [key]: value };
-      void saveForm6Document(next);
+      scheduleDocumentFieldSave(() => {
+        void saveForm6Document(next);
+      });
       return next;
     });
   };
@@ -3571,7 +3939,9 @@ export function DocumentsPage(_props: {
   ) => {
     setServiceCharacteristicFields((current) => {
       const next = { ...current, [key]: value };
-      void saveServiceCharacteristicDocument(next);
+      scheduleDocumentFieldSave(() => {
+        void saveServiceCharacteristicDocument(next);
+      });
       return next;
     });
   };
@@ -3598,7 +3968,9 @@ export function DocumentsPage(_props: {
       ) {
         next.bodyParagraph = buildZhbdBodyParagraph(next);
       }
-      void saveZhbdCertificateDocument(next);
+      scheduleDocumentFieldSave(() => {
+        void saveZhbdCertificateDocument(next);
+      });
       return next;
     });
   };
@@ -3609,7 +3981,9 @@ export function DocumentsPage(_props: {
   ) => {
     setForm12Fields((current) => {
       const next = { ...current, [key]: value };
-      void saveForm12Document(next);
+      scheduleDocumentFieldSave(() => {
+        void saveForm12Document(next);
+      });
       return next;
     });
   };
@@ -3730,7 +4104,9 @@ export function DocumentsPage(_props: {
   ) => {
     setUbdRestoreFields((current) => {
       const next = { ...current, [key]: value };
-      void saveUbdRestoreDocument(next);
+      scheduleDocumentFieldSave(() => {
+        void saveUbdRestoreDocument(next);
+      });
       return next;
     });
   };
@@ -3788,7 +4164,9 @@ export function DocumentsPage(_props: {
   ) => {
     setTicketFields((current) => {
       const next = { ...current, [key]: value };
-      void saveTicketDocument(next);
+      scheduleDocumentFieldSave(() => {
+        void saveTicketDocument(next);
+      });
       return next;
     });
   };
@@ -3973,7 +4351,9 @@ export function DocumentsPage(_props: {
           bankMfo: mfo || current.bankMfo,
           bankName: bank?.name || current.bankName,
         };
-        void saveSalaryDocument(next, workflow);
+        scheduleDocumentFieldSave(() => {
+          void saveSalaryDocument(next, workflow);
+        });
         return next;
       }
 
@@ -3984,12 +4364,16 @@ export function DocumentsPage(_props: {
           bankMfo: value,
           bankName: value === "custom" ? current.bankName : bank?.name || "",
         };
-        void saveSalaryDocument(next, workflow);
+        scheduleDocumentFieldSave(() => {
+          void saveSalaryDocument(next, workflow);
+        });
         return next;
       }
 
       const next = { ...current, [key]: value };
-      void saveSalaryDocument(next, workflow);
+      scheduleDocumentFieldSave(() => {
+        void saveSalaryDocument(next, workflow);
+      });
       return next;
     });
   };
@@ -4007,6 +4391,14 @@ export function DocumentsPage(_props: {
     nextWorkflow: SalaryWorkflowState,
     nextFiles = documentFiles,
   ) => {
+    if (!canMutateSelected) {
+      setDocumentMessage(
+        selectedDocument
+          ? `Лише перегляд · автор: ${documentCreatorLabel(selectedDocument)}`
+          : "Можна змінювати лише свої документи.",
+      );
+      return;
+    }
     if (selectedDocument?.type === "ubdReport" || mode === "ubdReport") {
       void saveUbdDocument(
         nextFields as UbdReportFields,
@@ -4082,6 +4474,14 @@ export function DocumentsPage(_props: {
   };
 
   const updateWorkflow = (next: SalaryWorkflowState) => {
+    if (!canMutateSelected) {
+      setDocumentMessage(
+        selectedDocument
+          ? `Лише перегляд · автор: ${documentCreatorLabel(selectedDocument)}`
+          : "Можна змінювати лише свої документи.",
+      );
+      return;
+    }
     setWorkflow(next);
     patchSelectedDocumentWorkflow(next);
     saveWorkflowForPerson(workflowKey, next);
@@ -4240,13 +4640,22 @@ export function DocumentsPage(_props: {
                 "salary-step-node",
                 isDone ? "done" : "",
                 isCurrent ? "current" : "",
+                canMutateSelected ? "" : "is-readonly",
               ]
                 .filter(Boolean)
                 .join(" ")}
               key={step.key}
               type="button"
-              onClick={() => setWorkflowStep(step.key)}
-              title={step.title}
+              disabled={!canMutateSelected}
+              onClick={() => {
+                if (!canMutateSelected) return;
+                setWorkflowStep(step.key);
+              }}
+              title={
+                canMutateSelected
+                  ? step.title
+                  : `${step.title} · лише перегляд`
+              }
             >
               <span>{index + 1}</span>
               <i />
@@ -4259,6 +4668,10 @@ export function DocumentsPage(_props: {
   ) : null;
 
   const deleteDocument = async (document: BackendPersonDocument) => {
+    if (!canMutateDocument(document)) {
+      setDocumentMessage("Можна видаляти лише документи, які ви створили.");
+      return;
+    }
     const confirmed = window.confirm(
       `Видалити документ "${document.title}" для ID ${document.personExternalId}?`,
     );
@@ -4326,6 +4739,7 @@ export function DocumentsPage(_props: {
   );
 
   const createPersonDocumentByType = (type: string) => {
+    if (!canEdit) return;
     if (type === "salaryPowerAttorney") return createSalaryPowerAttorneyDocument();
     if (type === "ubdReport") return createUbdReportDocument();
     if (type === "ubdRestoreReport") return createUbdRestoreReportDocument();
@@ -4344,7 +4758,7 @@ export function DocumentsPage(_props: {
       size="small"
       label="Створити документ"
       value="__none"
-      disabled={isSavingDocument || !personExternalId}
+      disabled={isSavingDocument || !personExternalId || !canEdit}
       onChange={(event) => {
         const nextType = event.target.value;
         if (!nextType || nextType === "__none") return;
@@ -4403,8 +4817,17 @@ export function DocumentsPage(_props: {
         multiline
         rows={3}
         value={value}
-        onChange={(event) => onChange(event.target.value)}
-        placeholder="Проблема з документами, уточнення по статусу або що треба доробити"
+        disabled={!canMutateSelected}
+        InputProps={{ readOnly: !canMutateSelected }}
+        onChange={(event) => {
+          if (!canMutateSelected) return;
+          onChange(event.target.value);
+        }}
+        placeholder={
+          canMutateSelected
+            ? "Проблема з документами, уточнення по статусу або що треба доробити"
+            : "Лише перегляд"
+        }
       />
     </div>
   );
@@ -5688,6 +6111,34 @@ export function DocumentsPage(_props: {
             >
               {isExportingDocumentJournal ? "Експорт..." : "Excel"}
             </Button>
+            {journalTypeFilter === "ubdReport" ? (
+              <>
+                <Button
+                  variant="outlined"
+                  startIcon={<FileDownloadOutlinedIcon />}
+                  disabled={
+                    isLoadingDocumentJournal ||
+                    isExportingDocumentJournal ||
+                    !filteredJournalDocuments.length
+                  }
+                  onClick={() => void exportUbdRegistryTable()}
+                >
+                  УБД таблиця
+                </Button>
+                <Button
+                  variant="outlined"
+                  startIcon={<FileDownloadOutlinedIcon />}
+                  disabled={
+                    isLoadingDocumentJournal ||
+                    isExportingDocumentJournal ||
+                    !filteredJournalDocuments.length
+                  }
+                  onClick={() => void exportUbdStatusTable()}
+                >
+                  Статус
+                </Button>
+              </>
+            ) : null}
           </Stack>
         </header>
 
@@ -5700,10 +6151,21 @@ export function DocumentsPage(_props: {
         >
           {documentMessage || "Журнал документів готовий."}
         </Alert>
+        {selectedDocument && !canMutateSelected ? (
+          <Alert severity="info" variant="outlined" className="personnel-page-alert">
+            Лише перегляд документа · автор: {selectedDocumentAuthor}. Зміни,
+            прогрес і видалення доступні лише автору.
+          </Alert>
+        ) : null}
 
         <section className="analytics-panel documents-journal-panel">
           <div className="panel-heading">
-            Усі документи · {filteredJournalDocuments.length}
+            {journalCreatorFilter === "MINE"
+              ? "Мої документи"
+              : journalCreatorFilter === "ALL"
+                ? "Усі документи"
+                : "Документи автора"}{" "}
+            · {filteredJournalDocuments.length}
             {filteredJournalDocuments.length !== journalDocuments.length
               ? ` / ${journalDocuments.length}`
               : ""}
@@ -5752,6 +6214,29 @@ export function DocumentsPage(_props: {
             <TextField
               select
               size="small"
+              label="Автор"
+              value={journalCreatorFilter}
+              onChange={(event) => setJournalCreatorFilter(event.target.value)}
+            >
+              <MenuItem value="MINE">Лише мої</MenuItem>
+              <MenuItem value="ALL">Усі автори</MenuItem>
+              {journalCreatorOptions
+                .filter((creator) => {
+                  const isSelf =
+                    user?.id === creator.id ||
+                    user?.email?.toLowerCase() ===
+                      creator.email.toLowerCase();
+                  return !isSelf;
+                })
+                .map((creator) => (
+                  <MenuItem key={creator.id} value={creator.id}>
+                    {creator.label}
+                  </MenuItem>
+                ))}
+            </TextField>
+            <TextField
+              select
+              size="small"
               label="Статус"
               value={journalStatusFilter}
               onChange={(event) => setJournalStatusFilter(event.target.value)}
@@ -5782,11 +6267,27 @@ export function DocumentsPage(_props: {
               ))}
             </TextField>
           </div>
-          <div className="documents-journal-table">
-            <div className="documents-journal-row header">
+          <div
+            className={[
+              "documents-journal-table",
+              showUbdExitDateColumn ? "documents-journal-table-with-exit-date" : "",
+            ]
+              .filter(Boolean)
+              .join(" ")}
+          >
+            <div
+              className={[
+                "documents-journal-row",
+                "header",
+                showUbdExitDateColumn ? "documents-journal-row-with-exit-date" : "",
+              ]
+                .filter(Boolean)
+                .join(" ")}
+            >
               <span>Службовець</span>
               <span>Статус службовця</span>
               <span>Документ</span>
+              <span>Автор</span>
               <button
                 type="button"
                 className="documents-journal-sort"
@@ -5809,6 +6310,27 @@ export function DocumentsPage(_props: {
               <span>Статус</span>
               <span>Коментар</span>
               <span>Файли</span>
+              {showUbdExitDateColumn ? (
+                <button
+                  type="button"
+                  className="documents-journal-sort"
+                  aria-label={
+                    journalSortField === "taskPeriodEnd" &&
+                    journalSortDirection === "desc"
+                      ? "Сортувати за датою виходу: спочатку старіші"
+                      : "Сортувати за датою виходу: спочатку новіші"
+                  }
+                  title="Сортувати за датою виходу"
+                  onClick={() => toggleJournalSort("taskPeriodEnd")}
+                >
+                  Вихід до
+                  {journalSortField === "taskPeriodEnd"
+                    ? journalSortDirection === "desc"
+                      ? " ↓"
+                      : " ↑"
+                    : ""}
+                </button>
+              ) : null}
               <button
                 type="button"
                 className="documents-journal-sort"
@@ -5887,6 +6409,9 @@ export function DocumentsPage(_props: {
                   <div
                     className={[
                       "documents-journal-row",
+                      showUbdExitDateColumn
+                        ? "documents-journal-row-with-exit-date"
+                        : "",
                       document.id === selectedDocumentId ? "active" : "",
                     ]
                       .filter(Boolean)
@@ -5912,6 +6437,13 @@ export function DocumentsPage(_props: {
                       {readDocumentPersonStatus(document, personStatusById)}
                     </span>
                     <span>{salaryDocumentTypeLabel(document.type)}</span>
+                    <span
+                      className="documents-journal-author"
+                      title={document.createdByEmail || undefined}
+                    >
+                      {documentCreatorLabel(document)}
+                      {isDocumentOwner(document) ? " · ви" : ""}
+                    </span>
                     <span className="documents-journal-progress">
                       <i style={{ width: `${progress}%` }} />
                       <b>{progress}%</b>
@@ -5924,32 +6456,43 @@ export function DocumentsPage(_props: {
                       {liveDocumentStatusNote(journalDocument) || "—"}
                     </span>
                     <span>{getDocumentFileSummary(document)}</span>
+                    {showUbdExitDateColumn ? (
+                      <span title={readDocumentUbdTaskPeriod(document) || undefined}>
+                        {readDocumentUbdTaskPeriodEndLabel(document) || "—"}
+                      </span>
+                    ) : null}
                     <span>
                       {new Date(document.createdAt).toLocaleString("uk-UA")}
                     </span>
                     <span>
                       {new Date(document.updatedAt).toLocaleString("uk-UA")}
                     </span>
-                    <button
-                      aria-label="Видалити документ"
-                      className="documents-journal-delete"
-                      disabled={isSavingDocument}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        void deleteDocument(document);
-                      }}
-                      title="Видалити документ"
-                      type="button"
-                    >
-                      <DeleteOutlineOutlinedIcon />
-                    </button>
+                    {canMutateDocument(document) ? (
+                      <button
+                        aria-label="Видалити документ"
+                        className="documents-journal-delete"
+                        disabled={isSavingDocument}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          void deleteDocument(document);
+                        }}
+                        title="Видалити документ"
+                        type="button"
+                      >
+                        <DeleteOutlineOutlinedIcon />
+                      </button>
+                    ) : (
+                      <span className="documents-journal-delete-slot" aria-hidden />
+                    )}
                   </div>
                 );
               })
             ) : (
               <div className="documents-journal-empty">
                 {journalDocuments.length
-                  ? "Немає документів за вибраними фільтрами."
+                  ? journalCreatorFilter === "MINE"
+                    ? "У вас ще немає документів у цьому фільтрі. Оберіть «Усі автори» або іншого автора для перегляду."
+                    : "Немає документів за вибраними фільтрами."
                   : "Документи ще не створювались."}
               </div>
             )}
@@ -5957,7 +6500,12 @@ export function DocumentsPage(_props: {
           </div>
         </section>
         {mode === "ubdReport" && selectedDocument?.type === "ubdReport" ? (
-          <section className="documents-journal-ubd" id="documents-journal-ubd">
+          <section
+            className={["documents-journal-ubd", foreignReadonlyClass]
+              .filter(Boolean)
+              .join(" ")}
+            id="documents-journal-ubd"
+          >
             <header className="topbar analytics-topbar salary-document-topbar">
               <div className="salary-document-main-row">
                 <Box className="salary-document-title">
@@ -5970,6 +6518,8 @@ export function DocumentsPage(_props: {
                       ? ` · ID ${selectedDocument.personExternalId}`
                       : ""}
                     {selectedDocument.title ? ` · ${selectedDocument.title}` : ""}
+                    {` · автор: ${selectedDocumentAuthor}`}
+                    {canMutateSelected ? "" : " · лише перегляд"}
                   </Typography>
                 </Box>
                 <Stack direction="row" spacing={1}>
@@ -5999,7 +6549,12 @@ export function DocumentsPage(_props: {
           </section>
         ) : null}
         {mode === "form6Report" && selectedDocument?.type === "form6Report" ? (
-          <section className="documents-journal-ubd" id="documents-journal-ubd">
+          <section
+            className={["documents-journal-ubd", foreignReadonlyClass]
+              .filter(Boolean)
+              .join(" ")}
+            id="documents-journal-ubd"
+          >
             <header className="topbar analytics-topbar salary-document-topbar">
               <div className="salary-document-main-row">
                 <Box className="salary-document-title">
@@ -6033,7 +6588,12 @@ export function DocumentsPage(_props: {
           </section>
         ) : null}
         {mode === "form12Report" && selectedDocument?.type === "form12Report" ? (
-          <section className="documents-journal-ubd" id="documents-journal-ubd">
+          <section
+            className={["documents-journal-ubd", foreignReadonlyClass]
+              .filter(Boolean)
+              .join(" ")}
+            id="documents-journal-ubd"
+          >
             <header className="topbar analytics-topbar salary-document-topbar">
               <div className="salary-document-main-row">
                 <Box className="salary-document-title">
@@ -6068,7 +6628,12 @@ export function DocumentsPage(_props: {
         ) : null}
         {mode === "serviceCharacteristic" &&
         selectedDocument?.type === "serviceCharacteristic" ? (
-          <section className="documents-journal-ubd" id="documents-journal-ubd">
+          <section
+            className={["documents-journal-ubd", foreignReadonlyClass]
+              .filter(Boolean)
+              .join(" ")}
+            id="documents-journal-ubd"
+          >
             <header className="topbar analytics-topbar salary-document-topbar">
               <div className="salary-document-main-row">
                 <Box className="salary-document-title">
@@ -6103,7 +6668,12 @@ export function DocumentsPage(_props: {
         ) : null}
         {mode === "zhbdCertificate" &&
         selectedDocument?.type === "zhbdCertificate" ? (
-          <section className="documents-journal-ubd" id="documents-journal-ubd">
+          <section
+            className={["documents-journal-ubd", foreignReadonlyClass]
+              .filter(Boolean)
+              .join(" ")}
+            id="documents-journal-ubd"
+          >
             <header className="topbar analytics-topbar salary-document-topbar">
               <div className="salary-document-main-row">
                 <Box className="salary-document-title">
@@ -6138,7 +6708,12 @@ export function DocumentsPage(_props: {
         ) : null}
         {mode === "ubdRestoreReport" &&
         selectedDocument?.type === "ubdRestoreReport" ? (
-          <section className="documents-journal-ubd" id="documents-journal-ubd">
+          <section
+            className={["documents-journal-ubd", foreignReadonlyClass]
+              .filter(Boolean)
+              .join(" ")}
+            id="documents-journal-ubd"
+          >
             <header className="topbar analytics-topbar salary-document-topbar">
               <div className="salary-document-main-row">
                 <Box className="salary-document-title">
@@ -6173,7 +6748,12 @@ export function DocumentsPage(_props: {
         ) : null}
         {mode === "temporaryMilitaryId" &&
         selectedDocument?.type === "temporaryMilitaryId" ? (
-          <section className="documents-journal-ubd" id="documents-journal-ubd">
+          <section
+            className={["documents-journal-ubd", foreignReadonlyClass]
+              .filter(Boolean)
+              .join(" ")}
+            id="documents-journal-ubd"
+          >
             <header className="topbar analytics-topbar salary-document-topbar">
               <div className="salary-document-main-row">
                 <Box className="salary-document-title">
@@ -6199,7 +6779,12 @@ export function DocumentsPage(_props: {
         ) : null}
         {mode === "salaryPowerAttorney" &&
         selectedDocument?.type === "salaryPowerAttorney" ? (
-          <section className="documents-journal-ubd" id="documents-journal-ubd">
+          <section
+            className={["documents-journal-ubd", foreignReadonlyClass]
+              .filter(Boolean)
+              .join(" ")}
+            id="documents-journal-ubd"
+          >
             <header className="topbar analytics-topbar salary-document-topbar">
               <div className="salary-document-main-row">
                 <Box className="salary-document-title">
@@ -6249,7 +6834,11 @@ export function DocumentsPage(_props: {
   if (mode === "temporaryMilitaryId") {
     return (
       <>
-      <main className="main-panel documents-ubd-page">
+      <main
+        className={["main-panel", "documents-ubd-page", foreignReadonlyClass]
+          .filter(Boolean)
+          .join(" ")}
+      >
         <header className="topbar analytics-topbar salary-document-topbar">
           <div className="salary-document-main-row">
             <Box className="salary-document-title">
@@ -6309,16 +6898,18 @@ export function DocumentsPage(_props: {
                         {new Date(document.updatedAt).toLocaleString("uk-UA")}
                       </small>
                     </button>
-                    <button
-                      aria-label="Видалити документ"
-                      className="salary-person-document-delete"
-                      disabled={isSavingDocument}
-                      onClick={() => void deleteDocument(document)}
-                      title="Видалити документ"
-                      type="button"
-                    >
-                      <DeleteOutlineOutlinedIcon />
-                    </button>
+                    {canMutateDocument(document) ? (
+                      <button
+                        aria-label="Видалити документ"
+                        className="salary-person-document-delete"
+                        disabled={isSavingDocument}
+                        onClick={() => void deleteDocument(document)}
+                        title="Видалити документ"
+                        type="button"
+                      >
+                        <DeleteOutlineOutlinedIcon />
+                      </button>
+                    ) : null}
                   </article>
                 ))
               ) : (
@@ -6327,7 +6918,7 @@ export function DocumentsPage(_props: {
                 </p>
               )}
             </div>
-            {personDocumentCreateSelect}
+            {canEdit ? personDocumentCreateSelect : null}
           </section>
 
           {ticketWorkspace}
@@ -6341,7 +6932,11 @@ export function DocumentsPage(_props: {
   if (mode === "ubdReport") {
     return (
       <>
-      <main className="main-panel documents-ubd-page">
+      <main
+        className={["main-panel", "documents-ubd-page", foreignReadonlyClass]
+          .filter(Boolean)
+          .join(" ")}
+      >
         <header className="topbar analytics-topbar salary-document-topbar">
           <div className="salary-document-main-row">
             <Box className="salary-document-title">
@@ -6420,16 +7015,18 @@ export function DocumentsPage(_props: {
                         {new Date(document.updatedAt).toLocaleString("uk-UA")}
                       </small>
                     </button>
-                    <button
-                      aria-label="Видалити документ"
-                      className="salary-person-document-delete"
-                      disabled={isSavingDocument}
-                      onClick={() => void deleteDocument(document)}
-                      title="Видалити документ"
-                      type="button"
-                    >
-                      <DeleteOutlineOutlinedIcon />
-                    </button>
+                    {canMutateDocument(document) ? (
+                      <button
+                        aria-label="Видалити документ"
+                        className="salary-person-document-delete"
+                        disabled={isSavingDocument}
+                        onClick={() => void deleteDocument(document)}
+                        title="Видалити документ"
+                        type="button"
+                      >
+                        <DeleteOutlineOutlinedIcon />
+                      </button>
+                    ) : null}
                   </article>
                 ))
               ) : (
@@ -6438,7 +7035,7 @@ export function DocumentsPage(_props: {
                 </p>
               )}
             </div>
-            {personDocumentCreateSelect}
+            {canEdit ? personDocumentCreateSelect : null}
           </section>
 
           {ubdWorkspace}
@@ -6452,7 +7049,11 @@ export function DocumentsPage(_props: {
   if (mode === "form6Report") {
     return (
       <>
-      <main className="main-panel documents-ubd-page">
+      <main
+        className={["main-panel", "documents-ubd-page", foreignReadonlyClass]
+          .filter(Boolean)
+          .join(" ")}
+      >
         <header className="topbar analytics-topbar salary-document-topbar">
           <div className="salary-document-main-row">
             <Box className="salary-document-title">
@@ -6523,16 +7124,18 @@ export function DocumentsPage(_props: {
                         {new Date(document.updatedAt).toLocaleString("uk-UA")}
                       </small>
                     </button>
-                    <button
-                      aria-label="Видалити документ"
-                      className="salary-person-document-delete"
-                      disabled={isSavingDocument}
-                      onClick={() => void deleteDocument(document)}
-                      title="Видалити документ"
-                      type="button"
-                    >
-                      <DeleteOutlineOutlinedIcon />
-                    </button>
+                    {canMutateDocument(document) ? (
+                      <button
+                        aria-label="Видалити документ"
+                        className="salary-person-document-delete"
+                        disabled={isSavingDocument}
+                        onClick={() => void deleteDocument(document)}
+                        title="Видалити документ"
+                        type="button"
+                      >
+                        <DeleteOutlineOutlinedIcon />
+                      </button>
+                    ) : null}
                   </article>
                 ))
               ) : (
@@ -6541,7 +7144,7 @@ export function DocumentsPage(_props: {
                 </p>
               )}
             </div>
-            {personDocumentCreateSelect}
+            {canEdit ? personDocumentCreateSelect : null}
           </section>
 
           {form6Workspace}
@@ -6555,7 +7158,11 @@ export function DocumentsPage(_props: {
   if (mode === "form12Report") {
     return (
       <>
-      <main className="main-panel documents-ubd-page">
+      <main
+        className={["main-panel", "documents-ubd-page", foreignReadonlyClass]
+          .filter(Boolean)
+          .join(" ")}
+      >
         <header className="topbar analytics-topbar salary-document-topbar">
           <div className="salary-document-main-row">
             <Box className="salary-document-title">
@@ -6626,16 +7233,18 @@ export function DocumentsPage(_props: {
                         {new Date(document.updatedAt).toLocaleString("uk-UA")}
                       </small>
                     </button>
-                    <button
-                      aria-label="Видалити документ"
-                      className="salary-person-document-delete"
-                      disabled={isSavingDocument}
-                      onClick={() => void deleteDocument(document)}
-                      title="Видалити документ"
-                      type="button"
-                    >
-                      <DeleteOutlineOutlinedIcon />
-                    </button>
+                    {canMutateDocument(document) ? (
+                      <button
+                        aria-label="Видалити документ"
+                        className="salary-person-document-delete"
+                        disabled={isSavingDocument}
+                        onClick={() => void deleteDocument(document)}
+                        title="Видалити документ"
+                        type="button"
+                      >
+                        <DeleteOutlineOutlinedIcon />
+                      </button>
+                    ) : null}
                   </article>
                 ))
               ) : (
@@ -6644,7 +7253,7 @@ export function DocumentsPage(_props: {
                 </p>
               )}
             </div>
-            {personDocumentCreateSelect}
+            {canEdit ? personDocumentCreateSelect : null}
           </section>
 
           {form12Workspace}
@@ -6658,7 +7267,11 @@ export function DocumentsPage(_props: {
   if (mode === "serviceCharacteristic") {
     return (
       <>
-      <main className="main-panel documents-ubd-page">
+      <main
+        className={["main-panel", "documents-ubd-page", foreignReadonlyClass]
+          .filter(Boolean)
+          .join(" ")}
+      >
         <header className="topbar analytics-topbar salary-document-topbar">
           <div className="salary-document-main-row">
             <Box className="salary-document-title">
@@ -6731,16 +7344,18 @@ export function DocumentsPage(_props: {
                         {new Date(document.updatedAt).toLocaleString("uk-UA")}
                       </small>
                     </button>
-                    <button
-                      aria-label="Видалити документ"
-                      className="salary-person-document-delete"
-                      disabled={isSavingDocument}
-                      onClick={() => void deleteDocument(document)}
-                      title="Видалити документ"
-                      type="button"
-                    >
-                      <DeleteOutlineOutlinedIcon />
-                    </button>
+                    {canMutateDocument(document) ? (
+                      <button
+                        aria-label="Видалити документ"
+                        className="salary-person-document-delete"
+                        disabled={isSavingDocument}
+                        onClick={() => void deleteDocument(document)}
+                        title="Видалити документ"
+                        type="button"
+                      >
+                        <DeleteOutlineOutlinedIcon />
+                      </button>
+                    ) : null}
                   </article>
                 ))
               ) : (
@@ -6749,7 +7364,7 @@ export function DocumentsPage(_props: {
                 </p>
               )}
             </div>
-            {personDocumentCreateSelect}
+            {canEdit ? personDocumentCreateSelect : null}
           </section>
 
           {serviceCharacteristicWorkspace}
@@ -6763,7 +7378,11 @@ export function DocumentsPage(_props: {
   if (mode === "zhbdCertificate") {
     return (
       <>
-      <main className="main-panel documents-ubd-page">
+      <main
+        className={["main-panel", "documents-ubd-page", foreignReadonlyClass]
+          .filter(Boolean)
+          .join(" ")}
+      >
         <header className="topbar analytics-topbar salary-document-topbar">
           <div className="salary-document-main-row">
             <Box className="salary-document-title">
@@ -6836,16 +7455,18 @@ export function DocumentsPage(_props: {
                         {new Date(document.updatedAt).toLocaleString("uk-UA")}
                       </small>
                     </button>
-                    <button
-                      aria-label="Видалити документ"
-                      className="salary-person-document-delete"
-                      disabled={isSavingDocument}
-                      onClick={() => void deleteDocument(document)}
-                      title="Видалити документ"
-                      type="button"
-                    >
-                      <DeleteOutlineOutlinedIcon />
-                    </button>
+                    {canMutateDocument(document) ? (
+                      <button
+                        aria-label="Видалити документ"
+                        className="salary-person-document-delete"
+                        disabled={isSavingDocument}
+                        onClick={() => void deleteDocument(document)}
+                        title="Видалити документ"
+                        type="button"
+                      >
+                        <DeleteOutlineOutlinedIcon />
+                      </button>
+                    ) : null}
                   </article>
                 ))
               ) : (
@@ -6854,7 +7475,7 @@ export function DocumentsPage(_props: {
                 </p>
               )}
             </div>
-            {personDocumentCreateSelect}
+            {canEdit ? personDocumentCreateSelect : null}
           </section>
 
           {zhbdCertificateWorkspace}
@@ -6868,7 +7489,11 @@ export function DocumentsPage(_props: {
   if (mode === "ubdRestoreReport") {
     return (
       <>
-      <main className="main-panel documents-ubd-page">
+      <main
+        className={["main-panel", "documents-ubd-page", foreignReadonlyClass]
+          .filter(Boolean)
+          .join(" ")}
+      >
         <header className="topbar analytics-topbar salary-document-topbar">
           <div className="salary-document-main-row">
             <Box className="salary-document-title">
@@ -6939,16 +7564,18 @@ export function DocumentsPage(_props: {
                         {new Date(document.updatedAt).toLocaleString("uk-UA")}
                       </small>
                     </button>
-                    <button
-                      aria-label="Видалити документ"
-                      className="salary-person-document-delete"
-                      disabled={isSavingDocument}
-                      onClick={() => void deleteDocument(document)}
-                      title="Видалити документ"
-                      type="button"
-                    >
-                      <DeleteOutlineOutlinedIcon />
-                    </button>
+                    {canMutateDocument(document) ? (
+                      <button
+                        aria-label="Видалити документ"
+                        className="salary-person-document-delete"
+                        disabled={isSavingDocument}
+                        onClick={() => void deleteDocument(document)}
+                        title="Видалити документ"
+                        type="button"
+                      >
+                        <DeleteOutlineOutlinedIcon />
+                      </button>
+                    ) : null}
                   </article>
                 ))
               ) : (
@@ -6957,7 +7584,7 @@ export function DocumentsPage(_props: {
                 </p>
               )}
             </div>
-            {personDocumentCreateSelect}
+            {canEdit ? personDocumentCreateSelect : null}
           </section>
 
           {ubdRestoreWorkspace}
@@ -7068,7 +7695,7 @@ export function DocumentsPage(_props: {
                 </p>
               )}
             </div>
-            {personDocumentCreateSelect}
+            {canEdit ? personDocumentCreateSelect : null}
           </section>
 
           {salaryWorkspace}

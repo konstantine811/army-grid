@@ -11,6 +11,7 @@ import {
   type AuthUser,
   type RegisteredUser,
 } from './auth/authTypes'
+import { showAppToast, showBackendBlockedToast } from './shared/appToast'
 
 const resolveApiBaseUrl = () => {
   const fromEnv = import.meta.env.VITE_API_BASE_URL
@@ -27,7 +28,8 @@ const resolveApiBaseUrl = () => {
   return 'http://127.0.0.1:4000'
 }
 
-const API_BASE_URL = resolveApiBaseUrl()
+/** Resolve per call — hostname differs on localhost vs phone/LAN. */
+const apiBaseUrl = () => resolveApiBaseUrl()
 
 type JsonRecord = Record<string, unknown>
 
@@ -134,6 +136,9 @@ export type BackendPersonDocument = {
   fields?: JsonRecord | null
   workflow?: JsonRecord | null
   files?: JsonRecord | null
+  createdByUserId?: string | null
+  createdByEmail?: string | null
+  createdByDisplayName?: string | null
   createdAt: string
   updatedAt: string
 }
@@ -149,6 +154,18 @@ export type BackendAnketaCellEdit = {
   value: string
   externalId?: string | null
   fullName?: string | null
+  updatedAt: string
+  createdAt: string
+}
+
+export type BackendAnketaSheetSnapshot = {
+  id: string
+  sheetId: string
+  gid: string
+  payload: JsonRecord
+  source: string
+  sourceLabel?: string | null
+  fetchedAt: string
   updatedAt: string
   createdAt: string
 }
@@ -337,7 +354,7 @@ const parseApiError = async (response: Response) => {
 }
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}${path}`, {
+  const response = await fetch(`${apiBaseUrl()}${path}`, {
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -347,7 +364,19 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   })
 
   if (!response.ok) {
-    throw new Error(await parseApiError(response))
+    const message = await parseApiError(response)
+    const method = (options.method || 'GET').toUpperCase()
+    const isWrite = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)
+    if (response.status === 403) {
+      showBackendBlockedToast(message)
+    } else if (isWrite && response.status >= 400 && response.status !== 401) {
+      showAppToast({
+        title: 'Помилка запису',
+        description: message,
+        variant: response.status >= 500 ? 'CRITICAL' : 'WARNING',
+      })
+    }
+    throw new Error(message)
   }
 
   if (response.status === 204) return undefined as T
@@ -355,7 +384,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 }
 
 async function requestBinary<T>(path: string, body: Blob, options: RequestInit = {}): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}${path}`, {
+  const response = await fetch(`${apiBaseUrl()}${path}`, {
     ...options,
     body,
     headers: {
@@ -370,17 +399,39 @@ async function requestBinary<T>(path: string, body: Blob, options: RequestInit =
       clearAuthToken()
       emitAuthLogout()
     }
+    let message = text || `API request failed: ${response.status}`
     if (response.status === 413) {
-      throw new Error('PDF завеликий для API. Спробуйте стиснути файл або збільшити QUESTIONNAIRE_BODY_LIMIT на backend.')
+      message =
+        'PDF завеликий для API. Спробуйте стиснути файл або збільшити QUESTIONNAIRE_BODY_LIMIT на backend.'
+    } else {
+      try {
+        const json = JSON.parse(text) as { message?: string | string[] }
+        if (Array.isArray(json.message)) message = json.message.join(', ')
+        else if (typeof json.message === 'string' && json.message.trim())
+          message = json.message
+      } catch {
+        /* plain text */
+      }
     }
-    throw new Error(text || `API request failed: ${response.status}`)
+    if (response.status === 403) {
+      showBackendBlockedToast(message)
+    } else if (response.status !== 401) {
+      showAppToast({
+        title: 'Помилка запису',
+        description: message,
+        variant: response.status >= 500 ? 'CRITICAL' : 'WARNING',
+      })
+    }
+    throw new Error(message)
   }
 
   return response.json() as Promise<T>
 }
 
 export const api = {
-  baseUrl: API_BASE_URL,
+  get baseUrl() {
+    return apiBaseUrl()
+  },
 
   register(body: { email: string; password: string; displayName: string }) {
     return request<AuthSession>('/auth/register', {
@@ -400,6 +451,19 @@ export const api = {
     return request<AuthUser>('/auth/me')
   },
 
+  updateOwnProfile(payload: {
+    displayName?: string
+    nickname?: string
+    photoData?: string
+    linkedPersonExternalId?: string | null
+    linkedPersonFullName?: string | null
+  }) {
+    return request<AuthUser>('/auth/me/profile', {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    })
+  },
+
   refreshAuth() {
     return request<AuthSession>('/auth/refresh', { method: 'POST' })
   },
@@ -413,6 +477,16 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify({ accessGranted }),
     })
+  },
+
+  setUserPermissions(userId: string, writePermissions: string[]) {
+    return request<RegisteredUser>(
+      `/auth/users/${encodeURIComponent(userId)}/permissions`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify({ writePermissions }),
+      },
+    )
   },
 
   getHealth() {
@@ -541,7 +615,7 @@ export const api = {
     if (fileName) params.set('fileName', fileName)
     if (download) params.set('download', '1')
     const query = params.toString()
-    return `${API_BASE_URL}/ejournals/personnel/questionnaires/${encodeURIComponent(personExternalId)}/file${
+    return `${apiBaseUrl()}/ejournals/personnel/questionnaires/${encodeURIComponent(personExternalId)}/file${
       query ? `?${query}` : ''
     }`
   },
@@ -594,7 +668,7 @@ export const api = {
 
   async getDiskQuestionnaireFile(relativePath: string) {
     const response = await fetch(
-      `${API_BASE_URL}/ejournals/personnel/questionnaire-disk/file`,
+      `${apiBaseUrl()}/ejournals/personnel/questionnaire-disk/file`,
       {
         method: 'POST',
         headers: {
@@ -886,5 +960,35 @@ export const api = {
         body: JSON.stringify({ items, actor: 'operator' }),
       },
     )
+  },
+
+  async getAnketaSnapshot(sheetId?: string, gid?: string) {
+    const params = new URLSearchParams()
+    if (sheetId?.trim()) params.set('sheetId', sheetId.trim())
+    if (gid?.trim()) params.set('gid', gid.trim())
+    const query = params.toString()
+    try {
+      return await request<BackendAnketaSheetSnapshot>(
+        `/anketa/snapshot${query ? `?${query}` : ''}`,
+      )
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (/не знайдено|not found|404/i.test(message)) return null
+      throw error
+    }
+  },
+
+  putAnketaSnapshot(payload: {
+    payload: JsonRecord
+    source?: string
+    sourceLabel?: string
+    fetchedAt?: string
+    sheetId?: string
+    gid?: string
+  }) {
+    return request<BackendAnketaSheetSnapshot>('/anketa/snapshot', {
+      method: 'PUT',
+      body: JSON.stringify({ ...payload, actor: 'operator' }),
+    })
   },
 }

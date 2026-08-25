@@ -287,6 +287,26 @@ export const buildFighterTaskPeriodText = (
   return "";
 };
 
+const UBD_TASK_PERIOD_RANGE_RE =
+  /(\d{1,2}[.\/-]\d{1,2}[.\/-]\d{2,4})\s*-\s*(\d{1,2}[.\/-]\d{1,2}[.\/-]\d{2,4})/;
+
+/** Друга дата з «Період завдань» — дата, по яку був вихід. */
+export const parseUbdTaskPeriodEndDate = (taskPeriod: string): Date | null => {
+  const text = String(taskPeriod ?? "").trim();
+  if (!text) return null;
+
+  const match = text.match(UBD_TASK_PERIOD_RANGE_RE);
+  if (!match) return null;
+
+  return parseFighterStatusDate(match[2]);
+};
+
+export const formatUbdTaskPeriodEndDate = (taskPeriod: string): string => {
+  const date = parseUbdTaskPeriodEndDate(taskPeriod);
+  if (!date) return "";
+  return date.toLocaleDateString("uk-UA");
+};
+
 export const getFighterTaskPlace = (
   row: EjournalPreviewRow | null | undefined,
 ) => getFighterStatusDirectValue(row, "fighter_status_direction");

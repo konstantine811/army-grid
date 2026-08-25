@@ -1,4 +1,9 @@
-import { bucketOf, countsInExitMetrics, countsInNoExitsList, emptyBucketCounts } from "./socPassportFields";
+import {
+  bucketOf,
+  countsInExitMetrics,
+  countsInNoExitsList,
+  emptyBucketCounts,
+} from "./socPassportFields";
 import type {
   BucketCounts,
   PassportMetricId,
@@ -10,7 +15,11 @@ import type {
   SocStaffSlot,
 } from "./socPassportTypes";
 
-const add = (counts: BucketCounts, rankGroup: RankGroup, serviceType: ServiceType) => {
+const add = (
+  counts: BucketCounts,
+  rankGroup: RankGroup,
+  serviceType: ServiceType,
+) => {
   counts[bucketOf(rankGroup, serviceType)] += 1;
 };
 
@@ -29,48 +38,275 @@ const layout: Array<{
   label: string;
   metricId?: PassportMetricId;
 }> = [
-  { id: "staff", kind: "metric", number: "1.", label: "За штатом", metricId: "staff" },
-  { id: "listed", kind: "metric", number: "2.", label: "За списком", metricId: "listed" },
-  { id: "present", kind: "metric", number: "3.", label: "В наявності", metricId: "present" },
-  { id: "disposition", kind: "metric", number: "4.", label: "В розпорядженні", metricId: "disposition" },
-  { id: "arrived", kind: "metric", number: "", label: "Прибули до в/ч.", metricId: "arrived" },
-  { id: "fromTck", kind: "metric", number: "5.", label: "З ТЦК та СП", metricId: "fromTck" },
-  { id: "fromNc", kind: "metric", number: "6.", label: "З НЦ", metricId: "fromTrainingCenter" },
-  { id: "fromRecruit", kind: "metric", number: "7.", label: "Прямий рекрутинг", metricId: "fromRecruiting" },
-  { id: "fromBrez", kind: "metric", number: "8.", label: "З Брез", metricId: "fromBrez" },
+  {
+    id: "staff",
+    kind: "metric",
+    number: "1.",
+    label: "За штатом",
+    metricId: "staff",
+  },
+  {
+    id: "listed",
+    kind: "metric",
+    number: "2.",
+    label: "За списком",
+    metricId: "listed",
+  },
+  {
+    id: "present",
+    kind: "metric",
+    number: "3.",
+    label: "В наявності",
+    metricId: "present",
+  },
+  {
+    id: "disposition",
+    kind: "metric",
+    number: "4.",
+    label: "В розпорядженні",
+    metricId: "disposition",
+  },
+  {
+    id: "arrived",
+    kind: "metric",
+    number: "",
+    label: "Прибули до в/ч.",
+    metricId: "arrived",
+  },
+  {
+    id: "fromTck",
+    kind: "metric",
+    number: "5.",
+    label: "З ТЦК та СП",
+    metricId: "fromTck",
+  },
+  {
+    id: "fromNc",
+    kind: "metric",
+    number: "6.",
+    label: "З НЦ",
+    metricId: "fromTrainingCenter",
+  },
+  {
+    id: "fromRecruit",
+    kind: "metric",
+    number: "7.",
+    label: "Прямий рекрутинг",
+    metricId: "fromRecruiting",
+  },
+  {
+    id: "fromBrez",
+    kind: "metric",
+    number: "8.",
+    label: "З Брез",
+    metricId: "fromBrez",
+  },
   { id: "sex", kind: "section", number: "", label: "Стать" },
-  { id: "male", kind: "metric", number: "9.", label: "Чоловіки", metricId: "male" },
-  { id: "female", kind: "metric", number: "10.", label: "Жінки", metricId: "female" },
+  {
+    id: "male",
+    kind: "metric",
+    number: "9.",
+    label: "Чоловіки",
+    metricId: "male",
+  },
+  {
+    id: "female",
+    kind: "metric",
+    number: "10.",
+    label: "Жінки",
+    metricId: "female",
+  },
   { id: "age", kind: "section", number: "", label: "За віком" },
-  { id: "age18", kind: "metric", number: "11.", label: "18-25", metricId: "age18_25" },
-  { id: "age26", kind: "metric", number: "12", label: "26-30", metricId: "age26_30" },
-  { id: "age31", kind: "metric", number: "13", label: "31-40", metricId: "age31_40" },
-  { id: "age41", kind: "metric", number: "14", label: "41-50", metricId: "age41_50" },
-  { id: "age50", kind: "metric", number: "15", label: "Старші 50", metricId: "age50plus" },
+  {
+    id: "age18",
+    kind: "metric",
+    number: "11.",
+    label: "18-25",
+    metricId: "age18_25",
+  },
+  {
+    id: "age26",
+    kind: "metric",
+    number: "12",
+    label: "26-30",
+    metricId: "age26_30",
+  },
+  {
+    id: "age31",
+    kind: "metric",
+    number: "13",
+    label: "31-40",
+    metricId: "age31_40",
+  },
+  {
+    id: "age41",
+    kind: "metric",
+    number: "14",
+    label: "41-50",
+    metricId: "age41_50",
+  },
+  {
+    id: "age50",
+    kind: "metric",
+    number: "15",
+    label: "Старші 50",
+    metricId: "age50plus",
+  },
   { id: "nat", kind: "section", number: "", label: "Національність" },
-  { id: "natUa", kind: "metric", number: "16", label: "Україна", metricId: "natUkraine" },
-  { id: "natPl", kind: "metric", number: "17", label: "Польща", metricId: "natPoland" },
-  { id: "natUs", kind: "metric", number: "18", label: "США", metricId: "natUsa" },
-  { id: "natGb", kind: "metric", number: "19", label: "Британія", metricId: "natBritain" },
-  { id: "natPt", kind: "metric", number: "20", label: "Португалія", metricId: "natPortugal" },
-  { id: "natAr", kind: "metric", number: "21", label: "Аргентина", metricId: "natArgentina" },
-  { id: "natOther", kind: "metric", number: "22", label: "Інші", metricId: "natOther" },
-  { id: "natRu", kind: "metric", number: "23", label: "Рф", metricId: "natRussia" },
-  { id: "exits", kind: "section", number: "", label: "По виконанню бойових завдань" },
-  { id: "exitsNone", kind: "metric", number: "", label: "Не виконували", metricId: "exitsNone" },
-  { id: "exits14", kind: "metric", number: "", label: "До 5ти виходів (завдань на ЛБЗ)", metricId: "exits1_4" },
-  { id: "exits510", kind: "metric", number: "", label: "5-10 виходів", metricId: "exits5_10" },
-  { id: "exits1115", kind: "metric", number: "", label: "11-15 виходів", metricId: "exits11_15" },
-  { id: "exits1620", kind: "metric", number: "", label: "16-20 виходів", metricId: "exits16_20" },
-  { id: "exits2125", kind: "metric", number: "", label: "21-25 виходів", metricId: "exits21_25" },
-  { id: "exits2630", kind: "metric", number: "", label: "26-30 виходів", metricId: "exits26_30" },
-  { id: "exits30", kind: "metric", number: "", label: "30 і більше", metricId: "exits30plus" },
+  {
+    id: "natUa",
+    kind: "metric",
+    number: "16",
+    label: "Україна",
+    metricId: "natUkraine",
+  },
+  {
+    id: "natPl",
+    kind: "metric",
+    number: "17",
+    label: "Польща",
+    metricId: "natPoland",
+  },
+  {
+    id: "natUs",
+    kind: "metric",
+    number: "18",
+    label: "США",
+    metricId: "natUsa",
+  },
+  {
+    id: "natGb",
+    kind: "metric",
+    number: "19",
+    label: "Британія",
+    metricId: "natBritain",
+  },
+  {
+    id: "natPt",
+    kind: "metric",
+    number: "20",
+    label: "Португалія",
+    metricId: "natPortugal",
+  },
+  {
+    id: "natAr",
+    kind: "metric",
+    number: "21",
+    label: "Аргентина",
+    metricId: "natArgentina",
+  },
+  {
+    id: "natOther",
+    kind: "metric",
+    number: "22",
+    label: "Інші",
+    metricId: "natOther",
+  },
+  {
+    id: "natRu",
+    kind: "metric",
+    number: "23",
+    label: "Рф",
+    metricId: "natRussia",
+  },
+  {
+    id: "exits",
+    kind: "section",
+    number: "",
+    label: "По виконанню бойових завдань",
+  },
+  {
+    id: "exitsNone",
+    kind: "metric",
+    number: "",
+    label: "Не виконували",
+    metricId: "exitsNone",
+  },
+  {
+    id: "exits14",
+    kind: "metric",
+    number: "",
+    label: "До 5ти виходів (завдань на ЛБЗ)",
+    metricId: "exits1_4",
+  },
+  {
+    id: "exits510",
+    kind: "metric",
+    number: "",
+    label: "5-10 виходів",
+    metricId: "exits5_10",
+  },
+  {
+    id: "exits1115",
+    kind: "metric",
+    number: "",
+    label: "11-15 виходів",
+    metricId: "exits11_15",
+  },
+  {
+    id: "exits1620",
+    kind: "metric",
+    number: "",
+    label: "16-20 виходів",
+    metricId: "exits16_20",
+  },
+  {
+    id: "exits2125",
+    kind: "metric",
+    number: "",
+    label: "21-25 виходів",
+    metricId: "exits21_25",
+  },
+  {
+    id: "exits2630",
+    kind: "metric",
+    number: "",
+    label: "26-30 виходів",
+    metricId: "exits26_30",
+  },
+  {
+    id: "exits30",
+    kind: "metric",
+    number: "",
+    label: "30 і більше",
+    metricId: "exits30plus",
+  },
   { id: "regions", kind: "section", number: "", label: "По регіонам" },
-  { id: "kyivCity", kind: "metric", number: "", label: "м. Київ", metricId: "kyivCity" },
-  { id: "kyiv", kind: "metric", number: "", label: "Київська обл.", metricId: "kyiv" },
-  { id: "vinnytsia", kind: "metric", number: "", label: "Вінницька обл.", metricId: "vinnytsia" },
-  { id: "volyn", kind: "metric", number: "", label: "Волинська обл.", metricId: "volyn" },
-  { id: "dnipro", kind: "metric", number: "", label: "Дніпропетровська обл.", metricId: "dnipro" },
+  {
+    id: "kyivCity",
+    kind: "metric",
+    number: "",
+    label: "м. Київ",
+    metricId: "kyivCity",
+  },
+  {
+    id: "kyiv",
+    kind: "metric",
+    number: "",
+    label: "Київська обл.",
+    metricId: "kyiv",
+  },
+  {
+    id: "vinnytsia",
+    kind: "metric",
+    number: "",
+    label: "Вінницька обл.",
+    metricId: "vinnytsia",
+  },
+  {
+    id: "volyn",
+    kind: "metric",
+    number: "",
+    label: "Волинська обл.",
+    metricId: "volyn",
+  },
+  {
+    id: "dnipro",
+    kind: "metric",
+    number: "",
+    label: "Дніпропетровська обл.",
+    metricId: "dnipro",
+  },
   {
     id: "donetskControlled",
     kind: "metric",
@@ -85,8 +321,20 @@ const layout: Array<{
     label: "Донецька обл. (тимчасово окупована частина)",
     metricId: "donetskOccupied",
   },
-  { id: "zhytomyr", kind: "metric", number: "", label: "Житомирська обл.", metricId: "zhytomyr" },
-  { id: "zakarpattia", kind: "metric", number: "", label: "Закарпатська обл.", metricId: "zakarpattia" },
+  {
+    id: "zhytomyr",
+    kind: "metric",
+    number: "",
+    label: "Житомирська обл.",
+    metricId: "zhytomyr",
+  },
+  {
+    id: "zakarpattia",
+    kind: "metric",
+    number: "",
+    label: "Закарпатська обл.",
+    metricId: "zakarpattia",
+  },
   {
     id: "ivanoFrankivsk",
     kind: "metric",
@@ -94,15 +342,69 @@ const layout: Array<{
     label: "Івано-Франківська обл.",
     metricId: "ivanoFrankivsk",
   },
-  { id: "kirovohrad", kind: "metric", number: "", label: "Кіровоградська обл.", metricId: "kirovohrad" },
-  { id: "luhansk", kind: "metric", number: "", label: "Луганська обл.", metricId: "luhansk" },
-  { id: "lviv", kind: "metric", number: "", label: "Львівська обл.", metricId: "lviv" },
-  { id: "mykolaiv", kind: "metric", number: "", label: "Миколаївська обл.", metricId: "mykolaiv" },
-  { id: "odesa", kind: "metric", number: "", label: "Одеська обл.", metricId: "odesa" },
-  { id: "poltava", kind: "metric", number: "", label: "Полтавська обл.", metricId: "poltava" },
-  { id: "rivne", kind: "metric", number: "", label: "Рівненська обл.", metricId: "rivne" },
-  { id: "sumy", kind: "metric", number: "", label: "Сумська обл.", metricId: "sumy" },
-  { id: "ternopil", kind: "metric", number: "", label: "Тернопільська обл.", metricId: "ternopil" },
+  {
+    id: "kirovohrad",
+    kind: "metric",
+    number: "",
+    label: "Кіровоградська обл.",
+    metricId: "kirovohrad",
+  },
+  {
+    id: "luhansk",
+    kind: "metric",
+    number: "",
+    label: "Луганська обл.",
+    metricId: "luhansk",
+  },
+  {
+    id: "lviv",
+    kind: "metric",
+    number: "",
+    label: "Львівська обл.",
+    metricId: "lviv",
+  },
+  {
+    id: "mykolaiv",
+    kind: "metric",
+    number: "",
+    label: "Миколаївська обл.",
+    metricId: "mykolaiv",
+  },
+  {
+    id: "odesa",
+    kind: "metric",
+    number: "",
+    label: "Одеська обл.",
+    metricId: "odesa",
+  },
+  {
+    id: "poltava",
+    kind: "metric",
+    number: "",
+    label: "Полтавська обл.",
+    metricId: "poltava",
+  },
+  {
+    id: "rivne",
+    kind: "metric",
+    number: "",
+    label: "Рівненська обл.",
+    metricId: "rivne",
+  },
+  {
+    id: "sumy",
+    kind: "metric",
+    number: "",
+    label: "Сумська обл.",
+    metricId: "sumy",
+  },
+  {
+    id: "ternopil",
+    kind: "metric",
+    number: "",
+    label: "Тернопільська обл.",
+    metricId: "ternopil",
+  },
   {
     id: "zaporizhzhiaControlled",
     kind: "metric",
@@ -145,20 +447,92 @@ const layout: Array<{
     label: "Херсонська обл. (непідконтрольна частина)",
     metricId: "khersonOccupied",
   },
-  { id: "khmelnytskyi", kind: "metric", number: "", label: "Хмельницька обл.", metricId: "khmelnytskyi" },
-  { id: "cherkasy", kind: "metric", number: "", label: "Черкаська обл.", metricId: "cherkasy" },
-  { id: "chernivtsi", kind: "metric", number: "", label: "Чернівецька обл.", metricId: "chernivtsi" },
-  { id: "chernihiv", kind: "metric", number: "", label: "Чернігівська обл.", metricId: "chernihiv" },
-  { id: "crimea", kind: "metric", number: "", label: "АР Крим", metricId: "crimea" },
+  {
+    id: "khmelnytskyi",
+    kind: "metric",
+    number: "",
+    label: "Хмельницька обл.",
+    metricId: "khmelnytskyi",
+  },
+  {
+    id: "cherkasy",
+    kind: "metric",
+    number: "",
+    label: "Черкаська обл.",
+    metricId: "cherkasy",
+  },
+  {
+    id: "chernivtsi",
+    kind: "metric",
+    number: "",
+    label: "Чернівецька обл.",
+    metricId: "chernivtsi",
+  },
+  {
+    id: "chernihiv",
+    kind: "metric",
+    number: "",
+    label: "Чернігівська обл.",
+    metricId: "chernihiv",
+  },
+  {
+    id: "crimea",
+    kind: "metric",
+    number: "",
+    label: "АР Крим",
+    metricId: "crimea",
+  },
   { id: "family", kind: "section", number: "", label: "Сімейний стан" },
-  { id: "married", kind: "metric", number: "", label: "Одружені", metricId: "married" },
-  { id: "unmarried", kind: "metric", number: "", label: "Неодружені", metricId: "unmarried" },
-  { id: "civil", kind: "metric", number: "", label: "Цивільний шлюб", metricId: "civil" },
+  {
+    id: "married",
+    kind: "metric",
+    number: "",
+    label: "Одружені",
+    metricId: "married",
+  },
+  {
+    id: "unmarried",
+    kind: "metric",
+    number: "",
+    label: "Неодружені",
+    metricId: "unmarried",
+  },
+  {
+    id: "civil",
+    kind: "metric",
+    number: "",
+    label: "Цивільний шлюб",
+    metricId: "civil",
+  },
   { id: "kin", kind: "section", number: "", label: "Родинні зв’язки" },
-  { id: "kids", kind: "metric", number: "", label: "Мають дітей до 18 років", metricId: "childrenUnder18" },
-  { id: "kids3", kind: "metric", number: "", label: "З них 3 і більше до 18 років", metricId: "children3plus" },
-  { id: "relServe", kind: "metric", number: "", label: "Близькі родичі, що служать", metricId: "relativesServing" },
-  { id: "relAbroad", kind: "metric", number: "", label: "Близькі родичі за кордоном", metricId: "relativesAbroad" },
+  {
+    id: "kids",
+    kind: "metric",
+    number: "",
+    label: "Мають дітей до 18 років",
+    metricId: "childrenUnder18",
+  },
+  {
+    id: "kids3",
+    kind: "metric",
+    number: "",
+    label: "З них 3 і більше до 18 років",
+    metricId: "children3plus",
+  },
+  {
+    id: "relServe",
+    kind: "metric",
+    number: "",
+    label: "Близькі родичі, що служать",
+    metricId: "relativesServing",
+  },
+  {
+    id: "relAbroad",
+    kind: "metric",
+    number: "",
+    label: "Близькі родичі за кордоном",
+    metricId: "relativesAbroad",
+  },
   {
     id: "relHostile",
     kind: "metric",
@@ -213,7 +587,8 @@ export const buildSocPassportResult = ({
     if (person.arrivalSource === "trainingCenter") {
       bump(metrics, "fromTrainingCenter", person);
     }
-    if (person.arrivalSource === "recruiting") bump(metrics, "fromRecruiting", person);
+    if (person.arrivalSource === "recruiting")
+      bump(metrics, "fromRecruiting", person);
     if (person.arrivalSource === "brez") bump(metrics, "fromBrez", person);
     if (person.sex === "female") bump(metrics, "female", person);
     else bump(metrics, "male", person);
@@ -224,11 +599,15 @@ export const buildSocPassportResult = ({
     if (person.ageBand === "50+") bump(metrics, "age50plus", person);
     if (person.nationality === "poland") bump(metrics, "natPoland", person);
     else if (person.nationality === "usa") bump(metrics, "natUsa", person);
-    else if (person.nationality === "britain") bump(metrics, "natBritain", person);
-    else if (person.nationality === "portugal") bump(metrics, "natPortugal", person);
-    else if (person.nationality === "argentina") bump(metrics, "natArgentina", person);
+    else if (person.nationality === "britain")
+      bump(metrics, "natBritain", person);
+    else if (person.nationality === "portugal")
+      bump(metrics, "natPortugal", person);
+    else if (person.nationality === "argentina")
+      bump(metrics, "natArgentina", person);
     else if (person.nationality === "other") bump(metrics, "natOther", person);
-    else if (person.nationality === "russia") bump(metrics, "natRussia", person);
+    else if (person.nationality === "russia")
+      bump(metrics, "natRussia", person);
     else bump(metrics, "natUkraine", person);
     if (
       person.exitBand === "none" &&
@@ -309,10 +688,12 @@ export const buildSocPassportResult = ({
           person.match.jbdExits ||
           person.match.bplaExits,
       ).length,
-      combatDutyMatched: people.filter((person) => person.combatDutyEvidence.length > 0)
-        .length,
+      combatDutyMatched: people.filter(
+        (person) => person.combatDutyEvidence.length > 0,
+      ).length,
       relativesParsed: people.filter((person) => person.relativesRaw).length,
-      unknownRegion: people.filter((person) => person.region === "unknown").length,
+      unknownRegion: people.filter((person) => person.region === "unknown")
+        .length,
       unknownAge: people.filter((person) => person.age == null).length,
     },
     warnings,

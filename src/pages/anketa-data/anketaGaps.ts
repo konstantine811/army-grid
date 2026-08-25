@@ -34,6 +34,7 @@ export const ANKETA_MISSING_VALUE_PRESETS = [
   "втрачено",
   "не застосовується",
   "уточнюється",
+  "в процесі виготовлення",
 ] as const;
 
 export type AnketaMissingValuePreset =

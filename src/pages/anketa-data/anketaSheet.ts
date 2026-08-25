@@ -1,3 +1,4 @@
+import { api } from "../../api";
 import {
   fetchWithCache,
   jsonChanged,
@@ -181,13 +182,67 @@ export type AnketaRow = {
 
 export type AnketaSheetSnapshot = {
   fetchedAt: string;
-  source: "google" | "file" | "cache";
+  source: "google" | "file" | "cache" | "db";
   sourceLabel: string;
   columns: AnketaColumnDef[];
   rows: AnketaRow[];
 };
 
 export const ANKETA_CACHE_KEY = "anketa:google-sheet:v1";
+
+const isAnketaSheetSnapshot = (
+  value: unknown,
+): value is AnketaSheetSnapshot => {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Partial<AnketaSheetSnapshot>;
+  return Array.isArray(record.rows) && Array.isArray(record.columns);
+};
+
+/** Persist sheet snapshot to API (shared across localhost + LAN). Best-effort. */
+export const saveAnketaSnapshotToServer = async (
+  snapshot: AnketaSheetSnapshot,
+): Promise<boolean> => {
+  try {
+    await api.putAnketaSnapshot({
+      payload: snapshot as unknown as Record<string, unknown>,
+      source: snapshot.source === "cache" || snapshot.source === "db"
+        ? "google"
+        : snapshot.source,
+      sourceLabel: snapshot.sourceLabel,
+      fetchedAt: snapshot.fetchedAt,
+      sheetId: ANKETA_SHEET_ID,
+      gid: ANKETA_SHEET_GID,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+export const loadAnketaSnapshotFromServer = async (): Promise<
+  AnketaSheetSnapshot | null
+> => {
+  try {
+    const record = await api.getAnketaSnapshot(
+      ANKETA_SHEET_ID,
+      ANKETA_SHEET_GID,
+    );
+    if (!record || !isAnketaSheetSnapshot(record.payload)) return null;
+    const snapshot: AnketaSheetSnapshot = {
+      ...record.payload,
+      source: "db",
+      sourceLabel:
+        record.sourceLabel?.trim() ||
+        record.payload.sourceLabel ||
+        "БД · Анкети",
+      fetchedAt: record.fetchedAt || record.payload.fetchedAt,
+    };
+    await writeDataCache(ANKETA_CACHE_KEY, snapshot);
+    return snapshot;
+  } catch {
+    return null;
+  }
+};
 
 const normalizeCell = (value: unknown) =>
   String(value ?? "")
@@ -332,6 +387,7 @@ export const loadAnketaSheetFromGoogle = async (): Promise<AnketaSheetSnapshot> 
     sourceLabel: "Google Sheets · Анкети",
   });
   await writeDataCache(ANKETA_CACHE_KEY, snapshot);
+  void saveAnketaSnapshotToServer(snapshot);
   return snapshot;
 };
 
@@ -344,6 +400,7 @@ export const loadAnketaSheetFromFile = async (
     sourceLabel: file.name,
   });
   await writeDataCache(ANKETA_CACHE_KEY, snapshot);
+  void saveAnketaSnapshotToServer(snapshot);
   return snapshot;
 };
 
@@ -359,10 +416,15 @@ export const loadAnketaSheetPreferCache = async (options?: {
   const merge = async (snapshot: AnketaSheetSnapshot) =>
     options?.mergeEdits ? await options.mergeEdits(snapshot) : snapshot;
 
-  const cached = await loadCachedAnketaSheet();
+  // 1) Shared DB snapshot (same for localhost + LAN), then local IndexedDB.
+  const fromDb = await loadAnketaSnapshotFromServer();
+  const cached = fromDb ?? (await loadCachedAnketaSheet());
   if (cached?.rows?.length) {
     await options?.onCached?.(
-      await merge({ ...cached, source: "cache" }),
+      await merge({
+        ...cached,
+        source: fromDb ? "db" : "cache",
+      }),
     );
   }
 
@@ -372,10 +434,18 @@ export const loadAnketaSheetPreferCache = async (options?: {
       fetcher: loadAnketaSheetFromGoogle,
       isChanged: jsonChanged,
     });
+    // fetchWithCache may return cached google payload without re-running fetcher;
+    // ensure server has the latest shared copy when we have rows.
+    if (fresh.rows?.length && fresh.source !== "cache") {
+      void saveAnketaSnapshotToServer(fresh);
+    }
     return await merge(fresh);
   } catch (error) {
     if (cached?.rows?.length) {
-      return await merge({ ...cached, source: "cache" as const });
+      return await merge({
+        ...cached,
+        source: fromDb ? ("db" as const) : ("cache" as const),
+      });
     }
     throw error;
   }

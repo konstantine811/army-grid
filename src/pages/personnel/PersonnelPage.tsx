@@ -386,7 +386,8 @@ export function PersonnelPage({
     meta?: { fullPosition?: string },
   ) => void;
 }) {
-  const { canEdit } = useAuth();
+  const { canEditArea } = useAuth();
+  const canEdit = canEditArea("personnel");
   const [imports, setImports] = useState<BackendEjournalImport[]>([]);
   const [dbPreview, setDbPreview] = useState<DbPreviewState | null>(null);
   const [rosterLabels, setRosterLabels] = useState<Record<string, string>>({});
