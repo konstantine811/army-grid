@@ -3,6 +3,7 @@ import type { EjournalPreviewRow } from "../ejournal/ejournalTypes";
 import {
   extractPhones,
   getPersonFieldValue,
+  isPersistedEjournalRowId,
   normalizeUaPhone,
   previewValueToDisplay,
   resolvePersonFieldKey,
@@ -147,31 +148,33 @@ export const syncEnrichmentToPerson = async (options: {
   if ((!row || !rowId) && personExternalId) {
     try {
       const profile = await api.getPersonnelProfile(personExternalId);
-      const oos = profile.ejournal?.oosRow;
-      const roster = profile.roster?.row;
-      const source =
-        oos && typeof oos === "object"
-          ? oos
-          : roster && typeof roster === "object"
-            ? roster
-            : null;
-      if (source) {
-        const id = String(
-          (source as { id?: unknown }).id ??
-            (source as { __dbRowId?: unknown }).__dbRowId ??
-            "",
-        ).trim();
-        const values =
-          (source as { values?: Record<string, unknown> }).values &&
-          typeof (source as { values?: unknown }).values === "object"
-            ? (source as { values: Record<string, unknown> }).values
-            : (source as Record<string, unknown>);
-        const resolved = {
-          __dbRowId: id || undefined,
-          ...values,
-        } as EjournalPreviewRow;
-        if (!row) row = resolved;
-        if (!rowId && id) rowId = id;
+      if (profile) {
+        const oos = profile.ejournal?.oosRow;
+        const roster = profile.roster?.row;
+        const source =
+          oos && typeof oos === "object"
+            ? oos
+            : roster && typeof roster === "object"
+              ? roster
+              : null;
+        if (source) {
+          const id = String(
+            (source as { id?: unknown }).id ??
+              (source as { __dbRowId?: unknown }).__dbRowId ??
+              "",
+          ).trim();
+          const values =
+            (source as { values?: Record<string, unknown> }).values &&
+            typeof (source as { values?: unknown }).values === "object"
+              ? (source as { values: Record<string, unknown> }).values
+              : (source as Record<string, unknown>);
+          const resolved = {
+            __dbRowId: id || undefined,
+            ...values,
+          } as EjournalPreviewRow;
+          if (!row) row = resolved;
+          if (!rowId && id) rowId = id;
+        }
       }
     } catch {
       /* keep local row if profile unavailable */
@@ -179,8 +182,14 @@ export const syncEnrichmentToPerson = async (options: {
   }
 
   const fieldUpdates = buildEmptyPersonFieldUpdates(row, options.patch);
-  if (rowId && Object.keys(fieldUpdates).length) {
-    await api.updateEjournalRowValues(rowId, fieldUpdates);
+  if (isPersistedEjournalRowId(rowId) && Object.keys(fieldUpdates).length) {
+    try {
+      await api.updateEjournalRowValues(rowId, fieldUpdates, {
+        suppressErrorToast: true,
+      });
+    } catch {
+      /* staging row may be absent after roster-only import */
+    }
   }
 
   return { phones, phonesAdded, fieldUpdates, phoneDocument };

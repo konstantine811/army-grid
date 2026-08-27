@@ -12,7 +12,27 @@ import {
 } from "../anketaEdits";
 import { readAnketaAppsScriptUrl } from "../anketaGaps";
 import { loadAnketaMissingNameKeys } from "../anketaMissingList";
-import { mergeAnketaRowsToPersonnel } from "../anketaPersonMerge";
+import {
+  formatAnketaBulkMergeReport,
+  formatPersonnelToAnketaMergeReport,
+  mergeCachedAnketaToPersonnel,
+  mergePersonnelToCachedAnketa,
+} from "../anketaPersonMerge";
+import {
+  buildStaffSheetEnrichmentEntries,
+  formatStaffSheetEnrichmentReport,
+  pushPersonnelEnrichmentToStaffSheet,
+} from "../staffSheetEnrichment";
+import {
+  downloadEnrichedStaffSheetExcel,
+  formatStaffSheetEnrichmentReport as formatStaffExportReport,
+} from "../staffSheetEnrichedExport";
+import {
+  formatStaffSheetImportSummary,
+  importStaffSheetFromFile,
+  loadStaffSheetImport,
+} from "../staffSheetImport";
+import { loadStaffSheetEnrichmentContext } from "../staffSheetEnrichmentContext";
 
 export function useAnketaSheetLoader() {
   const [snapshot, setSnapshot] = useState<AnketaSheetSnapshot | null>(null);
@@ -30,6 +50,29 @@ export function useAnketaSheetLoader() {
     Set<string>
   >(() => new Set());
   const [isMergingPersonnel, setIsMergingPersonnel] = useState(false);
+  const [isMergingFromPersonnel, setIsMergingFromPersonnel] = useState(false);
+  const [isPushingStaffSheet, setIsPushingStaffSheet] = useState(false);
+  const [isDownloadingStaffSheet, setIsDownloadingStaffSheet] = useState(false);
+  const [staffSheetImportName, setStaffSheetImportName] = useState("");
+  const [staffSheetImportedAt, setStaffSheetImportedAt] = useState("");
+  const [staffSheetSource, setStaffSheetSource] = useState<"file" | "">("");
+  const [staffSheetPersonCount, setStaffSheetPersonCount] = useState(0);
+  const [isImportingStaffSheet, setIsImportingStaffSheet] = useState(false);
+
+  const applyStaffSheetImportMeta = (imported: {
+    fileName: string;
+    importedAt: string;
+    personCount?: number;
+    rows?: unknown[];
+  }) => {
+    setStaffSheetImportName(imported.fileName);
+    setStaffSheetImportedAt(imported.importedAt);
+    setStaffSheetSource("file");
+    setStaffSheetPersonCount(
+      imported.personCount ||
+        (Array.isArray(imported.rows) ? imported.rows.length : 0),
+    );
+  };
 
   const rows = snapshot?.rows ?? [];
 
@@ -123,11 +166,8 @@ export function useAnketaSheetLoader() {
     }
     setIsMergingPersonnel(true);
     try {
-      const edits = await loadAnketaEdits();
       let lastProgressAt = 0;
-      const report = await mergeAnketaRowsToPersonnel({
-        rows,
-        edits,
+      const report = await mergeCachedAnketaToPersonnel({
         onProgress: (done, total) => {
           const now = Date.now();
           if (done !== total && now - lastProgressAt < 250) return;
@@ -135,16 +175,9 @@ export function useAnketaSheetLoader() {
           setMessage(`Злиття з особовим складом… ${done}/${total}`);
         },
       });
-      const parts = [
-        `оновлено осіб: ${report.updated}`,
-        `полів: ${report.fieldCount}`,
-        report.phonesAdded ? `телефонів: ${report.phonesAdded}` : "",
-        report.skippedNoMatch ? `без збігу: ${report.skippedNoMatch}` : "",
-        report.skippedNoUpdates ? `без нових даних: ${report.skippedNoUpdates}` : "",
-        report.skippedNoRowId ? `лише ранковий список: ${report.skippedNoRowId}` : "",
-        report.errors.length ? `помилок: ${report.errors.length}` : "",
-      ].filter(Boolean);
-      setMessage(`Злиття з особовим складом завершено · ${parts.join(" · ")}.`);
+      setMessage(
+        `Злиття з особовим складом завершено · ${formatAnketaBulkMergeReport(report)}.`,
+      );
     } catch (error) {
       setMessage(
         error instanceof Error
@@ -156,13 +189,142 @@ export function useAnketaSheetLoader() {
     }
   };
 
+  const mergeFromPersonnel = async () => {
+    if (!rows.length) {
+      setMessage("Спочатку завантажте анкетні дані.");
+      return;
+    }
+    setIsMergingFromPersonnel(true);
+    try {
+      let lastProgressAt = 0;
+      const report = await mergePersonnelToCachedAnketa({
+        onProgress: (done, total) => {
+          const now = Date.now();
+          if (done !== total && now - lastProgressAt < 250) return;
+          lastProgressAt = now;
+          setMessage(`Доповнення з особового складу… ${done}/${total}`);
+        },
+      });
+      const refreshed = await loadAnketaSheetPreferCache({
+        mergeEdits: mergeWithEdits,
+      });
+      setSnapshot(refreshed);
+      const edits = await loadAnketaEdits();
+      setEditsCount(countAnketaEdits(edits));
+      setMessage(
+        `Доповнено з особового складу · ${formatPersonnelToAnketaMergeReport(report)}.`,
+      );
+    } catch (error) {
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "Не вдалося доповнити анкети з особового складу.",
+      );
+    } finally {
+      setIsMergingFromPersonnel(false);
+    }
+  };
+
+  const importStaffSheetFile = async (file: File | undefined) => {
+    if (!file) return;
+    setIsImportingStaffSheet(true);
+    try {
+      setMessage("Імпортую «Штатку» (.xlsx) у кеш і БД персоналу…");
+      const imported = await importStaffSheetFromFile(file);
+      applyStaffSheetImportMeta(imported);
+
+      setMessage("Зіставляю з анкетами…");
+      const context = await loadStaffSheetEnrichmentContext();
+      const entries = buildStaffSheetEnrichmentEntries({
+        rosterRows: context.rosterRows,
+        mergedPersonnelRows: context.mergedPersonnelRows,
+        anketaRows: context.anketaRows,
+        questionnaires: context.questionnaires,
+      });
+      const report = {
+        rows: entries.length,
+        anketaYes: entries.filter((entry) => entry.values[0] === "так").length,
+        withBirthDate: entries.filter((entry) =>
+          Boolean(String(entry.values[1] ?? "").trim()),
+        ).length,
+        withInn: entries.filter(
+          (entry) => entry.values[4]?.replace(/\D/g, "").length === 10,
+        ).length,
+      };
+
+      setMessage(
+        `Імпортовано «Штатку»: ${formatStaffSheetImportSummary(imported)} · зіставлення: ${formatStaffSheetEnrichmentReport(report)}. Далі — «Скачати Штатку» або «→ Google Штатка». Цей файл також доступний для ранкового звіту.`,
+      );
+    } catch (error) {
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "Не вдалося імпортувати файл «Штатка».",
+      );
+    } finally {
+      setIsImportingStaffSheet(false);
+    }
+  };
+
+  const pushStaffSheetEnrichment = async () => {
+    setIsPushingStaffSheet(true);
+    try {
+      let phase = "";
+      const report = await pushPersonnelEnrichmentToStaffSheet({
+        onProgress: (nextPhase) => {
+          phase = nextPhase;
+          setMessage(nextPhase);
+        },
+      });
+      setMessage(
+        `${phase || "Google Sheet «Штатка»"} · ${formatStaffSheetEnrichmentReport(report)}.`,
+      );
+    } catch (error) {
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "Не вдалося оновити Google Sheet «Штатка».",
+      );
+    } finally {
+      setIsPushingStaffSheet(false);
+    }
+  };
+
+  const downloadStaffSheetExcel = async () => {
+    setIsDownloadingStaffSheet(true);
+    try {
+      let phase = "";
+      const report = await downloadEnrichedStaffSheetExcel({
+        onProgress: (nextPhase) => {
+          phase = nextPhase;
+          setMessage(nextPhase);
+        },
+      });
+      setMessage(
+        `Завантажено Excel · ${formatStaffExportReport(report)}${phase ? ` · ${phase}` : ""}`,
+      );
+    } catch (error) {
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "Не вдалося сформувати Excel «Штатка».",
+      );
+    } finally {
+      setIsDownloadingStaffSheet(false);
+    }
+  };
+
   useEffect(() => {
     void loadFromGoogle();
+    void loadStaffSheetImport().then((imported) => {
+      if (!imported) return;
+      applyStaffSheetImportMeta(imported);
+    });
     void loadAnketaEdits().then((edits: AnketaEditsMap) => {
       setEditsCount(countAnketaEdits(edits));
     });
     void loadAnketaMissingNameKeys()
-      .then((keys) => {
+      .then(({ keys }) => {
         setMissingQuestionnaireNames(keys);
       })
       .catch(() => {
@@ -185,10 +347,22 @@ export function useAnketaSheetLoader() {
     setAppsScriptUrl,
     missingQuestionnaireNames,
     isMergingPersonnel,
+    isMergingFromPersonnel,
+    isPushingStaffSheet,
+    isDownloadingStaffSheet,
+    isImportingStaffSheet,
+    staffSheetImportName,
+    staffSheetImportedAt,
+    staffSheetSource,
+    staffSheetPersonCount,
     mergeWithEdits,
     persistSnapshot,
     loadFromGoogle,
     loadFromCsvFile,
     mergeToPersonnel,
+    mergeFromPersonnel,
+    pushStaffSheetEnrichment,
+    downloadStaffSheetExcel,
+    importStaffSheetFile,
   };
 }

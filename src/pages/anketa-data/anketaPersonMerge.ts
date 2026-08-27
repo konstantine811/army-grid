@@ -20,6 +20,7 @@ import {
 } from "../personnel/personPhonesStore";
 import {
   applyAnketaEditsToRows,
+  loadAnketaEdits,
   type AnketaEditsMap,
 } from "./anketaEdits";
 import {
@@ -27,7 +28,15 @@ import {
   matchAnketaRowToPersonnel,
   type AnketaPersonnelMatch,
 } from "./anketaPersonMatch";
-import { isAnketaColumnReadonly, type AnketaColumnKey, type AnketaRow } from "./anketaSheet";
+import {
+  isAnketaColumnReadonly,
+  loadAnketaSheetPreferCache,
+  type AnketaColumnKey,
+  type AnketaRow,
+} from "./anketaSheet";
+import { upsertAnketaCellEdit } from "./anketaEdits";
+import { readRosterColumnValue } from "../excel-fill/rosterSourceSnapshot";
+import { resolvePersonBirthDate } from "../personnel/personnelUtils";
 
 type AnketaPersonnelFieldMap = {
   anketaKey: AnketaColumnKey;
@@ -264,7 +273,42 @@ export const mergeAnketaRowsToPersonnel = async (options: {
     }
   }
 
+  if (report.updated > 0 || report.phonesAdded > 0) {
+    await invalidatePersonnelCaches();
+  }
+
   return report;
+};
+
+export const formatAnketaBulkMergeReport = (report: AnketaBulkMergeReport) => {
+  const parts = [
+    `оновлено осіб: ${report.updated}`,
+    `полів: ${report.fieldCount}`,
+    report.phonesAdded ? `телефонів: ${report.phonesAdded}` : "",
+    report.skippedNoMatch ? `без збігу: ${report.skippedNoMatch}` : "",
+    report.skippedNoUpdates ? `без нових даних: ${report.skippedNoUpdates}` : "",
+    report.skippedNoRowId ? `лише ранковий список: ${report.skippedNoRowId}` : "",
+    report.errors.length ? `помилок: ${report.errors.length}` : "",
+  ].filter(Boolean);
+  return parts.join(" · ");
+};
+
+/** Завантажує кеш/Google «Анкети» + локальні правки й доповнює порожні поля в ООС. */
+export const mergeCachedAnketaToPersonnel = async (options?: {
+  onProgress?: (done: number, total: number) => void;
+}): Promise<AnketaBulkMergeReport> => {
+  const snapshot = await loadAnketaSheetPreferCache();
+  if (!snapshot.rows.length) {
+    throw new Error(
+      "Немає анкетних даних. Відкрийте «Анкетні дані» або оновіть таблицю з Google.",
+    );
+  }
+  const edits = await loadAnketaEdits();
+  return mergeAnketaRowsToPersonnel({
+    rows: snapshot.rows,
+    edits,
+    onProgress: options?.onProgress,
+  });
 };
 
 export const previewAnketaRowPersonnelMerge = (
@@ -273,4 +317,169 @@ export const previewAnketaRowPersonnelMerge = (
 ) => {
   if (!match) return null;
   return buildAnketaPersonFieldUpdates(match.row, anketaRow);
+};
+
+const readPersonnelValueForAnketa = (
+  personnelRow: EjournalPreviewRow,
+  anketaKey: AnketaColumnKey,
+  parts: string[],
+) => {
+  const fromOos = getPersonFieldValue(personnelRow, parts).trim();
+  if (fromOos) return fromOos;
+
+  if (anketaKey === "rnokpp") {
+    return readRosterColumnValue(personnelRow, 19).trim();
+  }
+  if (anketaKey === "birthDate") {
+    return (
+      resolvePersonBirthDate(personnelRow) ||
+      readRosterColumnValue(personnelRow, 16) ||
+      readRosterColumnValue(personnelRow, 17)
+    ).trim();
+  }
+  if (anketaKey === "rank") {
+    return readRosterColumnValue(personnelRow, 13).trim();
+  }
+  if (anketaKey === "militaryId") {
+    return readRosterColumnValue(personnelRow, 11).trim();
+  }
+  return "";
+};
+
+export type PersonnelToAnketaFieldUpdate = {
+  columnId: AnketaColumnKey;
+  value: string;
+  label: string;
+};
+
+/** Доповнити порожні поля анкети з особового складу / ранкового списку. */
+export const buildPersonnelToAnketaFieldUpdates = (
+  personnelRow: EjournalPreviewRow,
+  anketaRow: AnketaRow,
+): PersonnelToAnketaFieldUpdate[] => {
+  const updates: PersonnelToAnketaFieldUpdate[] = [];
+
+  for (const { anketaKey, parts } of ANKETA_PERSONNEL_FIELD_MAP) {
+    if (isAnketaColumnReadonly(anketaKey)) continue;
+    const current = String(anketaRow[anketaKey] ?? "").trim();
+    if (current) continue;
+
+    const raw = readPersonnelValueForAnketa(personnelRow, anketaKey, parts);
+    if (!raw) continue;
+
+    const field = findPersonFieldDef(parts);
+    let nextValue = raw.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
+    if (anketaKey === "rnokpp") {
+      const digits = nextValue.replace(/\D/g, "");
+      if (digits.length >= 8) nextValue = digits;
+    }
+
+    updates.push({
+      columnId: anketaKey,
+      value: nextValue,
+      label: field?.label ?? parts.join(" "),
+    });
+  }
+
+  return updates;
+};
+
+export type PersonnelToAnketaBulkMergeReport = {
+  processed: number;
+  matched: number;
+  updated: number;
+  fieldCount: number;
+  skippedNoMatch: number;
+  skippedNoUpdates: number;
+  errors: Array<{ name: string; message: string }>;
+};
+
+export const mergePersonnelToAnketaRows = async (options: {
+  rows: AnketaRow[];
+  onProgress?: (done: number, total: number) => void;
+}): Promise<PersonnelToAnketaBulkMergeReport> => {
+  const index = await loadPersonnelIndexForAnketa({ force: true });
+  const report: PersonnelToAnketaBulkMergeReport = {
+    processed: 0,
+    matched: 0,
+    updated: 0,
+    fieldCount: 0,
+    skippedNoMatch: 0,
+    skippedNoUpdates: 0,
+    errors: [],
+  };
+
+  for (const anketaRow of options.rows) {
+    report.processed += 1;
+    options.onProgress?.(report.processed, options.rows.length);
+
+    const match = matchAnketaRowToPersonnel(anketaRow, index);
+    if (!match) {
+      report.skippedNoMatch += 1;
+      continue;
+    }
+    report.matched += 1;
+
+    const updates = buildPersonnelToAnketaFieldUpdates(match.row, anketaRow);
+    if (!updates.length) {
+      report.skippedNoUpdates += 1;
+      continue;
+    }
+
+    let wroteAny = false;
+    for (const update of updates) {
+      try {
+        await upsertAnketaCellEdit({
+          rowNumber: anketaRow.__rowNumber,
+          columnId: update.columnId,
+          value: update.value,
+          externalId: String(anketaRow.externalId ?? "").trim() || undefined,
+          fullName: anketaRow.fullName,
+        });
+        report.fieldCount += 1;
+        wroteAny = true;
+      } catch (error) {
+        report.errors.push({
+          name: anketaRow.fullName?.trim() || `рядок ${anketaRow.__rowNumber}`,
+          message:
+            error instanceof Error
+              ? error.message
+              : "Не вдалося записати поле анкети",
+        });
+      }
+    }
+    if (wroteAny) report.updated += 1;
+  }
+
+  return report;
+};
+
+export const formatPersonnelToAnketaMergeReport = (
+  report: PersonnelToAnketaBulkMergeReport,
+) => {
+  const parts = [
+    `оновлено анкет: ${report.updated}`,
+    `полів: ${report.fieldCount}`,
+    report.skippedNoMatch ? `без збігу в ООС: ${report.skippedNoMatch}` : "",
+    report.skippedNoUpdates ? `без нових даних: ${report.skippedNoUpdates}` : "",
+    report.errors.length ? `помилок: ${report.errors.length}` : "",
+  ].filter(Boolean);
+  return parts.join(" · ");
+};
+
+export const mergePersonnelToCachedAnketa = async (options?: {
+  onProgress?: (done: number, total: number) => void;
+}): Promise<PersonnelToAnketaBulkMergeReport> => {
+  const snapshot = await loadAnketaSheetPreferCache();
+  if (!snapshot.rows.length) {
+    throw new Error(
+      "Немає анкетних даних. Оновіть таблицю з Google або імпортуйте CSV.",
+    );
+  }
+  const edits = await loadAnketaEdits();
+  const rows =
+    edits && Object.keys(edits).length
+      ? applyAnketaEditsToRows(snapshot.rows, edits)
+      : snapshot.rows;
+  return mergePersonnelToAnketaRows({ rows, onProgress: options?.onProgress });
 };

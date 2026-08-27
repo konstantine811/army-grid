@@ -10,10 +10,14 @@ import {
   extractPhones,
   formatExcelDateDisplay,
   formatUaPhoneDisplay,
+  getPersonDisplayName,
+  getPersonExternalId,
   getPersonFieldValue,
   previewValueToDisplay,
   resolvePersonCallSign,
 } from "../personnel/personnelUtils";
+import { getRosterValue } from "../personnel/personnelRosterMerge";
+import { normalizeRosterMatchText } from "../personnel/fighterStatusImport";
 import { splitFullNameParts } from "./serviceCharacteristicReport";
 import type { AnketaRow } from "../anketa-data/anketaSheet";
 
@@ -187,11 +191,52 @@ export const splitUbdIdDocument = (value: string) => {
   return { series: "", number: raw.replace(/\s+/g, "") };
 };
 
-/** Поки лише шаблон БР без номера й дати (дані ще невірні). */
-export const UBD_COMBAT_ORDER_STUB = "425 ОШП «СКЕЛЯ» №";
+/** Префікс колонки БР у Excel УБД. */
+export const UBD_COMBAT_ORDER_PREFIX = "425 ОШП «СКЕЛЯ» №";
 
-export const formatUbdCombatOrder = (_basisNumber?: string, _basisDate?: string) =>
-  UBD_COMBAT_ORDER_STUB;
+/** @deprecated використайте UBD_COMBAT_ORDER_PREFIX */
+export const UBD_COMBAT_ORDER_STUB = UBD_COMBAT_ORDER_PREFIX;
+
+const stripBasisNumber = (value: string) =>
+  String(value ?? "")
+    .trim()
+    .replace(/^№\s*/, "");
+
+const parseBasisFromCombined = (value: string) => {
+  const textValue = String(value ?? "").trim();
+  const match = textValue.match(
+    /№\s*(\S+)\s+від\s+(\d{1,2}[.\/-]\d{1,2}[.\/-]\d{2,4})/i,
+  );
+  if (!match) {
+    const numberOnly = textValue.match(/№\s*(\S+)/i);
+    return {
+      number: numberOnly ? stripBasisNumber(numberOnly[1]) : "",
+      date: "",
+    };
+  }
+  return {
+    number: stripBasisNumber(match[1]),
+    date: match[2].replaceAll("/", ".").replaceAll("-", "."),
+  };
+};
+
+/** БР у Excel: `425 ОШП «СКЕЛЯ» №4862/…/дск` (+ дата, якщо є). */
+export const formatUbdCombatOrder = (
+  basisNumber?: string,
+  basisDate?: string,
+  basisCombined?: string,
+) => {
+  let number = stripBasisNumber(basisNumber ?? "");
+  let date = String(basisDate ?? "").trim();
+  if (!number) {
+    const parsed = parseBasisFromCombined(basisCombined ?? "");
+    number = parsed.number;
+    if (!date) date = parsed.date;
+  }
+  if (!number) return UBD_COMBAT_ORDER_PREFIX;
+  const withNumber = `${UBD_COMBAT_ORDER_PREFIX}${number}`;
+  return date ? `${withNumber} від ${date}` : withNumber;
+};
 
 const formatCombatPeriod = (value: string) => {
   const raw = text(value).replace(/^з\s+/i, "").trim();
@@ -221,7 +266,8 @@ const resolveUbdWorkflowFlags = (document: BackendPersonDocument) => {
     "account",
     "scan",
     "ready",
-    "sent",
+    "sentReport",
+    "sentScans",
     "received",
     "handed",
   ];
@@ -229,9 +275,14 @@ const resolveUbdWorkflowFlags = (document: BackendPersonDocument) => {
     document.workflow && typeof document.workflow === "object"
       ? (document.workflow as Record<string, unknown>)
       : {};
-  const status = String(
+  const completed =
+    workflow.completed && typeof workflow.completed === "object"
+      ? (workflow.completed as Record<string, unknown>)
+      : {};
+  let status = String(
     document.status || workflow.currentStatus || "document",
   ).trim();
+  if (status === "sent") status = "sentReport";
   const index = Math.max(0, steps.indexOf(status));
   const files =
     document.files && typeof document.files === "object"
@@ -239,10 +290,21 @@ const resolveUbdWorkflowFlags = (document: BackendPersonDocument) => {
       : {};
   const hasScans = Array.isArray(files.ubdScans) && files.ubdScans.length > 0;
   const note = readField(document.fields as Record<string, unknown>, "statusNote");
+  const sentMarked =
+    completed.sent === true ||
+    completed.sentReport === true ||
+    completed.sentScans === true ||
+    index >= steps.indexOf("sentReport");
   return {
-    documents: yesIf(index >= steps.indexOf("scan") || hasScans),
-    raport: yesIf(index >= steps.indexOf("document")),
-    sent: note || yesIf(index >= steps.indexOf("sent")),
+    documents: yesIf(
+      completed.scan === true ||
+        index >= steps.indexOf("scan") ||
+        hasScans,
+    ),
+    raport: yesIf(
+      completed.document === true || index >= steps.indexOf("document"),
+    ),
+    sent: note || yesIf(sentMarked),
   };
 };
 
@@ -302,6 +364,62 @@ const readCallSign = (
     ticket?.fields as Record<string, unknown> | null | undefined,
     "callSign",
   );
+};
+
+/** Індекс позивних зі Штатки / Загального списку для експорту УБД. */
+export const buildUbdRosterCallSignIndex = (rows: EjournalPreviewRow[]) => {
+  const byId = new Map<string, { row: EjournalPreviewRow; callSign: string }>();
+  const byName = new Map<string, { row: EjournalPreviewRow; callSign: string }>();
+
+  for (const row of rows) {
+    const callSign =
+      resolvePersonCallSign(row) ||
+      text(readRosterColumnValue(row, 15)) ||
+      text(getRosterValue(row, ["позив"]));
+    if (!callSign) continue;
+
+    const entry = { row, callSign };
+    const id = getPersonExternalId(row);
+    if (id && !byId.has(id)) byId.set(id, entry);
+
+    const name = normalizeRosterMatchText(
+      getPersonDisplayName(row) ||
+        getRosterValue(row, ["піб"]) ||
+        getRosterValue(row, ["прізвище"]),
+    );
+    if (name && !byName.has(name)) byName.set(name, entry);
+  }
+
+  return { byId, byName };
+};
+
+export const lookupUbdRosterCallSign = (
+  index: ReturnType<typeof buildUbdRosterCallSignIndex>,
+  personExternalId: string,
+  fullName: string,
+) => {
+  const id = text(personExternalId);
+  if (id) {
+    const byId = index.byId.get(id);
+    if (byId) return byId;
+  }
+
+  const name = normalizeRosterMatchText(fullName);
+  if (!name) return null;
+  const exact = index.byName.get(name);
+  if (exact) return exact;
+
+  const surname = name.split(" ")[0] || "";
+  if (surname.length < 3) return null;
+  for (const [rowName, entry] of index.byName) {
+    if (
+      rowName.startsWith(surname) &&
+      name.split(" ").every((part) => !part || rowName.includes(part))
+    ) {
+      return entry;
+    }
+  }
+  return null;
 };
 
 /** Коротка «Посада» (не «Повна посада»). */
@@ -430,7 +548,11 @@ export const buildUbdNotSubmittedRowFromDocument = ({
     combatPlace: readField(fields, "taskPlace"),
     combatPeriod: formatCombatPeriod(readField(fields, "taskPeriod")),
     position: readShortPosition(personRow, fields),
-    combatOrder: formatUbdCombatOrder(),
+    combatOrder: formatUbdCombatOrder(
+      readField(fields, "basisNumber"),
+      readField(fields, "basisDate"),
+      readField(fields, "basis"),
+    ),
     personnelStatus: text(personnelStatus || ""),
     ubdStatus: "",
     documents: workflowFlags.documents,
@@ -519,17 +641,11 @@ const buildStatusSheet = (rows: UbdNotSubmittedExcelRow[]): SheetData => [
 
 export const exportUbdNotSubmittedExcel = async ({
   rows,
-  periodFilterLabel,
 }: {
   rows: UbdNotSubmittedExcelRow[];
   periodFilterLabel?: string;
 }) => {
-  const exportedAt = dayjs();
-  const periodSuffix =
-    periodFilterLabel && periodFilterLabel !== "Усі місяці"
-      ? ` ${periodFilterLabel}`
-      : "";
-  const fileName = `1ПБ УБД не подавалися${periodSuffix} ${exportedAt.format("DD.MM.YYYY")}.xlsx`;
+  const fileName = `1ПБ Рапорти для статусу УБД ${rows.length}.xlsx`;
 
   const columns = UBD_NOT_SUBMITTED_HEADERS.map((_, index) => {
     if (index === 13 || index === 14) return { width: 32 };

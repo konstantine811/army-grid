@@ -1,7 +1,7 @@
 import type { EjournalPreviewRow } from "../ejournal/ejournalTypes";
 import {
   buildPersonSummary,
-  getPersonFieldValue,
+  getPersonFullPositionTitle,
 } from "../personnel/personnelUtils";
 
 export type ServiceCharacteristicSignatory = {
@@ -89,11 +89,7 @@ export const createServiceCharacteristicFields = (
   const fullName = summary.name !== "Особа не вибрана" ? summary.name : "";
   const { lastName, firstName, patronymic } = splitFullNameParts(fullName);
   const rank = summary.rank || "";
-  const staffPosition =
-    getPersonFieldValue(row, ["посада"]) ||
-    getPersonFieldValue(row, ["штатна", "посада"]) ||
-    getPersonFieldValue(row, ["чим", "займається"]) ||
-    "";
+  const staffPosition = getPersonFullPositionTitle(row);
 
   return {
     rank,

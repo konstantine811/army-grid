@@ -125,8 +125,26 @@ export function AnketaPersonSidePanel({
                 ? "Шукаю в особовому складі…"
                 : panel.match
                   ? `Знайдено в ООС · ${matchLabel(panel.match.matchBy)}`
-                  : "У кеші особового складу не знайдено"}
+                  : panel.ambiguousMatches.length > 1
+                    ? `Знайдено ${panel.ambiguousMatches.length} осіб з таким ПІБ — додайте ID або дату народження в анкеті`
+                    : "У кеші особового складу не знайдено"}
             </Typography>
+            {panel.ambiguousMatches.length > 1 ? (
+              <Typography variant="caption" color="text.secondary" component="div">
+                {panel.ambiguousMatches
+                  .slice(0, 4)
+                  .map((item) =>
+                    [
+                      item.summary.rank,
+                      item.summary.birthDate,
+                      item.summary.externalId,
+                    ]
+                      .filter(Boolean)
+                      .join(" · "),
+                  )
+                  .join(" / ")}
+              </Typography>
+            ) : null}
           </div>
         </div>
 

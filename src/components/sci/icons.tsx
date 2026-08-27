@@ -16,6 +16,7 @@ import {
   Info,
   ListChecks,
   LogOut,
+  LogIn,
   Maximize2,
   Menu,
   MenuSquare,
@@ -98,6 +99,7 @@ export const HelpOutlineOutlinedIcon = withCompatIcon(HelpCircle);
 export const InfoOutlinedIcon = withCompatIcon(Info);
 export const LocalHospitalOutlinedIcon = withCompatIcon(Ambulance);
 export const LogoutOutlinedIcon = withCompatIcon(LogOut);
+export const LoginOutlinedIcon = withCompatIcon(LogIn);
 export const MenuOpenOutlinedIcon = withCompatIcon(MenuSquare);
 export const MenuOutlinedIcon = withCompatIcon(Menu);
 export const MilitaryTechOutlinedIcon = withCompatIcon(Swords);

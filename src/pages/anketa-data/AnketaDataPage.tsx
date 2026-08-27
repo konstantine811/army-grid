@@ -219,7 +219,30 @@ export function AnketaDataPage() {
               startIcon={<SyncAltOutlinedIcon />}
               disabled={
                 sheet.isLoading ||
+                sheet.isMergingFromPersonnel ||
                 sheet.isMergingPersonnel ||
+                sheet.isPushingStaffSheet ||
+                !sheet.rows.length ||
+                !canEdit
+              }
+              onClick={() => void sheet.mergeFromPersonnel()}
+              title="Доповнити порожні поля анкет з БД особового складу (РНОКПП, дата народження тощо)"
+            >
+              <span className="anketa-label-full">
+                {sheet.isMergingFromPersonnel ? "З ООС…" : "З особового складу"}
+              </span>
+              <span className="anketa-label-short" aria-hidden="true">
+                {sheet.isMergingFromPersonnel ? "З ООС…" : "← ООС"}
+              </span>
+            </Button>
+            <Button
+              variant="outlined"
+              startIcon={<SyncAltOutlinedIcon />}
+              disabled={
+                sheet.isLoading ||
+                sheet.isMergingPersonnel ||
+                sheet.isMergingFromPersonnel ||
+                sheet.isPushingStaffSheet ||
                 !sheet.rows.length ||
                 !canEdit
               }
@@ -236,15 +259,92 @@ export function AnketaDataPage() {
               </span>
             </Button>
             <Button
+              component="label"
+              variant="contained"
+              startIcon={<FileUploadOutlinedIcon />}
+              disabled={
+                sheet.isLoading ||
+                sheet.isImportingStaffSheet ||
+                sheet.isPushingStaffSheet ||
+                sheet.isDownloadingStaffSheet ||
+                !canEdit
+              }
+              title="Єдиний імпорт «Штатки» (.xlsx) — для анкет, ранкового звіту та БД персоналу"
+              sx={{ color: "#1a1a14" }}
+            >
+              <span className="anketa-label-full">
+                {sheet.isImportingStaffSheet ? "Імпорт…" : "Імпорт Штатки"}
+              </span>
+              <span className="anketa-label-short" aria-hidden="true">
+                {sheet.isImportingStaffSheet ? "…" : "↑ Штатка"}
+              </span>
+              <input
+                hidden
+                type="file"
+                accept=".xlsx,.xlsm,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel.sheet.macroEnabled.12"
+                disabled={!canEdit}
+                onChange={(event) => {
+                  void sheet.importStaffSheetFile(event.target.files?.[0]);
+                  event.currentTarget.value = "";
+                }}
+              />
+            </Button>
+            <Button
+              variant="outlined"
+              startIcon={<FileDownloadOutlinedIcon />}
+              disabled={
+                sheet.isLoading ||
+                sheet.isMergingPersonnel ||
+                sheet.isMergingFromPersonnel ||
+                sheet.isPushingStaffSheet ||
+                sheet.isDownloadingStaffSheet ||
+                sheet.isImportingStaffSheet ||
+                !sheet.staffSheetImportName ||
+                !canEdit
+              }
+              onClick={() => void sheet.downloadStaffSheetExcel()}
+              title="Скачати «Штатку» з колонками: анкета (так), ІПН, дата, рік, повних років"
+            >
+              <span className="anketa-label-full">
+                {sheet.isDownloadingStaffSheet ? "Штатка…" : "Скачати Штатку"}
+              </span>
+              <span className="anketa-label-short" aria-hidden="true">
+                {sheet.isDownloadingStaffSheet ? "…" : "↓ Штатка"}
+              </span>
+            </Button>
+            <Button
               variant="outlined"
               startIcon={<SyncAltOutlinedIcon />}
-              disabled={sheet.isLoading}
-              onClick={() => void handleLoadFromGoogle()}
-              title="Оновити з Google"
+              disabled={
+                sheet.isLoading ||
+                sheet.isMergingPersonnel ||
+                sheet.isMergingFromPersonnel ||
+                sheet.isPushingStaffSheet ||
+                sheet.isDownloadingStaffSheet ||
+                sheet.isImportingStaffSheet ||
+                !sheet.staffSheetImportName ||
+                !canEdit
+              }
+              onClick={() => void sheet.pushStaffSheetEnrichment()}
+              title="Записати в Google Sheet «Штатка»: анкета (так або порожньо), ІПН, дата/рік/вік"
             >
-              <span className="anketa-label-full">Оновити з Google</span>
+              <span className="anketa-label-full">
+                {sheet.isPushingStaffSheet ? "Штатка…" : "→ Google Штатка"}
+              </span>
               <span className="anketa-label-short" aria-hidden="true">
-                Google
+                {sheet.isPushingStaffSheet ? "Штатка…" : "→ Штатка"}
+              </span>
+            </Button>
+            <Button
+              variant="outlined"
+              startIcon={<SyncAltOutlinedIcon />}
+              disabled={sheet.isLoading || sheet.isImportingStaffSheet}
+              onClick={() => void handleLoadFromGoogle()}
+              title="Оновити таблицю анкет з Google (не Штатку)"
+            >
+              <span className="anketa-label-full">Оновити анкети</span>
+              <span className="anketa-label-short" aria-hidden="true">
+                Анкети
               </span>
             </Button>
             <Button
@@ -302,7 +402,13 @@ export function AnketaDataPage() {
         </div>
       </header>
 
-      {sheet.isLoading || sheet.isSyncing || sheet.isMergingPersonnel ? (
+      {sheet.isLoading ||
+      sheet.isSyncing ||
+      sheet.isMergingPersonnel ||
+      sheet.isMergingFromPersonnel ||
+      sheet.isPushingStaffSheet ||
+      sheet.isDownloadingStaffSheet ||
+      sheet.isImportingStaffSheet ? (
         <LinearProgress sx={{ mb: 1 }} />
       ) : null}
 
@@ -337,6 +443,17 @@ export function AnketaDataPage() {
               {sheet.dirtyCount ? (
                 <span title="Несинхронізовані в сесії">
                   сесія {sheet.dirtyCount}
+                </span>
+              ) : null}
+              {sheet.staffSheetImportName ? (
+                <span
+                  title={
+                    sheet.staffSheetImportedAt
+                      ? `${sheet.staffSheetImportName} · ${sheet.staffSheetSource || "?"} · ${new Date(sheet.staffSheetImportedAt).toLocaleString("uk-UA")}${sheet.staffSheetPersonCount ? ` · ${sheet.staffSheetPersonCount} осіб` : ""}`
+                      : sheet.staffSheetImportName
+                  }
+                >
+                  штатка ✓{sheet.staffSheetPersonCount ? ` ${sheet.staffSheetPersonCount}` : ""}
                 </span>
               ) : null}
               {sheet.missingQuestionnaireNames.size ? (
@@ -392,6 +509,7 @@ export function AnketaDataPage() {
               onClick={() => gap.setPersonPanelOpen(false)}
             />
             <AnketaPersonSidePanel
+              key={gap.focusedAnketaRow?.__rowId || "anketa-person-panel"}
               anketaRow={gap.focusedAnketaRow}
               focusedEmpty={gap.focusedEmpty}
               gapColumnKeys={gapColumns.gapColumnKeys}

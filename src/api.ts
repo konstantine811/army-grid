@@ -73,6 +73,49 @@ export type BackendEjournalImportRow = {
   createdAt: string
 }
 
+export type BackendEjournalLiveVersion = {
+  id: string
+  unitLabel: string
+  version: number
+  sourceFileName?: string | null
+  asOfDate?: string | null
+  sha256: string
+  byteSize: number
+  baseVersionId?: string | null
+  changeProtocol?: JsonRecord | null
+  sourcePbFileName?: string | null
+  sourcePbSha256?: string | null
+  notes?: string | null
+  createdByEmail?: string | null
+  createdAt: string
+  fileBase64?: string
+}
+
+export type BackendEjournalLiveState = {
+  unitLabel: string
+  current: BackendEjournalLiveVersion | null
+  versions: BackendEjournalLiveVersion[]
+}
+
+export type BackendEjournalPbSource = {
+  id: string
+  unitLabel: string
+  sourceFileName?: string | null
+  asOfDate?: string | null
+  sha256: string
+  byteSize: number
+  notes?: string | null
+  createdByEmail?: string | null
+  createdAt: string
+  fileBase64?: string
+}
+
+export type BackendEjournalPbState = {
+  unitLabel: string
+  current: BackendEjournalPbSource | null
+  items: BackendEjournalPbSource[]
+}
+
 export type BackendEjournalSheetRows = {
   total: number
   limit: number
@@ -353,23 +396,31 @@ const parseApiError = async (response: Response) => {
   return text || `API request failed: ${response.status}`
 }
 
-async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+type ApiRequestInit = RequestInit & { suppressErrorToast?: boolean }
+
+async function request<T>(path: string, options: ApiRequestInit = {}): Promise<T> {
+  const { suppressErrorToast, ...fetchOptions } = options
   const response = await fetch(`${apiBaseUrl()}${path}`, {
-    ...options,
+    ...fetchOptions,
     headers: {
       'Content-Type': 'application/json',
       ...authHeaders(),
-      ...options.headers,
+      ...fetchOptions.headers,
     },
   })
 
   if (!response.ok) {
     const message = await parseApiError(response)
-    const method = (options.method || 'GET').toUpperCase()
+    const method = (fetchOptions.method || 'GET').toUpperCase()
     const isWrite = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)
     if (response.status === 403) {
       showBackendBlockedToast(message)
-    } else if (isWrite && response.status >= 400 && response.status !== 401) {
+    } else if (
+      isWrite &&
+      response.status >= 400 &&
+      response.status !== 401 &&
+      !suppressErrorToast
+    ) {
       showAppToast({
         title: 'Помилка запису',
         description: message,
@@ -380,6 +431,24 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   }
 
   if (response.status === 204) return undefined as T
+  return response.json() as Promise<T>
+}
+
+/** GET that returns null on 404 instead of throwing (no error toast). */
+async function requestGetOptional<T>(path: string): Promise<T | null> {
+  const response = await fetch(`${apiBaseUrl()}${path}`, {
+    headers: {
+      'Content-Type': 'application/json',
+      ...authHeaders(),
+    },
+  })
+
+  if (response.status === 404) return null
+  if (!response.ok) {
+    const message = await parseApiError(response)
+    throw new Error(message)
+  }
+  if (response.status === 204) return null
   return response.json() as Promise<T>
 }
 
@@ -542,10 +611,15 @@ export const api = {
     })
   },
 
-  updateEjournalRowValues(rowId: string, values: JsonRecord) {
+  updateEjournalRowValues(
+    rowId: string,
+    values: JsonRecord,
+    options?: { suppressErrorToast?: boolean },
+  ) {
     return request<BackendEjournalImportRow>(`/ejournals/rows/${rowId}`, {
       method: 'PATCH',
       body: JSON.stringify({ values, actor: 'operator' }),
+      suppressErrorToast: options?.suppressErrorToast,
     }).then(async (result) => {
       await invalidateDataCache(
         'ejournal:sheet-rows:',
@@ -758,7 +832,7 @@ export const api = {
     const params = new URLSearchParams()
     if (fullName?.trim()) params.set('fullName', fullName.trim())
     const query = params.toString()
-    return request<BackendPersonnelProfile>(
+    return requestGetOptional<BackendPersonnelProfile>(
       `/ejournals/personnel/${encodeURIComponent(personExternalId)}/profile${query ? `?${query}` : ''}`,
     )
   },
@@ -767,19 +841,24 @@ export const api = {
     return request<BackendPersonDocument[]>('/ejournals/personnel/documents')
   },
 
-  createPersonDocument(personExternalId: string, payload: {
-    type: string
-    title: string
-    status?: string
-    fields?: JsonRecord
-    workflow?: JsonRecord
-    files?: JsonRecord
-  }) {
+  createPersonDocument(
+    personExternalId: string,
+    payload: {
+      type: string
+      title: string
+      status?: string
+      fields?: JsonRecord
+      workflow?: JsonRecord
+      files?: JsonRecord
+    },
+    options?: { suppressErrorToast?: boolean },
+  ) {
     return request<BackendPersonDocument>(
       `/ejournals/personnel/${encodeURIComponent(personExternalId)}/documents`,
       {
         method: 'POST',
         body: JSON.stringify(payload),
+        suppressErrorToast: options?.suppressErrorToast,
       },
     ).then(async (result) => {
       await invalidateDataCache(CacheKeys.documentsAll, CacheKeys.overview)
@@ -787,18 +866,24 @@ export const api = {
     })
   },
 
-  updatePersonDocument(personExternalId: string, documentId: string, payload: {
-    title?: string
-    status?: string
-    fields?: JsonRecord
-    workflow?: JsonRecord
-    files?: JsonRecord
-  }) {
+  updatePersonDocument(
+    personExternalId: string,
+    documentId: string,
+    payload: {
+      title?: string
+      status?: string
+      fields?: JsonRecord
+      workflow?: JsonRecord
+      files?: JsonRecord
+    },
+    options?: { suppressErrorToast?: boolean },
+  ) {
     return request<BackendPersonDocument>(
       `/ejournals/personnel/${encodeURIComponent(personExternalId)}/documents/${encodeURIComponent(documentId)}`,
       {
         method: 'PATCH',
         body: JSON.stringify(payload),
+        suppressErrorToast: options?.suppressErrorToast,
       },
     ).then(async (result) => {
       await invalidateDataCache(CacheKeys.documentsAll, CacheKeys.overview)
@@ -915,6 +1000,158 @@ export const api = {
 
   getLatestPersonnelRoster() {
     return request<BackendPersonnelRosterLatest | null>('/ejournals/personnel/roster/latest')
+  },
+
+  getEjournalLive(unitLabel = '1ПБ') {
+    return requestGetOptional<BackendEjournalLiveState>(
+      `/ejournals/live?unitLabel=${encodeURIComponent(unitLabel)}`,
+    ).then(
+      (state) =>
+        state ?? {
+          unitLabel,
+          current: null,
+          versions: [],
+        },
+    )
+  },
+
+  getEjournalLiveFile(versionId?: string, unitLabel = '1ПБ') {
+    const params = new URLSearchParams()
+    params.set('unitLabel', unitLabel)
+    if (versionId) params.set('versionId', versionId)
+    return request<BackendEjournalLiveVersion>(`/ejournals/live/file?${params.toString()}`)
+  },
+
+  seedEjournalLive(payload: {
+    fileBase64: string
+    sourceFileName?: string
+    asOfDate?: string
+    unitLabel?: string
+    notes?: string
+  }) {
+    return request<BackendEjournalLiveVersion>('/ejournals/live/seed', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    })
+  },
+
+  applyEjournalLive(payload: {
+    baseVersionId: string
+    fileBase64: string
+    sourceFileName?: string
+    asOfDate?: string
+    unitLabel?: string
+    sourcePbFileName?: string
+    sourcePbSha256?: string
+    changeProtocol?: JsonRecord
+    notes?: string
+  }) {
+    return request<BackendEjournalLiveVersion>('/ejournals/live/apply', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    })
+  },
+
+  rollbackEjournalLive(payload: {
+    targetVersionId: string
+    unitLabel?: string
+    notes?: string
+  }) {
+    return request<BackendEjournalLiveVersion>('/ejournals/live/rollback', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    })
+  },
+
+  getEjournalPbSources(unitLabel = '1ПБ') {
+    return requestGetOptional<BackendEjournalPbState>(
+      `/ejournals/pb?unitLabel=${encodeURIComponent(unitLabel)}`,
+    ).then(
+      (state) =>
+        state ?? {
+          unitLabel,
+          current: null,
+          items: [],
+        },
+    )
+  },
+
+  getEjournalPbFile(id?: string, unitLabel = '1ПБ') {
+    const params = new URLSearchParams()
+    params.set('unitLabel', unitLabel)
+    if (id) params.set('id', id)
+    return request<BackendEjournalPbSource>(`/ejournals/pb/file?${params.toString()}`)
+  },
+
+  uploadEjournalPb(payload: {
+    fileBase64: string
+    sourceFileName?: string
+    asOfDate?: string
+    unitLabel?: string
+    notes?: string
+  }) {
+    return request<BackendEjournalPbSource>('/ejournals/pb/upload', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    })
+  },
+
+  getEjournalOperatorSettings(unitLabel = '1ПБ') {
+    return request<{
+      unitLabel: string
+      settings: JsonRecord | null
+      updatedAt: string | null
+    }>(`/ejournals/operator-settings?unitLabel=${encodeURIComponent(unitLabel)}`)
+  },
+
+  putEjournalOperatorSettings(payload: {
+    unitLabel?: string
+    settings: JsonRecord
+  }) {
+    return request<{
+      unitLabel: string
+      settings: JsonRecord | null
+      updatedAt: string | null
+    }>('/ejournals/operator-settings', {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    })
+  },
+
+  getEjournalNormalized(unitLabel = '1ПБ') {
+    return request<{
+      unitLabel: string
+      versionId: string | null
+      asOfDate: string | null
+      syncedAt: string | null
+      counts: { persons: number; absences: number; timesheet: number }
+      persons: Array<{
+        personId: string
+        fullName: string
+        rank: string
+        positionIndex: string
+        dayCode: string
+        isVacant: boolean
+      }>
+    }>(`/ejournals/normalized?unitLabel=${encodeURIComponent(unitLabel)}`)
+  },
+
+  syncEjournalNormalized(payload: {
+    unitLabel?: string
+    versionId?: string
+    asOfDate?: string | null
+    persons: Array<Record<string, unknown>>
+    absences: Array<Record<string, unknown>>
+    timesheet: Array<Record<string, unknown>>
+  }) {
+    return request<{
+      unitLabel: string
+      counts: { persons: number; absences: number; timesheet: number }
+      syncedAt: string | null
+    }>('/ejournals/normalized/sync', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    })
   },
 
   listAnketaEdits(sheetId?: string, gid?: string) {

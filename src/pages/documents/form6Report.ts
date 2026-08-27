@@ -3,6 +3,7 @@ import {
   buildPersonSummary,
   formatUaPhoneDisplay,
   getPersonFieldValue,
+  getPersonFullPositionTitle,
 } from "../personnel/personnelUtils";
 import {
   buildFighterTaskPeriodText,
@@ -40,6 +41,11 @@ const DEFAULT_FORM6_COMMANDER =
   "Командиру 1 піхотного батальйону військової частини А4862";
 const DEFAULT_FORM6_BASIS =
   "Бойове розпорядження командира 425 ОШП «СКЕЛЯ» №4862/ОКП/1158/дск від 14.10.2025";
+
+export const buildForm6FolderName = (fullName: string) => {
+  const name = fullName.trim();
+  return name ? `1ПБ РАПОРТ Форма 6 · ${name}` : "1ПБ РАПОРТ Форма 6";
+};
 
 const GIVEN_NAME_GENITIVE: Record<string, string> = {
   анатолій: "Анатолія",
@@ -132,11 +138,7 @@ export const createForm6Fields = (
   signatories: Form6Signatory[] = [],
 ): Form6ReportFields => {
   const fullName = summary.name !== "Особа не вибрана" ? summary.name : "";
-  const staffPosition =
-    getPersonFieldValue(row, ["посада"]) ||
-    getPersonFieldValue(row, ["штатна", "посада"]) ||
-    getPersonFieldValue(row, ["чим", "займається"]) ||
-    "";
+  const staffPosition = getPersonFullPositionTitle(row);
   const documentName =
     getPersonFieldValue(row, ["назва", "документа", "посвідчує"]) ||
     "Паспорт громадянина України";
@@ -170,7 +172,7 @@ export const createForm6Fields = (
     taskPlace: getFighterTaskPlace(row),
     basis: DEFAULT_FORM6_BASIS,
     date: formatForm6Date(new Date()),
-    folderName: fullName ? `Форма 6 · ${fullName}` : "Форма 6",
+    folderName: buildForm6FolderName(fullName),
     signatories,
     statusNote: "",
   };
@@ -194,9 +196,26 @@ export const mergeForm6Fields = (
   // Personnel wins when filled; otherwise keep what was entered in the report.
   const pick = (personnel: string, document: string) =>
     String(personnel ?? "").trim() || String(document ?? "").trim();
+  const fullName = pick(defaults.fullName, merged.fullName);
+  const currentFolder = String(merged.folderName ?? "").trim();
+  const folderName = (() => {
+    if (!currentFolder) return buildForm6FolderName(fullName);
+    if (/^1ПБ\s+РАПОРТ\s+Форма\s+6\s*$/i.test(currentFolder)) {
+      return buildForm6FolderName(fullName);
+    }
+    if (/^Форма\s+6\b/i.test(currentFolder)) return buildForm6FolderName(fullName);
+    if (
+      /^1ПБ\s+РАПОРТ\s+Форма\s+6\b/i.test(currentFolder) &&
+      fullName &&
+      !currentFolder.includes(fullName)
+    ) {
+      return buildForm6FolderName(fullName);
+    }
+    return currentFolder;
+  })();
   return {
     ...merged,
-    fullName: pick(defaults.fullName, merged.fullName),
+    fullName,
     rank: pick(defaults.rank, merged.rank),
     staffPosition: pick(defaults.staffPosition, merged.staffPosition),
     birthDate: pick(defaults.birthDate, merged.birthDate),
@@ -204,5 +223,6 @@ export const mergeForm6Fields = (
     rnokpp: pick(defaults.rnokpp, merged.rnokpp),
     address: pick(defaults.address, merged.address),
     phone: pick(defaults.phone, merged.phone),
+    folderName,
   };
 };

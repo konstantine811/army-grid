@@ -8,6 +8,7 @@ import {
   useMaterialReactTable,
 } from "@/components/sci/SciDataTable";
 import type { BackendPersonnelOverviewRow } from "../../api";
+import { openPersonnelInNewTab } from "../../app/navigation";
 
 export type OverviewPersonDocumentSummary = {
   count: number;
@@ -57,12 +58,20 @@ export type OverviewPersonTarget = {
   externalId: string;
 };
 
+export type OverviewQuestionnaireTarget = {
+  externalId: string;
+  name: string;
+  rowId: string;
+  hasQuestionnaire: boolean;
+};
+
 export function OverviewVirtualTable({
   rows,
   photos,
   questionnaireByExternalId,
   documentsByExternalId,
   onOpenPersonnel,
+  onOpenQuestionnaire,
   onExport,
   emptyMessage = "Немає записів за поточними фільтрами.",
 }: {
@@ -71,6 +80,7 @@ export function OverviewVirtualTable({
   questionnaireByExternalId?: Record<string, true>;
   documentsByExternalId?: Record<string, OverviewPersonDocumentSummary>;
   onOpenPersonnel?: (target: OverviewPersonTarget) => void;
+  onOpenQuestionnaire?: (target: OverviewQuestionnaireTarget) => void;
   onExport?: (
     context: SciDataTableExportContext<BackendPersonnelOverviewRow>,
   ) => void | Promise<void>;
@@ -81,6 +91,24 @@ export function OverviewVirtualTable({
       rowId: row.id,
       externalId: row.externalId,
     });
+  };
+
+  const openQuestionnaire = (row: BackendPersonnelOverviewRow) => {
+    if (!row.externalId) return;
+    const hasQuestionnaire = Boolean(
+      questionnaireByExternalId?.[row.externalId],
+    );
+    if (onOpenQuestionnaire) {
+      onOpenQuestionnaire({
+        externalId: row.externalId,
+        name: row.name,
+        rowId: row.id,
+        hasQuestionnaire,
+      });
+      return;
+    }
+    if (hasQuestionnaire) return;
+    openPersonnelInNewTab({ rowId: row.id, externalId: row.externalId });
   };
 
   const columns = useMemo<Array<MRT_ColumnDef<BackendPersonnelOverviewRow>>>(
@@ -143,24 +171,36 @@ export function OverviewVirtualTable({
           row.externalId && questionnaireByExternalId?.[row.externalId]
             ? "Є"
             : "Немає",
-        Cell: ({ row }) => (
-          <Chip
-            className={`overview-status-chip ${
-              row.original.externalId &&
-              questionnaireByExternalId?.[row.original.externalId]
-                ? "tone-ok"
-                : "tone-other"
-            }`}
-            label={
-              row.original.externalId &&
-              questionnaireByExternalId?.[row.original.externalId]
-                ? "Є"
-                : "Немає"
-            }
-            size="small"
-            variant="outlined"
-          />
-        ),
+        Cell: ({ row }) => {
+          const hasQuestionnaire = Boolean(
+            row.original.externalId &&
+              questionnaireByExternalId?.[row.original.externalId],
+          );
+          const label = hasQuestionnaire ? "Є" : "Немає";
+          return (
+            <button
+              type="button"
+              className="overview-chip-button"
+              aria-label={
+                hasQuestionnaire
+                  ? `Відкрити анкету: ${row.original.name}`
+                  : `Анкети немає — перейти до картки: ${row.original.name}`
+              }
+              disabled={!row.original.externalId}
+              onClick={() => openQuestionnaire(row.original)}
+            >
+              <Chip
+                className={`overview-status-chip ${
+                  hasQuestionnaire ? "tone-ok" : "tone-other"
+                }`}
+                label={label}
+                size="small"
+                variant="outlined"
+                component="span"
+              />
+            </button>
+          );
+        },
       },
       {
         id: "documents",
@@ -237,7 +277,12 @@ export function OverviewVirtualTable({
             <IconButton
               size="small"
               aria-label="Деталі"
-              onClick={() => openPerson(row.original)}
+              onClick={() =>
+                openPersonnelInNewTab({
+                  rowId: row.original.id,
+                  externalId: row.original.externalId,
+                })
+              }
             >
               <InfoOutlinedIcon fontSize="small" />
             </IconButton>
@@ -248,7 +293,7 @@ export function OverviewVirtualTable({
         ),
       },
     ],
-    [documentsByExternalId, onOpenPersonnel, photos, questionnaireByExternalId],
+    [documentsByExternalId, onOpenPersonnel, onOpenQuestionnaire, photos, questionnaireByExternalId],
   );
 
   const table = useMaterialReactTable({

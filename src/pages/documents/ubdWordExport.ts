@@ -80,28 +80,38 @@ const personNameLines = (fullName: string) => {
   ];
 };
 
-const splitSignatory = (signatory: WordSignatory | null, lineCount: number) => {
+const splitSignatory = (
+  signatory: WordSignatory | null,
+  lineCount: number,
+  options?: { harvestRankFromTitle?: boolean },
+) => {
   if (!signatory) {
     return {
       titleLines: Array.from({ length: lineCount }, () => ""),
+      allTitleLines: [] as string[],
       rank: "",
       date: "",
       fullName: "",
     };
   }
+  const harvestRankFromTitle = options?.harvestRankFromTitle !== false;
   const rawLines = signatory.title
     .replace(/^ЗАТВЕРДЖУЮ[\s:–—-]*/iu, "")
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean);
   const date = rawLines.find(isDateLine) ?? "";
-  const rankFromTitle = [...rawLines]
-    .reverse()
-    .find(
-      (line) =>
-        !isDateLine(line) &&
-        !/командир|тимчасово|військової частини|затверджую/i.test(line),
-    );
+  const rankFromTitle = harvestRankFromTitle
+    ? [...rawLines]
+        .reverse()
+        .find(
+          (line) =>
+            !isDateLine(line) &&
+            !/командир|тимчасово|військової частини|затверджую|призначено/i.test(
+              line,
+            ),
+        )
+    : "";
   const rank = signatory.rank.trim() || rankFromTitle || "";
   const titleLines = rawLines.filter((line) => line !== date && line !== rank);
   const padded = [...titleLines];
@@ -115,6 +125,7 @@ const splitSignatory = (signatory: WordSignatory | null, lineCount: number) => {
   }
   return {
     titleLines: padded.slice(0, lineCount),
+    allTitleLines: titleLines,
     rank,
     date,
     fullName: formatSignatoryName(signatory.fullName),
@@ -126,6 +137,133 @@ const escapeXml = (value: string) =>
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;");
+
+const RUN_FONTS =
+  '<w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman"/>';
+
+const textParagraph = (text: string, align: "left" | "right" | "both" = "left") => {
+  const safe = escapeXml(text);
+  const space = text !== text.trim() || text.startsWith(" ") || text.endsWith(" ")
+    ? ` xml:space="preserve"`
+    : "";
+  return `<w:p><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/><w:jc w:val="${align}"/><w:rPr>${RUN_FONTS}<w:sz w:val="28"/><w:szCs w:val="28"/></w:rPr></w:pPr><w:r><w:rPr>${RUN_FONTS}<w:sz w:val="28"/><w:szCs w:val="28"/></w:rPr><w:t${space}>${safe}</w:t></w:r></w:p>`;
+};
+
+/** «ЗАТВЕРДЖУЮ»: текст посади зліва, звання + ПІБ справа. */
+const buildApprovalTwoColumnTable = ({
+  titleLines,
+  rank,
+  fullName,
+}: {
+  titleLines: string[];
+  rank: string;
+  fullName: string;
+}) => {
+  const leftLines = ["ЗАТВЕРДЖУЮ", ...titleLines.map((line) => line.trim())].filter(
+    Boolean,
+  );
+  const rightLines = [rank.trim(), fullName.trim()].filter(Boolean);
+  const leftXml = leftLines.map((line) => textParagraph(line, "left")).join("");
+  const rightXml = rightLines.length
+    ? rightLines
+        .map((line, index) =>
+          textParagraph(
+            line,
+            index === rightLines.length - 1 ? "right" : "right",
+          ),
+        )
+        .join("")
+    : textParagraph("");
+
+  return `<w:tbl><w:tblPr><w:tblW w:w="9640" w:type="dxa"/><w:tblBorders><w:top w:val="nil"/><w:left w:val="nil"/><w:bottom w:val="nil"/><w:right w:val="nil"/><w:insideH w:val="nil"/><w:insideV w:val="nil"/></w:tblBorders><w:tblLayout w:type="fixed"/><w:tblLook w:val="04A0" w:firstRow="0" w:lastRow="0" w:firstColumn="0" w:lastColumn="0" w:noHBand="0" w:noVBand="0"/></w:tblPr><w:tblGrid><w:gridCol w:w="5200"/><w:gridCol w:w="4440"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="5200" w:type="dxa"/><w:vAlign w:val="top"/></w:tcPr>${leftXml || textParagraph("")}</w:tc><w:tc><w:tcPr><w:tcW w:w="4440" w:type="dxa"/><w:vAlign w:val="bottom"/></w:tcPr>${rightXml}</w:tc></w:tr></w:tbl><w:p><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr></w:p>`;
+};
+
+const paragraphPlainText = (paragraphXml: string) =>
+  [...paragraphXml.matchAll(/<w:t[^>]*>([^<]*)<\/w:t>/g)]
+    .map((match) => match[1])
+    .join("")
+    .replaceAll("&amp;", "&")
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">");
+
+/** Замінює блок ЗАТВЕРДЖУЮ + title + rank/name на таблицю 2 колонки. */
+const replaceApprovalBlockWithTable = (
+  xml: string,
+  tableXml: string,
+) => {
+  const paragraphs = [...xml.matchAll(/<w:p\b[\s\S]*?<\/w:p>/g)];
+  let start = -1;
+  let end = -1;
+  for (const match of paragraphs) {
+    const text = paragraphPlainText(match[0]);
+    const index = match.index ?? -1;
+    if (index < 0) continue;
+    if (start < 0 && /ЗАТВЕРДЖУЮ/.test(text)) {
+      start = index;
+      end = index + match[0].length;
+      continue;
+    }
+    if (start >= 0) {
+      if (
+        text.includes("{{APPROVER_TITLE_1}}") ||
+        text.includes("{{APPROVER_TITLE_2}}") ||
+        text.includes("{{APPROVER_RANK}}") ||
+        text.includes("{{APPROVER_NAME}}")
+      ) {
+        end = index + match[0].length;
+        continue;
+      }
+      // Stop once we left the approval placeholders block.
+      if (
+        text.includes("{{SIGNER_") ||
+        text.includes("ВІДКРИТА") ||
+        text.includes("Додаток")
+      ) {
+        break;
+      }
+      // Keep consuming short empty / leftover approval lines right after start.
+      if (!text.trim()) {
+        end = index + match[0].length;
+        continue;
+      }
+      break;
+    }
+  }
+  if (start < 0 || end < 0) return xml;
+  return `${xml.slice(0, start)}${tableXml}${xml.slice(end)}`;
+};
+
+const applyRightNameTab = (
+  xml: string,
+  rankToken: string,
+  nameToken: string,
+  tabPos: number,
+) => {
+  const textIndex = xml.indexOf(rankToken);
+  if (textIndex < 0) return xml;
+  const paragraphStart = xml.lastIndexOf("<w:p ", textIndex);
+  const paragraphEnd = xml.indexOf("</w:p>", textIndex);
+  if (paragraphStart < 0 || paragraphEnd < 0) return xml;
+
+  const paragraph = xml.slice(paragraphStart, paragraphEnd + 6);
+  const pPrClose = paragraph.indexOf("</w:pPr>");
+  if (pPrClose < 0) return xml;
+
+  let pPr = paragraph.slice(0, pPrClose + "</w:pPr>".length);
+  const rightTabs = `<w:tabs><w:tab w:val="right" w:pos="${tabPos}"/></w:tabs>`;
+  pPr = pPr.includes("<w:tabs>")
+    ? pPr.replace(/<w:tabs>[\s\S]*?<\/w:tabs>/, rightTabs)
+    : pPr.replace("<w:pPr>", `<w:pPr>${rightTabs}`);
+  pPr = pPr.replace(/<w:jc w:val="both"\s*\/>/, `<w:jc w:val="left"/>`);
+
+  const rPrMatch = paragraph.match(/<w:rPr>[\s\S]*?<\/w:rPr>/);
+  const rPr =
+    rPrMatch?.[0] ??
+    `<w:rPr>${RUN_FONTS}<w:sz w:val="28"/><w:szCs w:val="28"/></w:rPr>`;
+
+  const rebuilt = `${pPr}<w:r>${rPr}<w:t>${rankToken}</w:t></w:r><w:r>${rPr}<w:tab/><w:t>${nameToken}</w:t></w:r></w:p>`;
+  return `${xml.slice(0, paragraphStart)}${rebuilt}${xml.slice(paragraphEnd + 6)}`;
+};
 
 const fillPlaceholders = (xml: string, values: Record<string, string>) => {
   let next = xml;
@@ -214,7 +352,9 @@ const valuesFromFields = (fields: UbdWordFields) => {
   const approval =
     fields.signatories.find((item) => item.blockType === "APPROVAL") ?? null;
   const signerParts = splitSignatory(signer, 3);
-  const approvalParts = splitSignatory(approval, 2);
+  const approvalParts = splitSignatory(approval, 8, {
+    harvestRankFromTitle: false,
+  });
   const [surname, givenNames] = personNameLines(fields.fullName);
 
   return {
@@ -238,6 +378,9 @@ const valuesFromFields = (fields: UbdWordFields) => {
     APPROVER_TITLE_2: approvalParts.titleLines[1] ?? "",
     APPROVER_RANK: approvalParts.rank,
     APPROVER_NAME: approvalParts.fullName,
+    approvalTitleLines: approvalParts.allTitleLines,
+    approvalRank: approvalParts.rank,
+    approvalName: approvalParts.fullName,
   };
 };
 
@@ -250,8 +393,31 @@ export const createUbdWordBlob = async (fields: UbdWordFields) => {
     throw new Error("У шаблоні немає word/document.xml.");
   }
   const values = valuesFromFields(fields);
-  const { SIGNER_DATE, ...tokens } = values;
-  let filled = fillPlaceholders(xml, tokens);
+  const {
+    SIGNER_DATE,
+    approvalTitleLines,
+    approvalRank,
+    approvalName,
+    APPROVER_TITLE_1: _a1,
+    APPROVER_TITLE_2: _a2,
+    APPROVER_RANK: _ar,
+    APPROVER_NAME: _an,
+    ...tokens
+  } = values;
+
+  const approvalTable = buildApprovalTwoColumnTable({
+    titleLines: approvalTitleLines,
+    rank: approvalRank,
+    fullName: approvalName,
+  });
+  let filled = replaceApprovalBlockWithTable(xml, approvalTable);
+  filled = applyRightNameTab(
+    filled,
+    "{{SIGNER_RANK}}",
+    "{{SIGNER_NAME}}",
+    9640,
+  );
+  filled = fillPlaceholders(filled, tokens);
   if (SIGNER_DATE) {
     const safeDate = escapeXml(SIGNER_DATE);
     filled = filled.replaceAll("{{SIGNER_DATE}}", safeDate);
@@ -266,4 +432,20 @@ export const createUbdWordBlob = async (fields: UbdWordFields) => {
 
   await stripRedColorInWordZip(zip);
   return generateDocxBlob(zip);
+};
+
+/** Підставляє блок «ЗАТВЕРДЖУЮ» як таблицю: текст зліва, звання/ПІБ справа. */
+export const injectUbdApprovalTwoColumnBlock = (
+  xml: string,
+  approval: WordSignatory | null,
+) => {
+  const parts = splitSignatory(approval, 8, { harvestRankFromTitle: false });
+  return replaceApprovalBlockWithTable(
+    xml,
+    buildApprovalTwoColumnTable({
+      titleLines: parts.allTitleLines,
+      rank: parts.rank,
+      fullName: parts.fullName,
+    }),
+  );
 };

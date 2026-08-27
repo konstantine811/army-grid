@@ -1,5 +1,10 @@
-import type { BackendEjournalImport } from "../../api";
-import { CacheKeys, readDataCache } from "../../data/idbDataCache";
+import { api, type BackendEjournalImport } from "../../api";
+import {
+  CacheKeys,
+  fetchWithCache,
+  jsonChanged,
+  readDataCache,
+} from "../../data/idbDataCache";
 import type {
   DbPreviewState,
   EjournalPreviewRow,
@@ -11,6 +16,8 @@ import {
   normalizePersonBirthKey,
   sheetRowsCacheKey,
 } from "../personnel/personnelUtils";
+import { mergeRosterRowsIntoPreview } from "../personnel/personnelRosterMerge";
+import { mapRosterLatestToPreviewRows } from "../excel-fill/rosterSourceSnapshot";
 import type { AnketaRow } from "./anketaSheet";
 
 export const normalizeAnketaNameKey = (value: unknown) =>
@@ -80,6 +87,30 @@ const buildPersonnelIndex = (rows: EjournalPreviewRow[]): PersonnelIndex => {
   return { byExternalId, byRnokpp, byNameBirth, byName };
 };
 
+const loadMergedPersonnelRows = async (): Promise<EjournalPreviewRow[]> => {
+  const [imports, latestRoster] = await Promise.all([
+    readDataCache<BackendEjournalImport[]>(CacheKeys.ejournalImports),
+    fetchWithCache({
+      key: CacheKeys.rosterLatest,
+      fetcher: () => api.getLatestPersonnelRoster(),
+      isChanged: jsonChanged,
+    }).catch(() => null),
+  ]);
+
+  const rosterRows = mapRosterLatestToPreviewRows(latestRoster);
+  const sheet = imports?.length ? findEjournalPersonnelSheet(imports) : undefined;
+
+  if (!sheet) {
+    return rosterRows.length
+      ? mergeRosterRowsIntoPreview({ rows: [] }, rosterRows)
+      : [];
+  }
+
+  const preview = await readDataCache<DbPreviewState>(sheetRowsCacheKey(sheet));
+  const oosRows = preview?.rows ?? [];
+  return mergeRosterRowsIntoPreview({ rows: oosRows }, rosterRows);
+};
+
 export const loadPersonnelIndexForAnketa = async (options?: {
   force?: boolean;
 }): Promise<PersonnelIndex> => {
@@ -88,70 +119,64 @@ export const loadPersonnelIndexForAnketa = async (options?: {
     return cachedIndex;
   }
 
-  const imports = await readDataCache<BackendEjournalImport[]>(
-    CacheKeys.ejournalImports,
-  );
-  if (!imports?.length) {
-    cachedIndex = {
-      byExternalId: new Map(),
-      byRnokpp: new Map(),
-      byNameBirth: new Map(),
-      byName: new Map(),
-    };
-    cachedIndexAt = now;
-    return cachedIndex;
-  }
-
-  const sheet = findEjournalPersonnelSheet(imports);
-  if (!sheet) {
-    cachedIndex = {
-      byExternalId: new Map(),
-      byRnokpp: new Map(),
-      byNameBirth: new Map(),
-      byName: new Map(),
-    };
-    cachedIndexAt = now;
-    return cachedIndex;
-  }
-
-  const preview = await readDataCache<DbPreviewState>(sheetRowsCacheKey(sheet));
-  const index = buildPersonnelIndex(preview?.rows ?? []);
+  const rows = await loadMergedPersonnelRows();
+  const index = buildPersonnelIndex(rows);
   cachedIndex = index;
   cachedIndexAt = now;
   return index;
 };
 
-export const matchAnketaRowToPersonnel = (
+export const loadPersonnelRowsForAnketa = async (): Promise<EjournalPreviewRow[]> =>
+  loadMergedPersonnelRows();
+
+export type AnketaPersonnelMatchResult = {
+  match: AnketaPersonnelMatch | null;
+  ambiguous: AnketaPersonnelMatch[];
+};
+
+export const matchAnketaRowToPersonnelDetailed = (
   anketaRow: AnketaRow | null | undefined,
   index: PersonnelIndex | null,
-): AnketaPersonnelMatch | null => {
-  if (!anketaRow || !index) return null;
+): AnketaPersonnelMatchResult => {
+  if (!anketaRow || !index) {
+    return { match: null, ambiguous: [] };
+  }
 
   const externalId = String(anketaRow.externalId ?? "").trim();
   if (externalId) {
     const hit = index.byExternalId.get(externalId);
-    if (hit) return hit;
+    if (hit) return { match: hit, ambiguous: [] };
   }
 
   const rnokpp = String(anketaRow.rnokpp ?? "").trim();
   if (rnokpp) {
     const hit = index.byRnokpp.get(rnokpp);
-    if (hit) return hit;
+    if (hit) return { match: hit, ambiguous: [] };
   }
 
   const nameKey = normalizeNameKey(anketaRow.fullName);
-  if (!nameKey) return null;
+  if (!nameKey) return { match: null, ambiguous: [] };
 
   const birthKey = normalizePersonBirthKey(String(anketaRow.birthDate ?? ""));
   if (birthKey) {
     const hit = index.byNameBirth.get(`${nameKey}|${birthKey}`);
-    if (hit) return hit;
+    if (hit) return { match: hit, ambiguous: [] };
   }
 
-  const byName = index.byName.get(nameKey);
-  if (byName?.length === 1) return byName[0] ?? null;
-  return null;
+  const byName = index.byName.get(nameKey) ?? [];
+  if (byName.length === 1) {
+    return { match: byName[0] ?? null, ambiguous: [] };
+  }
+  if (byName.length > 1) {
+    return { match: null, ambiguous: byName };
+  }
+  return { match: null, ambiguous: [] };
 };
+
+export const matchAnketaRowToPersonnel = (
+  anketaRow: AnketaRow | null | undefined,
+  index: PersonnelIndex | null,
+): AnketaPersonnelMatch | null => matchAnketaRowToPersonnelDetailed(anketaRow, index).match;
 
 export const matchLabel = (matchBy: AnketaPersonnelMatch["matchBy"]) => {
   switch (matchBy) {

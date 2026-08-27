@@ -39,6 +39,8 @@ export const readRosterColumnValue = (
 ): string => {
   const direct = cellText(row[`column_${columnNumber}`]);
   if (direct) return direct;
+  const rosterPrefixed = cellText(row[`roster__column_${columnNumber}`]);
+  if (rosterPrefixed) return rosterPrefixed;
 
   const label = MORNING_GENERAL_LIST_COLUMN_LABELS[columnNumber];
   if (!label) return "";
@@ -46,8 +48,20 @@ export const readRosterColumnValue = (
   const wanted = normalizeKey(label);
   for (const [key, value] of Object.entries(row)) {
     if (key.startsWith("__")) continue;
-    const keyNorm = normalizeKey(key).replace(/_/g, " ");
-    if (keyNorm === wanted || keyNorm.includes(wanted) || wanted.includes(keyNorm)) {
+    const bare = key.replace(/^roster__/i, "");
+    if (/^column_\d+$/i.test(bare)) continue;
+    const keyNorm = normalizeKey(bare).replace(/_/g, " ");
+    if (keyNorm === wanted) {
+      const text = cellText(value);
+      if (text) return text;
+    }
+  }
+  for (const [key, value] of Object.entries(row)) {
+    if (key.startsWith("__")) continue;
+    const bare = key.replace(/^roster__/i, "");
+    if (/^column_\d+$/i.test(bare)) continue;
+    const keyNorm = normalizeKey(bare).replace(/_/g, " ");
+    if (keyNorm.includes(wanted) || wanted.includes(keyNorm)) {
       const text = cellText(value);
       if (text) return text;
     }

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import writeXlsxFile, { type SheetData } from "write-excel-file/browser";
 import {
+  Alert,
   Box,
   Button,
   Chip,
@@ -25,6 +26,9 @@ import {
   type BackendPersonnelOverviewRow,
   type BackendPersonnelRosterLatest,
 } from "../../api";
+import {
+  openPersonnelInNewTab,
+} from "../../app/navigation";
 import {
   CacheKeys,
   fetchWithCache,
@@ -57,6 +61,7 @@ import {
   OverviewVirtualTable,
   type OverviewPersonDocumentSummary,
   type OverviewPersonTarget,
+  type OverviewQuestionnaireTarget,
 } from "./OverviewVirtualTable";
 import type { SciDataTableExportContext } from "@/components/sci/SciDataTable";
 
@@ -78,6 +83,51 @@ const PERIOD_FILTERS = [
 ] as const;
 
 const normalizeRosterText = normalizeRosterMatchText;
+
+/** Split pasted list: one name per line, or `;` / `,` separated. */
+const parseOverviewNameQueries = (raw: string) => {
+  const text = raw.replace(/\r/g, "").trim();
+  if (!text) return [] as string[];
+
+  const parts =
+    /[\n;]/.test(text) || (text.includes(",") && /\s/.test(text))
+      ? text.split(/[\n;]+/).flatMap((chunk) =>
+          chunk.includes(",") && chunk.trim().split(/\s+/).length >= 2
+            ? [chunk]
+            : chunk.split(","),
+        )
+      : [text];
+
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const part of parts) {
+    const cleaned = part.replace(/^[\s\-•·\d.)]+/u, "").trim();
+    if (!cleaned) continue;
+    const key = normalizeRosterText(cleaned);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    result.push(cleaned);
+  }
+  return result;
+};
+
+const overviewNameMatchesQuery = (personName: string, queryName: string) => {
+  const person = normalizeRosterText(personName);
+  const query = normalizeRosterText(queryName);
+  if (!person || !query) return false;
+  if (person.includes(query) || query.includes(person)) return true;
+
+  const personTokens = person.split(/\s+/).filter(Boolean);
+  const queryTokens = query.split(/\s+/).filter((token) => token.length >= 2);
+  if (!queryTokens.length) return false;
+
+  // All query tokens must appear in the person name (order-independent).
+  return queryTokens.every((token) =>
+    personTokens.some(
+      (part) => part === token || part.startsWith(token) || token.startsWith(part),
+    ),
+  );
+};
 
 const overviewDocumentTypeLabel = (type: string) =>
   type === "ubdReport"
@@ -435,9 +485,11 @@ export function OverviewPage({
     void load();
   }, []);
 
+  const nameQueries = useMemo(() => parseOverviewNameQueries(query), [query]);
+  const isNameListSearch = nameQueries.length > 1;
+
   const filteredRows = useMemo(() => {
     if (!data) return [] as BackendPersonnelOverviewRow[];
-    const normalizedQuery = normalizeRosterText(query);
     const maxDays = period === "ALL" ? null : Number(period);
 
     return data.rows.filter((row) => {
@@ -450,7 +502,18 @@ export function OverviewPage({
       ) {
         return false;
       }
+      if (!nameQueries.length) return true;
+
+      if (isNameListSearch) {
+        return nameQueries.some((nameQuery) =>
+          overviewNameMatchesQuery(row.name, nameQuery),
+        );
+      }
+
+      const normalizedQuery = normalizeRosterText(nameQueries[0] ?? "");
       if (!normalizedQuery) return true;
+      if (overviewNameMatchesQuery(row.name, nameQueries[0] ?? "")) return true;
+
       return [
         row.name,
         row.externalId,
@@ -472,9 +535,60 @@ export function OverviewPage({
         .join(" ")
         .includes(normalizedQuery);
     });
-  }, [data, documentsByExternalId, period, query, status, unit]);
+  }, [
+    data,
+    documentsByExternalId,
+    isNameListSearch,
+    nameQueries,
+    period,
+    status,
+    unit,
+  ]);
+
+  const nameListMatchStats = useMemo(() => {
+    if (!isNameListSearch || !data) return null;
+    const matched: string[] = [];
+    const missing: string[] = [];
+    for (const nameQuery of nameQueries) {
+      const hit = data.rows.some((row) =>
+        overviewNameMatchesQuery(row.name, nameQuery),
+      );
+      if (hit) matched.push(nameQuery);
+      else missing.push(nameQuery);
+    }
+    return { matched, missing, total: nameQueries.length };
+  }, [data, isNameListSearch, nameQueries]);
 
   const metrics = data?.metrics;
+
+  const openQuestionnaire = async (target: OverviewQuestionnaireTarget) => {
+    if (!target.externalId) return;
+    if (!target.hasQuestionnaire) {
+      openPersonnelInNewTab({
+        rowId: target.rowId,
+        externalId: target.externalId,
+      });
+      setMessage(`Відкрито картку ${target.name} — можна додати анкету.`);
+      return;
+    }
+
+    try {
+      setMessage(`Відкриваю анкету: ${target.name}…`);
+      const url = await api.getPersonQuestionnaireObjectUrl(
+        target.externalId,
+        buildQuestionnaireExportFileName(target.name),
+      );
+      window.open(url, "_blank", "noopener,noreferrer");
+      window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+      setMessage(`Анкета відкрита: ${target.name}`);
+    } catch (error) {
+      setMessage(
+        error instanceof Error
+          ? `Не вдалося відкрити анкету: ${error.message}`
+          : "Не вдалося відкрити анкету.",
+      );
+    }
+  };
 
   const exportOverviewTable = async (
     context: SciDataTableExportContext<BackendPersonnelOverviewRow>,
@@ -605,13 +719,27 @@ export function OverviewPage({
       </section>
 
       <section className="overview-toolbar">
-        <label className="overview-search">
+        <label
+          className={`overview-search${isNameListSearch ? " is-multiline" : ""}`}
+        >
           <SearchOutlinedIcon fontSize="small" />
-          <input
+          <textarea
             value={query}
+            rows={isNameListSearch ? Math.min(6, nameQueries.length + 1) : 1}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="Пошук за ПІБ"
+            placeholder="ПІБ або список (по одному в рядок) — Ctrl+V"
+            spellCheck={false}
           />
+          {query.trim() ? (
+            <button
+              type="button"
+              className="overview-search-clear"
+              aria-label="Очистити пошук"
+              onClick={() => setQuery("")}
+            >
+              ✕
+            </button>
+          ) : null}
         </label>
         <TextField
           select
@@ -665,6 +793,19 @@ export function OverviewPage({
         </TextField>
       </section>
 
+      {nameListMatchStats ? (
+        <Alert
+          severity={nameListMatchStats.missing.length ? "warning" : "success"}
+          className="overview-name-list-alert"
+        >
+          Список: знайдено {nameListMatchStats.matched.length} з{" "}
+          {nameListMatchStats.total}
+          {nameListMatchStats.missing.length
+            ? ` · не знайдено: ${nameListMatchStats.missing.join("; ")}`
+            : ""}
+        </Alert>
+      ) : null}
+
       <section className="overview-layout">
         <div className="overview-table-panel">
           <OverviewVirtualTable
@@ -673,6 +814,7 @@ export function OverviewPage({
             questionnaireByExternalId={questionnaireByExternalId}
             documentsByExternalId={documentsByExternalId}
             onOpenPersonnel={onOpenPersonnel}
+            onOpenQuestionnaire={(target) => void openQuestionnaire(target)}
             emptyMessage={
               isLoading && !data
                 ? "Завантаження огляду..."

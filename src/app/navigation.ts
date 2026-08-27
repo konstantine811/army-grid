@@ -98,6 +98,62 @@ export const getInitialBchsAnalyticsTab = (): BchsAnalyticsTab => {
     : "overview";
 };
 
+export type EjoosWorkspaceTab =
+  | "import"
+  | "shpo"
+  | "oos"
+  | "excluded"
+  | "tempArrivals"
+  | "tempAbsents"
+  | "timesheet"
+  | "irrevocableLosses";
+
+const EJOOS_WORKSPACE_TABS: readonly EjoosWorkspaceTab[] = [
+  "import",
+  "shpo",
+  "oos",
+  "excluded",
+  "tempArrivals",
+  "tempAbsents",
+  "timesheet",
+  "irrevocableLosses",
+] as const;
+
+export const isEjoosWorkspaceTab = (
+  value: string | null | undefined,
+): value is EjoosWorkspaceTab =>
+  !!value &&
+  (EJOOS_WORKSPACE_TABS as readonly string[]).includes(value);
+
+export const getInitialEjoosTab = (): EjoosWorkspaceTab => {
+  const tab = new URLSearchParams(window.location.search).get("ejoosTab");
+  return isEjoosWorkspaceTab(tab) ? tab : "import";
+};
+
+/** Persist ЕЖООС sub-tab in the URL so reload keeps the same screen. */
+export const replaceEjoosTabInUrl = (tab: EjoosWorkspaceTab) => {
+  if (typeof window === "undefined") return;
+  if (getPageFromPath(window.location.pathname) !== "ejournal") return;
+
+  const url = new URL(window.location.href);
+  if (tab === "import") {
+    url.searchParams.delete("ejoosTab");
+  } else {
+    url.searchParams.set("ejoosTab", tab);
+  }
+
+  const next = `${url.pathname}${url.search}${url.hash}`;
+  if (next === `${window.location.pathname}${window.location.search}${window.location.hash}`) {
+    return;
+  }
+
+  window.history.replaceState(
+    { ...(window.history.state as object | null), page: "ejournal" },
+    "",
+    next,
+  );
+};
+
 export const getCurrentRouteKey = () =>
   `${window.location.pathname}${window.location.search}`;
 
@@ -166,4 +222,15 @@ export const buildPersonnelRoute = ({
 
   const query = params.toString();
   return query ? `${pagePaths.personnel}?${query}` : pagePaths.personnel;
+};
+
+export const openPersonnelInNewTab = ({
+  rowId,
+  externalId,
+}: {
+  rowId?: string;
+  externalId?: string;
+}) => {
+  const url = buildPersonnelRoute({ rowId, externalId });
+  window.open(url, "_blank", "noopener,noreferrer");
 };

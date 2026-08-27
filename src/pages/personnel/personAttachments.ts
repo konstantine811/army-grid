@@ -1,7 +1,12 @@
-import type { BackendPersonDocument, BackendPersonQuestionnaire } from "../../api";
+import type {
+  BackendPersonDocument,
+  BackendPersonQuestionnaire,
+  BackendPersonQuestionnaireMeta,
+} from "../../api";
 import { api } from "../../api";
 import { sanitizeFileName } from "../../shared/browserExport";
 import type { EjournalPreviewRow } from "../ejournal/ejournalTypes";
+import { readRosterColumnValue } from "../excel-fill/rosterSourceSnapshot";
 import {
   buildPersonIdentityFingerprint,
   buildPersonSummary,
@@ -44,7 +49,7 @@ const pushLegacyAttachmentLookupIds = (
   if (birthKey) ids.add(`name-birth:${nameKey}:${birthKey}`);
   const callSignKey = normalizeAttachmentNameKey(callSign);
   if (callSignKey) {
-    ids.add(`call:${callSignKey}`);
+    // Лише разом із ПІБ — голий call:XXX часто тягне чужу анкету.
     ids.add(`name-call:${nameKey}:${callSignKey}`);
   }
 };
@@ -61,7 +66,53 @@ const nameTokensMatchFileName = (fullName: string, fileName: string) => {
   if (!nameKey || !fileKey) return false;
   const tokens = nameKey.split(" ").filter((token) => token.length > 1);
   if (tokens.length < 2) return false;
+  // Обовʼязково прізвище (перший токен) — інакше «Олександрович» ловить чужі файли.
+  const surname = tokens[0];
+  if (!surname || !fileKey.includes(surname)) return false;
   return tokens.every((token) => fileKey.includes(token));
+};
+
+/** Чи PDF-анкета належить цій людині (за назвою файлу). */
+export const questionnaireFileMatchesPerson = (
+  fileName: string | null | undefined,
+  names: Array<string | null | undefined>,
+) => {
+  const normalizedNames = names.map((name) => String(name ?? "").trim()).filter(Boolean);
+  if (!normalizedNames.length) return true;
+  const text = String(fileName ?? "").trim();
+  if (!text || /^questionnaire\.pdf$/i.test(text)) return true;
+  return normalizedNames.some((name) => nameTokensMatchFileName(name, text));
+};
+
+/** Чи є PDF-анкета для рядка ООС / штатки (як у картці персоналу). */
+export const rowHasListedQuestionnaire = (
+  row: EjournalPreviewRow | null,
+  items: BackendPersonQuestionnaireMeta[],
+  hints?: PersonAttachmentLookupHints,
+) => {
+  if (!row || !items.length) return false;
+
+  const lookupIds = new Set(collectPersonAttachmentLookupIds(row, hints));
+  for (const meta of items) {
+    const id = String(meta.personExternalId ?? "").trim();
+    if (id && lookupIds.has(id)) return true;
+  }
+
+  const names = [
+    getPersonDisplayName(row),
+    readRosterColumnValue(row, 14),
+    String(hints?.anketaFullName ?? "").trim(),
+  ].filter(Boolean);
+
+  for (const meta of items) {
+    const fileName = String(meta.fileName ?? "").trim();
+    if (!fileName) continue;
+    if (names.some((name) => nameTokensMatchFileName(name, fileName))) {
+      return true;
+    }
+  }
+
+  return false;
 };
 
 let questionnaireIndexCache:
@@ -88,8 +139,12 @@ const resolveQuestionnaireViaIndex = async (
   for (const meta of items) {
     const id = meta.personExternalId?.trim();
     if (!id || !lookupSet.has(id)) continue;
+    if (!questionnaireFileMatchesPerson(meta.fileName, names)) continue;
     const questionnaire = await api.getPersonQuestionnaire(id).catch(() => null);
-    if (hasQuestionnaireRecord(questionnaire)) {
+    if (
+      hasQuestionnaireRecord(questionnaire) &&
+      questionnaireFileMatchesPerson(questionnaire?.fileName, names)
+    ) {
       return {
         questionnaire,
         resolvedExternalId: questionnaire!.personExternalId?.trim() || id,
@@ -100,11 +155,12 @@ const resolveQuestionnaireViaIndex = async (
   for (const meta of items) {
     const id = meta.personExternalId?.trim();
     if (!id) continue;
-    if (!names.some((name) => nameTokensMatchFileName(name, meta.fileName ?? ""))) {
-      continue;
-    }
+    if (!questionnaireFileMatchesPerson(meta.fileName, names)) continue;
     const questionnaire = await api.getPersonQuestionnaire(id).catch(() => null);
-    if (hasQuestionnaireRecord(questionnaire)) {
+    if (
+      hasQuestionnaireRecord(questionnaire) &&
+      questionnaireFileMatchesPerson(questionnaire?.fileName, names)
+    ) {
       return {
         questionnaire,
         resolvedExternalId: questionnaire!.personExternalId?.trim() || id,
@@ -192,27 +248,33 @@ export const loadPersonQuestionnaireForRow = async (
 }> => {
   const fallback = resolvePersonIdentityKey(row);
   const lookupIds = collectPersonAttachmentLookupIds(row, hints);
+  const expectedNames = [
+    getPersonDisplayName(row),
+    String(hints?.anketaFullName ?? "").trim(),
+  ].filter(Boolean);
+
   for (const id of lookupIds) {
     try {
       const questionnaire = await api.getPersonQuestionnaire(id);
-      if (hasQuestionnaireRecord(questionnaire)) {
-        return {
-          questionnaire,
-          resolvedExternalId:
-            questionnaire!.personExternalId?.trim() || id,
-        };
+      if (!hasQuestionnaireRecord(questionnaire)) continue;
+      if (
+        !questionnaireFileMatchesPerson(
+          questionnaire?.fileName,
+          expectedNames,
+        )
+      ) {
+        continue;
       }
+      return {
+        questionnaire,
+        resolvedExternalId: questionnaire!.personExternalId?.trim() || id,
+      };
     } catch {
       /* try next key */
     }
   }
 
-  const personnelName = getPersonDisplayName(row);
-  const anketaName = String(hints?.anketaFullName ?? "").trim();
-  const indexed = await resolveQuestionnaireViaIndex(lookupIds, [
-    personnelName,
-    anketaName,
-  ]);
+  const indexed = await resolveQuestionnaireViaIndex(lookupIds, expectedNames);
   if (indexed) return indexed;
 
   return { questionnaire: null, resolvedExternalId: fallback };

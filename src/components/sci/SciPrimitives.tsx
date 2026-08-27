@@ -117,24 +117,38 @@ export function Box({ component, sx, style, ...props }: BoxProps) {
 type StackProps = HTMLAttributes<HTMLDivElement> & {
   direction?: "row" | "column" | Record<string, "row" | "column">;
   spacing?: number;
+  justifyContent?: string | Record<string, string>;
+  alignItems?: string | Record<string, string>;
+  flexWrap?: React.CSSProperties["flexWrap"];
   sx?: Sx;
 };
 
 export function Stack({
   direction = "column",
   spacing = 0,
+  justifyContent,
+  alignItems,
+  flexWrap,
   sx,
   style,
   ...props
 }: StackProps) {
   const resolvedDirection =
     typeof direction === "string" ? direction : direction.md ?? direction.xs ?? "column";
+  const resolveResponsive = (value?: string | Record<string, string>) => {
+    if (!value) return undefined;
+    if (typeof value === "string") return value;
+    return value.md ?? value.xs ?? Object.values(value)[0];
+  };
   return (
     <div
       style={{
         display: "flex",
         flexDirection: resolvedDirection,
         gap: spacing * spacingUnit,
+        justifyContent: resolveResponsive(justifyContent),
+        alignItems: resolveResponsive(alignItems),
+        flexWrap,
         ...sxToStyle(sx),
         ...style,
       }}

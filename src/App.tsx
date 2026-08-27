@@ -297,11 +297,14 @@ function App() {
   };
 
   useEffect(() => {
+    // Wait until session is known — during boot isAdmin is false and would
+    // wrongly bounce admins from /excel-fill (etc.) to /overview on every reload.
+    if (loading || !user) return;
     if (isAdmin) return;
     if (!isUserAllowedPage(activePage)) {
       applyRoute(navigateToPage("overview"));
     }
-  }, [isAdmin, activePage]);
+  }, [loading, user, isAdmin, activePage]);
 
   const openPersonnelForPerson = (target: {
     rowId: string;

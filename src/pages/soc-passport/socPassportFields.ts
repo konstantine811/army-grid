@@ -192,16 +192,50 @@ export const classifyArrivalSource = (
   calledBy: string,
   morningBrez: string,
 ): ArrivalSource => {
+  const arrived = normalizeLooseText(arrivedFrom);
   const text = normalizeLooseText(`${arrivedFrom} ${calledBy} ${morningBrez}`);
   if (!text) return "unknown";
   if (/бре[зc]|brez/.test(text)) return "brez";
   if (/рекрут/.test(text)) return "recruiting";
-  if (/(нц|навчальн|184\s*нц|бзвп)/.test(text) && !/тцк/.test(arrivedFrom.toLowerCase())) {
-    if (/(нц|навчальн)/.test(text)) return "trainingCenter";
+  // НЦ / навчальний центр (не плутати з ТЦК у тому ж рядку)
+  if (
+    /(нц|навчальн|184\s*нц|бзвп)/.test(text) &&
+    !/тцк|комісар|военкомат|військ.?ком/.test(arrived)
+  ) {
+    return "trainingCenter";
   }
-  if (/тцк|комісар|военкомат|військ.?ком/.test(text)) return "tck";
-  if (/в\/ч|а\d{4}/.test(text) || /транзит/.test(text)) return "other";
+  // ТЦК / військовий комісаріат
+  if (/тцк|комісар|военкомат|військ.?ком|вк\s*та\s*сп/.test(text)) {
+    return "tck";
+  }
+  // Переведені з іншої військової частини / в/ч А####
+  if (
+    /(перевед|з\s*інш|інш(?:ої|ої)?\s*в(?:ійськ|\.?\/?\s*ч)|з\s*в\/?ч|в\/ч|вч\s*а?\d{3,5}|\bа\d{4}\b|розпорядж)/.test(
+      text,
+    )
+  ) {
+    return "unitTransfer";
+  }
   return text ? "other" : "unknown";
+};
+
+/**
+ * Класифікація колонки ООС «Звідки прибув».
+ * Порожнє поле за домовленістю обліку = прибув з ТЦК.
+ */
+export const classifyOosArrivedFrom = (arrivedFrom: string): ArrivalSource => {
+  if (!normalizeLooseText(arrivedFrom)) return "tck";
+  return classifyArrivalSource(arrivedFrom, "", "");
+};
+
+export const ARRIVAL_SOURCE_LABELS: Record<ArrivalSource, string> = {
+  tck: "З ТЦК / військового комісаріату (або поле порожнє)",
+  trainingCenter: "З навчального центру (НЦ)",
+  recruiting: "Прямий рекрутинг",
+  brez: "З БРЕЗ",
+  unitTransfer: "Переведені з іншої військової частини",
+  other: "Інше джерело",
+  unknown: "Не вказано / не розпізнано",
 };
 
 const UKRAINIAN_BIRTH_RE =

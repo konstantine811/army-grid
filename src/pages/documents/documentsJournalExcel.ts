@@ -125,7 +125,7 @@ const buildJournalSheet = (
     "Статус документа",
     "Коментар",
     "Файли",
-    ...(includeUbdExitDate ? ["Вихід до"] : []),
+    ...(includeUbdExitDate ? ["Вихід від"] : []),
     "Створено",
     "Оновлено",
   ];

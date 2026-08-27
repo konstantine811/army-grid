@@ -13,7 +13,14 @@ export type Sex = "male" | "female" | "unknown";
 
 export type MaritalStatus = "married" | "unmarried" | "civil" | "unknown";
 
-export type ArrivalSource = "tck" | "trainingCenter" | "recruiting" | "brez" | "other" | "unknown";
+export type ArrivalSource =
+  | "tck"
+  | "trainingCenter"
+  | "recruiting"
+  | "brez"
+  | "unitTransfer"
+  | "other"
+  | "unknown";
 
 export type NationalityKey =
   | "ukraine"
@@ -242,5 +249,6 @@ export type SocPassportResult = {
     jbdExits?: string;
     bplaExits?: string;
     ubdRoster?: string;
+    housingIdp?: string;
   };
 };

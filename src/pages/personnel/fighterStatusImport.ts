@@ -122,18 +122,20 @@ const resolveFighterStatusColumnIndexes = (
     : -1;
 
   const totalDaysIndex = (() => {
-    const byLabel = getStatusColumnIndex(columns, ["дн"]);
-    if (byLabel >= 0) return byLabel;
-
-    if (returnDateIndex >= 0) {
-      const candidate = returnDateIndex + 1;
-      const header = normalizeStatusHeader(
-        columns[candidate]?.label || columns[candidate]?.key || "",
+    // Лише справжня колонка днів — не будь-який заголовок з «дн».
+    const byLabel = columns.findIndex((column) => {
+      const label = normalizeStatusHeader(column.label || column.key);
+      return (
+        label === "дн" ||
+        label === "дні" ||
+        label === "днів" ||
+        label.startsWith("днів") ||
+        label.includes("кількість днів") ||
+        label.includes("к-сть днів") ||
+        label.includes("ксть днів")
       );
-      if (!header || header.length <= 2) return candidate;
-    }
-
-    if (statusIndex > 0) return statusIndex - 1;
+    });
+    if (byLabel >= 0) return byLabel;
     return -1;
   })();
 
@@ -155,17 +157,25 @@ const resolveFighterStatusColumnIndexes = (
 export const buildFighterStatusValues = (
   row: { values: unknown[] },
   indexes: ReturnType<typeof resolveFighterStatusColumnIndexes>,
-) => ({
-  fighter_status_direction: readStatusCell(row, indexes.directionIndex),
-  fighter_status_entry_date: readStatusCell(row, indexes.entryDateIndex),
-  fighter_status_exit_date: readStatusCell(row, indexes.exitDateIndex),
-  fighter_status_return_date: readStatusCell(row, indexes.returnDateIndex),
-  fighter_status_total_days: readStatusCell(row, indexes.totalDaysIndex),
-  fighter_status_value: readStatusCell(row, indexes.statusIndex),
-  fighter_status_weapon: readStatusCell(row, indexes.weaponIndex),
-  fighter_status_communication: readStatusCell(row, indexes.communicationIndex),
-  fighter_status_note: readStatusCell(row, indexes.noteIndex),
-});
+) => {
+  const exitDate = readStatusCell(row, indexes.exitDateIndex);
+  const returnDate = readStatusCell(row, indexes.returnDateIndex);
+  const computedDays = diffFighterStatusDays(exitDate, returnDate);
+  const storedDays = readStatusCell(row, indexes.totalDaysIndex);
+  const storedDaysOk = /^\d{1,4}$/.test(storedDays);
+
+  return {
+    fighter_status_direction: readStatusCell(row, indexes.directionIndex),
+    fighter_status_entry_date: readStatusCell(row, indexes.entryDateIndex),
+    fighter_status_exit_date: exitDate,
+    fighter_status_return_date: returnDate,
+    fighter_status_total_days: computedDays || (storedDaysOk ? storedDays : ""),
+    fighter_status_value: readStatusCell(row, indexes.statusIndex),
+    fighter_status_weapon: readStatusCell(row, indexes.weaponIndex),
+    fighter_status_communication: readStatusCell(row, indexes.communicationIndex),
+    fighter_status_note: readStatusCell(row, indexes.noteIndex),
+  };
+};
 
 export const buildFighterStatusAdditions = (statusSheet: ExcelSheetSnapshot) => {
   const columns = buildImportColumns(statusSheet);
@@ -288,7 +298,21 @@ export const buildFighterTaskPeriodText = (
 };
 
 const UBD_TASK_PERIOD_RANGE_RE =
-  /(\d{1,2}[.\/-]\d{1,2}[.\/-]\d{2,4})\s*-\s*(\d{1,2}[.\/-]\d{1,2}[.\/-]\d{2,4})/;
+  /(\d{1,2}[.\/-]\d{1,2}[.\/-]\d{2,4})\s*[-–—]\s*(\d{1,2}[.\/-]\d{1,2}[.\/-]\d{2,4})/;
+
+/** Перша дата з «Період завдань» (`з 12.08.2026-19.08.2026` → 12.08.2026). */
+export const parseUbdTaskPeriodStartDate = (
+  taskPeriod: string,
+): Date | null => {
+  const text = String(taskPeriod ?? "").trim();
+  if (!text) return null;
+
+  const range = text.match(UBD_TASK_PERIOD_RANGE_RE);
+  if (range) return parseFighterStatusDate(range[1]);
+
+  const single = text.match(/(\d{1,2}[.\/-]\d{1,2}[.\/-]\d{2,4})/);
+  return single ? parseFighterStatusDate(single[1]) : null;
+};
 
 /** Друга дата з «Період завдань» — дата, по яку був вихід. */
 export const parseUbdTaskPeriodEndDate = (taskPeriod: string): Date | null => {
@@ -301,6 +325,12 @@ export const parseUbdTaskPeriodEndDate = (taskPeriod: string): Date | null => {
   return parseFighterStatusDate(match[2]);
 };
 
+export const formatUbdTaskPeriodStartDate = (taskPeriod: string): string => {
+  const date = parseUbdTaskPeriodStartDate(taskPeriod);
+  if (!date) return "";
+  return date.toLocaleDateString("uk-UA");
+};
+
 export const formatUbdTaskPeriodEndDate = (taskPeriod: string): string => {
   const date = parseUbdTaskPeriodEndDate(taskPeriod);
   if (!date) return "";
@@ -311,15 +341,58 @@ export const getFighterTaskPlace = (
   row: EjournalPreviewRow | null | undefined,
 ) => getFighterStatusDirectValue(row, "fighter_status_direction");
 
+export const resolveFighterStatusTotalDays = (
+  row: EjournalPreviewRow | null | undefined,
+) => {
+  const exitDate = getFighterStatusDirectValue(row, "fighter_status_exit_date");
+  const returnDate = getFighterStatusDirectValue(
+    row,
+    "fighter_status_return_date",
+  );
+  const computed = diffFighterStatusDays(exitDate, returnDate);
+  if (computed) return computed;
+
+  const stored = getFighterStatusDirectValue(row, "fighter_status_total_days");
+  return /^\d{1,4}$/.test(stored) ? stored : "";
+};
+
 export const extractFighterStatusFieldRows = (
   row: EjournalPreviewRow | null | undefined,
   labels: Record<string, string> = {},
 ) =>
-  FIGHTER_STATUS_FIELDS.map((field) => ({
-    key: field.key,
-    label: labels[field.key] || field.label,
-    value: getFighterStatusDirectValue(row, field.key),
-  })).filter((field) => field.value);
+  FIGHTER_STATUS_FIELDS.map((field) => {
+    const value =
+      field.key === "fighter_status_total_days"
+        ? resolveFighterStatusTotalDays(row)
+        : getFighterStatusDirectValue(row, field.key);
+    return {
+      key: field.key,
+      label: labels[field.key] || field.label,
+      value,
+    };
+  }).filter((field) => field.value);
+
+/** Візуальний тон плитки на картці Особового складу. */
+export const getFighterStatusFieldTone = (
+  key: string,
+): "exit" | "return" | "entry" | "days" | "status" | "direction" | null => {
+  switch (key) {
+    case "fighter_status_exit_date":
+      return "exit";
+    case "fighter_status_return_date":
+      return "return";
+    case "fighter_status_entry_date":
+      return "entry";
+    case "fighter_status_total_days":
+      return "days";
+    case "fighter_status_value":
+      return "status";
+    case "fighter_status_direction":
+      return "direction";
+    default:
+      return null;
+  }
+};
 
 export const getRosterFighterStatusOverviewFields = (row: EjournalPreviewRow) => {
   const fighterExitDate = getFighterStatusDirectValue(
@@ -330,18 +403,13 @@ export const getRosterFighterStatusOverviewFields = (row: EjournalPreviewRow) =>
     row,
     "fighter_status_return_date",
   );
-  const storedDays = getFighterStatusDirectValue(
-    row,
-    "fighter_status_total_days",
-  );
 
   return {
     fighterDirection: getFighterStatusDirectValue(row, "fighter_status_direction"),
     fighterEntryDate: getFighterStatusDirectValue(row, "fighter_status_entry_date"),
     fighterExitDate,
     fighterReturnDate,
-    fighterTotalDays:
-      storedDays || diffFighterStatusDays(fighterExitDate, fighterReturnDate),
+    fighterTotalDays: resolveFighterStatusTotalDays(row),
     fighterStatus: getFighterStatusDirectValue(row, "fighter_status_value"),
     fighterWeapon: getFighterStatusDirectValue(row, "fighter_status_weapon"),
     fighterCommunication: getFighterStatusDirectValue(

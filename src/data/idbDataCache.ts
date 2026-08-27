@@ -50,6 +50,7 @@ export const CacheKeys = {
   sheetRows: (sheetId: string, stamp: string) =>
     `ejournal:sheet-rows:${sheetId}:${stamp}`,
   rosterLatest: "personnel:roster:latest",
+  staffSheetImport: "anketa:staff-sheet-import",
   overview: "personnel:overview",
   documentsAll: "personnel:documents:all",
   questionnairesMeta: "personnel:questionnaires:meta",

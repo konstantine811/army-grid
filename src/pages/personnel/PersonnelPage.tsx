@@ -15,14 +15,20 @@ import {
 import { AddPhotoAlternateOutlinedIcon } from "@/components/sci/icons";
 import { ArticleOutlinedIcon } from "@/components/sci/icons";
 import { ArrowLeftOutlinedIcon } from "@/components/sci/icons";
+import { CalendarMonthOutlinedIcon } from "@/components/sci/icons";
 import { DeleteOutlineOutlinedIcon } from "@/components/sci/icons";
 import { FileUploadOutlinedIcon } from "@/components/sci/icons";
 import { FileDownloadOutlinedIcon } from "@/components/sci/icons";
 import { FormatListBulletedOutlinedIcon } from "@/components/sci/icons";
+import { LoginOutlinedIcon } from "@/components/sci/icons";
+import { LogoutOutlinedIcon } from "@/components/sci/icons";
 import { PersonOutlinedIcon } from "@/components/sci/icons";
 import { PersonSearchOutlinedIcon } from "@/components/sci/icons";
 import { PictureAsPdfOutlinedIcon } from "@/components/sci/icons";
 import { SearchOutlinedIcon } from "@/components/sci/icons";
+import { WarningAmberOutlinedIcon } from "@/components/sci/icons";
+import { PushPinOutlinedIcon } from "@/components/sci/icons";
+import { InfoOutlinedIcon } from "@/components/sci/icons";
 import {
   api,
   type BackendEjournalImport,
@@ -36,23 +42,19 @@ import {
   fetchWithCache,
   jsonChanged,
   readDataCache,
+  writeDataCache,
 } from "../../data/idbDataCache";
 import {
-  buildFighterStatusAdditions,
   extractFighterStatusFieldRows,
-  FIGHTER_STATUS_FIELDS,
-  findFighterStatusAddition,
-  findFighterStatusSheet,
+  getFighterStatusFieldTone,
   normalizeRosterMatchText,
 } from "./fighterStatusImport";
 import {
-  hasRowData,
   readWorkbookSnapshot,
   valueToDisplay,
 } from "../../excelRoundTrip";
-import { cellValueToJson } from "../../shared/format";
 import type { DbPreviewState, EjournalPreviewRow } from "../ejournal/ejournalTypes";
-import { buildImportColumns, parseDbColumns } from "../ejournal/ejournalUtils";
+import { parseDbColumns } from "../ejournal/ejournalUtils";
 import { PhotoCropDialog, type CropRect } from "./PhotoCropDialog";
 import { FloatingQuestionnairePreview } from "./FloatingQuestionnairePreview";
 import { QuestionnaireShareButton } from "./QuestionnaireShareButton";
@@ -82,6 +84,7 @@ import {
   getPersonFieldValue,
   inferRosterFieldLabel,
   isLikelyPersonnelRow,
+  looksLikePersonBirthDate,
   migratePersonAttachmentsBetweenIds,
   normalizePersonBirthKey,
   normalizeUaPhone,
@@ -89,6 +92,9 @@ import {
   resolveMorningGeneralListColumnLabel,
   resolvePersonIdentityKey,
   resolvePersonRankTitle,
+  resolvePersonBirthDate,
+  formatPersonBirthDateWithAge,
+  computeFullYearsFromBirthDate,
   isPositionIndexField,
   loadAllEjournalSheetRows,
   sheetRowsCacheKey,
@@ -112,12 +118,22 @@ import {
   upsertPersonPhonesDocument,
   writeStoredPersonPhones,
 } from "./personPhonesStore";
-import {
-  applyEnrichmentToPreviewRow,
-  syncEnrichmentToPerson,
-} from "./personEnrichment";
+import { questionnaireFileMatchesPerson } from "./personAttachments";
 import { migrateStoredPersonSignatures } from "./personSignatureStore";
-import { parseQuestionnairePdf } from "../questionnaire-parser/questionnairePdfParser";
+import {
+  formatAnketaBulkMergeReport,
+  mergeCachedAnketaToPersonnel,
+} from "../anketa-data/anketaPersonMerge";
+import {
+  formatVkTpvDovidkyMergeReport,
+  mergeVkTpvDovidkyWorkbook,
+} from "./vkTpvDovidkyImport";
+import { importStaffSheetFromFile } from "../anketa-data/staffSheetImport";
+import {
+  getRosterValue,
+  mergeRosterRowsIntoPreview,
+  ROSTER_FIELD_PREFIX,
+} from "./personnelRosterMerge";
 
 const PERSONNEL_FOCUS_KEY = "army-grid:focus-personnel";
 const ATTACHMENT_HEAL_SESSION_KEY = "army-grid:attachments-healed";
@@ -129,15 +145,7 @@ const formatFileSize = (bytes: number) => {
   return `${mb.toFixed(mb >= 10 ? 0 : 1)} MB`;
 };
 
-const ROSTER_FIELD_PREFIX = "roster__";
 const normalizeRosterText = normalizeRosterMatchText;
-
-const getRosterValue = (row: EjournalPreviewRow, keyParts: string[]) => {
-  const key = Object.keys(row).find((item) =>
-    keyParts.every((part) => item.toLocaleLowerCase("uk-UA").includes(part)),
-  );
-  return key ? valueToDisplay(row[key] as Parameters<typeof valueToDisplay>[0]).trim() : "";
-};
 
 const normalizePersonnelSearchText = (value: unknown) =>
   valueToDisplay(value as Parameters<typeof valueToDisplay>[0])
@@ -149,92 +157,13 @@ const normalizePersonnelSearchText = (value: unknown) =>
 const getRawCallSignSearchValues = (row: EjournalPreviewRow) =>
   collectPersonCallSignFieldValues(row);
 
-const getRosterAdditions = (rosterRow: EjournalPreviewRow) =>
-  Object.fromEntries(
-    Object.entries(rosterRow)
-      .filter(([key, value]) =>
-        !key.startsWith("__") &&
-        valueToDisplay(value as Parameters<typeof valueToDisplay>[0]).trim(),
-      )
-      .map(([key, value]) => [`${ROSTER_FIELD_PREFIX}${key}`, value]),
-  );
-
-const buildRosterOnlyPersonnelRow = (rosterRow: EjournalPreviewRow) => {
-  const name =
-    getRosterValue(rosterRow, ["піб"]) ||
-    getRosterValue(rosterRow, ["прізвище"]);
-  const identityKey = resolvePersonIdentityKey({
-    ...rosterRow,
-    прізвище: name,
-    ПІБ: name,
-  });
-  const rowKey = identityKey || normalizeRosterText(name);
-
-  return {
-    __dbRowId: `roster:${rowKey}`,
-    __rowNumber: rosterRow.__rowNumber,
-    id: identityKey,
-    "прізвище": name,
-    "ПІБ": name,
-    "звання": resolvePersonRankTitle(rosterRow),
-    "Звання": resolvePersonRankTitle(rosterRow),
-    "позивний": getRosterValue(rosterRow, ["позив"]),
-    "Позивний": getRosterValue(rosterRow, ["позив"]),
-    "індекс_посади": getRosterValue(rosterRow, ["індекс", "посади"]),
-    "Індекс посади": getRosterValue(rosterRow, ["індекс", "посади"]),
-    "місце_дислокації": getRosterValue(rosterRow, ["перебування"]),
-    "Місце дислокації": getRosterValue(rosterRow, ["перебування"]),
-    ...getRosterAdditions(rosterRow),
-  } as EjournalPreviewRow;
-};
-
-const mergeRosterRowsIntoPreview = (
+const mergeRosterRowsIntoPreviewState = (
   preview: DbPreviewState,
   rosterRows: EjournalPreviewRow[],
-) => {
-  if (!rosterRows.length) return preview;
-
-  const rosterById = new Map<string, EjournalPreviewRow>();
-  const rosterByName = new Map<string, EjournalPreviewRow>();
-  const usedRosterRows = new Set<EjournalPreviewRow>();
-  rosterRows.forEach((row) => {
-    const id = getPersonExternalId(row);
-    const name = getRosterValue(row, ["піб"]) || getRosterValue(row, ["прізвище"]);
-    if (id) rosterById.set(id, row);
-    if (name) rosterByName.set(normalizeRosterText(name), row);
-  });
-
-  const mergedRows = preview.rows.map((row) => {
-    try {
-      const spreadsheetId = getPersonExternalId(row);
-      const name = getPersonDisplayName(row);
-      const rosterRow =
-        (spreadsheetId && rosterById.get(spreadsheetId)) ||
-        rosterByName.get(normalizeRosterText(name));
-
-      if (!rosterRow) return row;
-      usedRosterRows.add(rosterRow);
-      return { ...row, ...getRosterAdditions(rosterRow) };
-    } catch {
-      return row;
-    }
-  });
-  const rosterOnlyRows = rosterRows
-    .filter((row) => !usedRosterRows.has(row))
-    .filter((row) => getRosterValue(row, ["піб"]) || getRosterValue(row, ["прізвище"]))
-    .flatMap((row) => {
-      try {
-        return [buildRosterOnlyPersonnelRow(row)];
-      } catch {
-        return [];
-      }
-    });
-
-  return {
-    ...preview,
-    rows: [...mergedRows, ...rosterOnlyRows],
-  };
-};
+) => ({
+  ...preview,
+  rows: mergeRosterRowsIntoPreview(preview, rosterRows),
+});
 
 const personRecordMatchKeys = (record: PersonnelRecord) => {
   const nameKey = normalizeRosterText(record.summary.name);
@@ -414,8 +343,6 @@ export function PersonnelPage({
   >({});
   const [phoneDraft, setPhoneDraft] = useState("");
   const [isSavingPhone, setIsSavingPhone] = useState(false);
-  const [isPullingFromQuestionnaire, setIsPullingFromQuestionnaire] =
-    useState(false);
   const [questionnaireByExternalId, setQuestionnaireByExternalId] = useState<
     Record<string, true>
   >({});
@@ -439,6 +366,8 @@ export function PersonnelPage({
   const [isDiskSearchOpen, setIsDiskSearchOpen] = useState(false);
   const [isUploadingQuestionnaire, setIsUploadingQuestionnaire] =
     useState(false);
+  const [isMergingAnketaData, setIsMergingAnketaData] = useState(false);
+  const [isMergingVkTpvDovidky, setIsMergingVkTpvDovidky] = useState(false);
   const [message, setMessage] = useState(`API: ${api.baseUrl}`);
   const [isLoading, setIsLoading] = useState(false);
   const personnelRows = useMemo<PersonnelRecord[]>(
@@ -507,13 +436,18 @@ export function PersonnelPage({
       selectedSummary.name,
     ],
   );
-  const questionnaireExportFileName = useMemo(
-    () =>
-      sanitizeFileName(
-        buildQuestionnaireExportFileName(selectedSummary.name, selectedCallSign),
-      ),
-    [selectedCallSign, selectedSummary.name],
-  );
+  const questionnaireExportFileName = useMemo(() => {
+    const stored = String(questionnaire?.fileName ?? "").trim();
+    if (
+      stored &&
+      questionnaireFileMatchesPerson(stored, [selectedSummary.name])
+    ) {
+      return sanitizeFileName(stored);
+    }
+    return sanitizeFileName(
+      buildQuestionnaireExportFileName(selectedSummary.name, selectedCallSign),
+    );
+  }, [questionnaire?.fileName, selectedCallSign, selectedSummary.name]);
   const currentQuestionnaireShareSource = useMemo((): QuestionnairePdfSource | null => {
     if (pendingQuestionnaireFile) return { file: pendingQuestionnaireFile };
     if (diskPreviewFile) return { file: diskPreviewFile };
@@ -531,6 +465,7 @@ export function PersonnelPage({
     [selectedRow],
   );
   const editableFieldsBySection = useMemo(() => {
+    const birthDate = String(selectedSummary.birthDate ?? "").trim();
     const sections: PersonFieldDef["section"][] = [
       "identity",
       "service",
@@ -541,29 +476,104 @@ export function PersonnelPage({
       .map((section) => ({
         section,
         label: PERSON_SECTION_LABELS[section],
-        fields: editableFields.filter((field) => field.section === section),
+        fields: editableFields.filter((field) => {
+          if (field.section !== section) return false;
+          // ID з датою народження не дублюємо — дата вже в «Дата народження».
+          if (field.parts.includes("id")) {
+            const idValue = formatPersonFieldValue(
+              selectedRow?.[field.key],
+              field,
+            ).trim();
+            if (looksLikePersonBirthDate(idValue)) return false;
+            if (
+              birthDate &&
+              normalizePersonBirthKey(idValue) ===
+                normalizePersonBirthKey(birthDate)
+            ) {
+              return false;
+            }
+          }
+          return true;
+        }),
       }))
       .filter((group) => group.fields.length > 0);
-  }, [editableFields]);
-  const rosterFieldRows = useMemo(
-    () =>
-      Object.entries(selectedRow ?? {})
-        .filter(([key, value]) =>
+  }, [editableFields, selectedRow, selectedSummary.birthDate]);
+
+  const birthDateWithAge = useMemo(
+    () => formatPersonBirthDateWithAge(selectedSummary.birthDate),
+    [selectedSummary.birthDate],
+  );
+  const rosterFieldRows = useMemo(() => {
+    const birthDate = String(selectedSummary.birthDate ?? "").trim();
+    return Object.entries(selectedRow ?? {})
+      .filter(
+        ([key, value]) =>
           key.startsWith(ROSTER_FIELD_PREFIX) &&
           !key.includes("fighter_status_") &&
           valueToDisplay(value as Parameters<typeof valueToDisplay>[0]).trim(),
-        )
-        .map(([key, value]) => {
-          const sourceKey = key.slice(ROSTER_FIELD_PREFIX.length);
-          const displayed = valueToDisplay(value as Parameters<typeof valueToDisplay>[0]).trim();
-          return {
-            key,
-            label: inferRosterFieldLabel(sourceKey, displayed, rosterLabels),
-            value: displayed,
-          };
-        }),
-    [rosterLabels, selectedRow],
-  );
+      )
+      .map(([key, value]) => {
+        const sourceKey = key.slice(ROSTER_FIELD_PREFIX.length);
+        const displayed = valueToDisplay(
+          value as Parameters<typeof valueToDisplay>[0],
+        ).trim();
+        return {
+          key,
+          sourceKey,
+          label: inferRosterFieldLabel(sourceKey, displayed, rosterLabels),
+          value: displayed,
+        };
+      })
+      .filter((field) => {
+        const labelNorm = field.label
+          .trim()
+          .toLocaleLowerCase("uk-UA")
+          .replace(/_/g, " ");
+        const keyNorm = field.sourceKey.toLocaleLowerCase("uk-UA");
+        const isYearField =
+          labelNorm === "рік" ||
+          labelNorm === "рік народження" ||
+          keyNorm === "рік" ||
+          keyNorm === "rik" ||
+          /(^|_)(рік|year|column_17)(_|$)/i.test(field.sourceKey);
+        const isBirthDateField =
+          labelNorm === "дата народження" ||
+          labelNorm.includes("дата народ") ||
+          (keyNorm.includes("народ") &&
+            (keyNorm.includes("дата") || keyNorm.includes("день"))) ||
+          /(^|_)(column_16)(_|$)/i.test(field.sourceKey);
+        const isFullYearsField =
+          labelNorm === "повних років" ||
+          labelNorm.includes("повних років") ||
+          /(^|_)(column_18)(_|$)/i.test(field.sourceKey);
+        const isStayPlaceField =
+          labelNorm === "місце перебування" ||
+          labelNorm.includes("перебуван") ||
+          labelNorm === "дислокація" ||
+          labelNorm.includes("дислокац") ||
+          /(^|_)(column_31|column_40)(_|$)/i.test(field.sourceKey);
+        const isPositionField =
+          labelNorm === "посада" ||
+          labelNorm === "повна посада" ||
+          (labelNorm.includes("посада") &&
+            !labelNorm.includes("індекс") &&
+            !labelNorm.includes("прийняття")) ||
+          /(^|_)(column_5|column_7)(_|$)/i.test(field.sourceKey);
+
+        // Дублі зі Штатки ховаємо, якщо дата народження вже в шапці картки
+        // (у т.ч. підставлені зі Штатки через resolvePersonBirthDate).
+        if (birthDate && (isYearField || isBirthDateField || isFullYearsField)) {
+          return false;
+        }
+        // «Рік» з повною датою — не показуємо окремо, вона піде в шапку.
+        if (!birthDate && isYearField && looksLikePersonBirthDate(field.value)) {
+          return false;
+        }
+        // Місце перебування / посада вже в шапці.
+        if (isStayPlaceField || isPositionField) return false;
+        return true;
+      });
+  }, [rosterLabels, selectedRow, selectedSummary.birthDate]);
   const fighterStatusFieldRows = useMemo(
     () => extractFighterStatusFieldRows(selectedRow, rosterLabels),
     [rosterLabels, selectedRow],
@@ -598,10 +608,18 @@ export function PersonnelPage({
   useEffect(() => {
     setEditValues(
       Object.fromEntries(
-        editableFields.map((field) => [
-          field.key,
-          formatPersonFieldValue(selectedRow?.[field.key], field),
-        ]),
+        editableFields.map((field) => {
+          const raw = selectedRow?.[field.key];
+          let text = formatPersonFieldValue(raw, field);
+          // Дата народження: мердж ООС + Штатка — одне поле без дублів у шапці.
+          if (
+            field.parts.includes("дата_народження") &&
+            !String(text ?? "").trim()
+          ) {
+            text = resolvePersonBirthDate(selectedRow);
+          }
+          return [field.key, text];
+        }),
       ),
     );
     setPhoneDraft("");
@@ -684,6 +702,11 @@ export function PersonnelPage({
         console.log("Рядок ООС (staging):", selectedRow);
         console.log("Профіль з БД:", profile);
 
+        if (!profile) {
+          console.groupEnd();
+          return;
+        }
+
         if (profile?.exitPeriods) {
           console.log("Періоди виходу / відсутності:", profile.exitPeriods);
 
@@ -699,15 +722,15 @@ export function PersonnelPage({
               oosExitFields: profile.exitPeriods.oosExitFields,
             });
           } else {
-            console.warn(
-              "Періодів виходу в БД не знайдено (absences, locationPeriods, absent sheet, fighter status).",
+            console.debug(
+              "[Особовий склад] періодів виходу в БД немає для цієї особи.",
             );
           }
         }
 
         if (!profile?.person) {
-          console.warn(
-            "Запис Person у таблиці persons відсутній — періоди зʼявляться після статусних дій з ЕЖООС.",
+          console.debug(
+            "[Особовий склад] запис Person у БД відсутній — профіль зʼявиться після імпорту ЕЖООС.",
           );
         }
 
@@ -759,7 +782,17 @@ export function PersonnelPage({
     void api
       .getPersonQuestionnaire(externalId)
       .then((next) => {
-        if (!isCancelled) setQuestionnaire(next);
+        if (isCancelled) return;
+        if (
+          next &&
+          !questionnaireFileMatchesPerson(next.fileName, [
+            selectedSummary.name,
+          ])
+        ) {
+          setQuestionnaire(null);
+          return;
+        }
+        setQuestionnaire(next);
       })
       .catch(() => {
         if (!isCancelled) setQuestionnaire(null);
@@ -776,7 +809,7 @@ export function PersonnelPage({
     return () => {
       isCancelled = true;
     };
-  }, [selectedSummary.externalId]);
+  }, [selectedSummary.externalId, selectedSummary.name]);
 
   useEffect(() => {
     return () => {
@@ -923,7 +956,7 @@ export function PersonnelPage({
   ) => {
     let mergedPreview = preview;
     try {
-      mergedPreview = mergeRosterRowsIntoPreview(preview, latestRosterRows);
+      mergedPreview = mergeRosterRowsIntoPreviewState(preview, latestRosterRows);
     } catch {
       mergedPreview = preview;
     }
@@ -1173,8 +1206,8 @@ export function PersonnelPage({
       const externalId = record.summary.externalId;
       if (!rowId || !externalId) continue;
       const missingQuestionnaire = !questionnaireByExternalId[externalId];
+      if (!missingQuestionnaire) continue;
       const missingPhoto = !photoByExternalId[externalId];
-      if (!missingQuestionnaire && !missingPhoto) continue;
       people.push({
         rowId,
         externalId,
@@ -1185,7 +1218,70 @@ export function PersonnelPage({
       });
     }
     return people;
-  }, [personnelRows, photoByExternalId, questionnaireByExternalId]);
+  }, [
+    personnelRows,
+    photoByExternalId,
+    questionnaireByExternalId,
+  ]);
+
+  const importVkTpvDovidkyWorkbook = async (file: File | undefined) => {
+    if (!file) return;
+
+    setIsMergingVkTpvDovidky(true);
+    setMessage(`Читаю «${file.name}»…`);
+    try {
+      const snapshot = await readWorkbookSnapshot(file);
+      let lastProgressAt = 0;
+      const report = await mergeVkTpvDovidkyWorkbook(snapshot, {
+        onProgress: (done, total) => {
+          const now = Date.now();
+          if (done !== total && now - lastProgressAt < 250) return;
+          lastProgressAt = now;
+          setMessage(`ВК ТПВ ДОВІДКИ · ${done}/${total}`);
+        },
+      });
+      await loadPersonnel();
+      setMessage(
+        `ВК ТПВ ДОВІДКИ · ${formatVkTpvDovidkyMergeReport(report)}.`,
+      );
+    } catch (error) {
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "Не вдалося імпортувати ВК ТПВ ДОВІДКИ.",
+      );
+    } finally {
+      setIsMergingVkTpvDovidky(false);
+    }
+  };
+
+  const mergeMissingFieldsFromAnketaData = async () => {
+    setIsMergingAnketaData(true);
+    setMessage("Завантажую анкетні дані…");
+    try {
+      let lastProgressAt = 0;
+      const report = await mergeCachedAnketaToPersonnel({
+        onProgress: (done, total) => {
+          const now = Date.now();
+          if (done !== total && now - lastProgressAt < 250) return;
+          lastProgressAt = now;
+          setMessage(`Доповнення з анкетних даних… ${done}/${total}`);
+        },
+      });
+      await loadPersonnel();
+      setMessage(
+        `Доповнено з анкетних даних · ${formatAnketaBulkMergeReport(report)}.`,
+      );
+    } catch (error) {
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "Не вдалося доповнити особовий склад з анкет.",
+      );
+    } finally {
+      setIsMergingAnketaData(false);
+    }
+  };
 
   const importPersonnelRoster = async (file: File | undefined) => {
     if (!file) return;
@@ -1193,98 +1289,47 @@ export function PersonnelPage({
     setIsLoading(true);
     try {
       const previousRecords = personnelRows;
-      const snapshot = await readWorkbookSnapshot(file);
-      const rosterSheet = snapshot.sheets.find((sheet) =>
-        /загальний\s*список/i.test(sheet.sheetName),
-      );
-      if (!rosterSheet) {
-        setMessage("У файлі не знайдено аркуш «Загальний список».");
+      setMessage("Імпортую «Штатку» / Загальний список…");
+      const imported = await importStaffSheetFromFile(file);
+
+      const fresh = await api.getLatestPersonnelRoster();
+      if (fresh) await writeDataCache(CacheKeys.rosterLatest, fresh);
+      const latestRosterRows = mapRosterLatestToRows(fresh);
+      applyRosterMeta(fresh);
+
+      if (!dbPreview) {
+        setMessage(
+          `Штатку збережено (${imported.personCount} осіб · ${imported.fileName}), але немає імпорту ЕЖООС — картки Особового складу не оновляться. Спочатку імпортуйте ЕЖООС.`,
+        );
         return;
       }
 
-      const fighterStatusSheet = findFighterStatusSheet(snapshot.sheets);
-      const fighterStatusAdditions = fighterStatusSheet
-        ? buildFighterStatusAdditions(fighterStatusSheet)
-        : new Map<string, Record<string, unknown>>();
-      const columns = [
-        ...buildImportColumns(rosterSheet),
-        ...FIGHTER_STATUS_FIELDS.map((field, index) => ({
-          key: field.key,
-          label: field.label,
-          order: rosterSheet.columnCount + index,
-          originalIndex: rosterSheet.columnCount + index,
-          letter: "",
-        })),
-      ];
-      const rosterColumns = buildImportColumns(rosterSheet);
-      let matchedFighterStatusCount = 0;
-      const rows = rosterSheet.rows
-        .filter((row) => hasRowData(row.values))
-        .map((row) => {
-          const values = Object.fromEntries(
-            rosterColumns.map((column, index) => [
-              column.key,
-              cellValueToJson(row.values[index]),
-            ]),
-          );
-          const statusAddition = findFighterStatusAddition(
-            values,
-            fighterStatusAdditions,
-          );
-          if (statusAddition) matchedFighterStatusCount += 1;
-
-          return {
-            excelRowNumber: row.excelRowNumber,
-            values: {
-              ...values,
-              ...(statusAddition ?? {}),
-            },
-          };
-        });
-
-      const created = await api.importPersonnelRoster({
-        name: snapshot.fileName.replace(/\.(xlsx|xlsm)$/i, ""),
-        sourceFileName: snapshot.fileName,
-        notes: "Імпорт Загальний список для доповнення карток особового складу.",
-        sheets: [
-          {
-            name: rosterSheet.sheetName,
-            sheetIndex: rosterSheet.sheetIndex,
-            columns,
-            rows,
-          },
-        ],
-      });
-
-      const latestRosterRows = await loadLatestPersonnelRoster();
-      let nextPreview = dbPreview;
-      try {
-        nextPreview = dbPreview
-          ? mergeRosterRowsIntoPreview(dbPreview, latestRosterRows)
-          : null;
-      } catch {
-        nextPreview = dbPreview;
-      }
+      const nextPreview = mergeRosterRowsIntoPreviewState(
+        dbPreview,
+        latestRosterRows,
+      );
       setDbPreview(nextPreview);
       setIsLoading(false);
       await new Promise<void>((resolve) => {
         window.setTimeout(resolve, 0);
       });
 
-      const migrationPairs = nextPreview
-        ? [
-            ...buildAttachmentMigrationPairs(previousRecords, nextPreview.rows),
-            ...buildSelfAttachmentMigrationPairs(nextPreview.rows),
-          ]
-        : [];
+      const migrationPairs = [
+        ...buildAttachmentMigrationPairs(previousRecords, nextPreview.rows),
+        ...buildSelfAttachmentMigrationPairs(nextPreview.rows),
+      ];
       const migrationResult = await migrateAttachmentsToNewExternalIds(
         migrationPairs,
         true,
       );
       sessionStorage.removeItem(ATTACHMENT_HEAL_SESSION_KEY);
 
+      const withStatus = latestRosterRows.filter((row) =>
+        Object.keys(row).some((key) => key.startsWith("fighter_status_")),
+      ).length;
+
       setMessage(
-        `Імпортовано Загальний список: ${created.totalRows} рядків · ${snapshot.fileName}. Статус бійців: ${fighterStatusSheet ? `аркуш «${fighterStatusSheet.sheetName.trim()}», ${fighterStatusAdditions.size} записів, привʼязано ${matchedFighterStatusCount}` : "аркуш не знайдено"}. Перенесено привʼязок: ${migrationResult}.`,
+        `Оновлено зі Штатки: ${imported.personCount} осіб · ${imported.fileName} · зі статусом бійців: ${withStatus} · привʼязок перенесено: ${migrationResult}. Відкрийте картку знову, якщо дані ще старі.`,
       );
     } catch (error) {
       setMessage(
@@ -1303,6 +1348,7 @@ export function PersonnelPage({
     return () => {
       cancelled = true;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const saveSelectedPerson = async () => {
@@ -1529,106 +1575,6 @@ export function PersonnelPage({
         ? `Телефон видалено: ${formatUaPhoneDisplay(phone)}.`
         : `Телефон прибрано локально: ${formatUaPhoneDisplay(phone)}. Не вдалося оновити БД.`,
     );
-  };
-
-  const pullContactsFromQuestionnaire = async () => {
-    const externalId = selectedSummary.externalId;
-    const rowId = selectedRow?.__dbRowId ? String(selectedRow.__dbRowId) : "";
-    if (!selectedRow || !externalId || !rowId) {
-      setMessage("Спочатку виберіть особу зі списку.");
-      return;
-    }
-
-    setIsPullingFromQuestionnaire(true);
-    try {
-      let file: File | null = pendingQuestionnaireFile || diskPreviewFile || null;
-      if (!file) {
-        const full = await api.getPersonQuestionnaire(externalId);
-        if (!full?.fileData) {
-          setMessage("Немає збереженої анкети — спочатку додайте PDF анкети.");
-          return;
-        }
-        file = dataUrlToFile(
-          full.fileData,
-          full.fileName || "anketa.pdf",
-        );
-      }
-
-      setMessage("Читаю анкету…");
-      const parsed = await parseQuestionnairePdf(file, { useOcr: false });
-      const byKey = Object.fromEntries(
-        parsed.fields.map((field) => [field.key, field.value.trim()]),
-      );
-      const enrichment = await syncEnrichmentToPerson({
-        personExternalId: externalId,
-        rowId,
-        row: selectedRow,
-        patch: {
-          rnokpp: byKey.rnokpp,
-          address: byKey.actualAddress || byKey.registrationAddress,
-          phones: extractPhones(byKey.phones || ""),
-        },
-        existingPhones: phonesByExternalId[externalId] ?? [],
-        phoneDocument: phoneDocByExternalId[externalId] ?? null,
-      });
-
-      setPhonesByExternalId((current) => {
-        const next = { ...current, [externalId]: enrichment.phones };
-        writeStoredPersonPhones(next);
-        return next;
-      });
-      if (enrichment.phoneDocument) {
-        setPhoneDocByExternalId((current) => ({
-          ...current,
-          [externalId]: enrichment.phoneDocument!,
-        }));
-      }
-
-      if (Object.keys(enrichment.fieldUpdates).length) {
-        setDbPreview((currentPreview) => {
-          if (!currentPreview) return currentPreview;
-          return {
-            ...currentPreview,
-            rows: currentPreview.rows.map((row) =>
-              row.__dbRowId === selectedRow.__dbRowId
-                ? applyEnrichmentToPreviewRow(row, enrichment.fieldUpdates)
-                : row,
-            ),
-          };
-        });
-        setEditValues((current) => ({
-          ...current,
-          ...enrichment.fieldUpdates,
-        }));
-      }
-
-      const fieldKeys = Object.keys(enrichment.fieldUpdates);
-      const parts = [
-        enrichment.phonesAdded.length
-          ? `телефони +${enrichment.phonesAdded.length}`
-          : "",
-        fieldKeys.some((key) => key.toLocaleLowerCase("uk-UA").includes("рнокпп"))
-          ? "РНОКПП"
-          : "",
-        fieldKeys.some((key) => key.toLocaleLowerCase("uk-UA").includes("адрес"))
-          ? "адреса"
-          : "",
-      ].filter(Boolean);
-
-      setMessage(
-        parts.length
-          ? `З анкети додано (без перезапису наявного): ${parts.join(", ")}.`
-          : "У анкеті немає нових даних для порожніх полів — наявне не змінено.",
-      );
-    } catch (error) {
-      setMessage(
-        error instanceof Error
-          ? `Не вдалося підтягнути з анкети: ${error.message}`
-          : "Не вдалося підтягнути дані з анкети.",
-      );
-    } finally {
-      setIsPullingFromQuestionnaire(false);
-    }
   };
 
   const deleteSelectedQuestionnaire = async () => {
@@ -1878,10 +1824,38 @@ export function PersonnelPage({
             Особовий склад
           </Typography>
           <Typography variant="body2" color="text.secondary">
-            Список із ЕЖООС · картка особи · редагування staging-даних
+            Список із ЕЖООС · «Штатку» імпортуйте на сторінці «Анкетні дані»
+            (.xlsx) — вона оновить і цей склад.
           </Typography>
         </Box>
         <Stack className="personnel-topbar-actions" direction="row" spacing={1}>
+          <Button
+            variant="outlined"
+            disabled={!canEdit || isLoading || isMergingAnketaData || isMergingVkTpvDovidky}
+            onClick={() => void mergeMissingFieldsFromAnketaData()}
+            title="Доповнити порожні поля (РНОКПП, телефон тощо) з таблиці «Анкети»"
+          >
+            {isMergingAnketaData ? "З анкет…" : "З анкетних даних"}
+          </Button>
+          <Button
+            component="label"
+            variant="outlined"
+            disabled={!canEdit || isLoading || isMergingAnketaData || isMergingVkTpvDovidky}
+            startIcon={<FileUploadOutlinedIcon />}
+            title="Імпорт ВК № в ООС та ІПН в анкетні дані за ПІБ"
+          >
+            {isMergingVkTpvDovidky ? "ВК ТПВ…" : "ВК ТПВ ДОВІДКИ"}
+            <input
+              hidden
+              type="file"
+              accept=".xlsx,.xlsm"
+              disabled={!canEdit}
+              onChange={(event) => {
+                void importVkTpvDovidkyWorkbook(event.target.files?.[0]);
+                event.target.value = "";
+              }}
+            />
+          </Button>
           <Button
             variant="outlined"
             disabled={!canEdit || !missingDiskSearchPeople.length}
@@ -1895,7 +1869,7 @@ export function PersonnelPage({
             startIcon={<FileUploadOutlinedIcon />}
             variant="outlined"
           >
-            Імпорт Загальний список
+            Імпорт Штатки / Загальний список
             <input
               hidden
               type="file"
@@ -1916,7 +1890,9 @@ export function PersonnelPage({
           </Button>
         </Stack>
       </header>
-      {isLoading && <LinearProgress color="primary" />}
+      {isLoading || isMergingAnketaData || isMergingVkTpvDovidky ? (
+        <LinearProgress color="primary" />
+      ) : null}
       <Alert severity="info" variant="outlined" className="personnel-page-alert">
         {message}
       </Alert>
@@ -2140,40 +2116,22 @@ export function PersonnelPage({
                     Додати
                   </Button>
                 </div>
-                <Button
-                  disabled={
-                    !selectedRow ||
-                    !selectedSummary.externalId ||
-                    isPullingFromQuestionnaire
-                  }
-                  size="small"
-                  type="button"
-                  variant="outlined"
-                  sx={{ mt: 1, alignSelf: "flex-start" }}
-                  onClick={() => void pullContactsFromQuestionnaire()}
-                >
-                  {isPullingFromQuestionnaire
-                    ? "Читаю анкету…"
-                    : "Підтягнути з анкети"}
-                </Button>
-              </span>
-              <span>
-                <strong>Дата народження</strong>
-                {selectedSummary.birthDate || "—"}
               </span>
               <span>
                 <strong>РНОКПП</strong>
                 {selectedSummary.rnokpp || "—"}
               </span>
               <span>
-                <strong>Дислокація</strong>
+                <strong>Дата народження</strong>
+                {birthDateWithAge || "—"}
+              </span>
+              <span>
+                <strong>Місце перебування</strong>
                 {selectedSummary.location || "—"}
               </span>
               <span>
-                <strong>Контракт</strong>
-                {[selectedSummary.contractFrom, selectedSummary.contractTo]
-                  .filter(Boolean)
-                  .join(" — ") || "—"}
+                <strong>Посада</strong>
+                {selectedSummary.positionTitle || "—"}
               </span>
               <span>
                 <strong>Військовий квиток</strong>
@@ -2189,12 +2147,40 @@ export function PersonnelPage({
               <div className="person-edit-section">
                 <div className="panel-heading">Статус бійців</div>
                 <div className="person-roster-grid">
-                  {fighterStatusFieldRows.map((field) => (
-                    <span key={field.key}>
-                      <strong>{field.label.replace(/^Статус бійців · /, "")}</strong>
-                      {field.value}
-                    </span>
-                  ))}
+                  {fighterStatusFieldRows.map((field) => {
+                    const tone = getFighterStatusFieldTone(field.key);
+                    const label = field.label.replace(/^Статус бійців · /, "");
+                    const Icon =
+                      tone === "exit"
+                        ? LogoutOutlinedIcon
+                        : tone === "return"
+                          ? LoginOutlinedIcon
+                          : tone === "entry"
+                            ? CalendarMonthOutlinedIcon
+                            : tone === "days"
+                              ? InfoOutlinedIcon
+                              : tone === "status"
+                                ? WarningAmberOutlinedIcon
+                                : tone === "direction"
+                                  ? PushPinOutlinedIcon
+                                  : null;
+                    return (
+                      <span
+                        key={field.key}
+                        className={
+                          tone
+                            ? `person-roster-tile is-${tone}`
+                            : "person-roster-tile"
+                        }
+                      >
+                        <strong>
+                          {Icon ? <Icon fontSize="small" aria-hidden /> : null}
+                          {label}
+                        </strong>
+                        <em>{field.value}</em>
+                      </span>
+                    );
+                  })}
                 </div>
               </div>
             ) : null}
@@ -2225,10 +2211,20 @@ export function PersonnelPage({
                       field.kind === "multiline" ||
                       field.section === "contacts" ||
                       field.parts.includes("додаткова_інформація");
+                    const isBirthDateField =
+                      field.parts.includes("дата_народження");
+                    const years = isBirthDateField
+                      ? computeFullYearsFromBirthDate(
+                          editValues[field.key] || selectedSummary.birthDate,
+                        )
+                      : null;
 
                     return (
                       <label className={isWide ? "wide" : ""} key={field.key}>
-                        <span>{field.label}</span>
+                        <span>
+                          {field.label}
+                          {years != null ? ` · ${years} р.` : ""}
+                        </span>
                         {field.kind === "multiline" ? (
                           <textarea
                             className="sci-message-area"
@@ -2281,13 +2277,6 @@ export function PersonnelPage({
                   event.target.value = "";
                 }}
               />
-            </Button>
-            <Button
-              disabled={!selectedRow}
-              variant="outlined"
-              onClick={() => selectedRow && onOpenDocuments(selectedRow)}
-            >
-              Створити документ
             </Button>
             <Button
               disabled={!selectedRow}

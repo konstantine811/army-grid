@@ -1,7 +1,7 @@
 import type { EjournalPreviewRow } from "../ejournal/ejournalTypes";
 import {
   buildPersonSummary,
-  getPersonFieldValue,
+  getPersonFullPositionTitle,
 } from "../personnel/personnelUtils";
 import { toUkrainianGenitiveFullName } from "./form6Report";
 
@@ -160,11 +160,7 @@ export const createUbdRestoreFields = (
   signatories: UbdRestoreSignatory[] = [],
 ): UbdRestoreReportFields => {
   const fullName = summary.name !== "Особа не вибрана" ? summary.name : "";
-  const staffPosition =
-    getPersonFieldValue(row, ["посада"]) ||
-    getPersonFieldValue(row, ["штатна", "посада"]) ||
-    getPersonFieldValue(row, ["чим", "займається"]) ||
-    "";
+  const staffPosition = getPersonFullPositionTitle(row);
 
   return {
     commander: DEFAULT_UBD_RESTORE_COMMANDER,

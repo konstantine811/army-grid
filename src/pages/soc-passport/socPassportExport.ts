@@ -1,4 +1,7 @@
 import { exportBlankWorkbookWithMutations } from "../../excelRoundTrip";
+import { appendEjoosMovementSheets } from "./socPassportDeparturesExport";
+import type { DeparturesResult } from "./socPassportDepartures";
+import type { HousingIdpStatsResult } from "./housingIdpStats";
 import {
   countsInExitMetrics,
   countsInNoExitsList,
@@ -488,7 +491,86 @@ const writeRussiaNationalsSheet = (sheet: any, people: SocPerson[]) => {
   });
 };
 
-export const exportSocPassportWorkbook = async (result: SocPassportResult) => {
+const writeHousingIdpSheet = (
+  sheet: any,
+  housing: HousingIdpStatsResult,
+) => {
+  sheet.name("ВПО житло");
+  sheet.cell(1, 1).value(
+    `ВПО · додаток про житло · ${housing.fileName}`,
+  );
+  sheet.cell(1, 1).style({ bold: true, fontSize: 13, fontColor: TEXT });
+  sheet.range(1, 1, 1, 8).merged(true);
+  sheet.cell(2, 1).value(
+    `У файлі ${housing.totals.inFile}; лишилось у ранковому ${housing.totals.remaining} (оф. ${housing.totals.byRankRemaining.officer}, серж. ${housing.totals.byRankRemaining.sergeant}, солд. ${housing.totals.byRankRemaining.soldier}); у наявності ${housing.totals.remainingPresent}; немає в ранковому ${housing.totals.leftNotInMorning}.`,
+  );
+  sheet.range(2, 1, 2, 8).merged(true);
+
+  const headers = [
+    "№",
+    "ПІБ",
+    "Звання",
+    "Категорія",
+    "Адреса (ТОТ)",
+    "Примітка",
+    "У ранковому",
+    "Статус ранкового",
+    "Лишився",
+    "У наявності",
+  ];
+  headers.forEach((header, index) => {
+    sheet.cell(4, index + 1).value(header);
+    styleHeader(sheet.cell(4, index + 1));
+  });
+  sheet.column(1).width(6);
+  sheet.column(2).width(36);
+  sheet.column(3).width(16);
+  sheet.column(4).width(12);
+  sheet.column(5).width(42);
+  sheet.column(6).width(28);
+  sheet.column(7).width(12);
+  sheet.column(8).width(22);
+  sheet.column(9).width(12);
+  sheet.column(10).width(12);
+
+  const rankLabel = (group: string) =>
+    group === "officer"
+      ? "Офіцери"
+      : group === "sergeant"
+        ? "Сержанти"
+        : "Солдати";
+
+  housing.people.forEach((person, index) => {
+    const excelRow = 5 + index;
+    const values = [
+      index + 1,
+      person.fullName,
+      person.rank,
+      rankLabel(person.rankGroup),
+      person.address,
+      person.note,
+      person.inMorning ? "так" : "ні",
+      person.morningStatus || "—",
+      person.remaining ? "так" : "ні",
+      person.remainingPresent ? "так" : "ні",
+    ];
+    values.forEach((value, columnIndex) => {
+      sheet.cell(excelRow, columnIndex + 1).value(value);
+    });
+    sheet.range(excelRow, 1, excelRow, headers.length).style({
+      border: BORDER,
+      fill: index % 2 === 0 ? VALUE_FILL : ALT_ROW_FILL,
+      verticalAlignment: "center",
+      fontColor: TEXT,
+    });
+  });
+};
+
+export const exportSocPassportWorkbook = async (
+  result: SocPassportResult,
+  departures?: DeparturesResult | null,
+  housingIdp?: HousingIdpStatsResult | null,
+) => {
   const stamp = new Date().toISOString().slice(0, 10);
   const exitsCount = result.people.filter(
     (person) => person.exitBand !== "none" && countsInExitMetrics(person),
@@ -511,12 +593,25 @@ export const exportSocPassportWorkbook = async (result: SocPassportResult) => {
     writeRussiaNationalsSheet(workbook.addSheet("Рф"), result.people);
     writeExitsPeopleSheet(workbook.addSheet("Виходи ЛБЗ"), result.people);
     writeNoExitsPeopleSheet(workbook.addSheet("Не виконували"), result.people);
+    if (housingIdp) {
+      writeHousingIdpSheet(workbook.addSheet("ВПО житло"), housingIdp);
+    }
+    if (departures) {
+      appendEjoosMovementSheets(workbook, departures);
+    }
   }, `Соц.паспорт_${stamp}.xlsx`);
   return {
     exitsCount,
     noExitsCount,
     officersCount,
     russiaCount,
+    hasEjoosTables: Boolean(departures),
+    arrivalsTotal: departures?.arrivalsAugust?.total ?? 0,
+    arrivalsMorningTotal: departures?.arrivalsFromMorning?.total ?? 0,
+    arrivalsPbTotal: departures?.arrivalsAugustPb?.total ?? 0,
+    departuresTotal: departures?.totals.all ?? 0,
+    housingIdpInFile: housingIdp?.totals.inFile ?? 0,
+    housingIdpRemaining: housingIdp?.totals.remaining ?? 0,
   };
 };
 

@@ -553,8 +553,35 @@ export function createWorkbookDebugPayload(snapshot: ExcelWorkbookSnapshot) {
   };
 }
 
+export type ReadWorkbookOptions = {
+  /** Keep only matching sheets (by name). */
+  sheetFilter?: (sheetName: string) => boolean;
+  /** Cap columns per sheet (ЕЖООС ООС/статистика мають 1000+ колонок). */
+  maxColumns?: number;
+  /** Skip PIB cell-fill scanning (very expensive on large workbooks). */
+  skipStyleFills?: boolean;
+  /** Skip building `rows[]` objects — rawRows only (less memory). */
+  skipRowObjects?: boolean;
+};
+
+/** Fast path for ЕЖООС↔1ПБ sync: few sheets, few columns, no style scans. */
+export const EJOOS_SYNC_READ_OPTIONS: ReadWorkbookOptions = {
+  sheetFilter: (name) =>
+    /^(sh|рух|archive)$/i.test(name.trim()) ||
+    /^1\.\s*шпо/i.test(name) ||
+    /^2\.\s*оос/i.test(name) ||
+    /^3\.\s*виключ/i.test(name) ||
+    /^5\.\s*тимчасов/i.test(name) ||
+    /^6\.\s*табель/i.test(name) ||
+    /^10\.\s*історія/i.test(name),
+  maxColumns: 48,
+  skipStyleFills: true,
+  skipRowObjects: true,
+};
+
 export async function readWorkbookSnapshot(
   file: File,
+  options: ReadWorkbookOptions = {},
 ): Promise<ExcelWorkbookSnapshot> {
   const XlsxPopulate = await loadXlsxPopulate();
   const workbook = await XlsxPopulate.fromDataAsync(file);
@@ -574,11 +601,18 @@ export async function readWorkbookSnapshot(
   const sheets: ExcelWorkbookSnapshot["sheets"] = [];
   for (let sheetIndex = 0; sheetIndex < workbookSheets.length; sheetIndex += 1) {
     const sheet = workbookSheets[sheetIndex];
+    const sheetName = sheet.name();
+    if (options.sheetFilter && !options.sheetFilter(sheetName)) continue;
+
     const values = (sheet.usedRange()?.value() ?? []) as RawCellValue[][];
-    const rawColumnCount = Math.max(
+    const detectedColumnCount = Math.max(
       FALLBACK_COLUMN_COUNT,
+      0,
       ...values.map((row) => row.length),
     );
+    const rawColumnCount = options.maxColumns
+      ? Math.min(options.maxColumns, detectedColumnCount)
+      : detectedColumnCount;
     const fullRows = values.map((row) =>
       Array.from({ length: rawColumnCount }, (_, index) =>
         sanitizeCellValue(row[index] ?? null),
@@ -599,8 +633,14 @@ export async function readWorkbookSnapshot(
       return hasHeader || hasData;
     });
     const firstUsedColumnIndex = usedColumnIndexes[0] ?? 0;
-    const lastUsedColumnIndex =
+    let lastUsedColumnIndex =
       usedColumnIndexes.at(-1) ?? Math.max(0, rawColumnCount - 1);
+    if (options.maxColumns) {
+      lastUsedColumnIndex = Math.min(
+        lastUsedColumnIndex,
+        firstUsedColumnIndex + options.maxColumns - 1,
+      );
+    }
     const columnIndexes =
       usedColumnIndexes.length > 0
         ? Array.from(
@@ -612,33 +652,39 @@ export async function readWorkbookSnapshot(
       pickColumns(row, columnIndexes),
     );
     const columnCount = columnIndexes.length;
-    const pibColumnNumber = findBchsRosterPibColumnNumber(fullRows);
-    const fromPopulate =
-      pibColumnNumber > 0
-        ? readBchsRosterPibFills(sheet, fullRows.length, pibColumnNumber)
-        : {};
-    const zipFills =
-      pibColumnNumber > 0 ? await loadZipFills(pibColumnNumber) : null;
-    const fromZip =
-      zipFills?.byName.get(sheet.name()) ?? zipFills?.byIndex[sheetIndex] ?? {};
-    const pibFillByExcelRow = { ...fromPopulate, ...fromZip };
+
+    let pibFillByExcelRow: Record<number, string> | undefined;
+    if (!options.skipStyleFills) {
+      const pibColumnNumber = findBchsRosterPibColumnNumber(fullRows);
+      const fromPopulate =
+        pibColumnNumber > 0
+          ? readBchsRosterPibFills(sheet, fullRows.length, pibColumnNumber)
+          : {};
+      const zipFills =
+        pibColumnNumber > 0 ? await loadZipFills(pibColumnNumber) : null;
+      const fromZip =
+        zipFills?.byName.get(sheetName) ?? zipFills?.byIndex[sheetIndex] ?? {};
+      const merged = { ...fromPopulate, ...fromZip };
+      if (Object.keys(merged).length > 0) pibFillByExcelRow = merged;
+    }
 
     sheets.push({
       sheetIndex,
-      sheetName: sheet.name(),
+      sheetName,
       rawRows: normalizedRows,
       headerRows: normalizedRows.slice(0, headerRowIndex + 1),
-      rows: normalizedRows.slice(dataStartRow - 1).map((values, index) => ({
-        id: `${file.name}-${sheetIndex}-${dataStartRow + index}`,
-        excelRowNumber: dataStartRow + index,
-        values,
-        source: "template" as const,
-      })),
+      rows: options.skipRowObjects
+        ? []
+        : normalizedRows.slice(dataStartRow - 1).map((rowValues, index) => ({
+            id: `${file.name}-${sheetIndex}-${dataStartRow + index}`,
+            excelRowNumber: dataStartRow + index,
+            values: rowValues,
+            source: "template" as const,
+          })),
       columnCount,
       columnIndexes,
       dataStartRow,
-      pibFillByExcelRow:
-        Object.keys(pibFillByExcelRow).length > 0 ? pibFillByExcelRow : undefined,
+      pibFillByExcelRow,
     });
   }
 

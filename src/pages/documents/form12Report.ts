@@ -1,7 +1,7 @@
 import type { EjournalPreviewRow } from "../ejournal/ejournalTypes";
 import {
   buildPersonSummary,
-  getPersonFieldValue,
+  getPersonFullPositionTitle,
 } from "../personnel/personnelUtils";
 import { toUkrainianGenitiveFullName } from "./form6Report";
 import {
@@ -39,6 +39,11 @@ export const form12WorkflowSteps = [
 ];
 
 const DEFAULT_FORM12_COMMANDER = "Командиру 1 піхотного батальйону";
+
+export const buildForm12FolderName = (fullName: string) => {
+  const name = fullName.trim();
+  return name ? `1ПБ РАПОРТ Форма 12 · ${name}` : "1ПБ РАПОРТ Форма 12";
+};
 
 const RANK_DATIVE: Record<string, string> = {
   солдат: "солдату",
@@ -268,11 +273,7 @@ export const createForm12Fields = (
   signatories: Form12Signatory[] = [],
 ): Form12ReportFields => {
   const fullName = summary.name !== "Особа не вибрана" ? summary.name : "";
-  const staffPosition =
-    getPersonFieldValue(row, ["посада"]) ||
-    getPersonFieldValue(row, ["штатна", "посада"]) ||
-    getPersonFieldValue(row, ["чим", "займається"]) ||
-    "";
+  const staffPosition = getPersonFullPositionTitle(row);
 
   return {
     commander: DEFAULT_FORM12_COMMANDER,
@@ -282,7 +283,7 @@ export const createForm12Fields = (
     date: formatForm12Date(new Date()),
     signatureData: "",
     signatureFileName: "",
-    folderName: fullName ? `Форма 12 · ${fullName}` : "Форма 12",
+    folderName: buildForm12FolderName(fullName),
     signatories,
     statusNote: "",
   };
@@ -296,11 +297,38 @@ export const mergeForm12Fields = (
     return defaults;
   }
   const next = value as Partial<Form12ReportFields>;
-  return {
+  const merged = {
     ...defaults,
     ...next,
     signatories: Array.isArray(next.signatories)
       ? next.signatories
       : defaults.signatories,
+  };
+  // Prefer the saved document name so opening another card cannot rewrite identity.
+  const fullName =
+    String(merged.fullName ?? "").trim() ||
+    String(defaults.fullName ?? "").trim();
+  const currentFolder = String(merged.folderName ?? "").trim();
+  const folderName = (() => {
+    if (!currentFolder) return buildForm12FolderName(fullName);
+    if (/^1ПБ\s+РАПОРТ\s+Форма\s+12\s*$/i.test(currentFolder)) {
+      return buildForm12FolderName(fullName);
+    }
+    if (/^Форма\s+12\b/i.test(currentFolder)) {
+      return buildForm12FolderName(fullName);
+    }
+    if (
+      /^1ПБ\s+РАПОРТ\s+Форма\s+12\b/i.test(currentFolder) &&
+      fullName &&
+      !currentFolder.includes(fullName)
+    ) {
+      return buildForm12FolderName(fullName);
+    }
+    return currentFolder;
+  })();
+  return {
+    ...merged,
+    fullName: fullName || merged.fullName,
+    folderName,
   };
 };

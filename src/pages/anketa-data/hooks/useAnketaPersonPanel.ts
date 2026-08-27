@@ -2,16 +2,19 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, type BackendPersonQuestionnaire } from "../../../api";
 import { subscribePersonnelAttachmentChanges } from "../../../shared/personnelAttachmentSync";
 import {
-  buildQuestionnaireExportFileName,
-  downloadQuestionnairePdf,
   loadPersonPhotoForRow,
   loadPersonQuestionnaireForRow,
+  questionnaireFileMatchesPerson,
+} from "../../personnel/personAttachments";
+import {
+  buildQuestionnaireExportFileName,
+  downloadQuestionnairePdf,
   revokeQuestionnairePreviewUrl,
 } from "../../personnel/personnelUtils";
 import type { QuestionnairePdfSource } from "../../personnel/questionnaireShare";
 import {
   loadPersonnelIndexForAnketa,
-  matchAnketaRowToPersonnel,
+  matchAnketaRowToPersonnelDetailed,
   type AnketaPersonnelMatch,
 } from "../anketaPersonMatch";
 import {
@@ -24,10 +27,16 @@ export function useAnketaPersonPanel(
   anketaRow: AnketaRow | null,
   onMessage?: (message: string) => void,
 ) {
+  const anketaRowId = anketaRow?.__rowId ?? "";
   const [match, setMatch] = useState<AnketaPersonnelMatch | null>(null);
+  const [ambiguousMatches, setAmbiguousMatches] = useState<AnketaPersonnelMatch[]>(
+    [],
+  );
   const [matchStatus, setMatchStatus] = useState<"idle" | "loading" | "ready">(
     "idle",
   );
+  /** Row id for which `match` was computed — blocks stale match after gap-search jump. */
+  const [matchedAnketaRowId, setMatchedAnketaRowId] = useState("");
   const [isMerging, setIsMerging] = useState(false);
   const [attachmentExternalId, setAttachmentExternalId] = useState("");
   const [photoData, setPhotoData] = useState("");
@@ -38,8 +47,36 @@ export function useAnketaPersonPanel(
   const [previewUrl, setPreviewUrl] = useState("");
   const [previewTitle, setPreviewTitle] = useState("");
   const attachmentsEpochRef = useRef(0);
+  const previewEpochRef = useRef(0);
+  const previewUrlRef = useRef("");
   const prevAnketaRowIdRef = useRef("");
   const shouldAutoOpenPreviewRef = useRef(false);
+
+  // Синхронний скид при зміні особи (до effects) — інакше один кадр лишається
+  // match попереднього і авто-PDF відкриває чужу анкету.
+  const [panelRowId, setPanelRowId] = useState(anketaRowId);
+  if (panelRowId !== anketaRowId) {
+    setPanelRowId(anketaRowId);
+    setMatch(null);
+    setAmbiguousMatches([]);
+    setMatchedAnketaRowId("");
+    setMatchStatus(anketaRowId ? "loading" : "idle");
+    setAttachmentExternalId("");
+    setPhotoData("");
+    setQuestionnaire(null);
+    setIsLoadingAttachments(false);
+    setPreviewOpen(false);
+    previewEpochRef.current += 1;
+    attachmentsEpochRef.current += 1;
+    if (previewUrlRef.current) {
+      revokeQuestionnairePreviewUrl(previewUrlRef.current);
+      previewUrlRef.current = "";
+    }
+    setPreviewUrl("");
+    setPreviewTitle("");
+    shouldAutoOpenPreviewRef.current = Boolean(anketaRowId);
+    prevAnketaRowIdRef.current = anketaRowId;
+  }
 
   const reloadAttachments = useCallback(
     async (personMatch: AnketaPersonnelMatch, row: AnketaRow) => {
@@ -77,16 +114,36 @@ export function useAnketaPersonPanel(
   );
 
   const openPreviewForExternalId = useCallback(
-    async (externalId: string, name: string, callSign: string) => {
-      const fileName = buildQuestionnaireExportFileName(name, callSign);
+    async (
+      externalId: string,
+      name: string,
+      callSign: string,
+      storedFileName?: string | null,
+    ) => {
+      const epoch = ++previewEpochRef.current;
+      const expectedNames = [name].filter(Boolean);
+      if (
+        storedFileName &&
+        !questionnaireFileMatchesPerson(storedFileName, expectedNames)
+      ) {
+        return;
+      }
+      const fileName =
+        String(storedFileName ?? "").trim() ||
+        buildQuestionnaireExportFileName(name, callSign);
       try {
         const nextUrl = await api.getPersonQuestionnaireObjectUrl(
           externalId,
           fileName,
         );
+        if (epoch !== previewEpochRef.current) {
+          revokeQuestionnairePreviewUrl(nextUrl);
+          return;
+        }
         setPreviewTitle(`Анкета · ${name} · ${fileName}`);
         setPreviewUrl((current) => {
           if (current) revokeQuestionnairePreviewUrl(current);
+          previewUrlRef.current = nextUrl;
           return nextUrl;
         });
         setPreviewOpen(true);
@@ -109,14 +166,19 @@ export function useAnketaPersonPanel(
     attachmentExternalId || match?.summary.externalId || "";
   const displayName =
     anketaRow?.fullName?.trim() || match?.summary.name || "Службовець";
-  const exportFileName = useMemo(
-    () =>
-      buildQuestionnaireExportFileName(
-        displayName,
-        match?.summary.callSign ?? "",
-      ),
-    [displayName, match?.summary.callSign],
-  );
+  const exportFileName = useMemo(() => {
+    const stored = String(questionnaire?.fileName ?? "").trim();
+    if (
+      stored &&
+      questionnaireFileMatchesPerson(stored, [displayName])
+    ) {
+      return stored;
+    }
+    return buildQuestionnaireExportFileName(
+      displayName,
+      match?.summary.callSign ?? "",
+    );
+  }, [displayName, match?.summary.callSign, questionnaire?.fileName]);
 
   const shareSource = useMemo<QuestionnairePdfSource | null>(() => {
     if (!questionnaire?.fileData) return null;
@@ -161,26 +223,36 @@ export function useAnketaPersonPanel(
     let cancelled = false;
     if (!anketaRow) {
       setMatch(null);
+      setAmbiguousMatches([]);
+      setMatchedAnketaRowId("");
       setMatchStatus("idle");
-      prevAnketaRowIdRef.current = "";
       return;
     }
+    const rowId = anketaRow.__rowId;
+    setMatch(null);
+    setAmbiguousMatches([]);
+    setMatchedAnketaRowId("");
     setMatchStatus("loading");
     void loadPersonnelIndexForAnketa({ force: true })
       .then((index) => {
         if (cancelled) return;
-        setMatch(matchAnketaRowToPersonnel(anketaRow, index));
+        const result = matchAnketaRowToPersonnelDetailed(anketaRow, index);
+        setMatch(result.match);
+        setAmbiguousMatches(result.ambiguous);
+        setMatchedAnketaRowId(rowId);
         setMatchStatus("ready");
       })
       .catch(() => {
         if (cancelled) return;
         setMatch(null);
+        setAmbiguousMatches([]);
+        setMatchedAnketaRowId(rowId);
         setMatchStatus("ready");
       });
     return () => {
       cancelled = true;
     };
-  }, [anketaRow?.__rowId]);
+  }, [anketaRowId]);
 
   useEffect(() => {
     if (!anketaRow) {
@@ -190,32 +262,28 @@ export function useAnketaPersonPanel(
       setPreviewOpen(false);
       setPreviewUrl((current) => {
         if (current) revokeQuestionnairePreviewUrl(current);
+        previewUrlRef.current = "";
         return "";
       });
+      shouldAutoOpenPreviewRef.current = false;
       return;
     }
 
-    const rowId = anketaRow.__rowId;
-    if (prevAnketaRowIdRef.current !== rowId) {
-      if (prevAnketaRowIdRef.current) {
-        shouldAutoOpenPreviewRef.current = true;
-      }
-      prevAnketaRowIdRef.current = rowId;
-      setPhotoData("");
-      setQuestionnaire(null);
-      setAttachmentExternalId("");
-      setPreviewOpen(false);
-      setPreviewUrl((current) => {
-        if (current) revokeQuestionnairePreviewUrl(current);
-        return "";
-      });
+    // Row-change reset already handled during render; keep auto-open flag for first focus.
+    if (prevAnketaRowIdRef.current !== anketaRowId) {
+      shouldAutoOpenPreviewRef.current = true;
+      prevAnketaRowIdRef.current = anketaRowId;
     }
-  }, [anketaRow?.__rowId]);
+  }, [anketaRow, anketaRowId]);
 
   useEffect(() => {
-    if (!anketaRow || !match) return;
+    if (!anketaRow || !match || matchStatus !== "ready") return;
+    if (matchedAnketaRowId !== anketaRowId) return;
 
+    const rowId = anketaRowId;
     void reloadAttachments(match, anketaRow).then((result) => {
+      if (prevAnketaRowIdRef.current !== rowId) return;
+      if (matchedAnketaRowId !== rowId) return;
       if (
         !shouldAutoOpenPreviewRef.current ||
         !result?.questionnaire ||
@@ -228,9 +296,18 @@ export function useAnketaPersonPanel(
         result.resolvedExternalId,
         anketaRow.fullName?.trim() || match.summary.name,
         match.summary.callSign ?? "",
+        result.questionnaire?.fileName,
       );
     });
-  }, [anketaRow?.__rowId, match, reloadAttachments, openPreviewForExternalId]);
+  }, [
+    anketaRow,
+    anketaRowId,
+    match,
+    matchedAnketaRowId,
+    matchStatus,
+    reloadAttachments,
+    openPreviewForExternalId,
+  ]);
 
   useEffect(() => {
     if (!personnelExternalId || !match || !anketaRow) return;
@@ -259,19 +336,28 @@ export function useAnketaPersonPanel(
 
   useEffect(() => {
     return () => {
-      setPreviewUrl((current) => {
-        if (current) revokeQuestionnairePreviewUrl(current);
-        return "";
-      });
+      previewEpochRef.current += 1;
+      if (previewUrlRef.current) {
+        revokeQuestionnairePreviewUrl(previewUrlRef.current);
+        previewUrlRef.current = "";
+      }
     };
   }, []);
 
   const openQuestionnairePreview = async () => {
     if (!questionnaire || !personnelExternalId) return;
+    const stored = String(questionnaire.fileName ?? "").trim();
+    if (
+      stored &&
+      !questionnaireFileMatchesPerson(stored, [displayName])
+    ) {
+      return;
+    }
     await openPreviewForExternalId(
       personnelExternalId,
       displayName,
       match?.summary.callSign ?? "",
+      questionnaire.fileName,
     );
   };
 
@@ -315,15 +401,18 @@ export function useAnketaPersonPanel(
   };
 
   const closePreview = () => {
+    previewEpochRef.current += 1;
     setPreviewOpen(false);
     setPreviewUrl((current) => {
       if (current) revokeQuestionnairePreviewUrl(current);
+      previewUrlRef.current = "";
       return "";
     });
   };
 
   return {
     match,
+    ambiguousMatches,
     matchStatus,
     isMerging,
     photoData,

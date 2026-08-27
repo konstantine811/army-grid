@@ -14,7 +14,30 @@ import {
   exportSocPassportRussiaWorkbook,
   exportSocPassportWorkbook,
 } from "./socPassportExport";
-import { countsInNoExitsList } from "./socPassportFields";
+import { exportSocPassportDeparturesWorkbook } from "./socPassportDeparturesExport";
+import {
+  buildArrivalsFromPb,
+  buildCombatLossesFromPb,
+  buildDeparturesFromEjoos,
+  buildDispositionFromArchive,
+  buildSzchFromRuh,
+  withMorningArrivalSources,
+  type ArrivalsMonthResult,
+  type CombatLossesResult,
+  type DeparturesResult,
+  type DispositionArchiveResult,
+  type SzchRuhResult,
+} from "./socPassportDepartures";
+import { assertEjoosWorkbook, assertPbWorkbook } from "../ejournal/ejoosWorkbookKind";
+import {
+  buildHousingIdpStats,
+  housingIdpRemainingNameSet,
+  type HousingIdpStatsResult,
+} from "./housingIdpStats";
+import {
+  countsInNoExitsList,
+  normalizePersonName,
+} from "./socPassportFields";
 import { parseSocPassportSources } from "./socPassportParse";
 import {
   STATIC_COMBAT_EXIT_OVERRIDE_SOURCE,
@@ -84,13 +107,284 @@ const CountsCells = ({ row }: { row: PassportTableRow }) => {
   );
 };
 
+const ArrivalsPreview = ({
+  arrivals,
+  titleHint,
+  headingPrefix = "Прибули",
+}: {
+  arrivals: ArrivalsMonthResult;
+  titleHint: string;
+  headingPrefix?: string;
+}) => (
+  <>
+    <div className="panel-heading" style={{ marginTop: 16 }}>
+      {headingPrefix} · {arrivals.monthLabel} · {arrivals.sourceSheet}
+    </div>
+    <Typography variant="body2" sx={{ mb: 1.5, lineHeight: 1.7 }}>
+      {titleHint}
+    </Typography>
+    <div className="bchs-analytics-table-wrap soc-passport-table-wrap">
+      <table className="bchs-analytics-table">
+        <thead>
+          <tr>
+            <th>№</th>
+            <th>За джерелом прибуття</th>
+            <th>Офіцери</th>
+            <th>Сержанти</th>
+            <th>Солдати</th>
+            <th>Разом</th>
+          </tr>
+        </thead>
+        <tbody>
+          {arrivals.sourceSummary.map((row, index) => (
+            <tr key={row.source}>
+              <td>{index + 1}</td>
+              <td>{row.label}</td>
+              <td>{row.byRank.officer || ""}</td>
+              <td>{row.byRank.sergeant || ""}</td>
+              <td>{row.byRank.soldier || ""}</td>
+              <td>
+                <strong>{row.count}</strong>
+              </td>
+            </tr>
+          ))}
+          <tr>
+            <td />
+            <td>
+              <strong>Разом</strong>
+            </td>
+            <td>
+              <strong>{arrivals.byRank.officer || ""}</strong>
+            </td>
+            <td>
+              <strong>{arrivals.byRank.sergeant || ""}</strong>
+            </td>
+            <td>
+              <strong>{arrivals.byRank.soldier || ""}</strong>
+            </td>
+            <td>
+              <strong>{arrivals.total}</strong>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </>
+);
+
+const DispositionPreview = ({
+  disposition,
+}: {
+  disposition: DispositionArchiveResult;
+}) => (
+  <>
+    <div className="panel-heading" style={{ marginTop: 16 }}>
+      Виведені у розпорядження · {disposition.sourceSheet}
+      {disposition.periodFrom ? ` · з ${disposition.periodFrom}` : ""}
+    </div>
+    <Typography variant="body2" sx={{ mb: 1.5, lineHeight: 1.7 }}>
+      З 1ПБ archive: рядки з маркером розпорядження, відкриті періоди
+      {disposition.periodFromLabel ? ` ${disposition.periodFromLabel}` : ""}.
+      У archive всього {disposition.totalArchiveRows}
+      {disposition.skippedNotDisposition ||
+      disposition.skippedBeforePeriod ||
+      disposition.skippedReturned
+        ? ` (не розпорядження ${disposition.skippedNotDisposition}, до періоду ${disposition.skippedBeforePeriod}, повернулись ${disposition.skippedReturned})`
+        : ""}
+      .
+    </Typography>
+    <div className="bchs-analytics-table-wrap soc-passport-table-wrap">
+      <table className="bchs-analytics-table">
+        <thead>
+          <tr>
+            <th>№</th>
+            <th>Підстава</th>
+            <th>Офіцери</th>
+            <th>Сержанти</th>
+            <th>Солдати</th>
+            <th>Разом</th>
+          </tr>
+        </thead>
+        <tbody>
+          {disposition.summary.map((row, index) => (
+            <tr key={row.reason}>
+              <td>{index + 1}</td>
+              <td>{row.label}</td>
+              <td>{row.byRank.officer || ""}</td>
+              <td>{row.byRank.sergeant || ""}</td>
+              <td>{row.byRank.soldier || ""}</td>
+              <td>
+                <strong>{row.count}</strong>
+              </td>
+            </tr>
+          ))}
+          <tr>
+            <td />
+            <td>
+              <strong>Разом у розпорядженні</strong>
+            </td>
+            <td>
+              <strong>{disposition.totals.byRank.officer}</strong>
+            </td>
+            <td>
+              <strong>{disposition.totals.byRank.sergeant}</strong>
+            </td>
+            <td>
+              <strong>{disposition.totals.byRank.soldier}</strong>
+            </td>
+            <td>
+              <strong>{disposition.totals.all}</strong>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </>
+);
+
+const SzchPreview = ({ szch }: { szch: SzchRuhResult }) => (
+  <>
+    <div className="panel-heading" style={{ marginTop: 16 }}>
+      СЗЧ · {szch.sourceSheet}
+      {szch.periodFrom ? ` · з ${szch.periodFrom}` : ""}
+    </div>
+    <Typography variant="body2" sx={{ mb: 1.5, lineHeight: 1.7 }}>
+      З 1ПБ Рух: рядки з маркером СЗЧ / самовільне залишення
+      {szch.periodFromLabel ? ` ${szch.periodFromLabel}` : ""}. У Рух всього{" "}
+      {szch.totalMovements}
+      {szch.skippedBeforePeriod || szch.skippedNoDate
+        ? ` (до періоду ${szch.skippedBeforePeriod}, без дати ${szch.skippedNoDate})`
+        : ""}
+      .
+    </Typography>
+    <div className="bchs-analytics-table-wrap soc-passport-table-wrap">
+      <table className="bchs-analytics-table">
+        <thead>
+          <tr>
+            <th>№</th>
+            <th>Категорія</th>
+            <th>Кількість</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>1</td>
+            <td>Офіцери</td>
+            <td>
+              <strong>{szch.totals.byRank.officer}</strong>
+            </td>
+          </tr>
+          <tr>
+            <td>2</td>
+            <td>Сержанти</td>
+            <td>
+              <strong>{szch.totals.byRank.sergeant}</strong>
+            </td>
+          </tr>
+          <tr>
+            <td>3</td>
+            <td>Солдати</td>
+            <td>
+              <strong>{szch.totals.byRank.soldier}</strong>
+            </td>
+          </tr>
+          <tr>
+            <td />
+            <td>
+              <strong>Разом СЗЧ</strong>
+            </td>
+            <td>
+              <strong>{szch.totals.all}</strong>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </>
+);
+
+const CombatLossesPreview = ({ losses }: { losses: CombatLossesResult }) => (
+  <>
+    <div className="panel-heading" style={{ marginTop: 16 }}>
+      Втрати · {losses.sourceSheet}
+      {losses.periodFrom ? ` · з ${losses.periodFrom}` : ""}
+    </div>
+    <Typography variant="body2" sx={{ mb: 1.5, lineHeight: 1.7 }}>
+      З 1ПБ Рух + archive: загиблі / безвісти / у бою / інші обставини
+      {losses.periodFromLabel ? ` ${losses.periodFromLabel}` : ""}.
+      {losses.skippedBeforePeriod || losses.skippedNoDate
+        ? ` Відфільтровано: до періоду ${losses.skippedBeforePeriod}, без дати ${losses.skippedNoDate}.`
+        : ""}
+    </Typography>
+    <div className="bchs-analytics-table-wrap soc-passport-table-wrap">
+      <table className="bchs-analytics-table">
+        <thead>
+          <tr>
+            <th>№</th>
+            <th>Категорія</th>
+            <th>Офіцери</th>
+            <th>Сержанти</th>
+            <th>Солдати</th>
+            <th>Разом</th>
+          </tr>
+        </thead>
+        <tbody>
+          {losses.summary.map((row, index) => (
+            <tr key={row.reason}>
+              <td>{index + 1}</td>
+              <td>{row.label}</td>
+              <td>{row.byRank.officer || ""}</td>
+              <td>{row.byRank.sergeant || ""}</td>
+              <td>{row.byRank.soldier || ""}</td>
+              <td>
+                <strong>{row.count}</strong>
+              </td>
+            </tr>
+          ))}
+          <tr>
+            <td />
+            <td>
+              <strong>Разом втрати</strong>
+            </td>
+            <td>
+              <strong>{losses.totals.byRank.officer}</strong>
+            </td>
+            <td>
+              <strong>{losses.totals.byRank.sergeant}</strong>
+            </td>
+            <td>
+              <strong>{losses.totals.byRank.soldier}</strong>
+            </td>
+            <td>
+              <strong>{losses.totals.all}</strong>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </>
+);
+
 export function SocPassportPage() {
   const [ejoos, setEjoos] = useState<ExcelWorkbookSnapshot | null>(null);
+  const [pb, setPb] = useState<ExcelWorkbookSnapshot | null>(null);
   const [morning, setMorning] = useState<ExcelWorkbookSnapshot | null>(null);
   const [jbdExits, setJbdExits] = useState<ExcelWorkbookSnapshot | null>(null);
   const [bplaExits, setBplaExits] = useState<ExcelWorkbookSnapshot | null>(null);
   const [ubdRoster, setUbdRoster] = useState<ExcelWorkbookSnapshot | null>(null);
+  const [housingIdp, setHousingIdp] = useState<ExcelWorkbookSnapshot | null>(
+    null,
+  );
+  const [housingIdpStats, setHousingIdpStats] =
+    useState<HousingIdpStatsResult | null>(null);
   const [result, setResult] = useState<SocPassportResult | null>(null);
+  const [departures, setDepartures] = useState<DeparturesResult | null>(null);
+  const [pbArrivals, setPbArrivals] = useState<ArrivalsMonthResult | null>(null);
+  const [pbDisposition, setPbDisposition] =
+    useState<DispositionArchiveResult | null>(null);
+  const [pbSzch, setPbSzch] = useState<SzchRuhResult | null>(null);
+  const [pbCombatLosses, setPbCombatLosses] =
+    useState<CombatLossesResult | null>(null);
   const [ubdStats, setUbdStats] = useState<UbdRegistryStatsResult | null>(null);
   const [message, setMessage] = useState(
     "Завантажте ЕЖООС (ШПО + ООС) і за бажанням ранковий звіт — потім натисніть «Порахувати».",
@@ -146,34 +440,227 @@ export function SocPassportPage() {
 
   const loadWorkbook = async (
     file: File | undefined,
-    kind: "ejoos" | "morning" | "jbd" | "bpla" | "ubd",
+    kind: "ejoos" | "pb" | "morning" | "jbd" | "bpla" | "ubd" | "housing",
   ) => {
     if (!file) return;
     setIsBusy(true);
     try {
       const snapshot = await readWorkbookSnapshot(file);
-      if (kind === "ejoos") setEjoos(snapshot);
-      else if (kind === "morning") setMorning(snapshot);
-      else if (kind === "jbd") setJbdExits(snapshot);
-      else if (kind === "bpla") setBplaExits(snapshot);
-      else {
+      if (kind === "ejoos") {
+        assertEjoosWorkbook(snapshot);
+        setEjoos(snapshot);
+        try {
+          const nextDepartures = buildDeparturesFromEjoos(snapshot);
+          let nextPbArrivals = pbArrivals;
+          if (pb) {
+            try {
+              nextPbArrivals = buildArrivalsFromPb(
+                pb,
+                8,
+                new Date().getFullYear(),
+                { ejoos: snapshot },
+              );
+              setPbArrivals(nextPbArrivals);
+            } catch {
+              /* лишаємо попередній розрахунок 1ПБ */
+            }
+          }
+          const withPb = {
+            ...nextDepartures,
+            ...(nextPbArrivals ? { arrivalsAugustPb: nextPbArrivals } : {}),
+            ...(pbDisposition
+              ? { dispositionFromArchive: pbDisposition }
+              : {}),
+            ...(pbSzch ? { szchFromRuh: pbSzch } : {}),
+            ...(pbCombatLosses
+              ? { combatLossesFromPb: pbCombatLosses }
+              : {}),
+          };
+          const withMorning = morning
+            ? withMorningArrivalSources(withPb, snapshot, morning)
+            : withPb;
+          setDepartures(withMorning);
+          const arrivals = withMorning.arrivalsAugust;
+          const arrivalsPart = arrivals
+            ? ` Прибули ООС (${arrivals.monthLabel}): ${arrivals.total} · ТЦК ${arrivals.bySource.tck} / НЦ ${arrivals.bySource.trainingCenter} / перевед. ${arrivals.bySource.unitTransfer}.`
+            : "";
+          const morningArrivals = withMorning.arrivalsFromMorning;
+          const morningPart = morningArrivals
+            ? ` Звідки (Штатка): ${morningArrivals.total} · БРЕЗ ${morningArrivals.bySource.brez} / ТЦК ${morningArrivals.bySource.tck} / перевед. ${morningArrivals.bySource.unitTransfer}.`
+            : morning
+              ? ""
+              : " (для «Звідки» завантажте Штатку / ранковий).";
+          const pbPart = nextPbArrivals
+            ? ` Прибули 1ПБ: ${nextPbArrivals.total} · ТЦК ${nextPbArrivals.bySource.tck} / НЦ ${nextPbArrivals.bySource.trainingCenter} / перевед. ${nextPbArrivals.bySource.unitTransfer}.`
+            : "";
+          setMessage(
+            `ЕЖООС: ${snapshot.fileName} · аркушів ${snapshot.sheets.length}. «Вибули» з «${withMorning.sourceSheet}»${withMorning.periodFrom ? ` з ${withMorning.periodFrom}` : ""}: ${withMorning.totals.all} з ${withMorning.totalUnfiltered} (звільнення ${withMorning.totals.discharges}, переведені ${withMorning.totals.transfers}).${arrivalsPart}${morningPart}${pbPart}`,
+          );
+        } catch (departuresError) {
+          setDepartures(null);
+          setMessage(
+            `ЕЖООС: ${snapshot.fileName} · аркушів ${snapshot.sheets.length}. ${
+              departuresError instanceof Error
+                ? departuresError.message
+                : "Не вдалося порахувати «Вибули»."
+            }`,
+          );
+        }
+      } else if (kind === "pb") {
+        assertPbWorkbook(snapshot);
+        setPb(snapshot);
+        const month = 8;
+        const year = new Date().getFullYear();
+        try {
+          const nextPbArrivals = buildArrivalsFromPb(snapshot, month, year, {
+            ejoos,
+          });
+          let nextDisposition: DispositionArchiveResult | null = null;
+          let nextSzch: SzchRuhResult | null = null;
+          let nextCombatLosses: CombatLossesResult | null = null;
+          try {
+            nextDisposition = buildDispositionFromArchive(snapshot);
+          } catch {
+            nextDisposition = null;
+          }
+          try {
+            nextSzch = buildSzchFromRuh(snapshot);
+          } catch {
+            nextSzch = null;
+          }
+          try {
+            nextCombatLosses = buildCombatLossesFromPb(snapshot);
+          } catch {
+            nextCombatLosses = null;
+          }
+          setPbArrivals(nextPbArrivals);
+          setPbDisposition(nextDisposition);
+          setPbSzch(nextSzch);
+          setPbCombatLosses(nextCombatLosses);
+          setDepartures((current) =>
+            current
+              ? {
+                  ...current,
+                  arrivalsAugustPb: nextPbArrivals,
+                  dispositionFromArchive: nextDisposition,
+                  szchFromRuh: nextSzch,
+                  combatLossesFromPb: nextCombatLosses,
+                }
+              : current,
+          );
+          const dispPart = nextDisposition
+            ? ` Розпорядження (archive): ${nextDisposition.totals.all} (лік. ${nextDisposition.summary[0]?.count ?? 0}, орг. ${nextDisposition.summary[1]?.count ?? 0}, інше ${nextDisposition.summary[2]?.count ?? 0}).`
+            : "";
+          const szchPart = nextSzch
+            ? ` СЗЧ (Рух): ${nextSzch.totals.all} (оф. ${nextSzch.totals.byRank.officer}, серж. ${nextSzch.totals.byRank.sergeant}, солд. ${nextSzch.totals.byRank.soldier}).`
+            : "";
+          const lossesPart = nextCombatLosses
+            ? ` Втрати: ${nextCombatLosses.totals.all} (загиблі ${nextCombatLosses.summary[0]?.count ?? 0}, безвісти ${nextCombatLosses.summary[1]?.count ?? 0}, у бою ${nextCombatLosses.summary[2]?.count ?? 0}, інше ${nextCombatLosses.summary[3]?.count ?? 0}).`
+            : "";
+          setMessage(
+            `1ПБ: ${snapshot.fileName} · sh / Рух / archive. Прибули (${nextPbArrivals.monthLabel}): ${nextPbArrivals.total} (оф. ${nextPbArrivals.byRank.officer}, серж. ${nextPbArrivals.byRank.sergeant}, солд. ${nextPbArrivals.byRank.soldier}). Джерела з «Звідки прибув»: ТЦК ${nextPbArrivals.bySource.tck}, НЦ ${nextPbArrivals.bySource.trainingCenter}, переведені ${nextPbArrivals.bySource.unitTransfer}.${dispPart}${szchPart}${lossesPart}`,
+          );
+        } catch (pbError) {
+          setPbArrivals(null);
+          setPbDisposition(null);
+          setPbSzch(null);
+          setPbCombatLosses(null);
+          setMessage(
+            `1ПБ: ${snapshot.fileName}. ${
+              pbError instanceof Error
+                ? pbError.message
+                : "Не вдалося порахувати прибули з Рух."
+            }`,
+          );
+        }
+      } else if (kind === "morning") {
+        setMorning(snapshot);
+        let housingPart = "";
+        if (housingIdp) {
+          try {
+            const nextHousing = buildHousingIdpStats(housingIdp, snapshot);
+            setHousingIdpStats(nextHousing);
+            housingPart = ` ВПО житло: у файлі ${nextHousing.totals.inFile}, лишилось у ранковому ${nextHousing.totals.remaining} (у наявності ${nextHousing.totals.remainingPresent}), вибули/немає ${nextHousing.totals.leftNotInMorning}.`;
+          } catch (housingError) {
+            setHousingIdpStats(null);
+            housingPart = ` ВПО житло: ${
+              housingError instanceof Error
+                ? housingError.message
+                : "не вдалося зіставити."
+            }`;
+          }
+        }
+        if (ejoos && departures) {
+          const withMorning = withMorningArrivalSources(
+            departures,
+            ejoos,
+            snapshot,
+          );
+          setDepartures(withMorning);
+          const m = withMorning.arrivalsFromMorning;
+          setMessage(
+            m
+              ? `Ранковий (Штатка): ${snapshot.fileName}. Звідки: ${m.total} · БРЕЗ ${m.bySource.brez} / ТЦК ${m.bySource.tck} / перевед. ${m.bySource.unitTransfer} (оф. ${m.byRank.officer}, серж. ${m.byRank.sergeant}, солд. ${m.byRank.soldier}).${housingPart}`
+              : `Ранковий звіт: ${snapshot.fileName} · аркушів ${snapshot.sheets.length}.${housingPart}`,
+          );
+        } else {
+          setMessage(
+            `Ранковий звіт: ${snapshot.fileName} · аркушів ${snapshot.sheets.length}.${
+              ejoos
+                ? ""
+                : " Завантажте також ЕЖООС — тоді порахуємо «Звідки» (БРЕЗ / ТЦК / в/ч)."
+            }${housingPart}`,
+          );
+        }
+      } else if (kind === "jbd") {
+        setJbdExits(snapshot);
+        setMessage(
+          `ЖБД виходи: ${snapshot.fileName} · аркушів ${snapshot.sheets.length}.`,
+        );
+      } else if (kind === "bpla") {
+        setBplaExits(snapshot);
+        setMessage(
+          `БПЛА виходи: ${snapshot.fileName} · аркушів ${snapshot.sheets.length}.`,
+        );
+      } else if (kind === "housing") {
+        setHousingIdp(snapshot);
+        if (morning) {
+          try {
+            const nextHousing = buildHousingIdpStats(snapshot, morning);
+            setHousingIdpStats(nextHousing);
+            setMessage(
+              `ВПО (житло): ${snapshot.fileName} · у списку ${nextHousing.totals.inFile}. Лишилось у ранковому: ${nextHousing.totals.remaining} (оф. ${nextHousing.totals.byRankRemaining.officer}, серж. ${nextHousing.totals.byRankRemaining.sergeant}, солд. ${nextHousing.totals.byRankRemaining.soldier}); у наявності ${nextHousing.totals.remainingPresent}; немає в ранковому ${nextHousing.totals.leftNotInMorning}.`,
+            );
+            console.group(
+              `[ВПО / житло] ${nextHousing.fileName} · лишилось ${nextHousing.totals.remaining} з ${nextHousing.totals.inFile}`,
+            );
+            console.log("Лишились у ранковому:", nextHousing.remainingNames);
+            console.log("Немає в ранковому:", nextHousing.leftNames);
+            console.groupEnd();
+          } catch (housingError) {
+            setHousingIdpStats(null);
+            setMessage(
+              housingError instanceof Error
+                ? housingError.message
+                : "Не вдалося зіставити ВПО з ранковим.",
+            );
+          }
+        } else {
+          setHousingIdpStats(null);
+          setMessage(
+            `ВПО (житло): ${snapshot.fileName}. Завантажте ранковий звіт — тоді перевіримо хто лишився.`,
+          );
+        }
+      } else {
         setUbdRoster(snapshot);
         setUbdStats(null);
         setUbdYearFilter(null);
         setBatchListSheet(null);
+        setMessage(
+          `УБД реєстр: ${snapshot.fileName} · аркушів ${snapshot.sheets.length}. Натисніть «Підрахунок УБД».`,
+        );
       }
       setResult(null);
-      setMessage(
-        kind === "ejoos"
-          ? `ЕЖООС: ${snapshot.fileName} · аркушів ${snapshot.sheets.length}.`
-          : kind === "morning"
-            ? `Ранковий звіт: ${snapshot.fileName} · аркушів ${snapshot.sheets.length}.`
-            : kind === "jbd"
-              ? `ЖБД виходи: ${snapshot.fileName} · аркушів ${snapshot.sheets.length}.`
-              : kind === "bpla"
-                ? `БПЛА виходи: ${snapshot.fileName} · аркушів ${snapshot.sheets.length}.`
-                : `УБД реєстр: ${snapshot.fileName} · аркушів ${snapshot.sheets.length}. Натисніть «Підрахунок УБД».`,
-      );
     } catch (error) {
       setMessage(
         error instanceof Error ? error.message : "Не вдалося прочитати Excel.",
@@ -191,6 +678,30 @@ export function SocPassportPage() {
     setIsBusy(true);
     try {
       const parsed = parseSocPassportSources({ ejoos, morning, jbdExits, bplaExits, ubdRoster });
+      let nextHousingStats: HousingIdpStatsResult | null = null;
+      if (housingIdp) {
+        try {
+          nextHousingStats = buildHousingIdpStats(housingIdp, morning);
+          setHousingIdpStats(nextHousingStats);
+        } catch (housingError) {
+          setHousingIdpStats(null);
+          console.warn("[ВПО / житло]", housingError);
+        }
+      }
+      const idpRemaining = housingIdpRemainingNameSet(nextHousingStats);
+      const peopleWithHousingIdp = parsed.people.map((person) => {
+        const fromHousing =
+          idpRemaining.has(normalizePersonName(person.name)) ||
+          idpRemaining.has(person.shortName);
+        if (!fromHousing) return person;
+        return {
+          ...person,
+          isIdp: true,
+          parseNotes: person.parseNotes.includes("ВПО: додаток про житло")
+            ? person.parseNotes
+            : [...person.parseNotes, "ВПО: додаток про житло"],
+        };
+      });
       const warnings = [
         morning
           ? ""
@@ -204,15 +715,38 @@ export function SocPassportPage() {
         !ubdRoster
           ? "УБД реєстр не завантажено: «Подавалися» / «Не подавалися» не враховуються для бойових виходів."
           : "",
-        parsed.people.length === 0 ? "На ШПО не знайдено осіб на посадах." : "",
+        housingIdp && !nextHousingStats
+          ? "Додаток про житло (ВПО) не вдалося зіставити з ранковим."
+          : "",
+        peopleWithHousingIdp.length === 0
+          ? "На ШПО не знайдено осіб на посадах."
+          : "",
       ].filter(Boolean);
       const next = buildSocPassportResult({
-        people: parsed.people,
+        people: peopleWithHousingIdp,
         staffSlots: parsed.staffSlots,
-        sheets: parsed.sheets,
+        sheets: {
+          ...parsed.sheets,
+          housingIdp: housingIdp?.fileName ?? "",
+        },
         warnings,
       });
       setResult(next);
+
+      if (departures) {
+        setDepartures(withMorningArrivalSources(departures, ejoos, morning));
+      } else {
+        try {
+          const nextDepartures = withMorningArrivalSources(
+            buildDeparturesFromEjoos(ejoos),
+            ejoos,
+            morning,
+          );
+          setDepartures(nextDepartures);
+        } catch {
+          /* вибули вже могли бути пораховані при імпорті ЕЖООС */
+        }
+      }
 
       const brez = parsed.brezDebug;
       console.groupCollapsed(
@@ -298,8 +832,23 @@ export function SocPassportPage() {
         ubdReg;
 
       setMessage(
-        `Пораховано: штат ${next.summary.staffSlots}, на посаді ${next.summary.occupied}, ООС ${next.summary.oosMatched}, ранок ${next.summary.morningMatched}. БРЕЗ: ${brez.counts.oosBrezAll}→${brez.counts.countedBrezAll}; УБД: ${ubd.counts.oosUbdAll}→${ubd.counts.countedUbdInMorning}; бойове (ЕЖООС): ${combat.counts.inferredExitFloor}; ЖБД: ${jbd.counts.peopleWithJbdMerged}; БПЛА: ${bpla.counts.matchedPerformers}; УБД реєстр: ${ubdReg.counts.matchedSubmitted + ubdReg.counts.matchedNotSubmitted} (див. console).`,
+        `Пораховано: штат ${next.summary.staffSlots}, на посаді ${next.summary.occupied}, ООС ${next.summary.oosMatched}, ранок ${next.summary.morningMatched}. БРЕЗ: ${brez.counts.oosBrezAll}→${brez.counts.countedBrezAll}; УБД: ${ubd.counts.oosUbdAll}→${ubd.counts.countedUbdInMorning}; бойове (ЕЖООС): ${combat.counts.inferredExitFloor}; ЖБД: ${jbd.counts.peopleWithJbdMerged}; БПЛА: ${bpla.counts.matchedPerformers}; УБД реєстр: ${ubdReg.counts.matchedSubmitted + ubdReg.counts.matchedNotSubmitted}${
+          nextHousingStats
+            ? `; ВПО житло: лишилось ${nextHousingStats.totals.remaining} з ${nextHousingStats.totals.inFile}`
+            : ""
+        } (див. console).`,
       );
+      if (nextHousingStats) {
+        console.group(
+          `[ВПО / житло] лишилось ${nextHousingStats.totals.remaining} з ${nextHousingStats.totals.inFile}`,
+        );
+        console.log("Лишились:", nextHousingStats.remainingNames);
+        console.log("Немає в ранковому:", nextHousingStats.leftNames);
+        console.groupEnd();
+        (
+          window as Window & { __SOC_PASSPORT_HOUSING_IDP__?: unknown }
+        ).__SOC_PASSPORT_HOUSING_IDP__ = nextHousingStats;
+      }
     } catch (error) {
       setResult(null);
       setMessage(
@@ -357,9 +906,27 @@ export function SocPassportPage() {
     if (!result) return;
     setIsBusy(true);
     try {
-      const stats = await exportSocPassportWorkbook(result);
+      const stats = await exportSocPassportWorkbook(
+        result,
+        departures,
+        housingIdpStats,
+      );
+      const ejoosPart = stats.hasEjoosTables
+        ? ` + аркуші ЕЖООС: «Вибули» (${stats.departuresTotal}), «Прибули ООС» (${stats.arrivalsTotal})${
+            stats.arrivalsMorningTotal
+              ? `, «Звідки Штатка» (${stats.arrivalsMorningTotal})`
+              : ""
+          }${
+            stats.arrivalsPbTotal
+              ? `, «Прибули 1ПБ» (${stats.arrivalsPbTotal})`
+              : ""
+          }`
+        : " (немає даних ЕЖООС Вибули/Прибули — завантажте ЕЖООС)";
+      const housingPart = stats.housingIdpRemaining
+        ? ` + ВПО житло (лишилось ${stats.housingIdpRemaining} з ${stats.housingIdpInFile})`
+        : "";
       setMessage(
-        `Експортовано Excel: «Соц.портрет», «Розбір», «Офіцери» (${stats.officersCount}), «Рф» (${stats.russiaCount}), «Виходи ЛБЗ» (${stats.exitsCount}), «Не виконували» (${stats.noExitsCount}).`,
+        `Експортовано Excel: «Соц.портрет», «Розбір», «Офіцери» (${stats.officersCount}), «Рф» (${stats.russiaCount}), «Виходи ЛБЗ» (${stats.exitsCount}), «Не виконували» (${stats.noExitsCount})${ejoosPart}${housingPart}.`,
       );
     } catch (error) {
       setMessage(
@@ -417,6 +984,35 @@ export function SocPassportPage() {
     }
   };
 
+  const exportDeparturesOnly = async () => {
+    if (!departures) return;
+    setIsBusy(true);
+    try {
+      const totals = await exportSocPassportDeparturesWorkbook(departures);
+      const arrivalsPart =
+        totals.arrivalsTotal > 0
+          ? ` + прибули ООС ${totals.arrivalsTotal}`
+          : "";
+      const arrivalsMorningPart =
+        totals.arrivalsMorningTotal > 0
+          ? ` + звідки Штатка ${totals.arrivalsMorningTotal}`
+          : "";
+      const arrivalsPbPart =
+        totals.arrivalsPbTotal > 0
+          ? ` + прибули 1ПБ ${totals.arrivalsPbTotal}`
+          : "";
+      setMessage(
+        `Експортовано «Вибули»: ${totals.all} записів (звільнення ${totals.discharges}, переведені ${totals.transfers})${arrivalsPart}${arrivalsMorningPart}${arrivalsPbPart}.`,
+      );
+    } catch (error) {
+      setMessage(
+        error instanceof Error ? error.message : "Не вдалося експортувати «Вибули».",
+      );
+    } finally {
+      setIsBusy(false);
+    }
+  };
+
   return (
     <main className="main-panel bchs-page soc-passport-page">
       <header className="topbar analytics-topbar">
@@ -425,7 +1021,7 @@ export function SocPassportPage() {
             Соціальний паспорт
           </Typography>
           <Typography variant="body2" color="text.secondary">
-            ШПО (хто на посаді) + анкети ООС + ранковий звіт (наявність і виходи)
+            ШПО + ООС + ранковий + додаток про житло (ВПО) + за бажанням ЖБД / БПЛА / УБД
           </Typography>
         </Box>
         <Stack direction="row" spacing={1} sx={{ flexWrap: "wrap", gap: 1 }}>
@@ -436,10 +1032,22 @@ export function SocPassportPage() {
             onFile={(file) => void loadWorkbook(file, "ejoos")}
           />
           <FileButton
+            label="1ПБ"
+            loadedName={pb?.fileName}
+            disabled={isBusy}
+            onFile={(file) => void loadWorkbook(file, "pb")}
+          />
+          <FileButton
             label="Ранковий звіт"
             loadedName={morning?.fileName}
             disabled={isBusy}
             onFile={(file) => void loadWorkbook(file, "morning")}
+          />
+          <FileButton
+            label="Додаток житло"
+            loadedName={housingIdp?.fileName}
+            disabled={isBusy}
+            onFile={(file) => void loadWorkbook(file, "housing")}
           />
           <FileButton
             label="ЖБД виходи"
@@ -476,6 +1084,11 @@ export function SocPassportPage() {
             variant="OUTLINE"
             disabled={isBusy || !result}
             onClick={() => void exportWorkbook()}
+            title={
+              departures
+                ? "Соц.портрет + розбір + Вибули/Прибули з ЕЖООС"
+                : "Соц.портрет і розбір (для Вибули/Прибули спочатку завантажте ЕЖООС)"
+            }
           >
             <FileDownloadOutlinedIcon fontSize="small" />
             Excel
@@ -507,12 +1120,171 @@ export function SocPassportPage() {
             <FileDownloadOutlinedIcon fontSize="small" />
             Рф (ПІБ)
           </SciButton>
+          <SciButton
+            variant="OUTLINE"
+            disabled={isBusy || !departures}
+            onClick={() => void exportDeparturesOnly()}
+            title="Окремий файл: Вибули з «Виключені» + Прибули за серпень (ООС і/або 1ПБ)"
+          >
+            <FileDownloadOutlinedIcon fontSize="small" />
+            Вибули
+          </SciButton>
         </Stack>
       </header>
 
       <Alert severity="info" sx={{ mb: 2 }}>
         {message}
       </Alert>
+
+      {departures ? (
+        <section className="analytics-panel">
+          <div className="panel-heading">
+            Вибули · {departures.sourceSheet}
+            {departures.periodFrom ? ` · з ${departures.periodFrom}` : ""}
+          </div>
+          <Typography variant="body2" sx={{ mb: 1.5, lineHeight: 1.7 }}>
+            Джерело: аркуш ЕЖООС «Виключені». Рахуємо рядки з{" "}
+            <strong>датою виключення / наказу</strong>
+            {departures.periodFromLabel
+              ? ` ${departures.periodFromLabel}`
+              : ""}
+            . У файлі всього {departures.totalUnfiltered}
+            {departures.skippedBeforePeriod || departures.skippedNoDate
+              ? ` (до періоду ${departures.skippedBeforePeriod}, без дати ${departures.skippedNoDate})`
+              : ""}
+            . Звільнення — 5 категорій; переведені / розпорядження — окремо.
+          </Typography>
+          <div className="bchs-analytics-table-wrap soc-passport-table-wrap">
+            <table className="bchs-analytics-table">
+              <thead>
+                <tr>
+                  <th>№</th>
+                  <th>Категорія</th>
+                  <th>Офіцери</th>
+                  <th>Сержанти</th>
+                  <th>Солдати</th>
+                  <th>Разом</th>
+                </tr>
+              </thead>
+              <tbody>
+                {departures.summary.map((row, index) => (
+                  <tr key={row.category}>
+                    <td>
+                      {row.category === "transfer" ? "—" : String(index + 1)}
+                    </td>
+                    <td>{row.label}</td>
+                    <td>{row.byRank.officer || ""}</td>
+                    <td>{row.byRank.sergeant || ""}</td>
+                    <td>{row.byRank.soldier || ""}</td>
+                    <td>
+                      <strong>{row.count}</strong>
+                    </td>
+                  </tr>
+                ))}
+                <tr>
+                  <td />
+                  <td>
+                    <strong>Усього у періоді</strong>
+                  </td>
+                  <td>
+                    <strong>{departures.totals.byRank.officer}</strong>
+                  </td>
+                  <td>
+                    <strong>{departures.totals.byRank.sergeant}</strong>
+                  </td>
+                  <td>
+                    <strong>{departures.totals.byRank.soldier}</strong>
+                  </td>
+                  <td>
+                    <strong>{departures.totals.all}</strong>
+                  </td>
+                </tr>
+                <tr>
+                  <td />
+                  <td>Звільнення / інше (без переведень)</td>
+                  <td>{departures.totals.dischargesByRank.officer || ""}</td>
+                  <td>{departures.totals.dischargesByRank.sergeant || ""}</td>
+                  <td>{departures.totals.dischargesByRank.soldier || ""}</td>
+                  <td>{departures.totals.discharges}</td>
+                </tr>
+                <tr>
+                  <td />
+                  <td>Переведені / розпорядження</td>
+                  <td>{departures.totals.transfersByRank.officer || ""}</td>
+                  <td>{departures.totals.transfersByRank.sergeant || ""}</td>
+                  <td>{departures.totals.transfersByRank.soldier || ""}</td>
+                  <td>{departures.totals.transfers}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          {departures.arrivalsAugust ? (
+            <ArrivalsPreview
+              arrivals={departures.arrivalsAugust}
+              titleHint="Прибули з ЕЖООС · 2. ООС за «Дата зарахування». Джерела — колонка «Звідки прибув» (порожнє поле = ТЦК)."
+            />
+          ) : null}
+          {departures.arrivalsFromMorning ? (
+            <ArrivalsPreview
+              arrivals={departures.arrivalsFromMorning}
+              headingPrefix="Звідки прибув"
+              titleHint="База — Штатка (ранковий): спочатку БРЕЗ з колонок БЗВП/БРЕЗ; решта — «Звідки прибув» з ООС ЕЖООС (порожнє = ТЦК). Розбивка за званням нижче."
+            />
+          ) : null}
+          {departures.arrivalsAugustPb ? (
+            <ArrivalsPreview
+              arrivals={departures.arrivalsAugustPb}
+              titleHint="Прибули з 1ПБ · Рух (ПРИБУВ). Джерела — з «Звідки прибув» (ООС / sh / Рух)."
+            />
+          ) : null}
+          {(departures.dispositionFromArchive || pbDisposition) && (
+            <DispositionPreview
+              disposition={
+                departures.dispositionFromArchive || pbDisposition!
+              }
+            />
+          )}
+          {(departures.szchFromRuh || pbSzch) && (
+            <SzchPreview szch={departures.szchFromRuh || pbSzch!} />
+          )}
+          {(departures.combatLossesFromPb || pbCombatLosses) && (
+            <CombatLossesPreview
+              losses={departures.combatLossesFromPb || pbCombatLosses!}
+            />
+          )}
+        </section>
+      ) : null}
+
+      {!departures && pbArrivals ? (
+        <section className="analytics-panel">
+          <ArrivalsPreview
+            arrivals={pbArrivals}
+            titleHint="Прибули з 1ПБ · Рух (ПРИБУВ). Для точніших ТЦК/НЦ/переведених завантажте також ЕЖООС — підтягнемо «Звідки прибув» з ООС."
+          />
+          {pbDisposition ? (
+            <DispositionPreview disposition={pbDisposition} />
+          ) : null}
+          {pbSzch ? <SzchPreview szch={pbSzch} /> : null}
+          {pbCombatLosses ? (
+            <CombatLossesPreview losses={pbCombatLosses} />
+          ) : null}
+        </section>
+      ) : null}
+
+      {!departures &&
+      !pbArrivals &&
+      (pbDisposition || pbSzch || pbCombatLosses) ? (
+        <section className="analytics-panel">
+          {pbDisposition ? (
+            <DispositionPreview disposition={pbDisposition} />
+          ) : null}
+          {pbSzch ? <SzchPreview szch={pbSzch} /> : null}
+          {pbCombatLosses ? (
+            <CombatLossesPreview losses={pbCombatLosses} />
+          ) : null}
+        </section>
+      ) : null}
 
       <section className="analytics-panel">
         <div className="panel-heading">Джерела</div>
@@ -530,7 +1302,11 @@ export function SocPassportPage() {
             подавалися») — хто є в цьому файлі і також у штатці (ранковий
             список), потрапляє в рядок статистики «УБД»; обидві групи також
             рахуються як «виконували» (мін. 1 вихід, якщо інших джерел немає).
-            Додатково в «УБД» лишається позначка з анкети ООС.            <strong> БПЛА виходи</strong> (таблиця з колонкою «Виконував БЗ» /
+            Додатково в «УБД» лишається позначка з анкети ООС.{" "}
+            <strong>Додаток житло</strong> (кнопка поруч із «Ранковий звіт») —
+            список ВПО з «Додаток про житло.xlsx»; зіставляємо з ранковим і
+            рахуємо хто лишився — вони входять у рядок «ВПО» соцпакета.{" "}
+            <strong>БПЛА виходи</strong> (таблиця з колонкою «Виконував БЗ» /
             «Не виконував БЗ») — хто позначений як виконував, теж рахується як
             «виконували» (мін. 1 вихід), якщо немає інших джерел. Статус ранкового
             звіту <strong>«Зниклі безвісти»</strong> також зараховується як
@@ -563,6 +1339,99 @@ export function SocPassportPage() {
           </p>
         </Typography>
       </section>
+
+      {housingIdpStats ? (
+        <section className="analytics-panel">
+          <div className="panel-heading">
+            ВПО · додаток про житло · {housingIdpStats.fileName}
+          </div>
+          <Typography variant="body2" sx={{ mb: 1.5, lineHeight: 1.7 }}>
+            ПІБ з додатку про житло зіставлено з ранковим звітом. У соцпакет
+            (рядок «ВПО») входять ті, хто{" "}
+            <strong>лишився в ранковому</strong>.
+          </Typography>
+          <div className="bchs-analytics-table-wrap soc-passport-table-wrap">
+            <table className="bchs-analytics-table">
+              <thead>
+                <tr>
+                  <th>Показник</th>
+                  <th>Офіцери</th>
+                  <th>Сержанти</th>
+                  <th>Солдати</th>
+                  <th>Разом</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>У файлі (додаток)</td>
+                  <td colSpan={3} />
+                  <td>
+                    <strong>{housingIdpStats.totals.inFile}</strong>
+                  </td>
+                </tr>
+                <tr>
+                  <td>Лишилось у ранковому</td>
+                  <td>
+                    {housingIdpStats.totals.byRankRemaining.officer || ""}
+                  </td>
+                  <td>
+                    {housingIdpStats.totals.byRankRemaining.sergeant || ""}
+                  </td>
+                  <td>
+                    {housingIdpStats.totals.byRankRemaining.soldier || ""}
+                  </td>
+                  <td>
+                    <strong>{housingIdpStats.totals.remaining}</strong>
+                  </td>
+                </tr>
+                <tr>
+                  <td>З них у наявності (в строю / відком.)</td>
+                  <td colSpan={3} />
+                  <td>
+                    <strong>{housingIdpStats.totals.remainingPresent}</strong>
+                  </td>
+                </tr>
+                <tr>
+                  <td>Немає в ранковому (вибули / не знайдені)</td>
+                  <td colSpan={3} />
+                  <td>
+                    <strong>{housingIdpStats.totals.leftNotInMorning}</strong>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div
+            className="bchs-analytics-table-wrap soc-passport-table-wrap"
+            style={{ marginTop: 12 }}
+          >
+            <table className="bchs-analytics-table">
+              <thead>
+                <tr>
+                  <th>№</th>
+                  <th>ПІБ</th>
+                  <th>Звання</th>
+                  <th>У ранковому</th>
+                  <th>Статус</th>
+                  <th>Примітка</th>
+                </tr>
+              </thead>
+              <tbody>
+                {housingIdpStats.people.map((person, index) => (
+                  <tr key={`${person.fullName}-${person.excelRow}`}>
+                    <td>{index + 1}</td>
+                    <td>{person.fullName}</td>
+                    <td>{person.rank}</td>
+                    <td>{person.remaining ? "так" : "ні"}</td>
+                    <td>{person.morningStatus || "—"}</td>
+                    <td>{person.note || "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      ) : null}
 
       {ubdStats ? (
         <section className="analytics-panel">
