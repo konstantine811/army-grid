@@ -257,6 +257,22 @@ function PersonDetail({
               />
             </label>
             <label>
+              Куди для табеля
+              <input
+                value={
+                  excludeOp.payload.timesheetDestination ||
+                  excludeOp.payload.destination ||
+                  ""
+                }
+                onChange={(event) =>
+                  onPatchPayload(excludeOp.id, {
+                    timesheetDestination: event.target.value,
+                  })
+                }
+                placeholder="вибув до ..."
+              />
+            </label>
+            <label>
               Дата виключення
               <input
                 value={
@@ -400,6 +416,7 @@ export function EjoosChangesPanel() {
     acceptReady,
     applyAccepted,
     acceptAndApplyPerson,
+    rebuildOperations,
     setTab,
     isLoading,
   } = useEjoosWorkspace();
@@ -494,6 +511,14 @@ export function EjoosChangesPanel() {
         <Stack direction="row" spacing={1} style={{ flexWrap: "wrap" }}>
           <Button size="small" variant="outlined" onClick={acceptReady}>
             Підтвердити всі «зелені»
+          </Button>
+          <Button
+            size="small"
+            variant="outlined"
+            disabled={isLoading}
+            onClick={() => void rebuildOperations()}
+          >
+            Перебудувати
           </Button>
           <Button
             size="small"

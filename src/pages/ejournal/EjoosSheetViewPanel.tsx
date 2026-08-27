@@ -1,5 +1,24 @@
-import { useMemo, useState } from "react";
-import { Box, Chip, Stack, Typography } from "@/components/sci/SciPrimitives";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
+import {
+  Box,
+  Button,
+  Chip,
+  IconButton,
+  Stack,
+  Typography,
+} from "@/components/sci/SciPrimitives";
+import {
+  PushPinOutlinedIcon,
+  WrapTextOutlinedIcon,
+} from "@/components/sci/icons";
 import type {
   CellValue,
   ExcelSheetSnapshot,
@@ -57,6 +76,12 @@ const SHEET_META: Record<
   },
 };
 
+const ROW_NUMBER_COLUMN_WIDTH = 48;
+const COMPACT_COLUMN_WIDTH = 40;
+const DEFAULT_COLUMN_WIDTH = 148;
+const MIN_COLUMN_WIDTH = 32;
+const MAX_COLUMN_WIDTH = 560;
+
 const cellDisplay = (value: CellValue | undefined): string => {
   if (value == null) return "";
   if (value instanceof Date && !Number.isNaN(value.getTime())) {
@@ -74,6 +99,86 @@ const cellDisplay = (value: CellValue | undefined): string => {
     return String(value);
   }
   return String(value).replace(/\s+/g, " ").trim();
+};
+
+const columnWidthsKey = (kind: EjoosSheetKind, sheetName: string) =>
+  `ejoos-sheet-column-widths:${kind}:${sheetName}`;
+
+const wrapTextKey = (kind: EjoosSheetKind, sheetName: string) =>
+  `ejoos-sheet-wrap-text:${kind}:${sheetName}`;
+
+const pinSecondRowKey = (kind: EjoosSheetKind, sheetName: string) =>
+  `ejoos-sheet-pin-second-row:${kind}:${sheetName}`;
+
+const getDefaultColumnWidths = (compactColumns: boolean[]) => [
+  ROW_NUMBER_COLUMN_WIDTH,
+  ...compactColumns.map((isCompact) =>
+    isCompact ? COMPACT_COLUMN_WIDTH : DEFAULT_COLUMN_WIDTH,
+  ),
+];
+
+const readColumnWidths = (
+  kind: EjoosSheetKind,
+  sheetName: string,
+  compactColumns: boolean[],
+) => {
+  const defaults = getDefaultColumnWidths(compactColumns);
+  if (typeof window === "undefined") return defaults;
+  try {
+    const parsed = JSON.parse(
+      window.localStorage.getItem(columnWidthsKey(kind, sheetName)) || "[]",
+    );
+    if (!Array.isArray(parsed)) return defaults;
+    return defaults.map((defaultWidth, index) => {
+      const saved = Number(parsed[index]);
+      return Number.isFinite(saved)
+        ? Math.min(MAX_COLUMN_WIDTH, Math.max(MIN_COLUMN_WIDTH, saved))
+        : defaultWidth;
+    });
+  } catch {
+    return defaults;
+  }
+};
+
+const writeColumnWidths = (
+  kind: EjoosSheetKind,
+  sheetName: string,
+  widths: number[],
+) => {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(
+    columnWidthsKey(kind, sheetName),
+    JSON.stringify(widths.map((width) => Math.round(width))),
+  );
+};
+
+const readWrapText = (kind: EjoosSheetKind, sheetName: string) => {
+  if (typeof window === "undefined") return true;
+  const saved = window.localStorage.getItem(wrapTextKey(kind, sheetName));
+  return saved === null ? true : saved === "true";
+};
+
+const writeWrapText = (
+  kind: EjoosSheetKind,
+  sheetName: string,
+  wrapped: boolean,
+) => {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(wrapTextKey(kind, sheetName), String(wrapped));
+};
+
+const readPinSecondRow = (kind: EjoosSheetKind, sheetName: string) => {
+  if (typeof window === "undefined") return false;
+  return window.localStorage.getItem(pinSecondRowKey(kind, sheetName)) === "true";
+};
+
+const writePinSecondRow = (
+  kind: EjoosSheetKind,
+  sheetName: string,
+  pinned: boolean,
+) => {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(pinSecondRowKey(kind, sheetName), String(pinned));
 };
 
 const findSheet = (
@@ -128,10 +233,10 @@ const buildTable = (sheet: ExcelSheetSnapshot, maxRows: number) => {
   }
   lastCol = Math.min(Math.max(lastCol, 4), 40);
 
-  const headers = Array.from({ length: lastCol }, (_, index) => {
-    const text = cellDisplay(headerRow[index]);
-    return text || `Col ${index + 1}`;
-  });
+  const rawHeaders = Array.from({ length: lastCol }, (_, index) =>
+    cellDisplay(headerRow[index]),
+  );
+  const headers = rawHeaders.map((text, index) => text || `Col ${index + 1}`);
 
   const dataRows: string[][] = [];
   for (let i = headerIndex + 1; i < sheet.rawRows.length; i += 1) {
@@ -148,6 +253,17 @@ const buildTable = (sheet: ExcelSheetSnapshot, maxRows: number) => {
     sheetName: sheet.sheetName,
     headerIndex,
     headers,
+    compactColumns: rawHeaders.map((header, index) => {
+      const headerText = header.trim();
+      if (!headerText || /^[-–—]+$/.test(headerText)) return true;
+      const filledValues = dataRows
+        .map((row) => row[index]?.trim() ?? "")
+        .filter(Boolean);
+      return (
+        filledValues.length > 0 &&
+        filledValues.every((value) => /^[-–—]+$/.test(value))
+      );
+    }),
     rows: dataRows,
     totalRawRows: sheet.rawRows.length,
     truncated: dataRows.length >= maxRows,
@@ -158,6 +274,11 @@ export function EjoosSheetViewPanel({ kind }: { kind: EjoosSheetKind }) {
   const { ejoosSnapshot, setTab, ensureEjoosLoaded, isLoading } =
     useEjoosWorkspace();
   const [query, setQuery] = useState("");
+  const [columnWidths, setColumnWidths] = useState<number[]>([]);
+  const [wrapText, setWrapText] = useState(true);
+  const [pinSecondRow, setPinSecondRow] = useState(false);
+  const [headerHeight, setHeaderHeight] = useState(40);
+  const tableHeadRef = useRef<HTMLTableSectionElement | null>(null);
   const meta = SHEET_META[kind];
 
   const sheet = useMemo(
@@ -178,6 +299,107 @@ export function EjoosSheetViewPanel({ kind }: { kind: EjoosSheetKind }) {
       row.join(" ").toLocaleLowerCase("uk-UA").includes(needle),
     );
   }, [query, table]);
+
+  const columnLayoutKey = table
+    ? `${kind}:${table.sheetName}:${table.headers.length}:${table.compactColumns.join(",")}`
+    : "";
+
+  useEffect(() => {
+    if (!table) {
+      setColumnWidths([]);
+      return;
+    }
+    setColumnWidths(
+      readColumnWidths(kind, table.sheetName, table.compactColumns),
+    );
+    setWrapText(readWrapText(kind, table.sheetName));
+    setPinSecondRow(readPinSecondRow(kind, table.sheetName));
+  }, [columnLayoutKey]);
+
+  useEffect(() => {
+    if (!tableHeadRef.current || typeof ResizeObserver === "undefined") return;
+    const updateHeight = () => {
+      const next = Math.ceil(
+        tableHeadRef.current?.getBoundingClientRect().height || 40,
+      );
+      setHeaderHeight(next);
+    };
+    updateHeight();
+    const observer = new ResizeObserver(updateHeight);
+    observer.observe(tableHeadRef.current);
+    return () => observer.disconnect();
+  }, [columnLayoutKey, columnWidths, wrapText]);
+
+  const resizeColumn = useCallback(
+    (columnIndex: number, nextWidth: number) => {
+      if (!table) return;
+      setColumnWidths((current) => {
+        const base =
+          current.length === table.headers.length + 1
+            ? current
+            : getDefaultColumnWidths(table.compactColumns);
+        const next = [...base];
+        next[columnIndex] = Math.min(
+          MAX_COLUMN_WIDTH,
+          Math.max(MIN_COLUMN_WIDTH, nextWidth),
+        );
+        writeColumnWidths(kind, table.sheetName, next);
+        return next;
+      });
+    },
+    [kind, table],
+  );
+
+  const resetColumnWidths = useCallback(() => {
+    if (!table) return;
+    const next = getDefaultColumnWidths(table.compactColumns);
+    setColumnWidths(next);
+    if (typeof window !== "undefined") {
+      window.localStorage.removeItem(columnWidthsKey(kind, table.sheetName));
+    }
+  }, [kind, table]);
+
+  const toggleWrapText = useCallback(() => {
+    if (!table) return;
+    setWrapText((current) => {
+      const next = !current;
+      writeWrapText(kind, table.sheetName, next);
+      return next;
+    });
+  }, [kind, table]);
+
+  const togglePinSecondRow = useCallback(() => {
+    if (!table) return;
+    setPinSecondRow((current) => {
+      const next = !current;
+      writePinSecondRow(kind, table.sheetName, next);
+      return next;
+    });
+  }, [kind, table]);
+
+  const startResize = useCallback(
+    (columnIndex: number, event: ReactPointerEvent<HTMLSpanElement>) => {
+      if (!table) return;
+      event.preventDefault();
+      const startX = event.clientX;
+      const startWidth =
+        columnWidths[columnIndex] ??
+        getDefaultColumnWidths(table.compactColumns)[columnIndex] ??
+        DEFAULT_COLUMN_WIDTH;
+
+      const handlePointerMove = (moveEvent: PointerEvent) => {
+        resizeColumn(columnIndex, startWidth + moveEvent.clientX - startX);
+      };
+      const handlePointerUp = () => {
+        window.removeEventListener("pointermove", handlePointerMove);
+        window.removeEventListener("pointerup", handlePointerUp);
+      };
+
+      window.addEventListener("pointermove", handlePointerMove);
+      window.addEventListener("pointerup", handlePointerUp, { once: true });
+    },
+    [columnWidths, resizeColumn, table],
+  );
 
   if (!ejoosSnapshot) {
     return (
@@ -239,6 +461,39 @@ export function EjoosSheetViewPanel({ kind }: { kind: EjoosSheetKind }) {
           variant="outlined"
           label={ejoosSnapshot.fileName}
         />
+        <Button size="small" variant="outlined" onClick={resetColumnWidths}>
+          Скинути ширини
+        </Button>
+        <IconButton
+          size="small"
+          className={wrapText ? "is-active" : undefined}
+          title={wrapText ? "Перенос тексту увімкнено" : "Перенос тексту вимкнено"}
+          aria-label={
+            wrapText ? "Вимкнути перенос тексту" : "Увімкнути перенос тексту"
+          }
+          aria-pressed={wrapText}
+          onClick={toggleWrapText}
+        >
+          <WrapTextOutlinedIcon fontSize="small" />
+        </IconButton>
+        <IconButton
+          size="small"
+          className={pinSecondRow ? "is-active" : undefined}
+          title={
+            pinSecondRow
+              ? "Другий рядок закріплено"
+              : "Другий рядок не закріплено"
+          }
+          aria-label={
+            pinSecondRow
+              ? "Відкріпити другий рядок"
+              : "Закріпити другий рядок"
+          }
+          aria-pressed={pinSecondRow}
+          onClick={togglePinSecondRow}
+        >
+          <PushPinOutlinedIcon fontSize="small" />
+        </IconButton>
       </Stack>
 
       <input
@@ -260,21 +515,74 @@ export function EjoosSheetViewPanel({ kind }: { kind: EjoosSheetKind }) {
       />
 
       <div className="bchs-analytics-table-wrap ejoos-sheet-table-wrap">
-        <table className="bchs-analytics-table ejoos-sheet-table">
-          <thead>
+        <table
+          className={
+            wrapText
+              ? `bchs-analytics-table ejoos-sheet-table is-wrap-text${pinSecondRow ? " is-pin-second-row" : ""}`
+              : `bchs-analytics-table ejoos-sheet-table is-nowrap-text${pinSecondRow ? " is-pin-second-row" : ""}`
+          }
+          style={{
+            "--ejoos-header-height": `${headerHeight}px`,
+            minWidth: "100%",
+            width: `${(columnWidths.length ? columnWidths : getDefaultColumnWidths(table.compactColumns)).reduce(
+              (sum, width) => sum + width,
+              0,
+            )}px`,
+          } as CSSProperties & Record<string, string>}
+        >
+          <colgroup>
+            {(columnWidths.length
+              ? columnWidths
+              : getDefaultColumnWidths(table.compactColumns)
+            ).map((width, index) => (
+              <col key={`col-${index}`} style={{ width: `${width}px` }} />
+            ))}
+          </colgroup>
+          <thead ref={tableHeadRef}>
             <tr>
-              <th>#</th>
+              <th>
+                <span className="ejoos-sheet-th-content">#</span>
+                <span
+                  className="ejoos-column-resize-handle"
+                  role="separator"
+                  aria-orientation="vertical"
+                  aria-label="Змінити ширину колонки #"
+                  onPointerDown={(event) => startResize(0, event)}
+                />
+              </th>
               {table.headers.map((header, index) => (
-                <th key={`${header}-${index}`}>{header}</th>
+                <th
+                  key={`${header}-${index}`}
+                  className={table.compactColumns[index] ? "is-compact-col" : undefined}
+                >
+                  <span className="ejoos-sheet-th-content">{header}</span>
+                  <span
+                    className="ejoos-column-resize-handle"
+                    role="separator"
+                    aria-orientation="vertical"
+                    aria-label={`Змінити ширину колонки ${header}`}
+                    onPointerDown={(event) => startResize(index + 1, event)}
+                  />
+                </th>
               ))}
             </tr>
           </thead>
           <tbody>
             {filteredRows.map((row, rowIndex) => (
-              <tr key={`r-${rowIndex}`}>
+              <tr
+                key={`r-${rowIndex}`}
+                className={rowIndex === 0 ? "ejoos-second-row" : undefined}
+              >
                 <td>{rowIndex + 1}</td>
                 {row.map((cell, cellIndex) => (
-                  <td key={`c-${rowIndex}-${cellIndex}`}>{cell}</td>
+                  <td
+                    key={`c-${rowIndex}-${cellIndex}`}
+                    className={
+                      table.compactColumns[cellIndex] ? "is-compact-col" : undefined
+                    }
+                  >
+                    {cell}
+                  </td>
                 ))}
               </tr>
             ))}

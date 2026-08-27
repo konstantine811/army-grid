@@ -92,7 +92,7 @@ const personKey = (op: EjoosSyncOp) => {
 const categoryForOps = (ops: EjoosSyncOp[]): PersonChangeCategory => {
   const kinds = new Set(ops.map((op) => op.kind));
   if (kinds.has("arrival")) return "arrival";
-  if (kinds.has("conflict") || ops.some((op) => op.class === "conflict")) {
+  if (ops.some((op) => op.class === "conflict")) {
     return "error";
   }
   const statusKinds: EjoosOpKind[] = [

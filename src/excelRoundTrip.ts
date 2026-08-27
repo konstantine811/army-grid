@@ -571,8 +571,10 @@ export const EJOOS_SYNC_READ_OPTIONS: ReadWorkbookOptions = {
     /^1\.\s*шпо/i.test(name) ||
     /^2\.\s*оос/i.test(name) ||
     /^3\.\s*виключ/i.test(name) ||
+    /^4\.\s*тимчасов/i.test(name) ||
     /^5\.\s*тимчасов/i.test(name) ||
     /^6\.\s*табель/i.test(name) ||
+    /^7\.\s*безповорот/i.test(name) ||
     /^10\.\s*історія/i.test(name),
   maxColumns: 48,
   skipStyleFills: true,

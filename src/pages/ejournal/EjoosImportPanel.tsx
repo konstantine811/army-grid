@@ -60,8 +60,9 @@ export function EjoosImportPanel() {
           1ПБ (sh / Рух / archive)
         </Typography>
         <Typography variant="body2" className="ejoos-muted" sx={{ mb: 1.5 }}>
-          Поки лише збереження файлу в БД. Синхронізація з ЕЖООС — наступним
-          кроком.
+          Після завантаження файл зберігається в БД, парситься по трьох
+          аркушах і будує план операцій для ЕЖООС, якщо канонічний журнал уже
+          відкритий або збережений у БД.
         </Typography>
         {pbSnapshot ? (
           <Typography variant="body2" sx={{ mb: 1.5 }}>

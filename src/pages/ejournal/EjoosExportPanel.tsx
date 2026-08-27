@@ -11,8 +11,8 @@ export function EjoosExportPanel() {
       <Box>
         <Typography variant="h6">Експорт ЕЖООС</Typography>
         <Typography variant="body2" className="ejoos-muted">
-          Скачати поточну версію ЕЖООС з БД (ШПО, ООС, Виключені, Табель…). Це не
-          файл 1ПБ.
+          Скачати поточну версію ЕЖООС з БД як повний .xlsx з оригінальними
+          аркушами, форматуванням і вже застосованими змінами. Це не файл 1ПБ.
         </Typography>
       </Box>
 
@@ -39,7 +39,7 @@ export function EjoosExportPanel() {
             >
               Скачати .xlsx
             </Button>
-            <Button variant="outlined" onClick={() => setTab("import")}>
+            <Button variant="outlined" onClick={() => setTab("history")}>
               Історія версій
             </Button>
           </Stack>

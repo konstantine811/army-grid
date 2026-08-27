@@ -284,11 +284,12 @@ type AlertProps = HTMLAttributes<HTMLDivElement> & {
   severity?: "info" | "success" | "warning" | "error";
   variant?: string;
   icon?: ReactNode;
+  action?: ReactNode;
   sx?: Sx;
 };
 
 export function Alert({ severity = "info", variant: _variant, sx, style, className, ...props }: AlertProps) {
-  const { icon: _icon, ...restProps } = props;
+  const { icon: _icon, action, children, ...restProps } = props;
   const alertVariant: "STATUS" | "WARNING" | "CRITICAL" | "INFO" =
     severity === "success"
       ? "STATUS"
@@ -304,7 +305,10 @@ export function Alert({ severity = "info", variant: _variant, sx, style, classNa
       className={cn("sci-alert", `sci-alert-${severity}`, className)}
       style={{ ...sxToStyle(sx), ...style }}
       {...restProps}
-    />
+    >
+      {children}
+      {action ? <span className="sci-alert-action">{action}</span> : null}
+    </SciAlert>
   );
 }
 
@@ -455,8 +459,27 @@ export function Select({ value, onChange, children, disabled, className, sx, ren
   );
 }
 
-export function Divider({ sx, style }: { sx?: Sx; style?: CSSProperties }) {
-  return <div className="sci-divider" style={{ ...sxToStyle(sx), ...style }} />;
+export function Divider({
+  sx,
+  style,
+  orientation,
+  flexItem,
+}: {
+  sx?: Sx;
+  style?: CSSProperties;
+  orientation?: "horizontal" | "vertical" | string;
+  flexItem?: boolean;
+}) {
+  return (
+    <div
+      className={cn(
+        "sci-divider",
+        orientation === "vertical" && "sci-divider-vertical",
+        flexItem && "sci-divider-flex-item",
+      )}
+      style={{ ...sxToStyle(sx), ...style }}
+    />
+  );
 }
 
 export function Switch({
@@ -528,12 +551,18 @@ export function Chip({
   label,
   className,
   color,
+  component,
+  sx,
+  style,
 }: {
   label?: ReactNode;
   className?: string;
   size?: string;
   color?: string;
   variant?: string;
+  component?: ElementType;
+  sx?: Sx;
+  style?: CSSProperties;
 }) {
   const badgeVariant =
     color === "warning"
@@ -541,10 +570,22 @@ export function Chip({
       : color === "error"
         ? "CRITICAL"
         : color === "default"
-          ? "OFFLINE"
-          : "ACTIVE";
+        ? "OFFLINE"
+        : "ACTIVE";
 
-  return <Badge variant={badgeVariant} className={className}>{label}</Badge>;
+  if (component) {
+    return createElement(component, {
+      className,
+      style: { ...sxToStyle(sx), ...style },
+      children: label,
+    });
+  }
+
+  return (
+    <Badge variant={badgeVariant} className={className} style={{ ...sxToStyle(sx), ...style }}>
+      {label}
+    </Badge>
+  );
 }
 
 type DialogSlotProps = {

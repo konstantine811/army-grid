@@ -6896,6 +6896,121 @@ body.combat-fs-open {
   font-weight: 700;
 }
 
+.ejoos-sheet-table {
+  table-layout: fixed;
+}
+
+.ejoos-sheet-table-wrap {
+  max-width: 100%;
+  overflow: auto;
+}
+
+.ejoos-sheet-table th,
+.ejoos-sheet-table td {
+  min-width: 0;
+  max-width: none;
+}
+
+.bchs-page .ejoos-sheet-table.is-wrap-text th,
+.bchs-page .ejoos-sheet-table.is-wrap-text td,
+.ejoos-sheet-table.is-wrap-text th,
+.ejoos-sheet-table.is-wrap-text td {
+  overflow: visible !important;
+  text-overflow: clip !important;
+  white-space: pre-wrap !important;
+  overflow-wrap: anywhere !important;
+  word-break: break-word !important;
+}
+
+.bchs-page .ejoos-sheet-table.is-nowrap-text th,
+.bchs-page .ejoos-sheet-table.is-nowrap-text td,
+.ejoos-sheet-table.is-nowrap-text th,
+.ejoos-sheet-table.is-nowrap-text td {
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+}
+
+.ejoos-sheet-table th:first-child,
+.ejoos-sheet-table td:first-child {
+  min-width: 0;
+  max-width: none;
+  width: auto;
+}
+
+.ejoos-sheet-table th.is-compact-col,
+.ejoos-sheet-table td.is-compact-col {
+  min-width: 0;
+  max-width: none;
+  width: auto;
+  text-align: center;
+}
+
+.bchs-page .ejoos-sheet-table th.is-compact-col,
+.bchs-page .ejoos-sheet-table td.is-compact-col,
+.ejoos-sheet-table th.is-compact-col,
+.ejoos-sheet-table td.is-compact-col {
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+}
+
+.ejoos-sheet-view .sci-icon-button.is-active {
+  color: var(--color-green);
+  border-color: var(--border-active);
+  box-shadow: var(--glow-green);
+}
+
+.ejoos-sheet-table.is-pin-second-row tbody tr.ejoos-second-row td {
+  position: sticky;
+  top: var(--ejoos-header-height, 40px);
+  z-index: 2;
+  background: #151511;
+  box-shadow: 0 1px 0 rgba(0, 255, 85, 0.18);
+}
+
+.ejoos-sheet-table.is-pin-second-row tbody tr.ejoos-second-row td:first-child {
+  z-index: 4;
+}
+
+.ejoos-sheet-table th {
+  position: sticky;
+  user-select: none;
+}
+
+.ejoos-sheet-th-content {
+  display: block;
+  padding-right: 8px;
+}
+
+.ejoos-column-resize-handle {
+  position: absolute;
+  top: 0;
+  right: -4px;
+  z-index: 5;
+  width: 8px;
+  height: 100%;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.ejoos-column-resize-handle::after {
+  position: absolute;
+  top: 8px;
+  right: 3px;
+  bottom: 8px;
+  width: 1px;
+  content: "";
+  background: rgba(0, 255, 85, 0.18);
+}
+
+.ejoos-column-resize-handle:hover::after,
+.ejoos-column-resize-handle:active::after {
+  width: 2px;
+  background: rgba(0, 255, 85, 0.86);
+  box-shadow: 0 0 10px rgba(0, 255, 85, 0.35);
+}
+
 .analytics-panel {
   min-height: 244px;
   padding: 16px;
@@ -10866,6 +10981,74 @@ html.auth-lock .auth-shell {
   border-radius: 8px;
   background: var(--surface-raised);
   color: var(--text-secondary);
+}
+
+.ejoos-pb-source-table-wrap {
+  max-width: 100%;
+  max-height: 64vh;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.ejoos-pb-source-table {
+  min-width: 1120px;
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  table-layout: fixed;
+  color: var(--text-secondary);
+  font-size: 0.86rem;
+}
+
+.ejoos-pb-source-table th,
+.ejoos-pb-source-table td {
+  padding: 0.55rem 0.65rem;
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ejoos-pb-source-table th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: #0b0d0a;
+  color: rgba(0, 237, 63, 0.78);
+  font-size: 0.76rem;
+  font-weight: 700;
+}
+
+.ejoos-pb-source-table th.is-text,
+.ejoos-pb-source-table td.is-text {
+  width: 220px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.ejoos-pb-source-table th:first-child,
+.ejoos-pb-source-table td:first-child {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  width: 72px;
+  background: #12140f;
+}
+
+.ejoos-pb-source-table th:first-child {
+  z-index: 3;
+  background: #0b0d0a;
+}
+
+.ejoos-pb-empty {
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-raised);
 }
 
 .ejoos-changes-layout {

@@ -1124,7 +1124,13 @@ export const api = {
       versionId: string | null
       asOfDate: string | null
       syncedAt: string | null
-      counts: { persons: number; absences: number; timesheet: number }
+      counts: {
+        persons: number
+        absences: number
+        timesheet: number
+        arrivals?: number
+        irrevocableLosses?: number
+      }
       persons: Array<{
         personId: string
         fullName: string
@@ -1143,10 +1149,18 @@ export const api = {
     persons: Array<Record<string, unknown>>
     absences: Array<Record<string, unknown>>
     timesheet: Array<Record<string, unknown>>
+    arrivals?: Array<Record<string, unknown>>
+    irrevocableLosses?: Array<Record<string, unknown>>
   }) {
     return request<{
       unitLabel: string
-      counts: { persons: number; absences: number; timesheet: number }
+      counts: {
+        persons: number
+        absences: number
+        timesheet: number
+        arrivals?: number
+        irrevocableLosses?: number
+      }
       syncedAt: string | null
     }>('/ejournals/normalized/sync', {
       method: 'POST',

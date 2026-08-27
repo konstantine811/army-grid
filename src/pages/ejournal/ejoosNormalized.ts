@@ -31,6 +31,32 @@ export type EjoosNormTimesheet = {
   code: string;
 };
 
+export type EjoosNormArrival = {
+  personId: string;
+  fullName: string;
+  rank: string;
+  positionIndex: string;
+  fromUnit: string;
+  arriveDate: string;
+  note: string;
+};
+
+export type EjoosNormIrrevocableLoss = {
+  personId: string;
+  fullName: string;
+  rank: string;
+  positionIndex: string;
+  serviceType: string;
+  birthDate: string;
+  birthPlace: string;
+  recruitedBy: string;
+  relatives: string;
+  lossType: string;
+  lossDate: string;
+  circumstances: string;
+  lossPlace: string;
+};
+
 export type EjoosNormalizedSnapshot = {
   unitLabel: string;
   versionId?: string;
@@ -38,6 +64,8 @@ export type EjoosNormalizedSnapshot = {
   persons: EjoosNormPerson[];
   absences: EjoosNormAbsence[];
   timesheet: EjoosNormTimesheet[];
+  arrivals: EjoosNormArrival[];
+  irrevocableLosses: EjoosNormIrrevocableLoss[];
 };
 
 export const buildNormalizedSnapshotFromWorkbook = (input: {
@@ -95,6 +123,30 @@ export const buildNormalizedSnapshotFromWorkbook = (input: {
       day: view.timesheetDay,
       dayLabel: view.timesheetDayLabel,
       code: row.dayValue,
+    })),
+    arrivals: view.arrivals.map((row) => ({
+      personId: row.personId,
+      fullName: row.fullName,
+      rank: row.rank,
+      positionIndex: row.positionIndex,
+      fromUnit: row.fromUnit,
+      arriveDate: row.arriveDate,
+      note: row.note,
+    })),
+    irrevocableLosses: view.irrevocableLosses.map((row) => ({
+      personId: row.personId,
+      fullName: row.fullName,
+      rank: row.rank,
+      positionIndex: row.positionIndex,
+      serviceType: row.serviceType,
+      birthDate: row.birthDate,
+      birthPlace: row.birthPlace,
+      recruitedBy: row.recruitedBy,
+      relatives: row.relatives,
+      lossType: row.lossType,
+      lossDate: row.lossDate,
+      circumstances: row.circumstances,
+      lossPlace: row.lossPlace,
     })),
   };
 };

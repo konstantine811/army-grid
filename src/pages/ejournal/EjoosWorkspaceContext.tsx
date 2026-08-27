@@ -72,14 +72,14 @@ type EjoosWorkspaceContextValue = {
   importEjoos: (file: File) => Promise<void>;
   loadEjoosFromDb: () => Promise<void>;
   ensureEjoosLoaded: () => Promise<ExcelWorkbookSnapshot | null>;
-  /** Завантажити 1ПБ (sh / Рух / archive) без синхронізації. */
+  /** Завантажити 1ПБ (sh / Рух / archive) і побудувати план операцій, якщо ЕЖООС доступний. */
   loadPb: (file: File) => Promise<void>;
   /** Зберегти поточний 1ПБ у БД. */
   savePbToDb: () => Promise<BackendEjournalPbSource | null>;
-  /** Відкрити 1ПБ з БД (без аналізу змін). */
+  /** Відкрити 1ПБ з БД і побудувати план операцій, якщо ЕЖООС доступний. */
   loadPbFromDb: (id?: string) => Promise<void>;
-  /** @deprecated sync UI прибрано — лишається для майбутньої логіки */
   analyzePb: (file: File) => Promise<void>;
+  rebuildOperations: () => Promise<void>;
   setDecision: (personChangeId: string, decision: PersonChangeDecision) => void;
   patchOpPayload: (
     personChangeId: string,
@@ -212,10 +212,12 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
             versionId: created.id,
             asOfDate: created.asOfDate ?? dayInfo.label,
           });
-        } catch {
-          /* optional */
+        } catch (syncErr) {
+          dbNote += ` Нормалізовані таблиці не синхронізовано: ${
+            syncErr instanceof Error ? syncErr.message : "невідома помилка"
+          }.`;
         }
-        dbNote = ` Збережено в БД як v${created.version}.`;
+        dbNote = ` Збережено в БД як v${created.version}.` + dbNote;
       } catch (saveErr) {
         dbNote = ` Файл відкрито локально; БД: ${
           saveErr instanceof Error ? saveErr.message : "недоступна"
@@ -284,10 +286,14 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
             versionId: saved.id,
             asOfDate: saved.asOfDate ?? dayInfo.label,
           });
-        } catch {
-          /* optional */
+        } catch (syncErr) {
+          dbNote += ` Нормалізовані таблиці не синхронізовано: ${
+            syncErr instanceof Error ? syncErr.message : "невідома помилка"
+          }.`;
         }
-        dbNote = ` Збережено в БД як v${saved.version} (було v${current.version}).`;
+        dbNote =
+          ` Збережено в БД як v${saved.version} (було v${current.version}).` +
+          dbNote;
       } catch (saveErr) {
         dbNote = ` Файл відкрито локально; БД: ${
           saveErr instanceof Error ? saveErr.message : "недоступна"
@@ -337,6 +343,19 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
     });
   }, [live, ejoosSnapshot, ensureEjoosSnapshot]);
 
+  const buildSessionFromPb = useCallback(
+    async (pb: ExcelWorkbookSnapshot) => {
+      const ejoos = await ensureEjoosSnapshot();
+      assertEjoosWorkbook(ejoos);
+      const plan = buildEjoosSyncPlan(ejoos, pb);
+      const nextSession = groupOpsIntoPersonChanges(plan, pb);
+      setSession(nextSession);
+      setSelectedPersonId(null);
+      return nextSession;
+    },
+    [ensureEjoosSnapshot],
+  );
+
   const loadPb = async (file: File) => {
     setIsLoading(true);
     setError("");
@@ -344,7 +363,6 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
       const pb = await readWorkbookSnapshot(file, EJOOS_SYNC_READ_OPTIONS);
       assertPbWorkbook(pb);
       setPbSnapshot(pb);
-      setSession(null);
       setSelectedPersonId(null);
 
       let savedNote = "";
@@ -367,12 +385,31 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
         }.`;
       }
 
+      let analysisNote = "";
+      let nextTab: EjoosWorkspaceTab = "pb";
+      try {
+        const nextSession = await buildSessionFromPb(pb);
+        analysisNote =
+          ` Операції: ${nextSession.counters.changes}, авто ` +
+          `${nextSession.counters.autoReady}, перевірити ` +
+          `${nextSession.counters.needsReview}, конфлікти ` +
+          `${nextSession.counters.errors}.`;
+      } catch (analysisErr) {
+        setSession(null);
+        analysisNote = ` Аналіз не виконано: ${
+          analysisErr instanceof Error
+            ? analysisErr.message
+            : "ЕЖООС недоступний"
+        }.`;
+        nextTab = "pb";
+      }
+
       setMessage(
         `1ПБ завантажено: ${file.name} · аркуші ${pb.sheets
           .map((sheet) => sheet.sheetName)
-          .join(", ")}.${savedNote}`,
+          .join(", ")}.${savedNote}${analysisNote}`,
       );
-      setTab("import");
+      setTab(nextTab);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Не вдалося завантажити 1ПБ");
     } finally {
@@ -380,7 +417,6 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  /** Залишено для майбутньої синхронізації; UI зараз не викликає. */
   const analyzePb = async (file: File) => {
     await loadPb(file);
   };
@@ -415,6 +451,45 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
     }
   };
 
+  const rebuildOperations = async () => {
+    if (!pbSnapshot) {
+      setError("Немає відкритого 1ПБ для аналізу");
+      return;
+    }
+    setIsLoading(true);
+    setError("");
+    try {
+      const state = await refreshLive();
+      const current = state.current;
+      if (!current) throw new Error("Спочатку завантажте або відкрийте ЕЖООС");
+      const full = await api.getEjournalLiveFile(current.id, "1ПБ");
+      if (!full.fileBase64) throw new Error("У поточній версії ЕЖООС немає файлу");
+      const file = base64ToFile(
+        full.fileBase64,
+        full.sourceFileName || `ЕЖООС_v${full.version}.xlsx`,
+      );
+      const snapshot = await readWorkbookSnapshot(file, EJOOS_SYNC_READ_OPTIONS);
+      assertEjoosWorkbook(snapshot);
+      setEjoosSnapshot(snapshot);
+      const plan = buildEjoosSyncPlan(snapshot, pbSnapshot);
+      const nextSession = groupOpsIntoPersonChanges(plan, pbSnapshot);
+      setSession(nextSession);
+      setSelectedPersonId(null);
+      setMessage(
+        `Операції перебудовано з поточного ЕЖООС v${current.version}: ` +
+          `${nextSession.counters.changes}, авто ${nextSession.counters.autoReady}, ` +
+          `перевірити ${nextSession.counters.needsReview}, конфлікти ${nextSession.counters.errors}.`,
+      );
+      setTab("changes");
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Не вдалося перебудувати операції",
+      );
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   const loadPbFromDb = async (id?: string) => {
     setIsLoading(true);
     setError("");
@@ -429,15 +504,32 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
       const pb = await readWorkbookSnapshot(file, EJOOS_SYNC_READ_OPTIONS);
       assertPbWorkbook(pb);
       setPbSnapshot(pb);
-      setSession(null);
       setSelectedPersonId(null);
       await refreshPbSources();
+
+      let analysisNote = "";
+      try {
+        const nextSession = await buildSessionFromPb(pb);
+        analysisNote =
+          ` Операції: ${nextSession.counters.changes}, авто ` +
+          `${nextSession.counters.autoReady}, перевірити ` +
+          `${nextSession.counters.needsReview}, конфлікти ` +
+          `${nextSession.counters.errors}.`;
+      } catch (analysisErr) {
+        setSession(null);
+        analysisNote = ` Аналіз не виконано: ${
+          analysisErr instanceof Error
+            ? analysisErr.message
+            : "ЕЖООС недоступний"
+        }.`;
+      }
+
       setMessage(
         `Відкрито 1ПБ з БД: ${fileName} · аркуші ${pb.sheets
           .map((sheet) => sheet.sheetName)
-          .join(", ")}.`,
+          .join(", ")}.${analysisNote}`,
       );
-      setTab("import");
+      setTab("pb");
     } catch (err) {
       setError(
         err instanceof Error ? err.message : "Не вдалося відкрити 1ПБ з БД",
@@ -503,6 +595,7 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
     });
     // Не качаємо файл на кожне застосування — експорт лише з вкладки «Експорт».
     const state = await refreshLive();
+    let normalizedWarning = "";
     if (state.current) {
       const full = await api.getEjournalLiveFile(state.current.id, "1ПБ");
       if (full.fileBase64) {
@@ -520,12 +613,14 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
             versionId: saved.id,
             asOfDate: saved.asOfDate,
           });
-        } catch {
-          /* optional */
+        } catch (syncErr) {
+          normalizedWarning = ` Нормалізовані таблиці не синхронізовано: ${
+            syncErr instanceof Error ? syncErr.message : "невідома помилка"
+          }.`;
         }
       }
     }
-    return saved;
+    return { saved, normalizedWarning };
   };
 
   const applyAccepted = async () => {
@@ -541,14 +636,14 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
     setIsLoading(true);
     setError("");
     try {
-      const saved = await runApplyOps(
+      const { saved, normalizedWarning } = await runApplyOps(
         session,
         ops,
         `Застосовано ${ops.length} ops / ${session.people.filter((p) => p.decision === "accepted").length} людей`,
       );
       setSession(null);
       setMessage(
-        `Записано ЕЖООС v${saved.version}. Застосовано ${ops.length} змін.`,
+        `Записано ЕЖООС v${saved.version}. Застосовано ${ops.length} змін.${normalizedWarning}`,
       );
       setTab("import");
     } catch (err) {
@@ -596,7 +691,7 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
     setIsLoading(true);
     setError("");
     try {
-      const saved = await runApplyOps(
+      const { saved, normalizedWarning } = await runApplyOps(
         nextSession,
         ops,
         `Переведення: ${person.fullName} · ${ops.length} ops`,
@@ -612,7 +707,7 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
       });
       setSelectedPersonId(null);
       setMessage(
-        `Переведення «${person.fullName}» записано в ЕЖООС v${saved.version}. Файл не качається — експорт з вкладки «Експорт», коли закінчите всі зміни.`,
+        `Переведення «${person.fullName}» записано в ЕЖООС v${saved.version}. Файл не качається — експорт з вкладки «Експорт», коли закінчите всі зміни.${normalizedWarning}`,
       );
     } catch (err) {
       setError(err instanceof Error ? err.message : "Не вдалося застосувати");
@@ -693,14 +788,43 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
       return;
     }
     setIsLoading(true);
+    setError("");
     try {
       const saved = await api.rollbackEjournalLive({
         targetVersionId: versionId,
         unitLabel: "1ПБ",
       });
-      await refreshLive();
-      setMessage(`Відкат: поточна v${saved.version}`);
-      setTab("import");
+      const state = await refreshLive();
+      const current = state.current ?? saved;
+      const full = await api.getEjournalLiveFile(current.id, "1ПБ");
+      if (!full.fileBase64) throw new Error("Відкат виконано, але файл не повернувся з БД");
+      const file = base64ToFile(
+        full.fileBase64,
+        full.sourceFileName || `ЕЖООС_v${full.version}.xlsx`,
+      );
+      const snapshot = await readWorkbookSnapshot(file, EJOOS_SYNC_READ_OPTIONS);
+      assertEjoosWorkbook(snapshot);
+      setEjoosSnapshot(snapshot);
+
+      let analysisNote = "";
+      let nextTab: EjoosWorkspaceTab = "history";
+      if (pbSnapshot) {
+        const plan = buildEjoosSyncPlan(snapshot, pbSnapshot);
+        const nextSession = groupOpsIntoPersonChanges(plan, pbSnapshot);
+        setSession(nextSession);
+        setSelectedPersonId(null);
+        analysisNote =
+          ` Операції перебудовано: ${nextSession.counters.changes}, авто ` +
+          `${nextSession.counters.autoReady}, перевірити ` +
+          `${nextSession.counters.needsReview}, конфлікти ` +
+          `${nextSession.counters.errors}.`;
+        nextTab = "changes";
+      } else {
+        setSession(null);
+      }
+
+      setMessage(`Відкат: поточна v${saved.version}.${analysisNote}`);
+      setTab(nextTab);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Не вдалося відкотити");
     } finally {
@@ -729,6 +853,7 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
     ensureEjoosLoaded,
     loadPb,
     analyzePb,
+    rebuildOperations,
     savePbToDb,
     loadPbFromDb,
     setDecision,

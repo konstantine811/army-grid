@@ -153,7 +153,7 @@ export type PbMovement = {
   arrivedFrom: string;
 };
 
-/** «Куди» у Рух часто = «x» / порожньо; реальне місце — у примітці. */
+/** «Куди» у Рух часто = «x» / порожньо; примітка не є місцем вибуття. */
 const resolveMovementDestination = (rawDest: string, note: string) => {
   const clean = (value: string) => {
     const text = value.replace(/\s+/g, " ").trim();
@@ -175,7 +175,77 @@ const resolveMovementDestination = (rawDest: string, note: string) => {
     }
     return text;
   };
-  return clean(rawDest) || clean(note);
+  void note;
+  return clean(rawDest);
+};
+
+const formatUnitForExclusionReason = (value: string) => {
+  const clean = value
+    .replace(/^_?\d+\s*/u, "")
+    .replace(/(\d)([А-ЯІЇЄҐA-Z])/gu, "$1 $2")
+    .replace(/\s+/g, " ")
+    .trim();
+  return clean;
+};
+
+const STRUCTURE_POSITION_WORDS = new Set([
+  "ВІДДІЛЕННЯ",
+  "ВІДДІЛЕННІ",
+  "ВЗВОДУ",
+  "ВЗВОДІ",
+  "РОТИ",
+  "РОТІ",
+  "БАТАЛЬЙОНУ",
+  "БАТАЛЬЙОНІ",
+  "БАТАРЕЇ",
+  "ДИВІЗІОНУ",
+  "УПРАВЛІННЯ",
+  "ШТАБУ",
+  "СЕКЦІЇ",
+  "СЛУЖБИ",
+  "ВІДДІЛУ",
+  "ГРУПИ",
+  "КОМАНДИ",
+]);
+
+const isStructureModifier = (token: string) => {
+  const word = token.toUpperCase().replace(/[^0-9А-ЯІЇЄҐA-Z]/gu, "");
+  if (!word) return false;
+  if (/^\d+$/.test(word)) return true;
+  return (
+    word.endsWith("ОГО") ||
+    word.endsWith("ЬКОГО") ||
+    word.endsWith("НОГО") ||
+    word.endsWith("ОВОГО") ||
+    word.endsWith("ЕВОГО") ||
+    word.endsWith("ОЇ") ||
+    word.endsWith("ЬКОЇ") ||
+    word.endsWith("НОЇ") ||
+    word.endsWith("ОВОЇ") ||
+    word.endsWith("ЕВОЇ") ||
+    word.endsWith("ИХ") ||
+    word.endsWith("ЬКИХ") ||
+    word.endsWith("НИХ") ||
+    word.endsWith("ОВИХ") ||
+    word.endsWith("ЕВИХ")
+  );
+};
+
+export const extractTimesheetDestinationFromPosition = (positionTitle: string) => {
+  const text = positionTitle.replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  const tokens = text.split(" ");
+  const structureIndex = tokens.findIndex((token) => {
+    const word = token.toUpperCase().replace(/[^А-ЯІЇЄҐA-Z]/gu, "");
+    return STRUCTURE_POSITION_WORDS.has(word);
+  });
+  if (structureIndex < 0) return text;
+
+  let start = structureIndex;
+  while (start > 0 && isStructureModifier(tokens[start - 1])) {
+    start -= 1;
+  }
+  return tokens.slice(start).join(" ").trim();
 };
 
 export const parsePbShPeople = (workbook: ExcelWorkbookSnapshot): PbShPerson[] => {
@@ -187,7 +257,7 @@ export const parsePbShPeople = (workbook: ExcelWorkbookSnapshot): PbShPerson[] =
   const rankCol = findCol(headers, /^зван/);
   const indexCol = findCol(headers, /індекс\s*посад/);
   const posCol = findCol(headers, /^посада$/);
-  const statusCol = findCol(headers, /^статус$/);
+  const statusCol = findCol(headers, /^статус$/, /^перебуван/);
   const fromCol = findCol(headers, /звідки.*прибув|^звідки$/);
   const people: PbShPerson[] = [];
 
@@ -283,9 +353,12 @@ export const parsePbMovements = (workbook: ExcelWorkbookSnapshot): PbMovement[] 
   const normalizeType = (value: string) => {
     const text = value.toUpperCase();
     if (text.includes("ПОСАД")) return "ПОСАДА";
+    if (text.includes("ПРИБ")) return "ПРИБУВ";
+    if (text.includes("ЗМІНИШТАТ") || text.includes("ЗМІНИ ШТАТ")) {
+      return "ПОСАДА";
+    }
     if (text.includes("РОЗПОР")) return "РОЗПОРЯДЖ";
     if (text.includes("ПЕРЕВ")) return "ПЕРЕВ";
-    if (text.includes("ПРИБ")) return "ПРИБУВ";
     if (text.includes("ЗВІЛ")) return "ЗВІЛЬН";
     if (text.includes("СЗЧ") || text.includes("САМОВІЛ")) return "СЗЧ";
     return text || "—";
@@ -325,6 +398,7 @@ export type EjoosAbsentRow = {
   excelRow: number;
   personId: string;
   fullName: string;
+  rank: string;
   positionIndex: string;
   ground: string;
   place: string;
@@ -363,6 +437,7 @@ export const parseEjoosAbsents = (
       excelRow: i + 1,
       personId: norm(row?.[2]),
       fullName,
+      rank: norm(row?.[0]),
       positionIndex,
       ground: norm(row?.[4]),
       place: norm(row?.[5]),
@@ -781,14 +856,25 @@ export const buildEjoosSyncPlan = (
     if (event.type === "ПЕРЕВ" || event.type === "РОЗПОРЯДЖ") {
       const destinationRaw = event.destination || "";
       const destinationUpper = destinationRaw.toUpperCase();
-      const destination =
+      const rawDestination =
         !destinationRaw ||
         destinationUpper.includes("РОЗПОР") ||
         destinationUpper.includes("ПЕРЕВ") ||
         destinationUpper === event.type
           ? ""
           : destinationRaw;
-      const hasDest = Boolean(destination);
+      const exclusionPlace = event.changeText || rawDestination;
+      const timesheetDestination =
+        extractTimesheetDestinationFromPosition(event.changeText) ||
+        rawDestination;
+      const unitLabel = formatUnitForExclusionReason(
+        event.arrivedFrom || rawDestination,
+      );
+      const exclusionReason =
+        event.type === "ПЕРЕВ"
+          ? `ПЕРЕВЕДЕННЯ${unitLabel ? ` ${unitLabel}` : ""}`
+          : "Розпорядження";
+      const hasRequiredExcludedFields = Boolean(exclusionPlace && exclusionReason);
       const shpo =
         (event.personId &&
           ejoosShpo.find((row) => row.personId === event.personId)) ||
@@ -810,7 +896,10 @@ export const buildEjoosSyncPlan = (
       ops.push({
         id: opId(["excl", event.movementNumber || String(event.excelRow), event.type]),
         kind: "exclude_transfer",
-        class: hasDest && Boolean(shpo || fromName) ? "ready" : "needs_input",
+        class:
+          hasRequiredExcludedFields && Boolean(shpo || fromName)
+            ? "ready"
+            : "needs_input",
         sheet: "Виключені → Табель → ШПО/ООС",
         personId: fromId,
         fullName: fromName,
@@ -819,16 +908,17 @@ export const buildEjoosSyncPlan = (
         before: shpo
           ? `ШПО R${shpo.excelRow}: ${fromRank} ${fromName} · інд. ${fromIndex}`
           : "в обліку (ШПО не знайдено — перевірте вручну)",
-        after: `виключити: ${event.type} → ${destination || "(куди?)"} · дата ${excludeDate}`,
+        after: `виключити: ${event.type} → ${exclusionPlace || "(куди?)"} · табель: ${timesheetDestination || "(куди?)"} · ${exclusionReason} · дата ${excludeDate}`,
         sourceRef: `Рух!R${event.excelRow} №${event.movementNumber}`,
-        why: hasDest
+        why: hasRequiredExcludedFields
           ? "ПЕРЕВ/РОЗПОРЯДЖ з «куди»: алгоритм Виключені → Табель (історія) → очистка ШПО/ООС. Не чіпаємо Тимч. відсутні/прибулі."
-          : "Немає «куди» у Рух — вкажіть місце вибуття вручну в картці",
-        confidence: hasDest && shpo ? "high" : "manual",
+          : "Немає посади/підстави для «Виключені» — дозаповніть вручну в картці",
+        confidence: hasRequiredExcludedFields && shpo ? "high" : "manual",
         payload: {
           movementNumber: event.movementNumber,
           type: event.type,
-          destination,
+          destination: exclusionPlace,
+          timesheetDestination,
           orderNumber: event.orderNumber,
           orderDate: event.orderDate,
           excludeDate,
@@ -840,9 +930,10 @@ export const buildEjoosSyncPlan = (
           fromName,
           fromPersonId: fromId,
           fromPositionIndex: fromIndex,
-          documentsDest: destination,
+          documentsDest: exclusionPlace,
+          exclusionReason,
         },
-        checkedDefault: hasDest && Boolean(shpo),
+        checkedDefault: hasRequiredExcludedFields && Boolean(shpo),
       });
       return;
     }

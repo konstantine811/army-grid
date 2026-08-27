@@ -68,7 +68,9 @@ async function mutateToBlob(
 ) {
   const module = await import("xlsx-populate/browser/xlsx-populate-no-encryption");
   const XlsxPopulate = module.default;
-  const workbook = await XlsxPopulate.fromDataAsync(ejoos.file);
+  const workbook = (await XlsxPopulate.fromDataAsync(
+    ejoos.file,
+  )) as unknown as WorkbookLike;
 
   const timesheet = workbook.sheet("6. Табель");
   const absent = workbook.sheet("5. Тимчасово відсутні");
@@ -181,8 +183,19 @@ type SheetLike = {
     c: number,
   ) => {
     value: (v?: unknown) => unknown;
+    style?: {
+      (name: string): unknown;
+      (names: string[]): Record<string, unknown>;
+      (styles: Record<string, unknown>): unknown;
+      (name: string, value: unknown): unknown;
+    };
   };
   row?: (r: number) => { height: (h?: number) => number };
+};
+
+type WorkbookLike = {
+  sheet: (name: string) => SheetLike | undefined;
+  outputAsync: (type: "blob") => Promise<Blob>;
 };
 
 /** ПЕРЕВ з обліку: Виключені → Табель → ШПО/ООС. Тимч. відсутні/прибулі не чіпаємо. */
@@ -204,6 +217,7 @@ function applyExcludeTransfer(input: {
     op.positionIndex;
   const destination =
     op.payload.destination || op.payload.documentsDest || "";
+  const timesheetDestination = op.payload.timesheetDestination || destination;
   const excludeDateLabel =
     op.payload.excludeDate ||
     op.payload.orderDate ||
@@ -239,9 +253,24 @@ function applyExcludeTransfer(input: {
 
   // 1) Виключені — дані зі ШПО + службові з Рух
   if (excluded) {
-    const targetRow = nextAppendRow(excluded, 6);
+    const targetRow = nextExcludedManualRow(excluded, 6);
+    copyRowPresentation(excluded, Math.max(6, targetRow - 1), targetRow, col("AF"));
+    const oosRow =
+      oos && personId
+        ? findPersonIdRow(oos, personId, 6, col("C"))
+        : oos && fullName
+          ? findPersonRowFlexible(oos, {
+              personId: "",
+              fullName,
+              positionIndex: "",
+              startRow: 6,
+              nameCol: col("B"),
+              idCol: col("C"),
+              indexCol: col("D"),
+            })
+          : 0;
+
     if (shpo && shpoRow > 0) {
-      // звання → ПІБ → ID → індекс + базові поля з ШПО
       copyCell(shpo, shpoRow, col("F"), excluded, targetRow, col("A"));
       copyCell(shpo, shpoRow, col("G"), excluded, targetRow, col("B"));
       copyCell(shpo, shpoRow, col("H"), excluded, targetRow, col("C"));
@@ -249,19 +278,28 @@ function applyExcludeTransfer(input: {
     } else {
       if (rank) excluded.cell(targetRow, col("A")).value(rank);
       if (fullName) excluded.cell(targetRow, col("B")).value(fullName);
+    }
+    if (oos && oosRow > 0) {
+      fillExcludedLookupValuesFromOos(oos, oosRow, excluded, targetRow, {
+        fillIdentity: !(shpo && shpoRow > 0),
+      });
+    } else {
       if (personId) excluded.cell(targetRow, col("C")).value(personId);
       if (positionIndex) excluded.cell(targetRow, col("D")).value(positionIndex);
     }
-    excluded.cell(targetRow, col("AB")).value(excludeDateValue);
-    excluded.cell(targetRow, col("AC")).value(excludeDateValue);
+    writeDateCell(excluded, targetRow, col("AB"), excludeDateValue);
+    writeDateCell(excluded, targetRow, col("AC"), excludeDateValue);
     excluded.cell(targetRow, col("AD")).value(op.payload.orderNumber || null);
     excluded.cell(targetRow, col("AE")).value(destination || null);
     excluded
       .cell(targetRow, col("AF"))
-      .value(op.payload.type === "РОЗПОРЯДЖ" ? "Розпорядження" : "Переведення");
-    excluded
-      .cell(targetRow, col("AG"))
-      .value(`Рух №${op.payload.movementNumber || "—"}`);
+      .value(formatExclusionReasonForCell(
+        op.payload.exclusionReason ||
+          (op.payload.type === "РОЗПОРЯДЖ"
+            ? "Розпорядження"
+            : "Переведення"),
+      ));
+    styleExcludedManualFields(excluded, targetRow);
   }
 
   // 2) Табель — історія: копія рядка + + до дня вибуття, далі −; старий рядок без особи
@@ -270,7 +308,7 @@ function applyExcludeTransfer(input: {
     copySheetRow(timesheet, timesheetRow, historyRow, col("AN"));
     writeTimesheetTransferHistory(timesheet, historyRow, {
       departDay,
-      destination,
+      destination: timesheetDestination,
       lastDay: Math.min(31, Math.max(departDay, plan.timesheetDay)),
     });
     // очистити персональну частину на старій посаді, лишити індекс/структуру
@@ -308,6 +346,172 @@ function applyExcludeTransfer(input: {
   }
 }
 
+function copyRowPresentation(
+  sheet: SheetLike,
+  sourceRow: number,
+  targetRow: number,
+  endCol: number,
+) {
+  const height = sheet.row?.(sourceRow).height();
+  if (typeof height === "number") sheet.row?.(targetRow).height(height);
+  for (let column = 1; column <= endCol; column += 1) {
+    copyCellStyle(sheet.cell(sourceRow, column), sheet.cell(targetRow, column));
+  }
+}
+
+function copyCellStyle(
+  sourceCell: ReturnType<SheetLike["cell"]>,
+  targetCell: ReturnType<SheetLike["cell"]>,
+) {
+  if (!sourceCell.style || !targetCell.style) return;
+  const styleNames = [
+    "bold",
+    "italic",
+    "underline",
+    "strikethrough",
+    "fontSize",
+    "fontFamily",
+    "fontColor",
+    "horizontalAlignment",
+    "verticalAlignment",
+    "wrapText",
+    "shrinkToFit",
+    "fill",
+    "border",
+    "leftBorder",
+    "rightBorder",
+    "topBorder",
+    "bottomBorder",
+    "numberFormat",
+  ];
+  targetCell.style(sourceCell.style(styleNames));
+}
+
+function writeDateCell(
+  sheet: SheetLike,
+  row: number,
+  column: number,
+  value: string | Date | null,
+) {
+  const cell = sheet.cell(row, column);
+  cell.value(value);
+  cell.style?.("numberFormat", "dd.mm.yyyy");
+  cell.style?.("horizontalAlignment", "center");
+  cell.style?.("verticalAlignment", "center");
+}
+
+function styleExcludedManualFields(sheet: SheetLike, row: number) {
+  [col("AB"), col("AC")].forEach((column) => {
+    const cell = sheet.cell(row, column);
+    cell.style?.("numberFormat", "dd.mm.yyyy");
+    cell.style?.("fontFamily", "Times New Roman");
+    cell.style?.("fontSize", 12);
+    cell.style?.("horizontalAlignment", "center");
+    cell.style?.("verticalAlignment", "center");
+    cell.style?.("wrapText", true);
+  });
+  [col("AD"), col("AF")].forEach((column) => {
+    const cell = sheet.cell(row, column);
+    cell.style?.("numberFormat", "General");
+    cell.style?.("fontFamily", "Times New Roman");
+    cell.style?.("fontSize", 12);
+    cell.style?.("horizontalAlignment", "center");
+    cell.style?.("verticalAlignment", "center");
+    cell.style?.("wrapText", true);
+  });
+  const destinationCell = sheet.cell(row, col("AE"));
+  destinationCell.style?.("numberFormat", "General");
+  destinationCell.style?.("fontFamily", "Times New Roman");
+  destinationCell.style?.("fontSize", 12);
+  destinationCell.style?.("horizontalAlignment", "left");
+  destinationCell.style?.("verticalAlignment", "center");
+  destinationCell.style?.("wrapText", true);
+}
+
+function formatExclusionReasonForCell(value: string) {
+  const text = value.replace(/\s+/g, " ").trim();
+  const match = text.match(/^(ПЕРЕВЕДЕННЯ|РОЗПОРЯДЖЕННЯ)\s+(.+)$/iu);
+  if (!match) return text;
+  return `${match[1].toUpperCase()}\n${match[2].toUpperCase()}`;
+}
+
+function nextExcludedManualRow(sheet: SheetLike, minRow: number) {
+  const end = sheet.usedRange()?.endCell().rowNumber() ?? minRow;
+  let lastManual = minRow - 1;
+  for (let row = minRow; row <= end; row += 1) {
+    const hasManualValue = [
+      col("A"),
+      col("B"),
+      col("AB"),
+      col("AC"),
+      col("AD"),
+      col("AE"),
+      col("AF"),
+    ].some((column) => {
+      const value = sheet.cell(row, column).value();
+      return value !== undefined && value !== null && String(value).trim() !== "";
+    });
+    if (hasManualValue) lastManual = row;
+  }
+  return lastManual + 1;
+}
+
+function fillExcludedLookupValuesFromOos(
+  oos: SheetLike,
+  oosRow: number,
+  excluded: SheetLike,
+  targetRow: number,
+  options?: { fillIdentity?: boolean },
+) {
+  const mapping: Array<[number, number]> = [
+    ...(options?.fillIdentity
+      ? ([
+          [col("C"), col("C")],
+          [col("D"), col("D")],
+        ] as Array<[number, number]>)
+      : []),
+    [col("E"), col("E")],
+    [col("F"), col("F")],
+    [col("H"), col("G")],
+    [col("I"), col("H")],
+    [col("J"), col("I")],
+    [col("K"), col("J")],
+    [col("L"), col("K")],
+    [col("V"), col("Q")],
+    [col("W"), col("R")],
+    [col("X"), col("S")],
+    [col("Z"), col("T")],
+    [col("AA"), col("U")],
+    [col("AB"), col("V")],
+    [col("AC"), col("W")],
+    [col("AD"), col("X")],
+    [col("AE"), col("Y")],
+    [col("AF"), col("Z")],
+    [col("AG"), col("AA")],
+  ];
+  mapping.forEach(([fromCol, toCol]) => {
+    const value = oos.cell(oosRow, fromCol).value();
+    if (isMeaningfulCellValue(value)) {
+      excluded.cell(targetRow, toCol).value(value);
+    } else {
+      excluded.cell(targetRow, toCol).value(null);
+    }
+  });
+}
+
+function isMeaningfulCellValue(value: unknown) {
+  if (value === undefined || value === null) return false;
+  if (value instanceof Date) return !Number.isNaN(value.getTime());
+  if (typeof value === "object") {
+    const rich = value as { text?: () => string };
+    if (typeof rich.text === "function") {
+      return rich.text().trim() !== "";
+    }
+    return false;
+  }
+  return String(value).trim() !== "";
+}
+
 function copyCell(
   from: SheetLike,
   fromRow: number,
@@ -317,7 +521,7 @@ function copyCell(
   toCol: number,
 ) {
   const value = from.cell(fromRow, fromCol).value();
-  if (value !== undefined && value !== null && String(value).trim() !== "") {
+  if (isMeaningfulCellValue(value)) {
     to.cell(toRow, toCol).value(value);
   }
 }
@@ -339,7 +543,7 @@ function writeTimesheetTransferHistory(
   opts: { departDay: number; destination: string; lastDay: number },
 ) {
   const departureText = opts.destination
-    ? `вибув до ${opts.destination}`
+    ? `вибув у ${opts.destination}`
     : "вибув";
   let presentDays = 0;
   for (let day = 1; day <= 31; day += 1) {

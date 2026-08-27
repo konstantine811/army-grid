@@ -10,13 +10,20 @@ import {
   type EjoosWorkspaceTab,
 } from "./EjoosWorkspaceContext";
 import { EjoosImportPanel } from "./EjoosImportPanel";
+import { EjoosChangesPanel } from "./EjoosChangesPanel";
 import {
   EjoosSheetViewPanel,
   type EjoosSheetKind,
 } from "./EjoosSheetViewPanel";
+import { EjoosExportPanel } from "./EjoosExportPanel";
+import { EjoosHistoryPanel } from "./EjoosHistoryPanel";
+import { EjoosPbSourcePanel } from "./EjoosPbSourcePanel";
 
 const TABS: { id: EjoosWorkspaceTab; label: string; group?: string }[] = [
   { id: "import", label: "Імпорт", group: "flow" },
+  { id: "pb", label: "1ПБ", group: "flow" },
+  { id: "changes", label: "Операції", group: "flow" },
+  { id: "history", label: "Історія", group: "flow" },
   { id: "shpo", label: "ШПО", group: "view" },
   { id: "oos", label: "ООС", group: "view" },
   { id: "excluded", label: "Виключені", group: "view" },
@@ -24,6 +31,7 @@ const TABS: { id: EjoosWorkspaceTab; label: string; group?: string }[] = [
   { id: "tempAbsents", label: "Тимчасові відсутні", group: "view" },
   { id: "timesheet", label: "Табель", group: "view" },
   { id: "irrevocableLosses", label: "Безповоротні втрати", group: "view" },
+  { id: "export", label: "Експорт", group: "flow" },
 ];
 
 const SHEET_TABS = new Set<EjoosWorkspaceTab>([
@@ -39,6 +47,10 @@ const SHEET_TABS = new Set<EjoosWorkspaceTab>([
 function WorkspaceBody() {
   const { tab } = useEjoosWorkspace();
   if (tab === "import") return <EjoosImportPanel />;
+  if (tab === "pb") return <EjoosPbSourcePanel />;
+  if (tab === "changes") return <EjoosChangesPanel />;
+  if (tab === "history") return <EjoosHistoryPanel />;
+  if (tab === "export") return <EjoosExportPanel />;
   if (SHEET_TABS.has(tab)) {
     return <EjoosSheetViewPanel kind={tab as EjoosSheetKind} />;
   }

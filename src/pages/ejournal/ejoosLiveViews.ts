@@ -11,6 +11,7 @@ import {
 } from "./ejoosSyncPlan";
 import type { EjoosDiffSession } from "./ejoosPersonDiff";
 import type { BackendEjournalLiveVersion } from "../../api";
+import { formatValueForDisplay } from "../../shared/format";
 
 const norm = (value: CellValue | unknown) => {
   if (value && typeof value === "object" && !(value instanceof Date)) {
@@ -22,6 +23,11 @@ const norm = (value: CellValue | unknown) => {
   return String(value ?? "")
     .replace(/\s+/g, " ")
     .trim();
+};
+
+const normDate = (value: CellValue | unknown) => {
+  const formatted = formatValueForDisplay(value);
+  return String(formatted ?? "").replace(/\s+/g, " ").trim();
 };
 
 const normKey = (value: string) =>
@@ -64,6 +70,23 @@ export type EjoosArrivalRow = {
   note: string;
 };
 
+export type EjoosIrrevocableLossRow = {
+  excelRow: number;
+  personId: string;
+  fullName: string;
+  rank: string;
+  positionIndex: string;
+  serviceType: string;
+  birthDate: string;
+  birthPlace: string;
+  recruitedBy: string;
+  relatives: string;
+  lossType: string;
+  lossDate: string;
+  circumstances: string;
+  lossPlace: string;
+};
+
 export type EjoosCheckItem = {
   id: string;
   severity: "ok" | "warn" | "error";
@@ -87,6 +110,7 @@ export type EjoosLiveView = {
   absentsOpen: EjoosAbsentRow[];
   absentsClosed: EjoosAbsentRow[];
   arrivals: EjoosArrivalRow[];
+  irrevocableLosses: EjoosIrrevocableLossRow[];
   excluded: EjoosExcludedRow[];
   checks: EjoosCheckItem[];
   todayChanges: EjoosTodayChange[];
@@ -96,6 +120,7 @@ export type EjoosLiveView = {
     vacant: number;
     absentsOpen: number;
     arrivals: number;
+    irrevocableLosses: number;
     excluded: number;
     onDutyToday: number;
   };
@@ -134,20 +159,50 @@ const parseArrivals = (sheet: ExcelSheetSnapshot | undefined): EjoosArrivalRow[]
   const rows: EjoosArrivalRow[] = [];
   for (let i = 5; i < sheet.rawRows.length; i += 1) {
     const row = sheet.rawRows[i];
-    const fullName = norm(row?.[6]) || norm(row?.[1]);
-    const personId = norm(row?.[7]) || norm(row?.[2]);
-    const positionIndex = norm(row?.[3]) || norm(row?.[1]);
+    const fullName = norm(row?.[1]) || norm(row?.[6]);
+    const personId = norm(row?.[2]);
+    const positionIndex = norm(row?.[4]) || norm(row?.[3]);
     if (!fullName && !personId && !/^\d/.test(positionIndex)) continue;
     if (!fullName && !personId) continue;
     rows.push({
       excelRow: i + 1,
       personId,
       fullName,
-      rank: norm(row?.[5]) || norm(row?.[4]),
+      rank: norm(row?.[0]) || norm(row?.[5]),
       positionIndex,
-      fromUnit: norm(row?.[8]) || norm(row?.[9]),
-      arriveDate: norm(row?.[10]) || norm(row?.[6]),
-      note: norm(row?.[11]) || norm(row?.[12]),
+      fromUnit: norm(row?.[5]) || norm(row?.[8]),
+      arriveDate: normDate(row?.[7]) || normDate(row?.[10]),
+      note: norm(row?.[15]) || norm(row?.[11]) || norm(row?.[12]),
+    });
+  }
+  return rows;
+};
+
+const parseIrrevocableLosses = (
+  sheet: ExcelSheetSnapshot | undefined,
+): EjoosIrrevocableLossRow[] => {
+  if (!sheet) return [];
+  const rows: EjoosIrrevocableLossRow[] = [];
+  for (let i = 5; i < sheet.rawRows.length; i += 1) {
+    const row = sheet.rawRows[i];
+    const fullName = norm(row?.[1]);
+    const personId = norm(row?.[4]);
+    if (!fullName && !personId) continue;
+    rows.push({
+      excelRow: i + 1,
+      personId,
+      fullName,
+      rank: norm(row?.[0]),
+      positionIndex: norm(row?.[2]),
+      serviceType: norm(row?.[3]),
+      birthDate: normDate(row?.[7]),
+      birthPlace: norm(row?.[8]),
+      recruitedBy: [norm(row?.[9]), normDate(row?.[10])].filter(Boolean).join(" "),
+      relatives: norm(row?.[11]),
+      lossType: norm(row?.[12]),
+      lossDate: normDate(row?.[13]),
+      circumstances: norm(row?.[14]),
+      lossPlace: norm(row?.[15]),
     });
   }
   return rows;
@@ -388,6 +443,7 @@ export const buildEjoosLiveView = (input: {
       absentsOpen: [],
       absentsClosed: [],
       arrivals: [],
+      irrevocableLosses: [],
       excluded: [],
       checks: buildChecks({
         hasLive: false,
@@ -404,6 +460,7 @@ export const buildEjoosLiveView = (input: {
         vacant: 0,
         absentsOpen: 0,
         arrivals: 0,
+        irrevocableLosses: 0,
         excluded: 0,
         onDutyToday: 0,
       },
@@ -412,6 +469,7 @@ export const buildEjoosLiveView = (input: {
 
   const absentSheet = findEjoosSheet(input.workbook, /тимчасов.*відсут/i);
   const arrivalSheet = findEjoosSheet(input.workbook, /тимчасов.*прибул/i);
+  const irrevocableLossSheet = findEjoosSheet(input.workbook, /безповорот/i);
   const excludedSheet = findEjoosSheet(input.workbook, /виключ/i);
   const timesheetSheet = findEjoosSheet(input.workbook, /табель/i);
   const shpoSheet = findEjoosSheet(input.workbook, /шпо|штатно.?посад/i);
@@ -423,6 +481,7 @@ export const buildEjoosLiveView = (input: {
   const timesheet = parseEjoosTimesheetDay(timesheetSheet, dayInfo.day);
   const roster = buildRoster(shpo, timesheet);
   const arrivals = parseArrivals(arrivalSheet);
+  const irrevocableLosses = parseIrrevocableLosses(irrevocableLossSheet);
   const excluded = parseExcluded(excludedSheet);
   const occupied = roster.filter((row) => !row.isVacant);
   const onDutyToday = occupied.filter((row) => row.dayCode === "+").length;
@@ -441,6 +500,7 @@ export const buildEjoosLiveView = (input: {
     absentsOpen,
     absentsClosed,
     arrivals,
+    irrevocableLosses,
     excluded,
     checks: buildChecks({
       hasLive: true,
@@ -455,6 +515,7 @@ export const buildEjoosLiveView = (input: {
       vacant: roster.length - occupied.length,
       absentsOpen: absentsOpen.length,
       arrivals: arrivals.length,
+      irrevocableLosses: irrevocableLosses.length,
       excluded: excluded.length,
       onDutyToday,
     },

@@ -100,16 +100,23 @@ export const getInitialBchsAnalyticsTab = (): BchsAnalyticsTab => {
 
 export type EjoosWorkspaceTab =
   | "import"
+  | "pb"
+  | "changes"
+  | "history"
   | "shpo"
   | "oos"
   | "excluded"
   | "tempArrivals"
   | "tempAbsents"
   | "timesheet"
-  | "irrevocableLosses";
+  | "irrevocableLosses"
+  | "export";
 
 const EJOOS_WORKSPACE_TABS: readonly EjoosWorkspaceTab[] = [
   "import",
+  "pb",
+  "changes",
+  "history",
   "shpo",
   "oos",
   "excluded",
@@ -117,6 +124,7 @@ const EJOOS_WORKSPACE_TABS: readonly EjoosWorkspaceTab[] = [
   "tempAbsents",
   "timesheet",
   "irrevocableLosses",
+  "export",
 ] as const;
 
 export const isEjoosWorkspaceTab = (

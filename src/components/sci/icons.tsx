@@ -43,6 +43,7 @@ import {
   UserSearch,
   Users,
   Wrench,
+  WrapText,
   XCircle,
   AlertTriangle,
 } from "lucide-react";
@@ -123,3 +124,4 @@ export const SyncAltOutlinedIcon = withCompatIcon(ClipboardList);
 export const TableChartOutlinedIcon = withCompatIcon(FileSpreadsheet);
 export const UploadFileOutlinedIcon = withCompatIcon(Upload);
 export const WarningAmberOutlinedIcon = withCompatIcon(AlertTriangle);
+export const WrapTextOutlinedIcon = withCompatIcon(WrapText);
