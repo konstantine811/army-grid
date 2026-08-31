@@ -5,6 +5,7 @@ import {
   parseEjoosShpo,
   parseEjoosTimesheetDay,
   parseTimesheetDayFromPbName,
+  resolveJournalTimesheetDay,
   type EjoosAbsentRow,
   type EjoosShpoRow,
   type EjoosTimesheetRow,
@@ -228,9 +229,9 @@ const resolveDay = (input: {
     }
   }
   if (input.pbFileName) {
-    return parseTimesheetDayFromPbName(input.pbFileName);
+    return resolveJournalTimesheetDay(input.pbFileName);
   }
-  return parseTimesheetDayFromPbName("");
+  return resolveJournalTimesheetDay("");
 };
 
 const buildRoster = (

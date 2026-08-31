@@ -22,7 +22,7 @@ import {
   resetOperatorSettings,
   writeOperatorSettings,
 } from "./ejoosStatusMap";
-import { useEjoosWorkspace } from "./EjoosWorkspaceContext";
+import { useEjoosWorkspace } from "./ejoosWorkspaceState";
 import { api } from "../../api";
 
 const CONFIDENCE_OPTIONS: EjoosStatusConfidence[] = [

@@ -1,3 +1,4 @@
+import JSZip from "jszip";
 import type { ExcelWorkbookSnapshot } from "../../excelRoundTrip";
 
 export type WorkbookKind = "ejoos" | "pb_1pb" | "unknown";
@@ -8,29 +9,42 @@ const sheetNamesOf = (workbook: ExcelWorkbookSnapshot) =>
 const hasAny = (names: string[], patterns: RegExp[]) =>
   patterns.some((pattern) => names.some((name) => pattern.test(name)));
 
-/** Визначає тип Excel: шаблон/журнал ЕЖООС vs штатка 1ПБ (sh / Рух / archive). */
-export const detectWorkbookKind = (
-  workbook: ExcelWorkbookSnapshot,
-): WorkbookKind => {
-  const names = sheetNamesOf(workbook);
-  const hasSh = hasAny(names, [/^sh$/i]);
+const kindFromNames = (names: string[]): WorkbookKind => {
+  const lower = names.map((name) => name.trim().toLowerCase());
+  const hasSh = hasAny(lower, [/^sh$/i]);
   const looksLikeEjoos =
-    hasAny(names, [/шпо|штатно.?посад/i]) &&
-    hasAny(names, [/оос|облік\s*особов/i]) &&
-    hasAny(names, [/табель/i]);
-  // 1ПБ завжди має sh; ЕЖООС — ніколи. Рух/archive підтверджують, але не обовʼязкові.
+    hasAny(lower, [/шпо|штатно.?посад/i]) &&
+    hasAny(lower, [/оос|облік\s*особов/i]) &&
+    hasAny(lower, [/табель/i]);
   const looksLikePb = hasSh && !looksLikeEjoos;
 
   if (looksLikeEjoos && !looksLikePb) return "ejoos";
   if (looksLikePb && !looksLikeEjoos) return "pb_1pb";
-  if (looksLikeEjoos && looksLikePb) {
-    // Рідкісний гібрид — пріоритет ЕЖООС, якщо є ключові аркуші журналу.
-    return "ejoos";
-  }
+  if (looksLikeEjoos && looksLikePb) return "ejoos";
   if (looksLikeEjoos) return "ejoos";
   if (looksLikePb) return "pb_1pb";
   return "unknown";
 };
+
+/** Лише workbook.xml — без xlsx-populate, щоб експорт не валив вкладку. */
+export async function readWorkbookSheetNames(
+  file: Blob | File,
+): Promise<string[]> {
+  const zip = await JSZip.loadAsync(await file.arrayBuffer());
+  const workbookXml = await zip.file("xl/workbook.xml")?.async("string");
+  if (!workbookXml) return [];
+  return [...workbookXml.matchAll(/<sheet\b[^>]*\bname="([^"]+)"/gi)].map(
+    (match) => match[1],
+  );
+}
+
+export const detectWorkbookKindFromFile = async (file: Blob | File) =>
+  kindFromNames(await readWorkbookSheetNames(file));
+
+/** Визначає тип Excel: шаблон/журнал ЕЖООС vs штатка 1ПБ (sh / Рух / archive). */
+export const detectWorkbookKind = (
+  workbook: ExcelWorkbookSnapshot,
+): WorkbookKind => kindFromNames(sheetNamesOf(workbook));
 
 export const assertEjoosWorkbook = (workbook: ExcelWorkbookSnapshot): void => {
   const kind = detectWorkbookKind(workbook);
@@ -69,14 +83,13 @@ export const assertPbWorkbook = (workbook: ExcelWorkbookSnapshot): void => {
 };
 
 export const ejoosDownloadFileName = (
-  version: number,
+  _version: number,
   asOfDate?: string | null,
-  fallback?: string | null,
+  _fallback?: string | null,
 ) => {
   if (asOfDate) {
     const stamp = asOfDate.replaceAll(".", "-");
-    return `ЄЖООС_v${version}_станом_на_${stamp}.xlsx`;
+    return `ЄЖООС_станом_на_${stamp}.xlsx`;
   }
-  if (fallback && /ежоос|єжоос|ejoos/i.test(fallback)) return fallback;
-  return `ЄЖООС_v${version}.xlsx`;
+  return "ЄЖООС.xlsx";
 };

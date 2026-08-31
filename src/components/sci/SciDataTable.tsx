@@ -20,6 +20,8 @@ export type MRT_ColumnDef<TData> = {
   accessorKey?: keyof TData | string;
   header?: ReactNode;
   Header?: () => ReactNode;
+  /** Назва в меню «Колонки», якщо header порожній або не текст. */
+  columnMenuLabel?: string;
   accessorFn?: (row: TData) => ReactNode;
   exportValue?: (row: TData) => string;
   Cell?: (props: {
@@ -73,6 +75,8 @@ type SciTableOptions<TData> = {
   enableGlobalFilter?: boolean;
   globalFilterPlaceholder?: string;
   exportLabel?: string;
+  copyLabel?: string;
+  enableCopyText?: boolean;
   onExport?: (
     context: SciDataTableExportContext<TData>,
   ) => void | Promise<void>;
@@ -153,6 +157,18 @@ export function MaterialReactTable<TData>({
   >({});
   const [openMenu, setOpenMenu] = useState<string | null>(null);
   const [sorting, setSorting] = useState<ColumnSortState | null>(null);
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "error">(
+    "idle",
+  );
+  const copyResetRef = useRef<number | null>(null);
+  useEffect(
+    () => () => {
+      if (copyResetRef.current != null) {
+        window.clearTimeout(copyResetRef.current);
+      }
+    },
+    [],
+  );
   const scrollParentRef = useRef<HTMLDivElement | null>(null);
   const pinnedColumns = useMemo(
     () =>
@@ -368,10 +384,24 @@ export function MaterialReactTable<TData>({
     table.getRowId,
   ]);
 
+  const visibleExportColumns = useMemo(
+    () =>
+      preparedColumns
+        .filter((column) => columnVisibility[column.columnId] !== false)
+        .filter((column) => column.columnId !== "actions")
+        .map((column) => ({
+          id: column.columnId,
+          label: column.label,
+          value: (row: TData) =>
+            column.exportValue?.(row) ?? getPlainCellValue(column, row),
+        })),
+    [columnVisibility, preparedColumns],
+  );
   const showToolbar =
     table.enableGlobalFilter !== false ||
     table.enableColumnVisibility !== false ||
-    Boolean(table.onExport);
+    Boolean(table.onExport) ||
+    table.enableCopyText === true;
   const hasColumnFilters =
     table.enableColumnFilters !== false &&
     visibleColumns.some((column) => column.enableColumnFilter !== false);
@@ -422,6 +452,39 @@ export function MaterialReactTable<TData>({
               />
             </label>
           ) : null}
+          {table.enableCopyText === true ? (
+            <button
+              type="button"
+              className={
+                copyState === "copied"
+                  ? "sci-data-table-export is-copied"
+                  : copyState === "error"
+                    ? "sci-data-table-export is-error"
+                    : "sci-data-table-export"
+              }
+              onClick={() => {
+                void copyVisibleRowsAsText(
+                  sortedRows,
+                  visibleExportColumns,
+                ).then((ok) => {
+                  if (copyResetRef.current != null) {
+                    window.clearTimeout(copyResetRef.current);
+                  }
+                  setCopyState(ok ? "copied" : "error");
+                  copyResetRef.current = window.setTimeout(() => {
+                    setCopyState("idle");
+                    copyResetRef.current = null;
+                  }, 1800);
+                });
+              }}
+            >
+              {copyState === "copied"
+                ? "Скопійовано"
+                : copyState === "error"
+                  ? "Не вдалося"
+                  : (table.copyLabel ?? "Копіювати")}
+            </button>
+          ) : null}
           {table.onExport ? (
             <button
               type="button"
@@ -429,18 +492,7 @@ export function MaterialReactTable<TData>({
               onClick={() =>
                 void table.onExport?.({
                   rows: filteredRows,
-                  columns: preparedColumns
-                    .filter(
-                      (column) => columnVisibility[column.columnId] !== false,
-                    )
-                    .filter((column) => column.columnId !== "actions")
-                    .map((column) => ({
-                      id: column.columnId,
-                      label: column.label,
-                      value: (row) =>
-                        column.exportValue?.(row) ??
-                        getPlainCellValue(column, row),
-                    })),
+                  columns: visibleExportColumns,
                 })
               }
             >
@@ -783,7 +835,7 @@ function prepareColumn<TData>(
   return {
     ...column,
     columnId,
-    label: labelText(column.header ?? columnId),
+    label: column.columnMenuLabel || labelText(column.header ?? columnId),
     width: column.size ?? column.minSize ?? 160,
     pin:
       column.pin ?? (leftPinned ? "left" : rightPinned ? "right" : undefined),
@@ -1203,6 +1255,44 @@ function renderCell<TData>(
   }
 
   return value;
+}
+
+function escapeTsvCell(value: string) {
+  const text = String(value ?? "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n");
+  if (/[\t\n"]/.test(text)) return `"${text.replace(/"/g, '""')}"`;
+  return text;
+}
+
+async function copyVisibleRowsAsText<TData>(
+  rows: TData[],
+  columns: Array<{ label: string; value: (row: TData) => string }>,
+) {
+  const header = columns.map((column) => escapeTsvCell(column.label)).join("\t");
+  const lines = rows.map((row) =>
+    columns.map((column) => escapeTsvCell(column.value(row) ?? "")).join("\t"),
+  );
+  const text = [header, ...lines].join("\n");
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    try {
+      const area = document.createElement("textarea");
+      area.value = text;
+      area.setAttribute("readonly", "");
+      area.style.position = "fixed";
+      area.style.left = "-9999px";
+      document.body.appendChild(area);
+      area.select();
+      const ok = document.execCommand("copy");
+      document.body.removeChild(area);
+      return ok;
+    } catch {
+      return false;
+    }
+  }
 }
 
 function getPlainCellValue<TData>(column: MRT_ColumnDef<TData>, row: TData) {

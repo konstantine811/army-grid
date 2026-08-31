@@ -1,6 +1,56 @@
+import JSZip from "jszip";
 import type { ExcelWorkbookSnapshot } from "../../excelRoundTrip";
 import type { EjoosSyncOp, EjoosSyncPlan } from "./ejoosSyncPlan";
-import { buildProtocolText } from "./ejoosSyncPlan";
+import {
+  buildProtocolText,
+  findEjoosSheet,
+  refreshPlanTimesheetHorizon,
+} from "./ejoosSyncPlan";
+import {
+  EXCLUDED_TO_OOS_BASE,
+  formatExcludedListBasis,
+  formatTimesheetTransferMark,
+  OOS_TO_EXCLUDED_BASE,
+} from "./ejoosExcludedColumns";
+import { applyExcludeTransfersWithZip } from "./ejoosExcludeTransferZip";
+import { applyDispositionWithZip } from "./ejoosDispositionZip";
+import { applyPositionChangeWithZip } from "./ejoosPositionChangeZip";
+import {
+  applyOosHistoryPresentation,
+  applyRankLabelsWithZip,
+} from "./ejoosOosZip";
+import {
+  applyInlineStringWritesToWorkbook,
+  type ZipCellWrite,
+} from "./ejoosZipCellWrites";
+import {
+  repairBrokenCellOpenTags,
+  stripInvalidNumericCellValues,
+} from "./ejoosWorkbookSanitize";
+import {
+  clipAbsenceSpansToActiveEpisode,
+  dayFromOrderLabel,
+  isTimesheetDepartureMark,
+  parseTimesheetAbsenceSpans,
+  timesheetCodeOnDay,
+  timesheetMarkFromArchive,
+  timesheetTransferMarkForDay,
+} from "./ejoosTimesheetText";
+import { excludeWritePlan } from "./ejoosExcludePolicy";
+import { personChangesFromOps } from "./ejoosPersonDiff";
+import {
+  serializeAppliedPerson,
+  serializeSyncOp,
+} from "./ejoosAppliedHistory";
+import { appendApplyHistorySheetRows } from "./ejoosChangeHistorySheet";
+import {
+  cellValueToOosText,
+  findOosStyleSourceRow,
+  formatOosRelativesText,
+  mergeOosHistoryValue,
+  OOS_HISTORY_COLUMNS,
+  OOS_RELATIVES_COLUMN,
+} from "./ejoosOosText";
 
 const col = (letter: string) => {
   let index = 0;
@@ -9,6 +59,40 @@ const col = (letter: string) => {
   }
   return index; // 1-based
 };
+
+const isSinglePersonMovement = (op: EjoosSyncOp) =>
+  op.kind === "exclude_transfer" || op.kind === "move_to_disposition";
+
+const isRankBeforeExclude = (op: EjoosSyncOp) => op.kind === "rank_change";
+
+const applyKindOrder = (op: EjoosSyncOp) => {
+  if (op.kind === "rank_change") return 0;
+  if (op.kind === "exclude_transfer") return 1;
+  if (
+    op.kind === "other_manual" &&
+    op.payload.type === "TRANSFER_CANCELLED"
+  ) {
+    return 9;
+  }
+  return 2;
+};
+
+const transferCancelUndoBlocksTimesheet = (
+  ops: EjoosSyncOp[],
+  op: EjoosSyncOp,
+) =>
+  ops.some(
+    (other) =>
+      other.payload.type === "TRANSFER_CANCELLED" &&
+      other.payload.restoreTimesheet === "1" &&
+      other.payload.reviewReason !== "CANCEL_TRANSFER_BUT_NOT_IN_CURRENT_SH" &&
+      (other.personId === op.personId ||
+        other.fullName.toLocaleLowerCase("uk-UA") ===
+          op.fullName.toLocaleLowerCase("uk-UA")),
+  );
+
+const closesOldPosition = (op: EjoosSyncOp) =>
+  op.kind === "position_change" && op.payload.closeOldPosition === "1";
 
 /**
  * Apply only confirmed ops to a copy of the live ЕЖООС workbook.
@@ -19,52 +103,165 @@ export async function applyConfirmedEjoosOps(input: {
   plan: EjoosSyncPlan;
   ops: EjoosSyncOp[];
   actor?: string;
+  history?: { version: number; appliedAt?: string };
 }): Promise<{
   blob: Blob;
   fileName: string;
   protocolText: string;
   changeProtocol: Record<string, unknown>;
+  /** Результат зібрано точковим записом XML і вже не потребує санітизації книги. */
+  directXml: boolean;
 }> {
-  const { ejoos, plan, ops, actor } = input;
-  if (!ops.length) {
+  const { ejoos, actor } = input;
+  const plan: EjoosSyncPlan = {
+    ...input.plan,
+    ...refreshPlanTimesheetHorizon(input.plan),
+  };
+  // Позначка помилки даних — інформаційна: у книгу нічого не пишемо.
+  const ops = input.ops.filter((op) => op.kind !== "data_mismatch");
+  if (!input.ops.length) {
     throw new Error("Немає підтверджених змін для застосування");
+  }
+  if (!ops.length) {
+    throw new Error(
+      "Обрано лише позначки ПІБ / ID / звання. Їх виправляють у джерелах — у ЕЖООС нічого не пишемо.",
+    );
+  }
+  const personKey = (op: EjoosSyncOp) =>
+    String(op.personId || op.fullName || "")
+      .trim()
+      .toLocaleLowerCase("uk-UA");
+  const integratedPersons = new Set(
+    ops.filter(isSinglePersonMovement).map(personKey).filter(Boolean),
+  );
+  // Комплексний рух уже включає всі потрібні аркуші. Окремі операції
+  // цієї ж особи не повинні запускати повторний повний rewrite книги.
+  // Звання перед ПЕРЕВ лишаємо: інакше у «Виключені» піде старе звання.
+  const appliedOps = ops
+    .filter(
+      (op) =>
+        isSinglePersonMovement(op) ||
+        isRankBeforeExclude(op) ||
+        !integratedPersons.has(personKey(op)),
+    )
+    .sort((left, right) => applyKindOrder(left) - applyKindOrder(right));
+  // Комплексні рухи пишемо точково в XML, тому кілька осіх одного типу — можна.
+  // Небезпечний лише змішаний набір: він тягне повний rewrite книги.
+  const onlyExcludeAndRank = appliedOps.every(
+    (op) => op.kind === "exclude_transfer" || op.kind === "rank_change",
+  );
+  const onlyDispositionFamily = appliedOps.every(
+    (op) =>
+      op.kind === "move_to_disposition" ||
+      op.kind === "rank_change" ||
+      op.kind === "absent_upsert" ||
+      op.kind === "absent_close",
+  );
+  const onePerson =
+    new Set(appliedOps.map(personKey).filter(Boolean)).size <= 1;
+  const uniformIntegratedKind =
+    appliedOps.every((op) => op.kind === "exclude_transfer") ||
+    appliedOps.every((op) => op.kind === "move_to_disposition") ||
+    (integratedPersons.size > 0 && onlyExcludeAndRank) ||
+    (onePerson && onlyDispositionFamily);
+  // Одна картка (звання + СЗЧ / розпорядження) — не «змішана пачка».
+  if (integratedPersons.size > 0 && !uniformIntegratedKind && !onePerson) {
+    throw new Error(
+      "Комплексний рух (виключення або розпорядження) застосовуйте окремо від інших змін. Це захищає ЕЖООС від повного перезапису та пошкодження аркушів.",
+    );
+  }
+
+  const incompleteTransfer = appliedOps.find(
+    (op) =>
+      op.kind === "exclude_transfer" &&
+      (!op.payload.destination?.trim() ||
+        !op.payload.excludeDate?.trim() ||
+        !op.payload.orderNumber?.trim() ||
+        !op.payload.orderDate?.trim()),
+  );
+  if (incompleteTransfer) {
+    throw new Error(
+      `Для ${incompleteTransfer.fullName || incompleteTransfer.personId} вкажіть куди вибув, дату виключення, номер і дату стройового наказу.`,
+    );
   }
 
   const fileName = `ЄЖООС_станом_на_${plan.timesheetDayLabel.replaceAll(".", "-")}.xlsx`;
-  const blob = await mutateToBlob(ejoos, ops, plan, actor);
-  const protocolText = buildProtocolText(plan, ops, {
+  // Точковий запис XML безпечніший для книги, тому вибираємо його, коли всі
+  // підтверджені операції одного типу. Змішаний набір іде звичайним шляхом.
+  const excludeOps = appliedOps.filter((op) => op.kind === "exclude_transfer");
+  const dispositionOps = appliedOps.filter(
+    (op) => op.kind === "move_to_disposition",
+  );
+  const positionOps = appliedOps.filter(closesOldPosition);
+  const useExcludeZip =
+    excludeOps.length > 0 &&
+    (onePerson || onlyExcludeAndRank || excludeOps.length === appliedOps.length);
+  const useDispositionZip =
+    !useExcludeZip &&
+    dispositionOps.length > 0 &&
+    (onePerson ||
+      onlyDispositionFamily ||
+      dispositionOps.length === appliedOps.length);
+  const usePositionZip =
+    !useExcludeZip &&
+    !useDispositionZip &&
+    positionOps.length > 0 &&
+    appliedOps.every((op) => closesOldPosition(op) || op.kind === "rank_change");
+  const directXml = useExcludeZip || useDispositionZip || usePositionZip;
+  const rawBlob = useExcludeZip
+    ? await applyExcludeTransfersWithZip({ ejoos, plan, ops: excludeOps })
+    : useDispositionZip
+      ? await applyDispositionWithZip({ ejoos, plan, ops: dispositionOps })
+      : usePositionZip
+        ? await applyPositionChangeWithZip({ ejoos, plan, ops: positionOps })
+        : await mutateToBlob(ejoos, appliedOps, plan);
+  const blob = await applyExcludedClearsWithZip({
+    file: await applyRankLabelsWithZip({
+      file: await applyOosHistoryPresentation({
+        file: rawBlob,
+        ejoos,
+        ops: appliedOps,
+        plan,
+      }),
+      ops: appliedOps,
+    }),
+    ejoos,
+    ops: appliedOps,
+  });
+  const protocolText = buildProtocolText(plan, appliedOps, {
     actor,
     at: new Date().toLocaleString("uk-UA"),
   });
+  const people = personChangesFromOps(appliedOps, plan.timesheetDay, {
+    decision: "accepted",
+  }).map(serializeAppliedPerson);
   const changeProtocol = {
     kind: "apply",
     pbFileName: plan.pbName,
     timesheetDay: plan.timesheetDay,
     timesheetDayLabel: plan.timesheetDayLabel,
-    appliedCount: ops.length,
-    ops: ops.map((op) => ({
-      id: op.id,
-      kind: op.kind,
-      sheet: op.sheet,
-      personId: op.personId,
-      fullName: op.fullName,
-      positionIndex: op.positionIndex,
-      before: op.before,
-      after: op.after,
-      sourceRef: op.sourceRef,
-      why: op.why,
-    })),
+    appliedCount: appliedOps.length,
+    ops: appliedOps.map(serializeSyncOp),
+    people,
     protocolText,
   };
+  let blobWithHistory = blob;
+  if (input.history?.version) {
+    const appliedAt = input.history.appliedAt || new Date().toISOString();
+    blobWithHistory = await appendApplyHistorySheetRows(blobWithHistory, {
+      version: input.history.version,
+      appliedAt,
+      people,
+    });
+  }
 
-  return { blob, fileName, protocolText, changeProtocol };
+  return { blob: blobWithHistory, fileName, protocolText, changeProtocol, directXml };
 }
 
 async function mutateToBlob(
   ejoos: ExcelWorkbookSnapshot,
   ops: EjoosSyncOp[],
   plan: EjoosSyncPlan,
-  actor?: string,
 ) {
   const module = await import("xlsx-populate/browser/xlsx-populate-no-encryption");
   const XlsxPopulate = module.default;
@@ -73,13 +270,17 @@ async function mutateToBlob(
   )) as unknown as WorkbookLike;
 
   const timesheet = workbook.sheet("6. Табель");
+  const arrivals = workbook.sheet("4. Тимчасово прибулі");
   const absent = workbook.sheet("5. Тимчасово відсутні");
   const excluded = workbook.sheet("3. Виключені");
   const oos = workbook.sheet("2. ООС");
   const shpo = workbook.sheet("1. ШПО");
-  const history = workbook.sheet("10. Історія змін");
 
-  ops.forEach((op) => {
+  const sortedOps = [...ops].sort(
+    (left, right) => applyKindOrder(left) - applyKindOrder(right),
+  );
+
+  sortedOps.forEach((op) => {
     if (op.kind === "shpo_occupant") {
       const shpoRow = Number(op.payload.shpoExcelRow || 0);
       const tsRow = Number(op.payload.timesheetExcelRow || 0);
@@ -95,13 +296,49 @@ async function mutateToBlob(
         if (rank) timesheet.cell(tsRow, col("F")).value(rank);
         if (name) timesheet.cell(tsRow, col("G")).value(name);
         if (personId) timesheet.cell(tsRow, col("H")).value(personId);
+        if (
+          !transferCancelUndoBlocksTimesheet(sortedOps, op) &&
+          (op.payload.timesheetAbsenceSpans || op.payload.timesheetActiveFrom)
+        ) {
+          paintTimesheetArchiveDays(timesheet, tsRow, plan, op.payload);
+        }
       }
+      clearStaleExcludedRow(excluded, op.payload.clearExcludedExcelRow);
       return;
     }
     if (op.kind === "timesheet_day" && timesheet) {
       const rowNumber = Number(op.payload.excelRow || 0);
+      if (op.payload.clearStalePerson === "1" && rowNumber > 0) {
+        if (op.payload.clearTimesheetIndex === "1") {
+          timesheet.cell(rowNumber, col("B")).value(null);
+        }
+        timesheet.cell(rowNumber, col("F")).value(null);
+        timesheet.cell(rowNumber, col("G")).value(null);
+        timesheet.cell(rowNumber, col("H")).value(null);
+        for (let day = 1; day <= 31; day += 1) {
+          timesheet.cell(rowNumber, col("I") + day - 1).value(null);
+        }
+        timesheet.cell(rowNumber, col("AN")).value(null);
+        return;
+      }
       const day = Number(op.payload.day || plan.timesheetDay);
       const code = op.payload.timesheetCode || String(op.after || "").trim();
+      if (op.payload.restorePerson === "1" && rowNumber > 0) {
+        const name = op.payload.nextName || op.fullName;
+        const personId = op.payload.nextPersonId || op.personId;
+        if (name) timesheet.cell(rowNumber, col("G")).value(name);
+        if (personId) timesheet.cell(rowNumber, col("H")).value(personId);
+        if (op.payload.nextRank) {
+          timesheet.cell(rowNumber, col("F")).value(op.payload.nextRank);
+        }
+      }
+      if (op.payload.type === "PAINT_ARCHIVE") {
+        if (!transferCancelUndoBlocksTimesheet(sortedOps, op)) {
+          paintTimesheetArchiveDays(timesheet, rowNumber, plan, op.payload);
+          repairHistoryTimesheetRow(timesheet, op, plan.timesheetDay);
+        }
+        return;
+      }
       if (
         rowNumber > 0 &&
         day >= 1 &&
@@ -116,16 +353,26 @@ async function mutateToBlob(
     if (op.kind === "absent_close" && absent) {
       const rowNumber = Number(op.payload.excelRow || 0);
       if (rowNumber > 0) {
-        absent
-          .cell(rowNumber, col("M"))
-          .value(op.payload.returnDate || plan.timesheetDayLabel);
+        writeAbsenceReturn(absent, rowNumber, op.payload, plan.timesheetDayLabel);
+      }
+      const timesheetRow = Number(op.payload.timesheetExcelRow || 0);
+      if (timesheet && timesheetRow > 0) {
+        if (!transferCancelUndoBlocksTimesheet(sortedOps, op)) {
+          paintTimesheetArchiveDays(timesheet, timesheetRow, plan, {
+            ...op.payload,
+            timesheetActiveFrom:
+              op.payload.timesheetActiveFrom || op.payload.returnDay || "",
+            timesheetSkipHistory: op.payload.timesheetSkipHistory || "1",
+          });
+        }
       }
       return;
     }
     if (op.kind === "absent_upsert" && absent) {
       const existing = Number(op.payload.existingExcelRow || 0);
       const targetRow = existing > 0 ? existing : nextEmptyAbsentRow(absent);
-      if (op.rank) absent.cell(targetRow, col("A")).value(op.rank);
+      const absenceRank = op.payload.nextRank || op.rank;
+      if (absenceRank) absent.cell(targetRow, col("A")).value(absenceRank);
       if (op.fullName) absent.cell(targetRow, col("B")).value(op.fullName);
       if (op.personId) absent.cell(targetRow, col("C")).value(op.personId);
       if (op.positionIndex) {
@@ -138,16 +385,34 @@ async function mutateToBlob(
       if (op.payload.departDate) {
         absent.cell(targetRow, col("G")).value(op.payload.departDate);
       }
-      const orderText = [op.payload.orderDate, op.payload.orderNumber]
-        .filter(Boolean)
-        .join(" ");
-      if (orderText) absent.cell(targetRow, col("I")).value(orderText);
-      if (op.payload.plannedReturn) {
+      if (op.payload.orderDate) {
+        absent.cell(targetRow, col("H")).value(op.payload.orderDate);
+      }
+      if (op.payload.orderNumber) {
+        absent.cell(targetRow, col("I")).value(op.payload.orderNumber);
+      }
+      if (op.payload.duration) {
+        absent.cell(targetRow, col("J")).value(op.payload.duration);
+      }
+      if (op.payload.plannedReturn && op.payload.plannedReturn !== "?") {
         absent.cell(targetRow, col("L")).value(op.payload.plannedReturn);
+      }
+      if (op.payload.returnDate) {
+        writeAbsenceReturn(absent, targetRow, op.payload, "");
       }
       absent
         .cell(targetRow, col("R"))
         .value(`archive №${op.payload.periodNumber || "—"}`);
+      const timesheetRow = Number(op.payload.timesheetExcelRow || 0);
+      if (timesheet && timesheetRow > 0) {
+        if (!transferCancelUndoBlocksTimesheet(sortedOps, op)) {
+          paintTimesheetArchiveDays(timesheet, timesheetRow, plan, op.payload);
+          repairHistoryTimesheetRow(timesheet, op, plan.timesheetDay);
+        }
+      }
+      return;
+    }
+    if (op.kind === "rank_change") {
       return;
     }
     if (op.kind === "exclude_transfer") {
@@ -158,22 +423,783 @@ async function mutateToBlob(
         timesheet,
         shpo,
         oos,
+        arrivals,
       });
       return;
     }
+    if (op.kind === "position_change") {
+      applyPositionChange({
+        op,
+        plan,
+        shpo,
+        oos,
+        timesheet,
+        arrivals,
+        excluded,
+      });
+      return;
+    }
+    if (
+      op.kind === "other_manual" &&
+      op.payload.type === "TRANSFER_CANCELLED"
+    ) {
+      applyTransferCancelled({ op, excluded, shpo, oos, timesheet, plan });
+      return;
+    }
   });
-
-  if (history) {
-    const start = nextAppendRow(history, 2);
-    history.cell(start, 1).value(new Date().toISOString());
-    history.cell(start, 2).value(actor || "user");
-    history
-      .cell(start, 3)
-      .value(`Застосовано ${ops.length} змін з ${plan.pbName}`);
-    history.cell(start, 4).value(plan.timesheetDayLabel);
+  if (timesheet) {
+    ops.forEach((op) => clearDuplicateTimesheetRow(timesheet, op));
   }
 
-  return workbook.outputAsync("blob") as Promise<Blob>;
+  if (shpo) removeShpoNameOnlyRows(shpo);
+
+  const populatedBlob = (await workbook.outputAsync("blob")) as Blob;
+  return finalizeEjoosWorkbookBlob(
+    populatedBlob,
+    ejoos.file,
+    touchedSheetNamesForOps(ops),
+  );
+}
+
+/** Скасоване переведення: rollback попереднього ПЕРЕВ (не новий рух). */
+function applyTransferCancelled(input: {
+  op: EjoosSyncOp;
+  plan: EjoosSyncPlan;
+  excluded: SheetLike | undefined;
+  shpo: SheetLike | undefined;
+  oos: SheetLike | undefined;
+  timesheet: SheetLike | undefined;
+}) {
+  const { op, plan, excluded, shpo, oos, timesheet } = input;
+  if (op.payload.reviewReason === "CANCEL_TRANSFER_BUT_NOT_IN_CURRENT_SH") {
+    return;
+  }
+
+  const excludedRowNumber = Number(op.payload.excludedExcelRow || 0);
+  const personId = op.personId;
+  const fullName = op.fullName;
+  const rank = op.rank;
+  const positionIndex = op.payload.previousIndex || op.positionIndex;
+
+  if (
+    op.payload.restoreOos === "1" &&
+    excluded &&
+    excludedRowNumber > 0 &&
+    oos
+  ) {
+    restoreOosFromExcluded(excluded, excludedRowNumber, oos, {
+      rank,
+      fullName,
+      personId,
+      positionIndex,
+    });
+  }
+
+  if (excluded && excludedRowNumber > 0) {
+    for (let column = col("A"); column <= col("AF"); column += 1) {
+      excluded.cell(excludedRowNumber, column).value(null);
+    }
+    excluded.cell(excludedRowNumber, col("Z")).value(null);
+  }
+
+  const shpoRowNumber = Number(op.payload.shpoExcelRow || 0);
+  const cancelNote = [
+    op.payload.cancelledTransferOrder
+      ? `скасовано ПЕРЕВ №${op.payload.cancelledTransferOrder}`
+      : "",
+    op.payload.transferCancelOrder
+      ? `наказ №${op.payload.transferCancelOrder}`
+      : "",
+    op.payload.transferCancelDate ? `від ${op.payload.transferCancelDate}` : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+  if (op.payload.restoreShpo === "1" && shpo && shpoRowNumber > 0) {
+    if (rank) shpo.cell(shpoRowNumber, col("F")).value(rank);
+    if (fullName) shpo.cell(shpoRowNumber, col("G")).value(fullName);
+    if (personId) shpo.cell(shpoRowNumber, col("H")).value(personId);
+  }
+  if (shpo && shpoRowNumber > 0 && cancelNote) {
+    appendCellHistory(shpo, shpoRowNumber, col("R"), cancelNote);
+  }
+
+  const timesheetRowNumber = Number(op.payload.timesheetExcelRow || 0);
+  if (
+    op.payload.restoreTimesheet === "1" &&
+    timesheet &&
+    timesheetRowNumber > 0
+  ) {
+    undoCancelledTransferOnTimesheet(timesheet, timesheetRowNumber, plan, {
+      rank,
+      fullName,
+      personId,
+      positionIndex,
+      payload: op.payload,
+    });
+  }
+
+  const historyRowNumber = Number(op.payload.historyTimesheetExcelRow || 0);
+  if (timesheet && historyRowNumber > 0 && historyRowNumber !== timesheetRowNumber) {
+    for (let column = col("B"); column <= col("AN"); column += 1) {
+      timesheet.cell(historyRowNumber, column).value(null);
+    }
+  }
+
+  clearDuplicateTimesheetRow(timesheet, op);
+}
+
+function undoCancelledTransferOnTimesheet(
+  timesheet: SheetLike,
+  rowNumber: number,
+  plan: EjoosSyncPlan,
+  input: {
+    rank: string;
+    fullName: string;
+    personId: string;
+    positionIndex: string;
+    payload: Record<string, string>;
+  },
+) {
+  const { rank, fullName, personId, payload } = input;
+  if (rank) timesheet.cell(rowNumber, col("F")).value(rank);
+  if (fullName) timesheet.cell(rowNumber, col("G")).value(fullName);
+  if (personId) timesheet.cell(rowNumber, col("H")).value(personId);
+  if (input.positionIndex) {
+    timesheet.cell(rowNumber, col("B")).value(input.positionIndex);
+  }
+
+  const departDay = dayFromOrderLabel(payload.cancelledTransferDate);
+  const cancelDay =
+    dayFromOrderLabel(payload.transferCancelDate) || plan.timesheetDay;
+  const activeFromDay = dayFromOrderLabel(payload.timesheetActiveFrom) || 1;
+  const keepGap = payload.timesheetCancelKeepGap === "1";
+  const spans = parseTimesheetAbsenceSpans(payload.timesheetAbsenceSpans || "");
+
+  let presentDays = 0;
+  for (let day = 1; day <= 31; day += 1) {
+    const cell = timesheet.cell(rowNumber, col("I") + day - 1);
+    const value = cell.value();
+    const text = String(value ?? "").trim();
+    const isDepart = isTimesheetDepartureMark(value);
+    const inDepartGap =
+      keepGap &&
+      departDay > 0 &&
+      day >= departDay &&
+      day < cancelDay;
+    const archiveCode = timesheetCodeOnDay(day, spans);
+
+    if (day > plan.timesheetDay) {
+      if (
+        isDepart ||
+        (departDay > 0 && day >= departDay && (text === "-" || isDepart))
+      ) {
+        cell.value(null);
+      }
+      continue;
+    }
+
+    if (day < activeFromDay) {
+      cell.value("-");
+      continue;
+    }
+
+    if (inDepartGap) {
+      cell.value("-");
+      continue;
+    }
+
+    if (archiveCode) {
+      cell.value(archiveCode);
+      if (archiveCode === "+") presentDays += 1;
+      continue;
+    }
+
+    const staleDepart =
+      isDepart ||
+      (departDay > 0 && day >= departDay && (text === "-" || isDepart));
+    const staleCancelNote = /скасован/i.test(text);
+    if (staleDepart || staleCancelNote || !text || text === "-") {
+      cell.value("+");
+      presentDays += 1;
+      continue;
+    }
+
+    if (text === "+") {
+      presentDays += 1;
+    }
+  }
+  timesheet.cell(rowNumber, col("AN")).value(presentDays);
+}
+
+function findArrivalCloseColumns(arrivals: SheetLike) {
+  let departDateCol = 0;
+  let orderDateCol = 0;
+  let orderNumberCol = 0;
+  let orderCombinedCol = 0;
+  for (let row = 1; row <= 6; row += 1) {
+    for (let column = 1; column <= 40; column += 1) {
+      const key = String(arrivals.cell(row, column).value() ?? "")
+        .toLocaleLowerCase("uk-UA")
+        .replace(/\s+/g, " ")
+        .trim();
+      if (!key) continue;
+      if (/дата вибут/.test(key) && !/наказ/.test(key)) {
+        departDateCol = column;
+      } else if (/дата.{0,12}наказ.{0,12}вибут|наказ.{0,12}вибут.{0,12}дата/.test(key)) {
+        orderDateCol = column;
+      } else if (/номер.{0,12}наказ.{0,12}вибут|наказ.{0,12}вибут.{0,12}номер/.test(key)) {
+        orderNumberCol = column;
+      } else if (/наказ.{0,16}вибут/.test(key) && !orderCombinedCol) {
+        orderCombinedCol = column;
+      }
+    }
+  }
+  return { departDateCol, orderDateCol, orderNumberCol, orderCombinedCol };
+}
+
+/** ПОСАДА: постановка на штатну позицію; для тимчасово прибулого — перехід у штат. */
+function applyPositionChange(input: {
+  op: EjoosSyncOp;
+  plan: EjoosSyncPlan;
+  shpo: SheetLike | undefined;
+  oos: SheetLike | undefined;
+  timesheet: SheetLike | undefined;
+  arrivals: SheetLike | undefined;
+  excluded: SheetLike | undefined;
+}) {
+  const { op, plan, shpo, oos, timesheet, arrivals, excluded } = input;
+  if (op.payload.closeOldPosition === "1") {
+    closeOldPositionRows({ op, plan, shpo, oos, timesheet, excluded });
+  }
+  const personId = op.payload.nextPersonId || op.personId;
+  const fullName = op.payload.nextName || op.fullName;
+  const rank = op.payload.nextRank || op.rank;
+  const nextIndex = op.payload.nextIndex || op.positionIndex;
+  const appointmentDate = op.payload.orderDate || plan.timesheetDayLabel;
+  const appointmentDay = dayFromOrderLabel(appointmentDate) || plan.timesheetDay;
+  const preserveHistory = op.payload.timesheetPreserveHistory === "1";
+  const returningToStaffIndex = op.payload.returningToStaffIndex === "1";
+  const activeFromDay =
+    dayFromOrderLabel(op.payload.timesheetActiveFrom || op.payload.transferCancelDate) ||
+    appointmentDay;
+
+  let shpoRow = Number(op.payload.shpoExcelRow || 0);
+  if (shpo && shpoRow <= 0) {
+    shpoRow = findPersonRowFlexible(shpo, {
+      personId: "",
+      fullName: "",
+      positionIndex: nextIndex,
+      startRow: 7,
+      nameCol: col("G"),
+      idCol: col("H"),
+      indexCol: col("A"),
+    });
+  }
+  const dispositionShpoRow = Number(op.payload.dispositionShpoExcelRow || 0);
+  if (shpo && dispositionShpoRow > 0) {
+    shpo.cell(dispositionShpoRow, col("B")).value(null);
+    shpo.cell(dispositionShpoRow, col("C")).value(null);
+    shpo.cell(dispositionShpoRow, col("F")).value(null);
+    shpo.cell(dispositionShpoRow, col("G")).value(null);
+    shpo.cell(dispositionShpoRow, col("H")).value(null);
+  }
+  if (shpo && shpoRow > 0) {
+    shpo.cell(shpoRow, col("F")).value(rank || null);
+    shpo.cell(shpoRow, col("G")).value(fullName || null);
+    shpo.cell(shpoRow, col("H")).value(personId || null);
+    if (op.payload.orderNumber || appointmentDate) {
+      shpo
+        .cell(shpoRow, col("R"))
+        .value(
+          [
+            "ПОСАДА",
+            op.payload.orderNumber ? `№${op.payload.orderNumber}` : "",
+            appointmentDate ? `від ${appointmentDate}` : "",
+          ]
+            .filter(Boolean)
+            .join(" "),
+        );
+    }
+  }
+
+  let timesheetRow = Number(op.payload.timesheetExcelRow || 0);
+  if (timesheet && timesheetRow <= 0) {
+    timesheetRow = findPersonRowFlexible(timesheet, {
+      personId: "",
+      fullName: "",
+      positionIndex: nextIndex,
+      startRow: 7,
+      nameCol: col("G"),
+      idCol: col("H"),
+      indexCol: col("B"),
+    });
+  }
+  if (timesheet && timesheetRow > 0 && op.payload.timesheetHandledByCancel !== "1") {
+    const previousName = String(
+      timesheet.cell(timesheetRow, col("G")).value() ?? "",
+    ).trim();
+    const previousId = String(
+      timesheet.cell(timesheetRow, col("H")).value() ?? "",
+    ).trim();
+    const samePersonOnStaff =
+      Boolean(previousName || previousId) &&
+      (previousName.toLocaleLowerCase("uk-UA") ===
+        fullName.toLocaleLowerCase("uk-UA") ||
+        (Boolean(personId) && previousId === personId));
+    const otherPerson =
+      Boolean(previousName || previousId) && !samePersonOnStaff;
+    const existingHistoryRow = Number(op.payload.previousTimesheetExcelRow || 0);
+    if (returningToStaffIndex && existingHistoryRow > 0) {
+      const activeRow = findTimesheetAppendNear(
+        timesheet,
+        Math.max(timesheetRow, existingHistoryRow),
+      );
+      const indexValue = timesheet.cell(timesheetRow, col("B")).value();
+      if (indexValue != null && String(indexValue).trim()) {
+        timesheet.cell(activeRow, col("B")).value(indexValue);
+      }
+      timesheet.cell(activeRow, col("F")).value(rank || null);
+      timesheet.cell(activeRow, col("G")).value(fullName || null);
+      timesheet.cell(activeRow, col("H")).value(personId || null);
+      paintTimesheetArchiveDays(timesheet, activeRow, plan, {
+        ...op.payload,
+        timesheetActiveFrom:
+          op.payload.timesheetActiveFrom || String(activeFromDay || appointmentDay),
+        timesheetPreserveHistory: activeFromDay > 1 ? "1" : "",
+      });
+      if (otherPerson) {
+        timesheet.cell(timesheetRow, col("F")).value(null);
+        timesheet.cell(timesheetRow, col("G")).value(null);
+        timesheet.cell(timesheetRow, col("H")).value(null);
+        for (let day = 1; day <= 31; day += 1) {
+          timesheet.cell(timesheetRow, col("I") + day - 1).value(null);
+        }
+        timesheet.cell(timesheetRow, col("AN")).value(null);
+      }
+    } else if (otherPerson) {
+      const historyRow = findTimesheetAppendNear(timesheet, timesheetRow);
+      copySheetRow(timesheet, timesheetRow, historyRow, col("AN"));
+      for (let day = appointmentDay; day <= 31; day += 1) {
+        timesheet.cell(historyRow, col("I") + day - 1).value(null);
+      }
+    } else if (preserveHistory) {
+      preserveCancelledTransferTimesheetHistory({
+        timesheet,
+        staffRow: timesheetRow,
+        existingHistoryRow: Number(op.payload.previousTimesheetExcelRow || 0),
+        copyStaff: samePersonOnStaff,
+        rank,
+        fullName,
+        personId,
+        cancelledOrder: op.payload.cancelledTransferOrder,
+        cancelledDate: op.payload.cancelledTransferDate,
+        cancelledDest: op.payload.cancelledTransferDest,
+        lastDay: plan.timesheetDay,
+      });
+    }
+    if (!returningToStaffIndex || existingHistoryRow <= 0) {
+    timesheet.cell(timesheetRow, col("F")).value(rank || null);
+    timesheet.cell(timesheetRow, col("G")).value(fullName || null);
+    timesheet.cell(timesheetRow, col("H")).value(personId || null);
+    const bindIndex = op.payload.timesheetBindStaffIndex || nextIndex;
+    if (bindIndex && op.payload.isTempArrivalPlacement === "1") {
+      timesheet.cell(timesheetRow, col("B")).value(bindIndex);
+    }
+    paintTimesheetArchiveDays(timesheet, timesheetRow, plan, {
+      ...op.payload,
+      timesheetActiveFrom:
+        op.payload.timesheetActiveFrom ||
+        (preserveHistory ? String(activeFromDay) : String(appointmentDay)),
+      timesheetPreserveHistory: preserveHistory ? "1" : op.payload.timesheetPreserveHistory,
+    });
+    }
+  }
+
+  // ООС не пишемо через xlsx-populate — лише applyOosHistoryPresentation.
+
+  // Історичний рядок не видаляємо: позначаємо завершення тимчасового статусу.
+  const arrivalRow = Number(op.payload.arrivalExcelRow || 0);
+  if (arrivals && arrivalRow > 0) {
+    const departDate =
+      op.payload.arrivalDepartDate || appointmentDate;
+    const orderNumber = op.payload.arrivalDepartOrderNumber || op.payload.orderNumber;
+    const orderDate = op.payload.arrivalDepartOrderDate || appointmentDate;
+    const closeColumns = findArrivalCloseColumns(arrivals);
+    if (closeColumns.departDateCol) {
+      arrivals.cell(arrivalRow, closeColumns.departDateCol).value(departDate || null);
+    }
+    if (closeColumns.orderDateCol) {
+      arrivals.cell(arrivalRow, closeColumns.orderDateCol).value(orderDate || null);
+    }
+    if (closeColumns.orderNumberCol) {
+      arrivals
+        .cell(arrivalRow, closeColumns.orderNumberCol)
+        .value(orderNumber ? `№${orderNumber}` : null);
+    }
+    if (closeColumns.orderCombinedCol) {
+      arrivals.cell(arrivalRow, closeColumns.orderCombinedCol).value(
+        [orderNumber ? `№${orderNumber}` : "", orderDate ? `від ${orderDate}` : ""]
+          .filter(Boolean)
+          .join(" "),
+      );
+    }
+    appendCellHistory(
+      arrivals,
+      arrivalRow,
+      col("R"),
+      [
+        `ЗАРАХОВАНО ДО ШТАТУ ${nextIndex}`,
+        appointmentDate,
+        op.payload.orderNumber ? `наказ №${op.payload.orderNumber}` : "",
+      ]
+        .filter(Boolean)
+        .join(" · "),
+    );
+  }
+
+  clearStaleExcludedRow(excluded, op.payload.clearExcludedExcelRow);
+}
+
+const EXCLUDED_CLEAR_LAST_COLUMN = 32;
+
+const clearStaleExcludedRow = (
+  excluded: SheetLike | undefined,
+  rowRaw: string | undefined,
+) => {
+  const rowNumber = Number(rowRaw || 0);
+  if (!excluded || rowNumber <= 0) return;
+  for (let column = col("A"); column <= EXCLUDED_CLEAR_LAST_COLUMN; column += 1) {
+    excluded.cell(rowNumber, column).value(null);
+  }
+  excluded.cell(rowNumber, col("Z")).value(null);
+};
+
+async function applyExcludedClearsWithZip(input: {
+  file: Blob;
+  ejoos: ExcelWorkbookSnapshot;
+  ops: EjoosSyncOp[];
+}): Promise<Blob> {
+  const excluded = findEjoosSheet(input.ejoos, /виключен/i);
+  if (!excluded) return input.file;
+  const rows = new Set<number>();
+  for (const op of input.ops) {
+    const row = Number(op.payload.clearExcludedExcelRow || 0);
+    if (row > 0) rows.add(row);
+  }
+  if (!rows.size) return input.file;
+  const writes: ZipCellWrite[] = [];
+  for (const row of rows) {
+    for (let column = 1; column <= EXCLUDED_CLEAR_LAST_COLUMN; column += 1) {
+      writes.push({
+        row,
+        column,
+        value: null,
+        styleSourceRow: 6,
+        copyNeighborStyle: true,
+      });
+    }
+  }
+  return applyInlineStringWritesToWorkbook(
+    input.file,
+    excluded.sheetName,
+    writes,
+  );
+}
+
+/**
+ * Зміна посади всередині 1ПБ закриває стару штатну посаду: рядок історії у
+ * «3. Виключені», закритий рядок Табеля та вакантний індекс у ШПО.
+ * ООС не чіпаємо — особа лишається в частині.
+ */
+function closeOldPositionRows(input: {
+  op: EjoosSyncOp;
+  plan: EjoosSyncPlan;
+  shpo: SheetLike | undefined;
+  oos: SheetLike | undefined;
+  timesheet: SheetLike | undefined;
+  excluded: SheetLike | undefined;
+}) {
+  const { op, shpo, oos, timesheet, excluded } = input;
+  const personId = op.payload.fromPersonId || op.personId;
+  const fullName = op.payload.fromName || op.fullName;
+  const rank = op.payload.fromRank || op.rank;
+  const previousIndex =
+    op.payload.fromPositionIndex || op.payload.previousIndex;
+  const excludeDateLabel = op.payload.excludeDate || op.payload.orderDate;
+  const departDay = dayFromOrderLabel(excludeDateLabel);
+
+  if (excluded) {
+    const targetRow = nextExcludedManualRow(excluded, 6);
+    copyRowHeight(excluded, 6, targetRow);
+    const oosRow =
+      oos && personId ? findPersonIdRow(oos, personId, 6, col("C")) : 0;
+    if (oos && oosRow > 0) {
+      fillExcludedBaseValuesFromOos(oos, oosRow, excluded, targetRow);
+    }
+    if (rank) excluded.cell(targetRow, col("A")).value(rank);
+    if (fullName) excluded.cell(targetRow, col("B")).value(fullName);
+    if (personId) excluded.cell(targetRow, col("C")).value(personId);
+    if (previousIndex) excluded.cell(targetRow, col("D")).value(previousIndex);
+    excluded.cell(targetRow, col("AB")).value(excludeDateLabel || null);
+    excluded.cell(targetRow, col("AC")).value(op.payload.orderDate || null);
+    excluded.cell(targetRow, col("AD")).value(op.payload.orderNumber || null);
+    excluded
+      .cell(targetRow, col("AE"))
+      .value(formatExcludedDestinationText(op.payload.documentsDest) || null);
+    excluded
+      .cell(targetRow, col("AF"))
+      .value(
+        formatExcludedListBasis({
+          ...op.payload,
+          exclusionReason: op.payload.exclusionReason || "ПЕРЕВЕДЕННЯ 1 ПБ",
+        }),
+      )
+      .style("wrapText", true);
+    excluded.cell(targetRow, col("Z")).style("wrapText", true);
+  }
+
+  const oldTimesheetRow = Number(
+    op.payload.previousIndexTimesheetExcelRow || 0,
+  );
+  if (timesheet && oldTimesheetRow > 0) {
+    const historyRow = findTimesheetAppendNear(timesheet, oldTimesheetRow);
+    copySheetRowValues(timesheet, oldTimesheetRow, historyRow, col("AN"));
+    if (rank) timesheet.cell(historyRow, col("F")).value(rank);
+    writeTimesheetTransferHistory(timesheet, historyRow, {
+      departDay,
+      destination: op.payload.timesheetDestination,
+      payload: op.payload,
+      orderNumber: op.payload.orderNumber,
+      orderDate: op.payload.orderDate,
+      // Особа не відсутня в частині, а переходить на іншу посаду:
+      // після дня вибуття старий рядок лишається порожнім.
+      lastDay: departDay,
+    });
+    timesheet.cell(oldTimesheetRow, col("F")).value(null);
+    timesheet.cell(oldTimesheetRow, col("G")).value(null);
+    timesheet.cell(oldTimesheetRow, col("H")).value(null);
+    for (let day = 1; day <= 31; day += 1) {
+      timesheet.cell(oldTimesheetRow, col("I") + day - 1).value(null);
+    }
+  }
+
+  const oldShpoRow = Number(op.payload.previousShpoExcelRow || 0);
+  if (shpo && oldShpoRow > 0) {
+    shpo.cell(oldShpoRow, col("F")).value(null);
+    shpo.cell(oldShpoRow, col("G")).value(null);
+    shpo.cell(oldShpoRow, col("H")).value(null);
+    shpo.cell(oldShpoRow, col("R")).value(null);
+  }
+}
+
+/** Прибирає службовий хвіст ШПО, де в рядку є лише ПІБ без штатної посади/ID. */
+function removeShpoNameOnlyRows(sheet: SheetLike) {
+  const endRow = sheet.usedRange()?.endCell().rowNumber() ?? 0;
+  for (let row = 7; row <= endRow; row += 1) {
+    const nameCell = sheet.cell(row, col("G"));
+    if (!isMeaningfulCellValue(nameCell.value())) continue;
+
+    let hasOtherData = false;
+    for (let column = col("A"); column <= col("R"); column += 1) {
+      if (column === col("G")) continue;
+      if (isMeaningfulCellValue(sheet.cell(row, column).value())) {
+        hasOtherData = true;
+        break;
+      }
+    }
+    if (hasOtherData) continue;
+
+    nameCell.value(null);
+  }
+}
+
+/**
+ * Після зміни формул/рядків старий calcChain містить неактуальні посилання.
+ * Excel відновлює такий файл при відкритті, тому видаляємо ланцюг і просимо
+ * Excel зробити повний перерахунок без перепакування книги редактором.
+ */
+const touchedSheetNamesForOps = (ops: EjoosSyncOp[]) => {
+  const names = new Set<string>();
+  for (const op of ops) {
+    if (op.kind === "shpo_occupant") {
+      names.add("1. ШПО");
+      names.add("6. Табель");
+      if (op.payload.excludedSourceExcelRow) names.add("2. ООС");
+      if (op.payload.clearExcludedExcelRow) names.add("3. Виключені");
+    } else if (op.kind === "timesheet_day") {
+      names.add("6. Табель");
+    } else if (op.kind === "absent_upsert") {
+      names.add("5. Тимчасово відсутні");
+      names.add("6. Табель");
+    } else if (op.kind === "absent_close") {
+      names.add("5. Тимчасово відсутні");
+      names.add("6. Табель");
+    } else if (op.kind === "exclude_transfer") {
+      names.add("1. ШПО");
+      names.add("2. ООС");
+      names.add("3. Виключені");
+      names.add("6. Табель");
+      if (op.payload.arrivalExcelRow) names.add("4. Тимчасово прибулі");
+    } else if (op.kind === "position_change") {
+      names.add("1. ШПО");
+      names.add("2. ООС");
+      names.add("4. Тимчасово прибулі");
+      names.add("6. Табель");
+      if (op.payload.closeOldPosition === "1") names.add("3. Виключені");
+      if (op.payload.clearExcludedExcelRow) names.add("3. Виключені");
+    } else if (
+      op.kind === "other_manual" &&
+      op.payload.type === "TRANSFER_CANCELLED" &&
+      op.payload.reviewReason !== "CANCEL_TRANSFER_BUT_NOT_IN_CURRENT_SH"
+    ) {
+      names.add("3. Виключені");
+      if (op.payload.restoreShpo === "1") names.add("1. ШПО");
+      if (op.payload.restoreOos === "1") names.add("2. ООС");
+      if (op.payload.restoreTimesheet === "1") names.add("6. Табель");
+    } else if (
+      op.kind === "other_manual" &&
+      op.payload.type === "TRANSFER_CANCELLED" &&
+      op.payload.excludedExcelRow
+    ) {
+      names.add("3. Виключені");
+    }
+  }
+  return names;
+};
+
+const workbookSheetPaths = async (zip: JSZip) => {
+  const workbookXml = await zip.file("xl/workbook.xml")?.async("string");
+  const relsXml = await zip.file("xl/_rels/workbook.xml.rels")?.async("string");
+  const paths = new Map<string, string>();
+  if (!workbookXml || !relsXml) return paths;
+  const targets = new Map<string, string>();
+  for (const relation of relsXml.matchAll(
+    /<Relationship\b(?=[^>]*\bId="([^"]+)")(?=[^>]*\bTarget="([^"]+)")[^>]*\/>/gi,
+  )) {
+    targets.set(relation[1], relation[2]);
+  }
+  for (const sheet of workbookXml.matchAll(/<sheet\b([^>]*)>/gi)) {
+    const attrs = sheet[1];
+    const name = attrs.match(/\bname="([^"]+)"/)?.[1];
+    const relationId = attrs.match(/\br:id="([^"]+)"/)?.[1];
+    const target = relationId ? targets.get(relationId) : undefined;
+    if (!name || !target) continue;
+    paths.set(
+      name,
+      target.startsWith("/")
+        ? target.slice(1)
+        : target.startsWith("xl/")
+          ? target
+          : `xl/${target.replace(/^\.\//, "")}`,
+    );
+  }
+  return paths;
+};
+
+async function finalizeEjoosWorkbookBlob(
+  file: Blob,
+  sourceFile: Blob | File,
+  touchedSheetNames: Set<string>,
+) {
+  const zip = await JSZip.loadAsync(await file.arrayBuffer());
+  const sourceZip = await JSZip.loadAsync(await sourceFile.arrayBuffer());
+
+  // xlsx-populate переписує навіть аркуші, яких операція не торкалася.
+  // Повертаємо їхній XML дослівно з базової справної версії.
+  const sourceSheetPaths = await workbookSheetPaths(sourceZip);
+  for (const [sheetName, sheetPath] of sourceSheetPaths) {
+    if (touchedSheetNames.has(sheetName)) continue;
+    const sourceSheet = sourceZip.file(sheetPath);
+    if (!sourceSheet) continue;
+    zip.file(sheetPath, await sourceSheet.async("uint8array"));
+  }
+
+  for (const path of Object.keys(zip.files)) {
+    if (!/^xl\/worksheets\/sheet\d+\.xml$/i.test(path)) continue;
+    const worksheet = zip.file(path);
+    if (!worksheet) continue;
+    const xml = await worksheet.async("string");
+    const cleaned = repairBrokenCellOpenTags(
+      stripInvalidNumericCellValues(xml),
+    );
+    if (cleaned !== xml) zip.file(path, cleaned);
+  }
+
+  // Нові значення використовують наявні стилі клітинок. Не дозволяємо
+  // бібліотеці глобально перебудовувати style table всієї книги.
+  const sourceStyles = sourceZip.file("xl/styles.xml");
+  if (sourceStyles) {
+    const sourceStylesXml = await sourceStyles.async("string");
+    zip.file("xl/styles.xml", sourceStylesXml);
+    const cellXfsBody =
+      sourceStylesXml.match(/<cellXfs\b[^>]*>([\s\S]*?)<\/cellXfs>/i)?.[1] ??
+      "";
+    const sourceStyleCount = (cellXfsBody.match(/<xf\b/gi) ?? []).length;
+    if (sourceStyleCount > 0) {
+      for (const path of Object.keys(zip.files)) {
+        if (!/^xl\/worksheets\/sheet\d+\.xml$/i.test(path)) continue;
+        const worksheet = zip.file(path);
+        if (!worksheet) continue;
+        const xml = await worksheet.async("string");
+        const repaired = xml.replace(/<c\b([^>]*)>/gi, (cellTag, attrs) => {
+          const style = String(attrs).match(/\bs="(\d+)"/i);
+          if (!style || Number(style[1]) < sourceStyleCount) return cellTag;
+          return `<c${String(attrs).replace(/\s+s="\d+"/i, "")}>`;
+        });
+        if (repaired !== xml) zip.file(path, repaired);
+      }
+    }
+  }
+
+  zip.remove("xl/calcChain.xml");
+  zip.remove("xl/ejoosAppliedChanges.json");
+
+  const relsPath = "xl/_rels/workbook.xml.rels";
+  const rels = await zip.file(relsPath)?.async("string");
+  if (rels) {
+    zip.file(
+      relsPath,
+      rels.replace(
+        /<Relationship\b(?=[^>]*(?:Type="[^"]*\/calcChain"|Target="(?:\.\.\/)?calcChain\.xml"))[^>]*\/>/gi,
+        "",
+      ),
+    );
+  }
+
+  const contentTypesPath = "[Content_Types].xml";
+  const contentTypes = await zip.file(contentTypesPath)?.async("string");
+  if (contentTypes) {
+    zip.file(
+      contentTypesPath,
+      contentTypes.replace(
+        /<Override\b[^>]*PartName="\/xl\/calcChain\.xml"[^>]*\/>/gi,
+        "",
+      ),
+    );
+  }
+
+  const workbookPath = "xl/workbook.xml";
+  const workbookXml = await zip.file(workbookPath)?.async("string");
+  if (workbookXml) {
+    const calcPr =
+      '<calcPr calcId="0" calcMode="auto" fullCalcOnLoad="1" forceFullCalc="1"/>';
+    const nextWorkbookXml = /<calcPr\b[^>]*(?:\/>|>[\s\S]*?<\/calcPr>)/i.test(
+      workbookXml,
+    )
+      ? workbookXml.replace(
+          /<calcPr\b[^>]*(?:\/>|>[\s\S]*?<\/calcPr>)/i,
+          calcPr,
+        )
+      : workbookXml.replace("</workbook>", `${calcPr}</workbook>`);
+    zip.file(workbookPath, nextWorkbookXml);
+  }
+
+  return zip.generateAsync({
+    type: "blob",
+    mimeType:
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    compression: "DEFLATE",
+  });
 }
 
 type SheetLike = {
@@ -198,7 +1224,7 @@ type WorkbookLike = {
   outputAsync: (type: "blob") => Promise<Blob>;
 };
 
-/** ПЕРЕВ з обліку: Виключені → Табель → ШПО/ООС. Тимч. відсутні/прибулі не чіпаємо. */
+/** ПЕРЕВ з обліку: Виключені → Табель → ШПО/ООС. Відкрите тимч. прибуття закриваємо, якщо лишилось після пропущеної внутрішньої ПОСАДИ. */
 function applyExcludeTransfer(input: {
   op: EjoosSyncOp;
   plan: EjoosSyncPlan;
@@ -206,8 +1232,9 @@ function applyExcludeTransfer(input: {
   timesheet: SheetLike | undefined;
   shpo: SheetLike | undefined;
   oos: SheetLike | undefined;
+  arrivals: SheetLike | undefined;
 }) {
-  const { op, plan, excluded, timesheet, shpo, oos } = input;
+  const { op, plan, excluded, timesheet, shpo, oos, arrivals } = input;
   const personId = op.payload.fromPersonId || op.personId;
   const fullName = op.payload.fromName || op.fullName;
   const rank = op.payload.fromRank || op.rank;
@@ -217,24 +1244,23 @@ function applyExcludeTransfer(input: {
     op.positionIndex;
   const destination =
     op.payload.destination || op.payload.documentsDest || "";
+  const documentsDestination = op.payload.documentsDest || destination;
   const timesheetDestination = op.payload.timesheetDestination || destination;
   const excludeDateLabel =
-    op.payload.excludeDate ||
-    op.payload.orderDate ||
-    plan.timesheetDayLabel;
-  const excludeDateValue = toExcelDateValue(excludeDateLabel);
-  const departDay = dayFromLabel(excludeDateLabel) || plan.timesheetDay;
+    op.payload.excludeDate;
+  const departDay = dayFromOrderLabel(excludeDateLabel);
 
   let shpoRow = Number(op.payload.shpoExcelRow || 0);
   if (shpo && shpoRow <= 0) {
     shpoRow = findPersonRowFlexible(shpo, {
       personId,
       fullName,
-      positionIndex,
+      positionIndex: op.payload.occupiedPositionIndex || positionIndex,
       startRow: 7,
       nameCol: col("G"),
       idCol: col("H"),
       indexCol: col("A"),
+      matchByIndex: excludeWritePlan(op.payload).matchShpoByIndex,
     });
   }
 
@@ -243,18 +1269,21 @@ function applyExcludeTransfer(input: {
     timesheetRow = findPersonRowFlexible(timesheet, {
       personId,
       fullName,
-      positionIndex,
+      positionIndex: op.payload.occupiedPositionIndex || positionIndex,
       startRow: 7,
       nameCol: col("G"),
       idCol: col("H"),
       indexCol: col("B"),
+      matchByIndex: excludeWritePlan(op.payload).matchTimesheetByIndex,
     });
   }
 
-  // 1) Виключені — дані зі ШПО + службові з Рух
-  if (excluded) {
+  // 1) Виключені — A:AA переносимо з ООС, AB:AF дописуємо з Рух
+  if (excluded && !op.payload.excludedExcelRow) {
     const targetRow = nextExcludedManualRow(excluded, 6);
-    copyRowPresentation(excluded, Math.max(6, targetRow - 1), targetRow, col("AF"));
+    // Не передаємо styles.xml через API xlsx-populate: саме копіювання стилів
+    // створювало сотні нових font/fill/border/xf та ламало наступну версію.
+    copyRowHeight(excluded, 6, targetRow);
     const oosRow =
       oos && personId
         ? findPersonIdRow(oos, personId, 6, col("C"))
@@ -270,7 +1299,17 @@ function applyExcludeTransfer(input: {
             })
           : 0;
 
-    if (shpo && shpoRow > 0) {
+    if (oos && oosRow > 0) {
+      if (rank) oos.cell(oosRow, col("A")).value(rank);
+      if (op.payload.lastRankOrderDate) {
+        oos.cell(oosRow, col("O")).value(op.payload.lastRankOrderDate);
+      }
+      if (op.payload.lastRankOrderNumber) {
+        oos.cell(oosRow, col("P")).value(op.payload.lastRankOrderNumber);
+      }
+      fillExcludedBaseValuesFromOos(oos, oosRow, excluded, targetRow);
+    } else if (shpo && shpoRow > 0) {
+      // Fallback без ООС: переносимо тільки те, що є у ШПО.
       copyCell(shpo, shpoRow, col("F"), excluded, targetRow, col("A"));
       copyCell(shpo, shpoRow, col("G"), excluded, targetRow, col("B"));
       copyCell(shpo, shpoRow, col("H"), excluded, targetRow, col("C"));
@@ -278,38 +1317,55 @@ function applyExcludeTransfer(input: {
     } else {
       if (rank) excluded.cell(targetRow, col("A")).value(rank);
       if (fullName) excluded.cell(targetRow, col("B")).value(fullName);
-    }
-    if (oos && oosRow > 0) {
-      fillExcludedLookupValuesFromOos(oos, oosRow, excluded, targetRow, {
-        fillIdentity: !(shpo && shpoRow > 0),
-      });
-    } else {
       if (personId) excluded.cell(targetRow, col("C")).value(personId);
-      if (positionIndex) excluded.cell(targetRow, col("D")).value(positionIndex);
     }
-    writeDateCell(excluded, targetRow, col("AB"), excludeDateValue);
-    writeDateCell(excluded, targetRow, col("AC"), excludeDateValue);
+    // D в ООС інколи є формульною/нестандартною клітинкою, яку xlsx-populate
+    // повертає не як просте значення. План уже зчитав актуальний індекс із ООС,
+    // тому закріплюємо його явно після переносу базової картки.
+    if (positionIndex) excluded.cell(targetRow, col("D")).value(positionIndex);
+    // Звання вже визначене у плані з ЕЖООС; РУХ тут лише fallback.
+    if (rank) excluded.cell(targetRow, col("A")).value(rank);
+    if (op.payload.lastRankOrderDate) {
+      excluded.cell(targetRow, col("L")).value(op.payload.lastRankOrderDate);
+    }
+    if (op.payload.lastRankOrderNumber) {
+      excluded.cell(targetRow, col("M")).value(op.payload.lastRankOrderNumber);
+    }
+    // Пишемо готовий dd.mm.yyyy як текст без створення нових style records.
+    // Оформлення нового рядка буде відновлене окремим OOXML-шаром.
+    excluded.cell(targetRow, col("AB")).value(excludeDateLabel || null);
+    excluded
+      .cell(targetRow, col("AC"))
+      .value(op.payload.orderDate || null);
     excluded.cell(targetRow, col("AD")).value(op.payload.orderNumber || null);
-    excluded.cell(targetRow, col("AE")).value(destination || null);
+    excluded
+      .cell(targetRow, col("AE"))
+      .value(formatExcludedDestinationText(documentsDestination) || null);
     excluded
       .cell(targetRow, col("AF"))
-      .value(formatExclusionReasonForCell(
-        op.payload.exclusionReason ||
-          (op.payload.type === "РОЗПОРЯДЖ"
-            ? "Розпорядження"
-            : "Переведення"),
-      ));
-    styleExcludedManualFields(excluded, targetRow);
+      .value(formatExcludedListBasis(op.payload))
+      .style("wrapText", true);
+    excluded.cell(targetRow, col("Z")).style("wrapText", true);
   }
 
   // 2) Табель — історія: копія рядка + + до дня вибуття, далі −; старий рядок без особи
   if (timesheet && timesheetRow > 0) {
     const historyRow = findTimesheetAppendNear(timesheet, timesheetRow);
-    copySheetRow(timesheet, timesheetRow, historyRow, col("AN"));
+    // Порожній рядок Табеля вже має власне оформлення. Копіюємо лише дані,
+    // не серіалізуємо повторно весь набір стилів клітинок.
+    copySheetRowValues(timesheet, timesheetRow, historyRow, col("AN"));
+    if (rank) timesheet.cell(historyRow, col("F")).value(rank);
     writeTimesheetTransferHistory(timesheet, historyRow, {
       departDay,
       destination: timesheetDestination,
+      payload: op.payload,
+      orderNumber: op.payload.orderNumber,
+      orderDate: op.payload.orderDate,
       lastDay: Math.min(31, Math.max(departDay, plan.timesheetDay)),
+      absenceSpans: parseTimesheetAbsenceSpans(
+        op.payload.timesheetAbsenceSpans || "",
+      ),
+      activeFromDay: dayFromOrderLabel(op.payload.timesheetActiveFrom || ""),
     });
     // очистити персональну частину на старій посаді, лишити індекс/структуру
     timesheet.cell(timesheetRow, col("F")).value(null);
@@ -318,6 +1374,24 @@ function applyExcludeTransfer(input: {
     for (let day = 1; day <= 31; day += 1) {
       timesheet.cell(timesheetRow, col("I") + day - 1).value(null);
     }
+  } else if (timesheet && excludeWritePlan(op.payload).createTimesheetHistory) {
+    const historyRow = findTimesheetAppendNear(timesheet, 7);
+    if (positionIndex) timesheet.cell(historyRow, col("B")).value(positionIndex);
+    if (rank) timesheet.cell(historyRow, col("F")).value(rank);
+    if (fullName) timesheet.cell(historyRow, col("G")).value(fullName);
+    if (personId) timesheet.cell(historyRow, col("H")).value(personId);
+    writeTimesheetTransferHistory(timesheet, historyRow, {
+      departDay,
+      destination: timesheetDestination,
+      payload: op.payload,
+      orderNumber: op.payload.orderNumber,
+      orderDate: op.payload.orderDate,
+      lastDay: Math.min(31, Math.max(departDay, plan.timesheetDay)),
+      absenceSpans: parseTimesheetAbsenceSpans(
+        op.payload.timesheetAbsenceSpans || "",
+      ),
+      activeFromDay: dayFromOrderLabel(op.payload.timesheetActiveFrom || ""),
+    });
   }
 
   // 3) ШПО — прибрати звання/ПІБ/ID, лишити посаду
@@ -344,6 +1418,39 @@ function applyExcludeTransfer(input: {
     });
     if (oosRow) clearOosRow(oos, oosRow);
   }
+
+  const arrivalRow = Number(op.payload.arrivalExcelRow || 0);
+  if (arrivals && arrivalRow > 0) {
+    const departDate =
+      op.payload.arrivalDepartDate || op.payload.appointmentOrderDate || "";
+    const orderNumber =
+      op.payload.arrivalDepartOrderNumber ||
+      op.payload.appointmentOrderNumber ||
+      op.payload.orderNumber;
+    const orderDate =
+      op.payload.arrivalDepartOrderDate ||
+      op.payload.appointmentOrderDate ||
+      "";
+    const closeColumns = findArrivalCloseColumns(arrivals);
+    if (closeColumns.departDateCol) {
+      arrivals.cell(arrivalRow, closeColumns.departDateCol).value(departDate || null);
+    }
+    if (closeColumns.orderDateCol) {
+      arrivals.cell(arrivalRow, closeColumns.orderDateCol).value(orderDate || null);
+    }
+    if (closeColumns.orderNumberCol) {
+      arrivals
+        .cell(arrivalRow, closeColumns.orderNumberCol)
+        .value(orderNumber ? `№${orderNumber}` : null);
+    }
+    if (closeColumns.orderCombinedCol) {
+      arrivals.cell(arrivalRow, closeColumns.orderCombinedCol).value(
+        [orderNumber ? `№${orderNumber}` : "", orderDate ? `від ${orderDate}` : ""]
+          .filter(Boolean)
+          .join(" "),
+      );
+    }
+  }
 }
 
 function copyRowPresentation(
@@ -357,6 +1464,15 @@ function copyRowPresentation(
   for (let column = 1; column <= endCol; column += 1) {
     copyCellStyle(sheet.cell(sourceRow, column), sheet.cell(targetRow, column));
   }
+}
+
+function copyRowHeight(
+  sheet: SheetLike,
+  sourceRow: number,
+  targetRow: number,
+) {
+  const height = sheet.row?.(sourceRow).height();
+  if (typeof height === "number") sheet.row?.(targetRow).height(height);
 }
 
 function copyCellStyle(
@@ -378,61 +1494,16 @@ function copyCellStyle(
     "shrinkToFit",
     "fill",
     "border",
-    "leftBorder",
-    "rightBorder",
-    "topBorder",
-    "bottomBorder",
     "numberFormat",
   ];
   targetCell.style(sourceCell.style(styleNames));
 }
 
-function writeDateCell(
-  sheet: SheetLike,
-  row: number,
-  column: number,
-  value: string | Date | null,
-) {
-  const cell = sheet.cell(row, column);
-  cell.value(value);
-  cell.style?.("numberFormat", "dd.mm.yyyy");
-  cell.style?.("horizontalAlignment", "center");
-  cell.style?.("verticalAlignment", "center");
-}
-
-function styleExcludedManualFields(sheet: SheetLike, row: number) {
-  [col("AB"), col("AC")].forEach((column) => {
-    const cell = sheet.cell(row, column);
-    cell.style?.("numberFormat", "dd.mm.yyyy");
-    cell.style?.("fontFamily", "Times New Roman");
-    cell.style?.("fontSize", 12);
-    cell.style?.("horizontalAlignment", "center");
-    cell.style?.("verticalAlignment", "center");
-    cell.style?.("wrapText", true);
-  });
-  [col("AD"), col("AF")].forEach((column) => {
-    const cell = sheet.cell(row, column);
-    cell.style?.("numberFormat", "General");
-    cell.style?.("fontFamily", "Times New Roman");
-    cell.style?.("fontSize", 12);
-    cell.style?.("horizontalAlignment", "center");
-    cell.style?.("verticalAlignment", "center");
-    cell.style?.("wrapText", true);
-  });
-  const destinationCell = sheet.cell(row, col("AE"));
-  destinationCell.style?.("numberFormat", "General");
-  destinationCell.style?.("fontFamily", "Times New Roman");
-  destinationCell.style?.("fontSize", 12);
-  destinationCell.style?.("horizontalAlignment", "left");
-  destinationCell.style?.("verticalAlignment", "center");
-  destinationCell.style?.("wrapText", true);
-}
-
-function formatExclusionReasonForCell(value: string) {
-  const text = value.replace(/\s+/g, " ").trim();
-  const match = text.match(/^(ПЕРЕВЕДЕННЯ|РОЗПОРЯДЖЕННЯ)\s+(.+)$/iu);
-  if (!match) return text;
-  return `${match[1].toUpperCase()}\n${match[2].toUpperCase()}`;
+function formatExcludedDestinationText(value: string) {
+  return value
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLocaleLowerCase("uk-UA");
 }
 
 function nextExcludedManualRow(sheet: SheetLike, minRow: number) {
@@ -456,40 +1527,13 @@ function nextExcludedManualRow(sheet: SheetLike, minRow: number) {
   return lastManual + 1;
 }
 
-function fillExcludedLookupValuesFromOos(
+function fillExcludedBaseValuesFromOos(
   oos: SheetLike,
   oosRow: number,
   excluded: SheetLike,
   targetRow: number,
-  options?: { fillIdentity?: boolean },
 ) {
-  const mapping: Array<[number, number]> = [
-    ...(options?.fillIdentity
-      ? ([
-          [col("C"), col("C")],
-          [col("D"), col("D")],
-        ] as Array<[number, number]>)
-      : []),
-    [col("E"), col("E")],
-    [col("F"), col("F")],
-    [col("H"), col("G")],
-    [col("I"), col("H")],
-    [col("J"), col("I")],
-    [col("K"), col("J")],
-    [col("L"), col("K")],
-    [col("V"), col("Q")],
-    [col("W"), col("R")],
-    [col("X"), col("S")],
-    [col("Z"), col("T")],
-    [col("AA"), col("U")],
-    [col("AB"), col("V")],
-    [col("AC"), col("W")],
-    [col("AD"), col("X")],
-    [col("AE"), col("Y")],
-    [col("AF"), col("Z")],
-    [col("AG"), col("AA")],
-  ];
-  mapping.forEach(([fromCol, toCol]) => {
+  OOS_TO_EXCLUDED_BASE.forEach(([fromCol, toCol]) => {
     const value = oos.cell(oosRow, fromCol).value();
     if (isMeaningfulCellValue(value)) {
       excluded.cell(targetRow, toCol).value(value);
@@ -497,6 +1541,61 @@ function fillExcludedLookupValuesFromOos(
       excluded.cell(targetRow, toCol).value(null);
     }
   });
+}
+
+function fillOosBaseValuesFromExcluded(
+  excluded: SheetLike,
+  sourceRow: number,
+  oos: SheetLike,
+  targetRow: number,
+) {
+  EXCLUDED_TO_OOS_BASE.forEach(([fromCol, toCol]) => {
+    const value = excluded.cell(sourceRow, fromCol).value();
+    if (!isMeaningfulCellValue(value)) return;
+    if (toCol === OOS_RELATIVES_COLUMN) {
+      writeOosWrappedCell(oos, targetRow, toCol, formatOosRelativesText(value));
+      return;
+    }
+    if (OOS_HISTORY_COLUMNS.includes(toCol)) {
+      writeOosWrappedCell(oos, targetRow, toCol, mergeOosHistoryValue("", value));
+      return;
+    }
+    const text = cellValueToOosText(value);
+    oos.cell(targetRow, toCol).value(text || value);
+  });
+}
+
+function restoreOosFromExcluded(
+  excluded: SheetLike,
+  sourceRow: number,
+  oos: SheetLike,
+  person: {
+    rank: string;
+    fullName: string;
+    personId: string;
+    positionIndex: string;
+  },
+) {
+  const targetRow = nextEmptyPersonRow(oos, 6, col("B"));
+  copyRowPresentation(
+    oos,
+    findOosStyleSourceRow(
+      (row, column) => oos.cell(row, column).value(),
+      {
+        skipRows: [targetRow],
+        lastRow: oos.usedRange()?.endCell().rowNumber() ?? 40,
+      },
+    ),
+    targetRow,
+    col("AG"),
+  );
+  fillOosBaseValuesFromExcluded(excluded, sourceRow, oos, targetRow);
+  if (person.rank) oos.cell(targetRow, col("A")).value(person.rank);
+  if (person.fullName) oos.cell(targetRow, col("B")).value(person.fullName);
+  if (person.personId) oos.cell(targetRow, col("C")).value(person.personId);
+  if (person.positionIndex) {
+    appendCellHistory(oos, targetRow, col("D"), person.positionIndex);
+  }
 }
 
 function isMeaningfulCellValue(value: unknown) {
@@ -532,32 +1631,142 @@ function copySheetRow(
   targetRow: number,
   endCol: number,
 ) {
+  const height = sheet.row?.(sourceRow).height();
+  if (typeof height === "number") sheet.row?.(targetRow).height(height);
   for (let c = 1; c <= endCol; c += 1) {
-    sheet.cell(targetRow, c).value(sheet.cell(sourceRow, c).value());
+    const sourceCell = sheet.cell(sourceRow, c);
+    const targetCell = sheet.cell(targetRow, c);
+    targetCell.value(sourceCell.value());
+    copyCellStyle(sourceCell, targetCell);
+  }
+}
+
+function copySheetRowValues(
+  sheet: SheetLike,
+  sourceRow: number,
+  targetRow: number,
+  endCol: number,
+) {
+  copyRowHeight(sheet, sourceRow, targetRow);
+  for (let column = 1; column <= endCol; column += 1) {
+    sheet
+      .cell(targetRow, column)
+      .value(sheet.cell(sourceRow, column).value());
+  }
+}
+
+function timesheetRowHasDeparture(sheet: SheetLike, rowNumber: number) {
+  for (let day = 1; day <= 31; day += 1) {
+    if (
+      isTimesheetDepartureMark(
+        sheet.cell(rowNumber, col("I") + day - 1).value(),
+      )
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function preserveCancelledTransferTimesheetHistory(input: {
+  timesheet: SheetLike;
+  staffRow: number;
+  existingHistoryRow: number;
+  copyStaff: boolean;
+  rank: string;
+  fullName: string;
+  personId: string;
+  cancelledOrder: string;
+  cancelledDate: string;
+  cancelledDest: string;
+  lastDay: number;
+}) {
+  const {
+    timesheet,
+    staffRow,
+    existingHistoryRow,
+    copyStaff,
+    rank,
+    fullName,
+    personId,
+    cancelledOrder,
+    cancelledDate,
+    cancelledDest,
+    lastDay,
+  } = input;
+  if (existingHistoryRow > 0 && existingHistoryRow !== staffRow) return;
+  const historyRow = findTimesheetAppendNear(timesheet, staffRow);
+  copySheetRow(timesheet, staffRow, historyRow, col("AN"));
+  if (!copyStaff) {
+    timesheet.cell(historyRow, col("F")).value(rank || null);
+    timesheet.cell(historyRow, col("G")).value(fullName || null);
+    timesheet.cell(historyRow, col("H")).value(personId || null);
+  }
+  const departDay = dayFromOrderLabel(cancelledDate);
+  if (departDay > 0 && !timesheetRowHasDeparture(timesheet, historyRow)) {
+    writeTimesheetTransferHistory(timesheet, historyRow, {
+      departDay,
+      destination: cancelledDest,
+      payload: { destination: cancelledDest, timesheetDestination: cancelledDest },
+      orderNumber: cancelledOrder,
+      orderDate: cancelledDate,
+      lastDay,
+    });
   }
 }
 
 function writeTimesheetTransferHistory(
   sheet: SheetLike,
   rowNumber: number,
-  opts: { departDay: number; destination: string; lastDay: number },
+  opts: {
+    departDay: number;
+    destination: string;
+    payload?: {
+      type?: string;
+      exclusionReason?: string;
+      destination?: string;
+      documentsDest?: string;
+      timesheetDestination?: string;
+      changeText?: string;
+    };
+    orderNumber: string;
+    orderDate: string;
+    lastDay: number;
+    absenceSpans?: TimesheetAbsenceSpan[];
+    activeFromDay?: number;
+  },
 ) {
-  const departureText = opts.destination
-    ? `вибув у ${opts.destination}`
-    : "вибув";
+  const absenceSpans = opts.absenceSpans ?? [];
+  const activeFromDay = opts.activeFromDay || 1;
+  const departureText = formatTimesheetTransferMark(
+    opts.payload || {
+      destination: opts.destination,
+      timesheetDestination: opts.destination,
+    },
+  );
   let presentDays = 0;
   for (let day = 1; day <= 31; day += 1) {
     const cell = sheet.cell(rowNumber, col("I") + day - 1);
-    if (day < opts.departDay) {
-      cell.value("+");
-      presentDays += 1;
-    } else if (day === opts.departDay) {
-      cell.value(departureText);
-    } else if (day <= opts.lastDay) {
-      cell.value("-");
+    const mark = timesheetTransferMarkForDay({
+      day,
+      departDay: opts.departDay,
+      lastDay: opts.lastDay,
+      activeFromDay,
+      absenceSpans,
+      departMark: departureText,
+    });
+    if (day === opts.departDay && mark) {
+      cell.value(mark);
+      cell.style?.("wrapText", true);
+      cell.style?.({
+        wrapText: true,
+        verticalAlignment: "center",
+        horizontalAlignment: "center",
+      });
     } else {
-      cell.value(null);
+      cell.value(mark);
     }
+    if (mark === "+") presentDays += 1;
   }
   sheet.cell(rowNumber, col("AN")).value(presentDays);
 }
@@ -583,6 +1792,7 @@ function findPersonRowFlexible(
     nameCol: number;
     idCol: number;
     indexCol: number;
+    matchByIndex?: boolean;
   },
 ) {
   const end = sheet.usedRange()?.endCell().rowNumber() ?? opts.startRow;
@@ -604,6 +1814,7 @@ function findPersonRowFlexible(
     if (idKey && id === idKey) return row;
     if (nameKey && name === nameKey) return row;
     if (
+      opts.matchByIndex !== false &&
       !indexMatch &&
       opts.positionIndex &&
       index === opts.positionIndex &&
@@ -613,27 +1824,124 @@ function findPersonRowFlexible(
     }
   }
   // Якщо ПІБ/ID не збіглися (розбіжності написання) — посада з людиною на індексі.
-  return indexMatch;
+  return opts.matchByIndex === false ? 0 : indexMatch;
 }
 
-function dayFromLabel(label: string) {
-  const match = String(label ?? "").match(/(\d{1,2})[./-]/);
-  if (!match) return 0;
-  const day = Number(match[1]);
-  return day >= 1 && day <= 31 ? day : 0;
-}
+const timesheetRowIsHistoryOnly = (
+  timesheet: {
+    cell: (row: number, column: number) => { value: () => unknown };
+  },
+  rowNumber: number,
+  activeFromDay: number,
+) => {
+  let departed = false;
+  let plusAfter = false;
+  for (let day = 1; day <= 31; day += 1) {
+    const value = timesheet.cell(rowNumber, col("I") + day - 1).value();
+    if (isTimesheetDepartureMark(value)) departed = true;
+    if (String(value ?? "").trim() === "+" && day >= Math.max(1, activeFromDay)) {
+      plusAfter = true;
+    }
+  }
+  return departed && !plusAfter;
+};
 
-function toExcelDateValue(label: string) {
-  const match = String(label ?? "").match(
-    /(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})/,
+const paintTimesheetArchiveDays = (
+  timesheet: {
+    cell: (
+      row: number,
+      column: number,
+    ) => { value: (next?: unknown) => unknown };
+  },
+  rowNumber: number,
+  plan: EjoosSyncPlan,
+  payload: Record<string, string>,
+) => {
+  if (rowNumber <= 0) return;
+  const activeFromDay = dayFromOrderLabel(payload.timesheetActiveFrom || "");
+  if (timesheetRowIsHistoryOnly(timesheet, rowNumber, activeFromDay)) {
+    return;
+  }
+  const rawSpans = parseTimesheetAbsenceSpans(payload.timesheetAbsenceSpans || "");
+  const spans =
+    activeFromDay > 1
+      ? clipAbsenceSpansToActiveEpisode(rawSpans, activeFromDay)
+      : rawSpans;
+  const fillBeforeActive = activeFromDay > 1;
+  const spanEnd = spans.reduce((max, span) => Math.max(max, span.toDay), 0);
+  const lastDay = Math.max(plan.timesheetDay, spanEnd);
+  let presentDays = 0;
+  for (let day = 1; day <= 31; day += 1) {
+    const mark = timesheetMarkFromArchive(day, {
+      activeFromDay: activeFromDay || 1,
+      lastDay,
+      spans,
+      fillBeforeActive,
+    });
+    if (mark == null) continue;
+    timesheet.cell(rowNumber, col("I") + day - 1).value(mark);
+    if (day <= lastDay && mark === "+") presentDays += 1;
+  }
+  timesheet.cell(rowNumber, col("AN")).value(presentDays);
+
+  const historyRow = Number(payload.historyTimesheetExcelRow || 0);
+  const historySpans = parseTimesheetAbsenceSpans(
+    payload.historyTimesheetAbsenceSpans || "",
   );
-  if (!match) return label || null;
-  const day = Number(match[1]);
-  const month = Number(match[2]);
-  const yearRaw = Number(match[3]);
-  const year = yearRaw < 100 ? 2000 + yearRaw : yearRaw;
-  return new Date(year, month - 1, day);
-}
+  if (historyRow > 0 && historySpans.length && historyRow !== rowNumber) {
+    for (let day = 1; day <= 31; day += 1) {
+      const code = timesheetCodeOnDay(day, historySpans);
+      if (!code) continue;
+      const current = timesheet.cell(historyRow, col("I") + day - 1).value();
+      if (isTimesheetDepartureMark(current)) continue;
+      timesheet.cell(historyRow, col("I") + day - 1).value(code);
+    }
+  }
+};
+
+const repairHistoryTimesheetRow = (
+  timesheet: SheetLike,
+  op: EjoosSyncOp,
+  lastDay: number,
+) => {
+  const historyRow = Number(op.payload.historyTimesheetExcelRow || 0);
+  const departDay = dayFromOrderLabel(op.payload.historyDepartDate || "");
+  if (historyRow <= 0 || departDay <= 0) return;
+  if (timesheetRowHasDeparture(timesheet, historyRow)) return;
+  writeTimesheetTransferHistory(timesheet, historyRow, {
+    departDay,
+    destination: op.payload.historyDepartDest || "",
+    payload: {
+      destination: op.payload.historyDepartDest || "",
+      timesheetDestination: op.payload.historyDepartDest || "",
+    },
+    orderNumber: op.payload.historyOrderNumber || "",
+    orderDate: op.payload.historyDepartDate || "",
+    lastDay,
+  });
+};
+
+const writeAbsenceReturn = (
+  absent: {
+    cell: (
+      row: number,
+      column: number,
+    ) => { value: (next?: unknown) => unknown };
+  },
+  rowNumber: number,
+  payload: Record<string, string>,
+  fallbackDate: string,
+) => {
+  const returnDate = payload.returnDate || fallbackDate;
+  if (returnDate) absent.cell(rowNumber, col("M")).value(returnDate);
+  const returnOrderDate = payload.returnOrderDate || "";
+  const returnOrderNumber = payload.returnOrderNumber || "";
+  absent.cell(rowNumber, col("N")).value(null);
+  if (returnOrderDate) absent.cell(rowNumber, col("O")).value(returnOrderDate);
+  if (returnOrderNumber) {
+    absent.cell(rowNumber, col("P")).value(returnOrderNumber);
+  }
+};
 
 function nextAppendRow(
   sheet: {
@@ -643,6 +1951,38 @@ function nextAppendRow(
 ) {
   const used = sheet.usedRange();
   return Math.max(minRow, (used?.endCell().rowNumber() ?? minRow - 1) + 1);
+}
+
+function nextEmptyPersonRow(
+  sheet: SheetLike,
+  minRow: number,
+  nameColumn: number,
+) {
+  const end = sheet.usedRange()?.endCell().rowNumber() ?? minRow;
+  for (let row = minRow; row <= end + 5; row += 1) {
+    if (!isMeaningfulCellValue(sheet.cell(row, nameColumn).value())) return row;
+  }
+  return end + 1;
+}
+
+function writeOosWrappedCell(
+  sheet: SheetLike,
+  row: number,
+  column: number,
+  value: string,
+) {
+  sheet.cell(row, column).value(value || null);
+}
+
+function appendCellHistory(
+  sheet: SheetLike,
+  row: number,
+  column: number,
+  nextValue: string,
+) {
+  const merged = mergeOosHistoryValue(sheet.cell(row, column).value(), nextValue);
+  if (!merged) return;
+  writeOosWrappedCell(sheet, row, column, merged);
 }
 
 function nextEmptyAbsentRow(sheet: {
@@ -673,6 +2013,31 @@ function findPersonIdRow(
     }
   }
   return 0;
+}
+
+function clearDuplicateTimesheetRow(
+  sheet: SheetLike | undefined,
+  op: EjoosSyncOp,
+) {
+  if (!sheet) return;
+  const rowNumber = Number(op.payload.duplicateTimesheetExcelRow || 0);
+  if (rowNumber <= 0) return;
+  if (
+    op.kind === "timesheet_day" &&
+    Number(op.payload.excelRow || 0) === rowNumber
+  ) {
+    return;
+  }
+  if (op.payload.clearTimesheetIndex === "1") {
+    sheet.cell(rowNumber, col("B")).value(null);
+  }
+  sheet.cell(rowNumber, col("F")).value(null);
+  sheet.cell(rowNumber, col("G")).value(null);
+  sheet.cell(rowNumber, col("H")).value(null);
+  for (let day = 1; day <= 31; day += 1) {
+    sheet.cell(rowNumber, col("I") + day - 1).value(null);
+  }
+  sheet.cell(rowNumber, col("AN")).value(null);
 }
 
 function clearOosRow(

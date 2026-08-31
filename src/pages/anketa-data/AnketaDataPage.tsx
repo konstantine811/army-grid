@@ -219,20 +219,19 @@ export function AnketaDataPage() {
               startIcon={<SyncAltOutlinedIcon />}
               disabled={
                 sheet.isLoading ||
-                sheet.isMergingFromPersonnel ||
+                sheet.isAddingFromEjoos ||
                 sheet.isMergingPersonnel ||
                 sheet.isPushingStaffSheet ||
-                !sheet.rows.length ||
                 !canEdit
               }
-              onClick={() => void sheet.mergeFromPersonnel()}
-              title="Доповнити порожні поля анкет з БД особового складу (РНОКПП, дата народження тощо)"
+              onClick={() => void sheet.addMissingFromEjoos()}
+              title="Додати в анкети лише тих, кого ще немає: з ООС і Виключених збереженого ЕЖООС. Існуючі анкети не змінюються."
             >
               <span className="anketa-label-full">
-                {sheet.isMergingFromPersonnel ? "З ООС…" : "З особового складу"}
+                {sheet.isAddingFromEjoos ? "З ЕЖООС…" : "З ЕЖООС"}
               </span>
               <span className="anketa-label-short" aria-hidden="true">
-                {sheet.isMergingFromPersonnel ? "З ООС…" : "← ООС"}
+                {sheet.isAddingFromEjoos ? "ЕЖ…" : "+ ЕЖ"}
               </span>
             </Button>
             <Button
@@ -241,7 +240,7 @@ export function AnketaDataPage() {
               disabled={
                 sheet.isLoading ||
                 sheet.isMergingPersonnel ||
-                sheet.isMergingFromPersonnel ||
+                sheet.isAddingFromEjoos ||
                 sheet.isPushingStaffSheet ||
                 !sheet.rows.length ||
                 !canEdit
@@ -295,7 +294,7 @@ export function AnketaDataPage() {
               disabled={
                 sheet.isLoading ||
                 sheet.isMergingPersonnel ||
-                sheet.isMergingFromPersonnel ||
+                sheet.isAddingFromEjoos ||
                 sheet.isPushingStaffSheet ||
                 sheet.isDownloadingStaffSheet ||
                 sheet.isImportingStaffSheet ||
@@ -318,7 +317,7 @@ export function AnketaDataPage() {
               disabled={
                 sheet.isLoading ||
                 sheet.isMergingPersonnel ||
-                sheet.isMergingFromPersonnel ||
+                sheet.isAddingFromEjoos ||
                 sheet.isPushingStaffSheet ||
                 sheet.isDownloadingStaffSheet ||
                 sheet.isImportingStaffSheet ||
@@ -405,7 +404,7 @@ export function AnketaDataPage() {
       {sheet.isLoading ||
       sheet.isSyncing ||
       sheet.isMergingPersonnel ||
-      sheet.isMergingFromPersonnel ||
+      sheet.isAddingFromEjoos ||
       sheet.isPushingStaffSheet ||
       sheet.isDownloadingStaffSheet ||
       sheet.isImportingStaffSheet ? (

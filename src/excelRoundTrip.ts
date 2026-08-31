@@ -429,6 +429,23 @@ const detectHeaderRowIndex = (rows: CellValue[][]) => {
     : Math.max(0, bestCandidate.index);
 };
 
+const joinRichTextRuns = (parts: string[]) => {
+  const cleaned = parts
+    .map((part) =>
+      String(part ?? "")
+        .replace(/\r\n/g, "\n")
+        .replace(/\r/g, "\n")
+        .trim(),
+    )
+    .filter(Boolean);
+  if (!cleaned.length) return "";
+  const historyLike = cleaned.every(
+    (part) =>
+      /^\d{7}$/.test(part) || /^\d{1,2}\.\d{1,2}\.\d{4}$/.test(part),
+  );
+  return historyLike ? cleaned.join("\n") : cleaned.join("");
+};
+
 const extractXmlText = (value: unknown): string => {
   if (value === null || value === undefined) return "";
   if (
@@ -438,7 +455,8 @@ const extractXmlText = (value: unknown): string => {
   )
     return String(value);
   if (value instanceof Date) return value.toISOString();
-  if (Array.isArray(value)) return value.map(extractXmlText).join("");
+  if (Array.isArray(value))
+    return joinRichTextRuns(value.map(extractXmlText));
 
   if (typeof value === "object") {
     const node = value as { children?: unknown[]; value?: () => unknown };
@@ -461,23 +479,45 @@ const sanitizeCellValue = (value: RawCellValue): CellValue => {
   if (value instanceof Date) return value;
 
   if (Array.isArray(value)) {
-    const text = value.map(extractXmlText).join("").trim();
-    
+    const text = joinRichTextRuns(value.map(extractXmlText));
     return text || null;
   }
 
   if (typeof value === "object") {
-    const maybeRichText = value as {
+    const maybe = value as {
       text?: () => string;
       value?: () => unknown;
+      error?: () => string;
+      _error?: string;
       constructor?: { name?: string };
     };
 
-    if (typeof maybeRichText.text === "function") return maybeRichText.text();
-    if (typeof maybeRichText.value === "function")
-      return extractXmlText(maybeRichText.value());
+    // xlsx-populate FormulaError (#N/A, #REF!, …) — інакше стає "[object Object]"
+    if (typeof maybe.error === "function") {
+      try {
+        const err = String(maybe.error() ?? "").trim();
+        return err || "#N/A";
+      } catch {
+        return "#N/A";
+      }
+    }
+    if (typeof maybe._error === "string" && maybe._error.trim()) {
+      return maybe._error.trim();
+    }
+    if (
+      maybe.constructor?.name === "FormulaError" ||
+      /FormulaError/i.test(Object.prototype.toString.call(value))
+    ) {
+      return "#N/A";
+    }
 
-    return extractXmlText(value);
+    if (typeof maybe.text === "function") return maybe.text();
+    if (typeof maybe.value === "function")
+      return extractXmlText(maybe.value());
+
+    const asText = extractXmlText(value);
+    if (asText && asText !== "[object Object]") return asText;
+    return "#N/A";
   }
 
   return String(value);

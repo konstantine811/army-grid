@@ -180,6 +180,17 @@ export type AnketaRow = {
   __rowNumber: number;
 } & Record<AnketaColumnKey, string>;
 
+export const createEmptyAnketaRow = (rowNumber: number): AnketaRow => {
+  const record = {
+    __rowId: `anketa-${rowNumber}`,
+    __rowNumber: rowNumber,
+  } as AnketaRow;
+  for (const column of ANKETA_COLUMNS) {
+    record[column.key] = "";
+  }
+  return record;
+};
+
 export type AnketaSheetSnapshot = {
   fetchedAt: string;
   source: "google" | "file" | "cache" | "db";

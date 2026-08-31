@@ -1,6 +1,6 @@
 import { Box, Button, Stack, Typography } from "@/components/sci/SciPrimitives";
 import { CloudUploadOutlinedIcon } from "@/components/sci/icons";
-import { useEjoosWorkspace } from "./EjoosWorkspaceContext";
+import { useEjoosWorkspace } from "./ejoosWorkspaceState";
 
 export function EjoosImportPanel() {
   const {
@@ -31,7 +31,7 @@ export function EjoosImportPanel() {
         </Typography>
         <Typography variant="body2" className="ejoos-muted" sx={{ mb: 1.5 }}>
           {live?.current
-            ? `Зараз у БД: v${live.current.version} · ${live.current.sourceFileName || "без імені"}. Новий імпорт створить наступну версію.`
+            ? `Зараз у БД: v${live.current.version} · ${live.current.sourceFileName || "без імені"}. Новий файл стане поточним, а ця версія залишиться в історії.`
             : "Ще немає ЕЖООС у БД — завантажте файл (ШПО, ООС, Виключені, Табель…)."}
         </Typography>
         <Button
@@ -41,7 +41,9 @@ export function EjoosImportPanel() {
           disabled={isLoading}
           sx={live?.current ? undefined : { color: "#1a1a14" }}
         >
-          {live?.current ? "Оновити ЕЖООС з файлу" : "Завантажити ЕЖООС"}
+          {live?.current
+            ? "Завантажити новий ЕЖООС"
+            : "Завантажити ЕЖООС"}
           <input
             hidden
             type="file"

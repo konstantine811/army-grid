@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import writeXlsxFile, { type SheetData } from "write-excel-file/browser";
 import {
   Alert,
@@ -13,7 +13,6 @@ import {
 } from "@/components/sci/SciPrimitives";
 import { BusinessCenterOutlinedIcon } from "@/components/sci/icons";
 import { CalendarMonthOutlinedIcon } from "@/components/sci/icons";
-import { FileUploadOutlinedIcon } from "@/components/sci/icons";
 import { LocalHospitalOutlinedIcon } from "@/components/sci/icons";
 import { BeachAccessOutlinedIcon } from "@/components/sci/icons";
 import { PersonOutlinedIcon } from "@/components/sci/icons";
@@ -48,10 +47,17 @@ import {
   buildPersonSummary,
   buildQuestionnaireExportFileName,
   getPersonExternalId,
+  getPersonFullPositionTitle,
   isUnstablePersonExternalId,
   resolvePersonIdentityKey,
   resolvePersonRankTitle,
 } from "../personnel/personnelUtils";
+import { questionnaireFileMatchesPerson } from "../personnel/personAttachments";
+import {
+  buildOverviewPhotoMap,
+  fillMissingOverviewPhotos,
+  resolveOverviewPhoto,
+} from "./overviewPhotos";
 import { PERSON_PHONES_DOCUMENT_TYPE } from "../personnel/personPhonesStore";
 import {
   getRosterFighterStatusOverviewFields,
@@ -146,6 +152,8 @@ const overviewDocumentTypeLabel = (type: string) =>
         ? "Довіреність зарплати"
         : type === "temporaryMilitaryId"
           ? "Тимчасовий військовий квиток"
+          : type === "lostMilitaryId"
+            ? "Втрата військового квитка"
           : type;
 
 const buildDocumentsByExternalId = (documents: BackendPersonDocument[]) => {
@@ -222,6 +230,7 @@ const rosterRowToOverviewRow = (
       "—",
     status: mappedStatus.status,
     statusLabel: mappedStatus.statusLabel,
+    positionTitle: getPersonFullPositionTitle(rosterRow),
     validFrom: null,
     days: null,
     plannedReturn: null,
@@ -292,10 +301,17 @@ const mergeRosterRowsIntoOverview = (
     } catch {
       rosterRank = "";
     }
+    let positionTitle = "";
+    try {
+      positionTitle = getPersonFullPositionTitle(rosterRow);
+    } catch {
+      positionTitle = "";
+    }
     return {
       ...row,
       externalId,
       ...(rosterRank ? { rank: rosterRank } : {}),
+      ...(positionTitle ? { positionTitle } : {}),
       ...getRosterFighterStatusFields(rosterRow),
     };
   });
@@ -358,10 +374,8 @@ const buildCallSignByExternalId = (rosterRows: EjournalPreviewRow[]) => {
 };
 
 export function OverviewPage({
-  onOpenImport,
   onOpenPersonnel,
 }: {
-  onOpenImport?: () => void;
   onOpenPersonnel?: (target: OverviewPersonTarget) => void;
 }) {
   const [data, setData] = useState<BackendPersonnelOverview | null>(null);
@@ -369,6 +383,10 @@ export function OverviewPage({
   const [questionnaireByExternalId, setQuestionnaireByExternalId] = useState<
     Record<string, true>
   >({});
+  const [
+    questionnaireSourceIdByExternalId,
+    setQuestionnaireSourceIdByExternalId,
+  ] = useState<Record<string, string>>({});
   const [documentsByExternalId, setDocumentsByExternalId] = useState<
     Record<string, OverviewPersonDocumentSummary>
   >({});
@@ -381,6 +399,11 @@ export function OverviewPage({
   const [period, setPeriod] = useState("30");
   const [isLoading, setIsLoading] = useState(false);
   const [message, setMessage] = useState(`API: ${api.baseUrl}`);
+  const rosterRowsRef = useRef<EjournalPreviewRow[]>([]);
+  const photosRef = useRef<Record<string, string>>({});
+  const requestedPhotoKeysRef = useRef(new Set<string>());
+  const [rosterEpoch, setRosterEpoch] = useState(0);
+  photosRef.current = photos;
 
   const load = async () => {
     setIsLoading(true);
@@ -396,6 +419,8 @@ export function OverviewPage({
         } catch {
           mergedOverview = overview;
         }
+        rosterRowsRef.current = rosterRows;
+        setRosterEpoch((value) => value + 1);
         setData(mergedOverview);
         try {
           setCallSignByExternalId(buildCallSignByExternalId(rosterRows));
@@ -409,6 +434,7 @@ export function OverviewPage({
               ? `Джерело: ${mergedOverview.importName} · ООС + Загальний список`
               : "Немає імпорту ЕЖООС",
         );
+        return mergedOverview;
       };
 
       const [cachedOverview, cachedRoster] = await Promise.all([
@@ -448,19 +474,42 @@ export function OverviewPage({
             () => [] as EjournalPreviewRow[],
           ),
         ]);
-      applyOverview(overview, rosterRows);
-      setPhotos(
-        Object.fromEntries(
-          photoList.map((item) => [item.personExternalId, item.photoData]),
-        ),
+      const mergedOverview = applyOverview(overview, rosterRows);
+      const listedPhotos = buildOverviewPhotoMap(
+        photoList,
+        mergedOverview.rows,
+        rosterRows,
       );
-      setQuestionnaireByExternalId(
-        Object.fromEntries(
-          questionnaireList
-            .filter((item) => item.personExternalId)
-            .map((item) => [item.personExternalId, true as const]),
-        ),
-      );
+      photosRef.current = listedPhotos.photos;
+      setPhotos(listedPhotos.photos);
+      const questionnairePresence: Record<string, true> = {};
+      const questionnaireSourceIds: Record<string, string> = {};
+      for (const item of questionnaireList) {
+        const sourceId = item.personExternalId?.trim();
+        if (!sourceId) continue;
+        questionnairePresence[sourceId] = true;
+        questionnaireSourceIds[sourceId] = sourceId;
+      }
+      // Старі анкети могли бути збережені під іншим ID. Назва PDF містить ПІБ,
+      // тому зв’язуємо її з актуальним рядком огляду й пам’ятаємо реальний ID файла.
+      for (const row of mergedOverview.rows) {
+        const rowId = row.externalId?.trim();
+        if (!rowId || questionnairePresence[rowId]) continue;
+        const match = questionnaireList.find((item) => {
+          const fileName = item.fileName?.trim();
+          return (
+            Boolean(fileName) &&
+            !/^questionnaire\.pdf$/i.test(fileName ?? "") &&
+            questionnaireFileMatchesPerson(fileName, [row.name])
+          );
+        });
+        const sourceId = match?.personExternalId?.trim();
+        if (!sourceId) continue;
+        questionnairePresence[rowId] = true;
+        questionnaireSourceIds[rowId] = sourceId;
+      }
+      setQuestionnaireByExternalId(questionnairePresence);
+      setQuestionnaireSourceIdByExternalId(questionnaireSourceIds);
     } catch (error) {
       setMessage(
         error instanceof Error ? error.message : "Не вдалося завантажити огляд",
@@ -518,6 +567,7 @@ export function OverviewPage({
         row.name,
         row.externalId,
         row.rank,
+        row.positionTitle,
         row.unit,
         row.statusLabel,
         row.fighterDirection,
@@ -574,12 +624,12 @@ export function OverviewPage({
 
     try {
       setMessage(`Відкриваю анкету: ${target.name}…`);
-      const url = await api.getPersonQuestionnaireObjectUrl(
-        target.externalId,
+      const url = await api.createPersonQuestionnairePreviewUrl(
+        questionnaireSourceIdByExternalId[target.externalId] ??
+          target.externalId,
         buildQuestionnaireExportFileName(target.name),
       );
       window.open(url, "_blank", "noopener,noreferrer");
-      window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
       setMessage(`Анкета відкрита: ${target.name}`);
     } catch (error) {
       setMessage(
@@ -589,6 +639,50 @@ export function OverviewPage({
       );
     }
   };
+
+  const onNeedPhoto = useCallback((row: BackendPersonnelOverviewRow) => {
+    if (resolveOverviewPhoto(row, photosRef.current)) return;
+    const requestKey = row.externalId || row.id || row.name;
+    if (!requestKey || requestedPhotoKeysRef.current.has(requestKey)) return;
+    requestedPhotoKeysRef.current.add(requestKey);
+    void fillMissingOverviewPhotos(
+      [row],
+      rosterRowsRef.current,
+      photosRef.current,
+    ).then((next) => {
+      photosRef.current = next;
+      setPhotos(next);
+      if (
+        !resolveOverviewPhoto(row, next) &&
+        !rosterRowsRef.current.length
+      ) {
+        requestedPhotoKeysRef.current.delete(requestKey);
+      }
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!filteredRows.length || filteredRows.length > 40) return;
+    const missing = filteredRows.filter((row) => {
+      const requestKey = row.externalId || row.id || row.name;
+      if (!requestKey || requestedPhotoKeysRef.current.has(requestKey)) {
+        return false;
+      }
+      return !resolveOverviewPhoto(row, photosRef.current);
+    });
+    if (!missing.length) return;
+    for (const row of missing) {
+      requestedPhotoKeysRef.current.add(row.externalId || row.id || row.name);
+    }
+    void fillMissingOverviewPhotos(
+      missing,
+      rosterRowsRef.current,
+      photosRef.current,
+    ).then((next) => {
+      photosRef.current = next;
+      setPhotos(next);
+    });
+  }, [filteredRows, rosterEpoch]);
 
   const exportOverviewTable = async (
     context: SciDataTableExportContext<BackendPersonnelOverviewRow>,
@@ -630,7 +724,9 @@ export function OverviewPage({
     const files: Array<{ name: string; data: Uint8Array }> = [];
 
     for (const row of questionnaireRows) {
-      const questionnaire = await api.getPersonQuestionnaire(row.externalId);
+      const questionnaire = await api.getPersonQuestionnaire(
+        questionnaireSourceIdByExternalId[row.externalId] ?? row.externalId,
+      );
       if (!questionnaire?.fileData) continue;
       const fileName = sanitizeFileName(
         buildQuestionnaireExportFileName(
@@ -671,14 +767,6 @@ export function OverviewPage({
         <Stack direction="row" spacing={1}>
           <Button variant="outlined" onClick={() => void load()}>
             Оновити
-          </Button>
-          <Button
-            variant="contained"
-            startIcon={<FileUploadOutlinedIcon />}
-            onClick={onOpenImport}
-            sx={{ color: "#1a1a14" }}
-          >
-            Імпортувати
           </Button>
         </Stack>
       </header>
@@ -811,6 +899,7 @@ export function OverviewPage({
           <OverviewVirtualTable
             rows={filteredRows}
             photos={photos}
+            onNeedPhoto={onNeedPhoto}
             questionnaireByExternalId={questionnaireByExternalId}
             documentsByExternalId={documentsByExternalId}
             onOpenPersonnel={onOpenPersonnel}

@@ -29,19 +29,25 @@ import {
   blobToBase64,
   downloadBlobFile,
   downloadTextFile,
-  fileToBase64,
 } from "./ejoosSyncApply";
+import { appendEjoosChangeHistoryOnExport } from "./ejoosChangeHistorySheet";
 import {
   buildConfirmSummary,
   buildEjoosSyncPlan,
   buildProtocolText,
+  collectProcessedMovementKeys,
   type EjoosSyncOp,
   type EjoosSyncPlan,
 } from "./ejoosSyncPlan";
 import {
+  timesheetOpBlocksApply,
+  timesheetOpNeedsManualCode,
+} from "./ejoosOpRequirements";
+import {
   assertEjoosWorkbook,
   assertPbWorkbook,
   detectWorkbookKind,
+  detectWorkbookKindFromFile,
   ejoosDownloadFileName,
 } from "./ejoosWorkbookKind";
 
@@ -114,7 +120,7 @@ export function EjoosLiveSyncPanel() {
     try {
       const snapshot = await readWorkbookSnapshot(file, EJOOS_SYNC_READ_OPTIONS);
       assertEjoosWorkbook(snapshot);
-      const fileBase64 = await fileToBase64(file);
+      const fileBase64 = await blobToBase64(file);
       const created = await api.seedEjournalLive({
         fileBase64,
         sourceFileName: file.name,
@@ -149,7 +155,9 @@ export function EjoosLiveSyncPanel() {
       setPbSnapshot(pb);
       // Yield so loading spinner paints before heavy plan build.
       await new Promise((resolve) => window.setTimeout(resolve, 0));
-      const nextPlan = buildEjoosSyncPlan(ejoos, pb);
+      const nextPlan = buildEjoosSyncPlan(ejoos, pb, {
+        processedMovementKeys: collectProcessedMovementKeys(live?.versions),
+      });
       setPlan(nextPlan);
       setPage(0);
       setCheckedIds(
@@ -256,10 +264,7 @@ export function EjoosLiveSyncPanel() {
   const blockedSelected = selectedOps.filter((op) => {
     if (op.class === "conflict") return true;
     if (op.kind === "timesheet_day") {
-      const code = op.payload.timesheetCode || "";
-      if (!code || code === "(оберіть код)") return true;
-      if (!op.payload.excelRow) return true;
-      return false;
+      return timesheetOpBlocksApply(op);
     }
     if (op.kind === "exclude_transfer") {
       return !op.payload.destination;
@@ -331,13 +336,36 @@ export function EjoosLiveSyncPanel() {
         ejoos: ejoosSnapshot,
         plan,
         ops: selectedOps,
+        history: {
+          version: (live.current.version || 0) + 1,
+          appliedAt: new Date().toISOString(),
+        },
       });
-      const fileBase64 = await blobToBase64(result.blob);
+      const resultBlob = result.blob;
       const protocolWithVersion = buildProtocolText(plan, selectedOps, {
         actor: "operator",
         at: new Date().toLocaleString("uk-UA"),
         version: (live.current.version || 0) + 1,
       });
+      const changeProtocol = {
+        ...result.changeProtocol,
+        protocolText: protocolWithVersion,
+      };
+      const pendingVersion: BackendEjournalLiveVersion = {
+        ...live.current,
+        version: (live.current.version || 0) + 1,
+        createdAt: new Date().toISOString(),
+        asOfDate: plan.timesheetDayLabel,
+        sourcePbFileName: pbSnapshot?.fileName,
+        changeProtocol,
+        notes: `Застосовано ${selectedOps.length} змін з ${plan.pbName}`,
+      };
+      const withHistory = await appendEjoosChangeHistoryOnExport(
+        resultBlob,
+        [...(live.versions ?? []), pendingVersion],
+        pendingVersion.version,
+      );
+      const fileBase64 = await blobToBase64(withHistory);
       const saved = await api.applyEjournalLive({
         baseVersionId: live.current.id,
         fileBase64,
@@ -345,13 +373,10 @@ export function EjoosLiveSyncPanel() {
         asOfDate: plan.timesheetDayLabel,
         unitLabel: "1ПБ",
         sourcePbFileName: pbSnapshot?.fileName,
-        changeProtocol: {
-          ...result.changeProtocol,
-          protocolText: protocolWithVersion,
-        },
+        changeProtocol,
         notes: `Застосовано ${selectedOps.length} змін з ${plan.pbName}`,
       });
-      downloadBlobFile(result.fileName, result.blob);
+      downloadBlobFile(result.fileName, withHistory);
       downloadTextFile(
         `протокол_ЕЖООС_v${saved.version}.txt`,
         protocolWithVersion,
@@ -381,17 +406,21 @@ export function EjoosLiveSyncPanel() {
     }
   };
 
-  const downloadVersionFile = async (versionId: string, fileNameHint?: string) => {
+  const downloadVersionFile = async (
+    versionId: string,
+    _fileNameHint?: string,
+  ) => {
     setIsLoading(true);
     try {
       const full = await api.getEjournalLiveFile(versionId);
       if (!full.fileBase64) throw new Error("Немає файлу");
-      const downloadName =
-        fileNameHint ||
-        ejoosDownloadFileName(full.version, full.asOfDate, full.sourceFileName);
+      const downloadName = ejoosDownloadFileName(
+        full.version,
+        full.asOfDate,
+        full.sourceFileName,
+      );
       const file = base64ToFile(full.fileBase64, downloadName);
-      const snapshot = await readWorkbookSnapshot(file, EJOOS_SYNC_READ_OPTIONS);
-      if (detectWorkbookKind(snapshot) === "pb_1pb") {
+      if ((await detectWorkbookKindFromFile(file)) === "pb_1pb") {
         throw new Error(
           "У цій версії збережено 1ПБ (sh/Рух/archive), а не ЕЖООС. Імпортуйте канонічний ЕЖООС і застосуйте зміни знову.",
         );
@@ -420,14 +449,34 @@ export function EjoosLiveSyncPanel() {
   };
 
   const rollbackTo = async (versionId: string) => {
-    if (!window.confirm("Зробити цю версію поточною? Буде створено нову версію-копію (історія не зітреться).")) {
+    if (!window.confirm("Зробити цю версію поточною? Буде створено нову версію-копію.")) {
       return;
     }
     setIsLoading(true);
     try {
+      const targetMeta = live?.versions?.find((version) => version.id === versionId);
+      if (!targetMeta) throw new Error("Версію для відкату не знайдено");
+
+      const targetFile = await api.getEjournalLiveFile(versionId, "1ПБ");
+      if (!targetFile.fileBase64) {
+        throw new Error("Файл цільової версії не повернувся з БД");
+      }
+      const targetBlob = base64ToFile(
+        targetFile.fileBase64,
+        targetFile.sourceFileName || `ЕЖООС_v${targetMeta.version}.xlsx`,
+      );
+      const withHistory = await appendEjoosChangeHistoryOnExport(
+        targetBlob,
+        live?.versions ?? [],
+        targetMeta.version,
+        { mode: "rebuild" },
+      );
+      const fileBase64 = await blobToBase64(withHistory);
+
       const saved = await api.rollbackEjournalLive({
         targetVersionId: versionId,
         unitLabel: "1ПБ",
+        fileBase64,
       });
       await refreshLive();
       await loadCurrentEjoosFromDb(saved);
@@ -891,7 +940,8 @@ const OpRow = memo(function OpRow({
       </td>
       <td>
         {op.kind === "timesheet_day" &&
-        (op.class === "needs_input" || !op.payload.timesheetCode) ? (
+        op.payload.clearStalePerson !== "1" &&
+        timesheetOpNeedsManualCode(op) ? (
           <Select
             size="small"
             value={manualCode || op.payload.timesheetCode || ""}

@@ -27,6 +27,13 @@ const normalizeStatusText = (value: string) =>
     .replace(/\s+/g, " ")
     .trim();
 
+/**
+ * `_5 1ПБ`, `_1 1ПБ`, `1ПБ` — людина в своїй частині, у табелі «+».
+ * `_5 2ПБ` сюди не входить (інший батальйон).
+ */
+const isOwnBattalionPresentStatus = (text: string) =>
+  /^_?\d{0,2}\s*1\s*пб$/.test(text);
+
 const ruleMatches = (rule: EjoosStatusRule, text: string) => {
   if (!rule.enabled) return false;
   if (rule.excludeAny?.some((token) => text.includes(token))) return false;
@@ -66,6 +73,17 @@ export const mapPbStatusToEjoosWithRules = (
       label: rule.label,
       reason: rule.reason,
       ruleId: rule.id,
+    };
+  }
+
+  if (isOwnBattalionPresentStatus(text)) {
+    return {
+      timesheetCode: "+",
+      absenceGround: null,
+      confidence: "high",
+      label: "У 1ПБ",
+      reason: "СТАТУС — підрозділ 1ПБ (`_5 1ПБ` тощо) → код табеля «+»",
+      ruleId: "own_unit",
     };
   }
 

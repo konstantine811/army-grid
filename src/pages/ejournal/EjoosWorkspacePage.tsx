@@ -4,11 +4,11 @@ import {
   Chip,
   LinearProgress,
 } from "@/components/sci/SciPrimitives";
+import { EjoosWorkspaceProvider } from "./EjoosWorkspaceContext";
 import {
-  EjoosWorkspaceProvider,
   useEjoosWorkspace,
   type EjoosWorkspaceTab,
-} from "./EjoosWorkspaceContext";
+} from "./ejoosWorkspaceState";
 import { EjoosImportPanel } from "./EjoosImportPanel";
 import { EjoosChangesPanel } from "./EjoosChangesPanel";
 import {
@@ -23,7 +23,7 @@ const TABS: { id: EjoosWorkspaceTab; label: string; group?: string }[] = [
   { id: "import", label: "Імпорт", group: "flow" },
   { id: "pb", label: "1ПБ", group: "flow" },
   { id: "changes", label: "Операції", group: "flow" },
-  { id: "history", label: "Історія", group: "flow" },
+  { id: "history", label: "Застосовано", group: "flow" },
   { id: "shpo", label: "ШПО", group: "view" },
   { id: "oos", label: "ООС", group: "view" },
   { id: "excluded", label: "Виключені", group: "view" },

@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "dev:lan": "vite --host",
+    "cert:trust": "bash scripts/setupLanHttps.sh",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "preview": "vite preview",

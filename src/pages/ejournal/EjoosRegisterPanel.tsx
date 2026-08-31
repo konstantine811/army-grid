@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { Button, Stack, Typography } from "@/components/sci/SciPrimitives";
 import { filterByQuery } from "./ejoosLiveViews";
-import { useEjoosWorkspace } from "./EjoosWorkspaceContext";
+import { useEjoosWorkspace } from "./ejoosWorkspaceState";
 import { useEjoosLiveView } from "./useEjoosLiveView";
 
 type RegisterKind =

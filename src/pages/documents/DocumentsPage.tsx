@@ -36,6 +36,7 @@ import {
   jsonChanged,
   readDataCache,
 } from "../../data/idbDataCache";
+import { buildDocumentRoute } from "../../app/navigation";
 import type { EjournalPreviewRow } from "../ejournal/ejournalTypes";
 import {
   buildPersonSummary,
@@ -164,6 +165,21 @@ import {
   type UbdRestoreSignatory,
 } from "./ubdRestoreReport";
 import { createUbdRestoreWordBlob } from "./ubdRestoreWordExport";
+import {
+  createLostMilitaryIdFields,
+  mergeLostMilitaryIdFields,
+  lostMilitaryIdWorkflowSteps,
+  buildLostMilitaryIdReportText,
+  buildLostMilitaryIdOrderText,
+  reportSignerOf,
+  reporterFooterBlock,
+  type LostMilitaryIdFields,
+  type LostMilitaryIdSignatory,
+} from "./lostMilitaryIdReport";
+import {
+  createLostMilitaryIdReportWordBlob,
+  createLostMilitaryIdKitZip,
+} from "./lostMilitaryIdWordExport";
 
 dayjs.locale("uk");
 
@@ -176,7 +192,8 @@ type DocumentMode =
   | "form12Report"
   | "serviceCharacteristic"
   | "zhbdCertificate"
-  | "temporaryMilitaryId";
+  | "temporaryMilitaryId"
+  | "lostMilitaryId";
 
 type DefaultDocumentFieldKey = "pib" | "rank" | "unit" | "date";
 type DefaultDocumentFields = Record<DefaultDocumentFieldKey, string>;
@@ -549,6 +566,23 @@ const loadUbdRestoreSignatoryRecords = async () => {
   if (own.length) return own;
   return api.listDocumentSignatories("ubdReport");
 };
+
+const loadLostMilitaryIdSignatoryRecords = async () => {
+  const own = await api.listDocumentSignatories("lostMilitaryId");
+  if (own.length) return own;
+  return api.listDocumentSignatories("ubdReport");
+};
+
+const toLostMilitaryIdSignatories = (
+  records: DocumentSignatorySnapshot[],
+): LostMilitaryIdSignatory[] =>
+  records.map((record) => ({
+    blockType: record.blockType === "APPROVAL" ? "APPROVAL" : "SIGNER",
+    title: record.title,
+    rank: record.rank,
+    fullName: record.fullName,
+    signatureData: record.signatureData ?? null,
+  }));
 
 const toUbdRestoreSignatories = (
   records: DocumentSignatorySnapshot[],
@@ -1013,6 +1047,7 @@ const CREATE_PERSON_DOCUMENT_TYPES = [
   { value: "serviceCharacteristic", label: "Службова характеристика" },
   { value: "zhbdCertificate", label: "Довідка ЖБД" },
   { value: "temporaryMilitaryId", label: "Тимчасовий військовий квиток" },
+  { value: "lostMilitaryId", label: "Втрата військового квитка" },
 ] as const;
 
 const JOURNAL_DOCUMENT_TYPE_FILTERS = [
@@ -1025,6 +1060,7 @@ const JOURNAL_DOCUMENT_TYPE_FILTERS = [
   { value: "zhbdCertificate", label: "Довідка ЖБД" },
   { value: "temporaryMilitaryId", label: "Тимчасовий військовий квиток" },
   { value: "salaryPowerAttorney", label: "Довіреність зарплати" },
+  { value: "lostMilitaryId", label: "Втрата військового квитка" },
 ] as const;
 
 const salaryDocumentTypeLabel = (type: string) =>
@@ -1044,6 +1080,8 @@ const salaryDocumentTypeLabel = (type: string) =>
                 ? "Довідка ЖБД"
           : type === "temporaryMilitaryId"
             ? "Тимчасовий військовий квиток"
+            : type === "lostMilitaryId"
+              ? "Втрата військового квитка"
             : type;
 
 const buildTicketPhotoFile = (photoData: string) =>
@@ -1069,6 +1107,7 @@ const buildPersonDocumentDraft = (
     zhbdCertificateFields: ZhbdCertificateFields;
     restoreFields: UbdRestoreReportFields;
     ticketFields: TemporaryMilitaryIdFields;
+    lostMilitaryIdFields: LostMilitaryIdFields;
   },
 ) => {
   const now = dayjs().format("DD.MM.YYYY HH:mm");
@@ -1166,6 +1205,17 @@ const buildPersonDocumentDraft = (
       files: { ticketPhoto, ubdScans: [] },
     };
   }
+  if (type === "lostMilitaryId") {
+    const workflow = { ...createEmptyWorkflow(), currentStatus: "document" };
+    return {
+      type,
+      title: `Втрата військового квитка · ${now}`,
+      status: "document",
+      fields: { ...input.lostMilitaryIdFields, personStatus: input.personStatus },
+      workflow: workflow as unknown as Record<string, unknown>,
+      files: { ubdScans: [] },
+    };
+  }
   return null;
 };
 
@@ -1181,6 +1231,7 @@ const workflowStatusLabel = (status?: string | null) =>
     ...serviceCharacteristicWorkflowSteps,
     ...zhbdCertificateWorkflowSteps,
     ...temporaryMilitaryIdWorkflowSteps,
+    ...lostMilitaryIdWorkflowSteps,
   ].find((step) => step.key === status)?.title ||
   status ||
   "статус не заданий";
@@ -1198,6 +1249,8 @@ const documentWorkflowSteps = (type?: string | null) =>
         ? ubdWorkflowSteps
         : type === "temporaryMilitaryId"
           ? temporaryMilitaryIdWorkflowSteps
+          : type === "lostMilitaryId"
+            ? lostMilitaryIdWorkflowSteps
           : salaryWorkflowSteps;
 
 const resolveDocumentWorkflowStatus = (
@@ -1251,15 +1304,30 @@ const documentWorkflowStatusLabel = (document: BackendPersonDocument) =>
       resolveDocumentWorkflowStatus(document.type, document.status),
   )?.title || workflowStatusLabel(document.status);
 
-/** Нормалізує карту кроків: незалежні галочки; старий `sent` → sentReport. */
+/** Нормалізує карту кроків. Старий УБД `sent` → sentReport; у характеристиці `sent` — окремий крок. */
 const normalizeWorkflowCompletedRecord = (
   completed: Record<string, boolean> | undefined,
   steps: Array<{ key: string }>,
 ) => {
   const raw = { ...(completed || {}) };
-  if (raw.sent === true) {
-    if (raw.sentReport == null) raw.sentReport = true;
+  const stepKeys = new Set(steps.map((step) => step.key));
+  if (
+    raw.sent === true &&
+    stepKeys.has("sentReport") &&
+    raw.sentReport == null
+  ) {
+    raw.sentReport = true;
+  }
+  if (stepKeys.has("sentReport") && !stepKeys.has("sent")) {
     delete raw.sent;
+  }
+  if (
+    stepKeys.has("sent") &&
+    !stepKeys.has("sentReport") &&
+    raw.sentReport === true &&
+    raw.sent !== false
+  ) {
+    raw.sent = true;
   }
   return Object.fromEntries(
     steps.map((step) => [step.key, raw[step.key] === true]),
@@ -1298,6 +1366,27 @@ const resolveWorkflowCompletedMap = (
       index >= 0 && stepIndex <= index,
     ]),
   ) as Record<string, boolean>;
+};
+
+/** Найвищий відмічений крок — для фільтра журналу (не «поточний» жовтий). */
+const documentHighestWorkflowStatusLabel = (
+  document: BackendPersonDocument,
+  workflowOverride?: SalaryWorkflowState,
+) => {
+  const steps = documentWorkflowSteps(document.type);
+  if (!steps.length) return documentWorkflowStatusLabel(document);
+  const workflow = workflowOverride ?? mergeSalaryWorkflow(document.workflow);
+  const completed = resolveWorkflowCompletedMap(
+    workflow,
+    steps,
+    document.type,
+    document.status || workflow.currentStatus,
+  );
+  let lastTitle = "";
+  for (const step of steps) {
+    if (completed[step.key]) lastTitle = step.title;
+  }
+  return lastTitle || documentWorkflowStatusLabel(document);
 };
 
 const countWorkflowCompletedSteps = (
@@ -1370,17 +1459,36 @@ const getDocumentProgressPercent = (document: BackendPersonDocument) => {
   return Math.round((completedCount / steps.length) * 100);
 };
 
+const readDocumentFieldText = (
+  fields: Record<string, unknown>,
+  key: string,
+) => {
+  const value = fields[key];
+  return typeof value === "string" ? value.trim() : "";
+};
+
 const getDocumentPersonName = (document: BackendPersonDocument) => {
-  const fields = document.fields || {};
-  const value =
-    fields.fullName ||
-    fields.pib ||
-    fields.name ||
-    fields["ПІБ"] ||
-    fields["ФИО"];
-  return typeof value === "string" && value.trim()
-    ? value.trim()
-    : `ID ${document.personExternalId}`;
+  const fields = (document.fields || {}) as Record<string, unknown>;
+  const fullName =
+    readDocumentFieldText(fields, "fullName") ||
+    readDocumentFieldText(fields, "pib") ||
+    readDocumentFieldText(fields, "name") ||
+    readDocumentFieldText(fields, "ПІБ") ||
+    readDocumentFieldText(fields, "ФИО");
+  if (fullName) return fullName;
+
+  const assembled = [
+    readDocumentFieldText(fields, "lastName"),
+    readDocumentFieldText(fields, "firstName"),
+    readDocumentFieldText(fields, "patronymic"),
+  ]
+    .filter(Boolean)
+    .join(" ");
+  if (assembled) return assembled;
+
+  return document.personExternalId
+    ? `ID ${document.personExternalId}`
+    : "Без ПІБ";
 };
 
 const readDocumentUbdTaskPeriod = (document: BackendPersonDocument) => {
@@ -1405,7 +1513,11 @@ type JournalSortField =
   | "progress"
   | "taskPeriodStart";
 
-type JournalReadinessFilter = "ALL" | "INCOMPLETE" | "COMPLETE";
+type JournalReadinessFilter =
+  | "ALL"
+  | "INCOMPLETE"
+  | "READY_TO_SEND"
+  | "COMPLETE";
 
 const cloneSalaryWorkflow = (workflow: SalaryWorkflowState): SalaryWorkflowState =>
   mergeSalaryWorkflow(JSON.parse(JSON.stringify(workflow)));
@@ -1517,10 +1629,72 @@ const ubdDocumentHasEmptyInputs = (
   ) {
     return true;
   }
-  // Червоний лише за явної позначки «БР ще не підходить»,
-  // не через авто-порівняння дат (інакше «засвічуються» усі з найближчим БР).
+  return false;
+};
+
+const ubdLiveDocument = (
+  document: BackendPersonDocument,
+  workflowOverride?: SalaryWorkflowState,
+) =>
+  workflowOverride
+    ? {
+        ...document,
+        workflow: workflowOverride,
+        status: workflowOverride.currentStatus || document.status,
+      }
+    : document;
+
+/** Зелений і поза експортом «Не подавалися» — лише коли всі кроки прогресу відмічені. */
+const ubdDocumentIsComplete = (
+  document: BackendPersonDocument,
+  workflowOverride?: SalaryWorkflowState,
+) => {
+  if (document.type !== "ubdReport") return false;
+  return getDocumentProgressPercent(ubdLiveDocument(document, workflowOverride)) >= 100;
+};
+
+const ubdHighestCompletedStepKey = (
+  document: BackendPersonDocument,
+  workflowOverride?: SalaryWorkflowState,
+) => {
+  const live = ubdLiveDocument(document, workflowOverride);
+  const workflow = workflowOverride ?? mergeSalaryWorkflow(live.workflow);
+  const completed = resolveWorkflowCompletedMap(
+    workflow,
+    ubdWorkflowSteps,
+    live.type,
+    live.status || workflow.currentStatus,
+  );
+  let last = "";
+  for (const step of ubdWorkflowSteps) {
+    if (completed[step.key]) last = step.key;
+  }
+  return last;
+};
+
+/** Дата БР не збігається з «з» періоду завдань — жовтий рядок у журналі. */
+const ubdDocumentHasBasisDateMismatch = (
+  fields: Record<string, unknown> | null | undefined,
+) => {
+  const resolved = resolveUbdFieldsForGapCheck(fields);
   const flag = resolved.basisNotReady;
-  return flag === true || flag === "true";
+  if (flag === true || flag === "true") return true;
+  const taskPeriod = String(resolved.taskPeriod ?? "").trim();
+  const basisDate = String(resolved.basisDate ?? "").trim();
+  if (!taskPeriod || isBlankDocumentInput(basisDate)) return false;
+  return !ubdBasisDateMatchesTaskPeriod(taskPeriod, basisDate);
+};
+
+/** Можна відправляти рапорт: крок «Готово до відправки», без червоного/жовтого, ще не відправлений. */
+const ubdDocumentIsReadyToSend = (
+  document: BackendPersonDocument,
+  fields: Record<string, unknown> | null | undefined,
+  workflowOverride?: SalaryWorkflowState,
+) => {
+  if (document.type !== "ubdReport") return false;
+  if (ubdDocumentHasEmptyInputs(fields)) return false;
+  if (ubdDocumentHasBasisDateMismatch(fields)) return false;
+  return ubdHighestCompletedStepKey(document, workflowOverride) === "ready";
 };
 
 const documentCreatedMonthKey = (value?: string | null) => {
@@ -1761,6 +1935,10 @@ export function DocumentsPage(_props: {
   const [ticketFields, setTicketFields] = useState<TemporaryMilitaryIdFields>(
     () => createTemporaryMilitaryIdFields(buildPersonSummary(null)),
   );
+  const [lostMilitaryIdFields, setLostMilitaryIdFields] =
+    useState<LostMilitaryIdFields>(() =>
+      createLostMilitaryIdFields(null, buildPersonSummary(null)),
+    );
   const [commanderSignatureSrc, setCommanderSignatureSrc] = useState(
     UBD_COMMANDER_SIGNATURE_SRC,
   );
@@ -1819,6 +1997,7 @@ export function DocumentsPage(_props: {
   const [ubdProgressBackups, setUbdProgressBackups] = useState<UbdProgressBackup[]>(
     () => loadUbdProgressBackups(),
   );
+  const [ubdProgressBackupsOpen, setUbdProgressBackupsOpen] = useState(false);
   const refreshUbdProgressBackups = () =>
     setUbdProgressBackups(loadUbdProgressBackups());
   const showUbdExitDateColumn = journalTypeFilter === "ubdReport";
@@ -1857,7 +2036,8 @@ export function DocumentsPage(_props: {
     mode === "form12Report" ||
     mode === "serviceCharacteristic" ||
     mode === "zhbdCertificate" ||
-    mode === "ubdRestoreReport";
+    mode === "ubdRestoreReport" ||
+    mode === "lostMilitaryId";
   const buildActiveWordBlob = useCallback(() => {
     if (mode === "ubdReport") return createUbdWordBlob(ubdWordFields);
     if (mode === "form6Report") return createForm6WordBlob(form6Fields);
@@ -1871,10 +2051,14 @@ export function DocumentsPage(_props: {
     if (mode === "ubdRestoreReport") {
       return createUbdRestoreWordBlob(ubdRestoreFields);
     }
+    if (mode === "lostMilitaryId") {
+      return createLostMilitaryIdReportWordBlob(lostMilitaryIdFields);
+    }
     return Promise.reject(new Error("Немає Word-шаблону для цього документа."));
   }, [
     form12Fields,
     form6Fields,
+    lostMilitaryIdFields,
     mode,
     serviceCharacteristicFields,
     zhbdCertificateFields,
@@ -1892,6 +2076,7 @@ export function DocumentsPage(_props: {
             ...ubdRestoreWorkflowSteps,
             ...form12WorkflowSteps,
             ...temporaryMilitaryIdWorkflowSteps,
+            ...lostMilitaryIdWorkflowSteps,
             ...salaryWorkflowSteps,
           ]
         : documentWorkflowSteps(journalTypeFilter);
@@ -1932,9 +2117,20 @@ export function DocumentsPage(_props: {
       ) {
         return false;
       }
+      const liveWorkflow =
+        document.id === selectedDocumentId
+          ? mergeSalaryWorkflow({
+              ...(document.workflow && typeof document.workflow === "object"
+                ? document.workflow
+                : {}),
+              ...workflow,
+            })
+          : undefined;
       if (
         journalStatusFilters.length > 0 &&
-        !journalStatusFilters.includes(documentWorkflowStatusLabel(document))
+        !journalStatusFilters.includes(
+          documentHighestWorkflowStatusLabel(document, liveWorkflow),
+        )
       ) {
         return false;
       }
@@ -1950,9 +2146,19 @@ export function DocumentsPage(_props: {
           document.id === selectedDocumentId && mode === "ubdReport"
             ? (ubdFields as unknown as Record<string, unknown>)
             : ((document.fields || {}) as Record<string, unknown>);
-        const incomplete = ubdDocumentHasEmptyInputs(liveFields);
-        if (journalReadinessFilter === "INCOMPLETE" && !incomplete) return false;
-        if (journalReadinessFilter === "COMPLETE" && incomplete) return false;
+        const readyToSend = ubdDocumentIsReadyToSend(
+          document,
+          liveFields,
+          liveWorkflow,
+        );
+        const complete = ubdDocumentIsComplete(document, liveWorkflow);
+        if (journalReadinessFilter === "READY_TO_SEND" && !readyToSend) {
+          return false;
+        }
+        if (journalReadinessFilter === "INCOMPLETE" && readyToSend) {
+          return false;
+        }
+        if (journalReadinessFilter === "COMPLETE" && !complete) return false;
       }
       return true;
     });
@@ -1993,20 +2199,49 @@ export function DocumentsPage(_props: {
     mode,
     selectedDocumentId,
     ubdFields,
+    workflow,
   ]);
+
+  const journalUbdExportBlockedIds = useMemo(() => {
+    const blocked = new Set<string>();
+    for (const document of filteredJournalDocuments) {
+      if (document.type !== "ubdReport") continue;
+      const liveWorkflow =
+        document.id === selectedDocumentId
+          ? mergeSalaryWorkflow({
+              ...(document.workflow && typeof document.workflow === "object"
+                ? document.workflow
+                : {}),
+              ...workflow,
+            })
+          : undefined;
+      if (ubdDocumentIsComplete(document, liveWorkflow)) {
+        blocked.add(document.id);
+      }
+    }
+    return blocked;
+  }, [filteredJournalDocuments, selectedDocumentId, workflow]);
 
   const journalExportDocuments = useMemo(
     () =>
       filteredJournalDocuments.filter(
-        (document) => !journalExportDeselectedIds[document.id],
+        (document) =>
+          !journalExportDeselectedIds[document.id] &&
+          !journalUbdExportBlockedIds.has(document.id),
       ),
-    [filteredJournalDocuments, journalExportDeselectedIds],
+    [
+      filteredJournalDocuments,
+      journalExportDeselectedIds,
+      journalUbdExportBlockedIds,
+    ],
   );
 
+  const journalExportEligibleCount =
+    filteredJournalDocuments.length - journalUbdExportBlockedIds.size;
   const journalExportSelectedCount = journalExportDocuments.length;
   const journalExportAllSelected =
-    filteredJournalDocuments.length > 0 &&
-    journalExportSelectedCount === filteredJournalDocuments.length;
+    journalExportEligibleCount > 0 &&
+    journalExportSelectedCount === journalExportEligibleCount;
   const journalExportSomeSelected =
     journalExportSelectedCount > 0 && !journalExportAllSelected;
 
@@ -2083,7 +2318,9 @@ export function DocumentsPage(_props: {
     }
     setJournalExportDeselectedIds(
       Object.fromEntries(
-        filteredJournalDocuments.map((document) => [document.id, true as const]),
+        filteredJournalDocuments
+          .filter((document) => !journalUbdExportBlockedIds.has(document.id))
+          .map((document) => [document.id, true as const]),
       ),
     );
   };
@@ -2185,8 +2422,11 @@ export function DocumentsPage(_props: {
           rows,
           periodFilterLabel,
         });
+        const skipped = journalUbdExportBlockedIds.size;
         setDocumentMessage(
-          `Експортовано УБД «Не подавалися»: ${rowCount} рядків · ${fileName}`,
+          skipped
+            ? `Експортовано УБД «Не подавалися»: ${rowCount} рядків · ${fileName}. Пропущено з повним прогресом: ${skipped}.`
+            : `Експортовано УБД «Не подавалися»: ${rowCount} рядків · ${fileName}`,
         );
         return;
       }
@@ -2515,6 +2755,8 @@ export function DocumentsPage(_props: {
               ? "zhbdCertificate"
             : requestedDocumentType === "temporary-military-id"
               ? "temporaryMilitaryId"
+            : requestedDocumentType === "lost-military-id"
+              ? "lostMilitaryId"
               : requestedDocumentType === "salary-power-attorney" ||
                   savedMode === "salaryPowerAttorney"
                 ? "salaryPowerAttorney"
@@ -2532,6 +2774,8 @@ export function DocumentsPage(_props: {
                         ? "zhbdCertificate"
                       : savedMode === "temporaryMilitaryId"
                         ? "temporaryMilitaryId"
+                      : savedMode === "lostMilitaryId"
+                        ? "lostMilitaryId"
                         : "default",
     );
 
@@ -2579,6 +2823,7 @@ export function DocumentsPage(_props: {
       );
       setUbdRestoreFields(createUbdRestoreFields(person, nextSummary));
       setTicketFields(createTemporaryMilitaryIdFields(nextSummary));
+      setLostMilitaryIdFields(createLostMilitaryIdFields(person, nextSummary));
       if (personFull || storedFull) {
         storeSelectedPersonFullPosition(personFull || storedFull);
         setRosterResolvedFullPosition(personFull || storedFull);
@@ -2845,6 +3090,8 @@ export function DocumentsPage(_props: {
             ? "zhbdCertificate"
           : requestedDocumentType === "temporary-military-id"
             ? "temporaryMilitaryId"
+          : requestedDocumentType === "lost-military-id"
+            ? "lostMilitaryId"
             : requestedDocumentType === "salary-power-attorney"
               ? "salaryPowerAttorney"
               : mode;
@@ -2859,7 +3106,8 @@ export function DocumentsPage(_props: {
         targetDocumentType !== "form12Report" &&
         targetDocumentType !== "serviceCharacteristic" &&
         targetDocumentType !== "zhbdCertificate" &&
-        targetDocumentType !== "temporaryMilitaryId") ||
+        targetDocumentType !== "temporaryMilitaryId" &&
+        targetDocumentType !== "lostMilitaryId") ||
       !personExternalId
     )
       return;
@@ -2913,6 +3161,8 @@ export function DocumentsPage(_props: {
                 ? loadServiceCharacteristicSignatoryRecords()
               : targetDocumentType === "zhbdCertificate"
                 ? loadZhbdCertificateSignatoryRecords()
+              : targetDocumentType === "lostMilitaryId"
+                ? loadLostMilitaryIdSignatoryRecords()
                 : Promise.resolve([]),
             api.getPersonPhoto(personExternalId).catch(() => null),
             api.listPersonQuestionnaires().catch(() => []),
@@ -2930,6 +3180,13 @@ export function DocumentsPage(_props: {
         const ticketDefaults = createTemporaryMilitaryIdFields(
           summary,
           personPhoto?.photoData || "",
+        );
+        const lostMilitaryIdDefaults = createLostMilitaryIdFields(
+          selectedPerson,
+          summary,
+          toLostMilitaryIdSignatories(
+            configured.length ? configured : legacyUbdSignatories(),
+          ),
         );
         const form6Defaults = createForm6Fields(
           selectedPerson,
@@ -3005,6 +3262,7 @@ export function DocumentsPage(_props: {
             zhbdCertificateFields: zhbdCertificateDefaults,
             restoreFields: restoreDefaults,
             ticketFields: ticketDefaults,
+            lostMilitaryIdFields: lostMilitaryIdDefaults,
           });
           if (!draft) {
             setSelectedDocumentId("");
@@ -3016,6 +3274,7 @@ export function DocumentsPage(_props: {
             setZhbdCertificateFields(zhbdCertificateDefaults);
             setUbdRestoreFields(restoreDefaults);
             setTicketFields(ticketDefaults);
+            setLostMilitaryIdFields(lostMilitaryIdDefaults);
             setDocumentFiles({});
             setWorkflow(createEmptyWorkflow());
             setDocumentMessage(
@@ -3054,6 +3313,7 @@ export function DocumentsPage(_props: {
             setZhbdCertificateFields(zhbdCertificateDefaults);
             setUbdRestoreFields(restoreDefaults);
             setTicketFields(ticketDefaults);
+            setLostMilitaryIdFields(lostMilitaryIdDefaults);
             setDocumentFiles({});
             setWorkflow(createEmptyWorkflow());
             setDocumentMessage(
@@ -3138,6 +3398,10 @@ export function DocumentsPage(_props: {
             mergedTicket.photoData ||
             ticketFiles.ticketPhoto?.dataUrl ||
             ticketDefaults.photoData,
+        });
+        setLostMilitaryIdFields({
+          ...mergeLostMilitaryIdFields(lostMilitaryIdDefaults, active.fields),
+          signatories: lostMilitaryIdDefaults.signatories,
         });
         setDocumentFiles(ticketFiles);
         setWorkflow(mergeSalaryWorkflow(active.workflow));
@@ -3257,6 +3521,21 @@ export function DocumentsPage(_props: {
 
   const openPersonDocument = async (document: BackendPersonDocument) => {
     const nextPersonId = String(document.personExternalId || "").trim();
+    if (isPersonDocumentMode) {
+      const currentParams = new URLSearchParams(window.location.search);
+      const nextRoute = buildDocumentRoute({
+        personExternalId:
+          nextPersonId || requestedPersonId || personExternalId,
+        rowId: currentParams.get("rowId") || undefined,
+        documentId: document.id,
+        type: document.type,
+      });
+      window.history.replaceState(
+        { ...(window.history.state as object | null), page: "documents" },
+        "",
+        nextRoute,
+      );
+    }
     if (
       nextPersonId &&
       nextPersonId !== questionnairePreviewPersonId
@@ -3436,6 +3715,23 @@ export function DocumentsPage(_props: {
         photoData: merged.photoData || files.ticketPhoto?.dataUrl || defaults.photoData,
       });
       setDocumentFiles(files);
+    } else if (document.type === "lostMilitaryId") {
+      setMode("lostMilitaryId");
+      const configured = snapshotSignatories(
+        await loadLostMilitaryIdSignatoryRecords(),
+      );
+      const defaults = createLostMilitaryIdFields(
+        selectedPerson,
+        summary,
+        toLostMilitaryIdSignatories(
+          configured.length ? configured : legacyUbdSignatories(),
+        ),
+      );
+      setLostMilitaryIdFields({
+        ...mergeLostMilitaryIdFields(defaults, document.fields),
+        signatories: defaults.signatories,
+      });
+      setDocumentFiles(mergeDocumentFiles(document.files));
     } else {
       const defaults = createSalaryFields(selectedPerson, summary);
       setMode("salaryPowerAttorney");
@@ -3887,6 +4183,58 @@ export function DocumentsPage(_props: {
     }
   };
 
+  const createLostMilitaryIdDocument = async () => {
+    if (!personExternalId) return;
+    const nextWorkflow = {
+      ...createEmptyWorkflow(),
+      currentStatus: "document",
+    };
+    setIsSavingDocument(true);
+    setDocumentMessage("Створюю документ про втрату військового квитка...");
+    try {
+      const configured = snapshotSignatories(
+        await loadLostMilitaryIdSignatoryRecords(),
+      );
+      const defaults = createLostMilitaryIdFields(
+        selectedPerson,
+        summary,
+        toLostMilitaryIdSignatories(
+          configured.length ? configured : legacyUbdSignatories(),
+        ),
+      );
+      const fieldPayload = {
+        ...defaults,
+        personStatus: createPersonStatusSnapshot(selectedPerson, summary).label,
+      };
+      const created = await api.createPersonDocument(personExternalId, {
+        type: "lostMilitaryId",
+        title: `Втрата військового квитка · ${dayjs().format("DD.MM.YYYY HH:mm")}`,
+        status: "document",
+        fields: fieldPayload as unknown as Record<string, unknown>,
+        workflow: nextWorkflow as unknown as Record<string, unknown>,
+        files: { ubdScans: [] },
+      });
+      setPersonDocuments((current) => [created, ...current]);
+      setAllPersonDocuments((current) => [created, ...current]);
+      setSelectedDocumentId(created.id);
+      setLostMilitaryIdFields(mergeLostMilitaryIdFields(defaults, created.fields));
+      setDocumentFiles(mergeDocumentFiles(created.files));
+      setWorkflow(mergeSalaryWorkflow(created.workflow));
+      setMode("lostMilitaryId");
+      setDocumentMessage(
+        `Створено документ: ${created.title} · ${new Date(created.updatedAt).toLocaleString("uk-UA")}`,
+      );
+    } catch (error) {
+      setDocumentMessage(
+        error instanceof Error
+          ? `Не вдалося створити документ: ${error.message}`
+          : "Не вдалося створити документ про втрату військового квитка.",
+      );
+    } finally {
+      setIsSavingDocument(false);
+    }
+  };
+
   const addUbdScanFiles = async (files: FileList | null) => {
     if (!files?.length || !selectedDocument) return;
 
@@ -3933,6 +4281,11 @@ export function DocumentsPage(_props: {
         mode === "temporaryMilitaryId"
       ) {
         await saveTicketDocument(ticketFields, nextFiles);
+      } else if (
+        selectedDocument.type === "lostMilitaryId" ||
+        mode === "lostMilitaryId"
+      ) {
+        await saveLostMilitaryIdDocument(lostMilitaryIdFields, nextFiles);
       } else {
         await saveUbdDocument(ubdFields, nextFiles);
       }
@@ -3994,6 +4347,11 @@ export function DocumentsPage(_props: {
       mode === "temporaryMilitaryId"
     ) {
       void saveTicketDocument(ticketFields, nextFiles);
+    } else if (
+      selectedDocument?.type === "lostMilitaryId" ||
+      mode === "lostMilitaryId"
+    ) {
+      void saveLostMilitaryIdDocument(lostMilitaryIdFields, nextFiles);
     } else {
       void saveUbdDocument(ubdFields, nextFiles);
     }
@@ -4640,6 +4998,45 @@ export function DocumentsPage(_props: {
     }
   };
 
+  const saveLostMilitaryIdDocument = async (
+    nextFields: LostMilitaryIdFields,
+    nextFiles = documentFiles,
+    nextWorkflow = workflow,
+  ) => {
+    if (!documentSavePersonId || !selectedDocumentId) return;
+
+    setIsSavingDocument(true);
+    try {
+      const fieldPayload = {
+        ...nextFields,
+        personStatus: nextPersonStatusLabel(),
+      };
+      const updated = await api.updatePersonDocument(
+        documentSavePersonId,
+        selectedDocumentId,
+        {
+          title: selectedDocument?.title || "Втрата військового квитка",
+          status: nextWorkflow.currentStatus,
+          fields: fieldPayload as unknown as Record<string, unknown>,
+          workflow: nextWorkflow as unknown as Record<string, unknown>,
+          files: nextFiles as unknown as Record<string, unknown>,
+        },
+      );
+      applyUpdatedDocument(updated);
+      setDocumentMessage(
+        `Збережено в БД · ${new Date(updated.updatedAt).toLocaleString("uk-UA")}`,
+      );
+    } catch (error) {
+      setDocumentMessage(
+        error instanceof Error
+          ? `Не вдалося зберегти документ: ${error.message}`
+          : "Не вдалося зберегти документ про втрату військового квитка.",
+      );
+    } finally {
+      setIsSavingDocument(false);
+    }
+  };
+
   const flushDocumentFieldSave = () => {
     if (autoSaveTimerRef.current) {
       clearTimeout(autoSaveTimerRef.current);
@@ -4997,6 +5394,19 @@ export function DocumentsPage(_props: {
     });
   };
 
+  const updateLostMilitaryIdField = <K extends keyof LostMilitaryIdFields>(
+    key: K,
+    value: LostMilitaryIdFields[K],
+  ) => {
+    setLostMilitaryIdFields((current) => {
+      const next = { ...current, [key]: value };
+      scheduleDocumentFieldSave(() => {
+        void saveLostMilitaryIdDocument(next);
+      });
+      return next;
+    });
+  };
+
   const addTicketPhoto = async (files: FileList | null) => {
     const file = files?.[0];
     if (!file || !selectedDocument) return;
@@ -5147,12 +5557,11 @@ export function DocumentsPage(_props: {
     }
     if (!targetId || !personQuestionnaire) return;
     try {
-      const url = await api.getPersonQuestionnaireObjectUrl(
+      const url = await api.createPersonQuestionnairePreviewUrl(
         targetId,
         personQuestionnaire.fileName || questionnaireFileName,
       );
       window.open(url, "_blank", "noopener,noreferrer");
-      window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
     } catch (error) {
       setDocumentMessage(
         error instanceof Error
@@ -5213,7 +5622,8 @@ export function DocumentsPage(_props: {
       | ServiceCharacteristicFields
       | ZhbdCertificateFields
       | UbdRestoreReportFields
-      | TemporaryMilitaryIdFields,
+      | TemporaryMilitaryIdFields
+      | LostMilitaryIdFields,
     nextWorkflow: SalaryWorkflowState,
     nextFiles = documentFiles,
   ) => {
@@ -5288,6 +5698,18 @@ export function DocumentsPage(_props: {
       return;
     }
 
+    if (
+      selectedDocument?.type === "lostMilitaryId" ||
+      mode === "lostMilitaryId"
+    ) {
+      void saveLostMilitaryIdDocument(
+        nextFields as LostMilitaryIdFields,
+        nextFiles,
+        nextWorkflow,
+      );
+      return;
+    }
+
     void saveSalaryDocument(nextFields as SalaryDocumentFields, nextWorkflow);
   };
 
@@ -5310,6 +5732,8 @@ export function DocumentsPage(_props: {
             ? ubdRestoreFields
             : mode === "temporaryMilitaryId"
             ? ticketFields
+            : mode === "lostMilitaryId"
+            ? lostMilitaryIdFields
             : salaryFields,
       next,
     );
@@ -5328,18 +5752,17 @@ export function DocumentsPage(_props: {
     }
     if (!activeWorkflowSteps.some((step) => step.key === targetKey)) return;
 
-    // База для кліку: лише вже збережені галочки. Без «послідовного» автозаповнення.
-    const rawCompleted = { ...(workflow.completed || {}) };
-    if (rawCompleted.sent === true && rawCompleted.sentReport == null) {
-      rawCompleted.sentReport = true;
-    }
-    delete rawCompleted.sent;
-    const baseMap = Object.fromEntries(
-      activeWorkflowSteps.map((step) => [
-        step.key,
-        rawCompleted[step.key] === true,
-      ]),
-    ) as Record<string, boolean>;
+    // База — те, що зараз видно як виконане (і явні галочки, і старий
+    // послідовний прогрес до currentStatus). Інакше клік по пізньому кроку
+    // обнуляє перші, бо в `completed` їх ще не було.
+    const baseMap = {
+      ...resolveWorkflowCompletedMap(
+        workflow,
+        activeWorkflowSteps,
+        selectedDocument?.type || mode,
+        selectedDocument?.status || workflow.currentStatus,
+      ),
+    };
 
     const nextDone = action === "on" ? true : !baseMap[targetKey];
     const completed = {
@@ -5459,6 +5882,26 @@ export function DocumentsPage(_props: {
     setDocumentMessage(`Word-файл «${fileName}» збережено.`);
     setWorkflowStep("document", "on");
     void saveUbdRestoreDocument(ubdRestoreFields);
+  };
+
+  const saveLostMilitaryIdAsWord = async () => {
+    setDocumentMessage("Формую рапорт про втрату військового квитка...");
+    const blob = await createLostMilitaryIdReportWordBlob(lostMilitaryIdFields);
+    const fileName = `${safeFilePart(lostMilitaryIdFields.folderName)} · Рапорт.docx`;
+    downloadBlob(fileName, blob);
+    setDocumentMessage(`Word-файл «${fileName}» збережено.`);
+    setWorkflowStep("document", "on");
+    void saveLostMilitaryIdDocument(lostMilitaryIdFields);
+  };
+
+  const saveLostMilitaryIdKit = async () => {
+    setDocumentMessage("Формую комплект: рапорт, наказ, акт...");
+    const blob = await createLostMilitaryIdKitZip(lostMilitaryIdFields);
+    const fileName = `${safeFilePart(lostMilitaryIdFields.folderName)}.zip`;
+    downloadBlob(fileName, blob);
+    setDocumentMessage(`Комплект «${fileName}» збережено.`);
+    setWorkflowStep("document", "on");
+    void saveLostMilitaryIdDocument(lostMilitaryIdFields);
   };
 
   const printUbdDocument = () => {
@@ -5595,6 +6038,7 @@ export function DocumentsPage(_props: {
     if (type === "zhbdCertificate") return createZhbdCertificateDocument();
     if (type === "temporaryMilitaryId")
       return createTemporaryMilitaryIdDocument();
+    if (type === "lostMilitaryId") return createLostMilitaryIdDocument();
   };
 
   const personDocumentCreateSelect = (
@@ -5681,6 +6125,7 @@ export function DocumentsPage(_props: {
       return zhbdCertificateFields.statusNote.trim();
     if (mode === "ubdRestoreReport") return ubdRestoreFields.statusNote.trim();
     if (mode === "temporaryMilitaryId") return ticketFields.statusNote.trim();
+    if (mode === "lostMilitaryId") return lostMilitaryIdFields.statusNote.trim();
     if (mode === "salaryPowerAttorney") return salaryFields.statusNote.trim();
     return readDocumentStatusNote(document);
   };
@@ -6812,6 +7257,244 @@ export function DocumentsPage(_props: {
     </>
   );
 
+  const lostMilitaryIdWorkspace = (
+    <>
+      {selectedDocument ? (
+        <section className="analytics-panel document-fields">
+          <div className="panel-heading">Втрата військового квитка</div>
+          <div className="document-placeholder-map salary-document-map ubd-document-map">
+            {(
+              [
+                ["fullName", "Військовослужбовець"],
+                ["rank", "Звання"],
+                ["staffPosition", "Посада"],
+                ["unitLabel", "Підрозділ"],
+                ["militaryUnit", "В/ч"],
+                ["addressee", "Кому"],
+                ["lossDate", "Дата втрати"],
+                ["fromLocation", "Звідки"],
+                ["toLocation", "Куди"],
+                ["customCircumstances", "Інші обставини"],
+                ["searchResult", "Результат пошуку"],
+                ...(lostMilitaryIdFields.signatories.length
+                  ? []
+                  : ([
+                      ["reporterFullName", "Хто подає рапорт"],
+                      ["reporterRank", "Звання того, хто подає"],
+                      ["reporterTitle", "Посада того, хто подає"],
+                    ] as Array<[keyof LostMilitaryIdFields, string]>)),
+                ["investigatorFullName", "Хто проводить розслідування"],
+                ["investigatorRank", "Звання розслідувача"],
+                ["investigatorPosition", "Посада розслідувача"],
+                ["reportDate", "Дата рапорту"],
+                ["orderNumber", "Номер наказу"],
+                ["orderDate", "Дата наказу"],
+                ["folderName", "Папка"],
+              ] as Array<[keyof LostMilitaryIdFields, string]>
+            ).map(([key, label]) => (
+              <label
+                key={key}
+                className={
+                  key === "staffPosition" ||
+                  key === "addressee" ||
+                  key === "reporterTitle" ||
+                  key === "investigatorPosition" ||
+                  key === "customCircumstances"
+                    ? "wide"
+                    : undefined
+                }
+              >
+                <code>{label}</code>
+                <TextField
+                  size="small"
+                  fullWidth
+                  multiline={
+                    key === "staffPosition" ||
+                    key === "addressee" ||
+                    key === "reporterTitle" ||
+                    key === "investigatorPosition" ||
+                    key === "customCircumstances"
+                  }
+                  rows={
+                    key === "staffPosition" ||
+                    key === "reporterTitle" ||
+                    key === "investigatorPosition"
+                      ? 2
+                      : undefined
+                  }
+                  value={String(lostMilitaryIdFields[key] ?? "")}
+                  onChange={(event) =>
+                    updateLostMilitaryIdField(
+                      key,
+                      event.target.value as LostMilitaryIdFields[typeof key],
+                    )
+                  }
+                />
+              </label>
+            ))}
+            {lostMilitaryIdFields.signatories.length ? (
+              <div className="wide document-default-signatories">
+                <code>Підпис рапорту (з шаблону)</code>
+                {lostMilitaryIdFields.signatories
+                  .filter((signatory) => signatory.blockType === "SIGNER")
+                  .map((signatory, index) => {
+                    const footer = reporterFooterBlock(lostMilitaryIdFields);
+                    const signer = reportSignerOf(lostMilitaryIdFields);
+                    return (
+                      <article
+                        key={`${signatory.fullName}-${index}`}
+                      >
+                        <strong>
+                          {signer?.fullName || signatory.fullName}
+                        </strong>
+                        {footer.titleLines.map((line) => (
+                          <span key={line}>{line}</span>
+                        ))}
+                        <small>
+                          {footer.rank} · {footer.name}
+                        </small>
+                      </article>
+                    );
+                  })}
+              </div>
+            ) : null}
+          </div>
+          <Stack direction="row" spacing={2} sx={{ mt: 1, flexWrap: "wrap" }}>
+            <label>
+              <Checkbox
+                checked={lostMilitaryIdFields.isExactDate}
+                onCheckedChange={(checked) =>
+                  updateLostMilitaryIdField("isExactDate", Boolean(checked))
+                }
+              />
+              <span>Дата точна (інакше «орієнтовно»)</span>
+            </label>
+            <label>
+              <Checkbox
+                checked={lostMilitaryIdFields.circumstanceKind === "movement"}
+                onCheckedChange={(checked) =>
+                  updateLostMilitaryIdField(
+                    "circumstanceKind",
+                    checked ? "movement" : "custom",
+                  )
+                }
+              />
+              <span>Під час переміщення</span>
+            </label>
+            <label>
+              <Checkbox
+                checked={lostMilitaryIdFields.searchConducted}
+                onCheckedChange={(checked) =>
+                  updateLostMilitaryIdField("searchConducted", Boolean(checked))
+                }
+              />
+              <span>Пошук проводився</span>
+            </label>
+            <label>
+              <Checkbox
+                checked={lostMilitaryIdFields.editManually}
+                onCheckedChange={(checked) =>
+                  updateLostMilitaryIdField("editManually", Boolean(checked))
+                }
+              />
+              <span>Редагувати вручну</span>
+            </label>
+          </Stack>
+          {lostMilitaryIdFields.editManually ? (
+            <div className="document-placeholder-map salary-document-map ubd-document-map">
+              <label className="wide">
+                <code>ПІБ (орудний)</code>
+                <TextField
+                  size="small"
+                  fullWidth
+                  value={lostMilitaryIdFields.fullNameInstrumentalManual}
+                  placeholder="ЛИСЕНКОМ Михайлом Юрійовичем"
+                  onChange={(event) =>
+                    updateLostMilitaryIdField(
+                      "fullNameInstrumentalManual",
+                      event.target.value,
+                    )
+                  }
+                />
+              </label>
+              <label className="wide">
+                <code>Розслідувач (давальний)</code>
+                <TextField
+                  size="small"
+                  fullWidth
+                  value={lostMilitaryIdFields.investigatorDativeManual}
+                  placeholder="ГУНЬКУ Олександру Олександровичу"
+                  onChange={(event) =>
+                    updateLostMilitaryIdField(
+                      "investigatorDativeManual",
+                      event.target.value,
+                    )
+                  }
+                />
+              </label>
+              <label className="wide">
+                <code>Текст рапорту</code>
+                <TextField
+                  size="small"
+                  fullWidth
+                  multiline
+                  rows={8}
+                  value={
+                    lostMilitaryIdFields.reportTextOverride ||
+                    buildLostMilitaryIdReportText({
+                      ...lostMilitaryIdFields,
+                      reportTextOverride: "",
+                    })
+                  }
+                  onChange={(event) =>
+                    updateLostMilitaryIdField(
+                      "reportTextOverride",
+                      event.target.value,
+                    )
+                  }
+                />
+              </label>
+              <label className="wide">
+                <code>Текст наказу</code>
+                <TextField
+                  size="small"
+                  fullWidth
+                  multiline
+                  rows={6}
+                  value={
+                    lostMilitaryIdFields.orderTextOverride ||
+                    buildLostMilitaryIdOrderText({
+                      ...lostMilitaryIdFields,
+                      orderTextOverride: "",
+                    })
+                  }
+                  onChange={(event) =>
+                    updateLostMilitaryIdField(
+                      "orderTextOverride",
+                      event.target.value,
+                    )
+                  }
+                />
+              </label>
+            </div>
+          ) : (
+            <section className="analytics-panel" style={{ marginTop: 12 }}>
+              <div className="panel-heading">Текст рапорту</div>
+              <Typography variant="body2" sx={{ whiteSpace: "pre-wrap" }}>
+                {buildLostMilitaryIdReportText(lostMilitaryIdFields)}
+              </Typography>
+            </section>
+          )}
+          {documentStatusNotePanel(lostMilitaryIdFields.statusNote, (value) =>
+            updateLostMilitaryIdField("statusNote", value),
+          )}
+          {personQuestionnaireRow}
+        </section>
+      ) : null}
+      {wordPreviewPanel}
+    </>
+  );
+
   const salaryWorkspace = (
     <>
       {selectedDocument ? (
@@ -6979,6 +7662,8 @@ export function DocumentsPage(_props: {
       selectedDocument?.type === "zhbdCertificate") ||
     (mode === "temporaryMilitaryId" &&
       selectedDocument?.type === "temporaryMilitaryId") ||
+    (mode === "lostMilitaryId" &&
+      selectedDocument?.type === "lostMilitaryId") ||
     (mode === "salaryPowerAttorney" &&
       selectedDocument?.type === "salaryPowerAttorney");
 
@@ -7174,17 +7859,33 @@ export function DocumentsPage(_props: {
               }
             >
               <MenuItem value="ALL">Усі</MenuItem>
-              <MenuItem value="INCOMPLETE">Не готові</MenuItem>
-              <MenuItem value="COMPLETE">Готові</MenuItem>
+              <MenuItem value="READY_TO_SEND">Готово до відправки</MenuItem>
+              <MenuItem value="INCOMPLETE">Не готові до відправки</MenuItem>
+              <MenuItem value="COMPLETE">Повний прогрес</MenuItem>
             </TextField>
           </div>
           {journalTypeFilter === "ubdReport" ? (
             <div className="documents-journal-bulk-progress documents-journal-bulk-progress-recovery">
               <div className="documents-journal-bulk-progress-heading">
-                <code>
-                  Резервні копії прогресу УБД · збережено в браузері ·{" "}
-                  {ubdProgressBackups.length}
-                </code>
+                <button
+                  type="button"
+                  className="documents-journal-bulk-progress-toggle"
+                  aria-expanded={ubdProgressBackupsOpen}
+                  onClick={() =>
+                    setUbdProgressBackupsOpen((current) => !current)
+                  }
+                >
+                  <span
+                    className={`documents-journal-bulk-progress-chevron${
+                      ubdProgressBackupsOpen ? " is-open" : ""
+                    }`}
+                    aria-hidden
+                  />
+                  <code>
+                    Резервні копії прогресу УБД · збережено в браузері ·{" "}
+                    {ubdProgressBackups.length}
+                  </code>
+                </button>
                 <Stack direction="row" spacing={1}>
                   <Button
                     variant="outlined"
@@ -7204,35 +7905,37 @@ export function DocumentsPage(_props: {
                   ) : null}
                 </Stack>
               </div>
-              {ubdProgressBackups.length ? (
-                <div className="documents-journal-bulk-progress-backups">
-                  {ubdProgressBackups.map((backup) => (
-                    <div
-                      className="documents-journal-bulk-progress-backup-row"
-                      key={backup.id}
-                    >
-                      <span>
-                        {formatUbdProgressBackupWhen(backup.savedAt)} ·{" "}
-                        {backup.label} · {backup.entries.length} рапортів
-                      </span>
-                      <Button
-                        variant="outlined"
-                        color="warning"
-                        size="small"
-                        disabled={isApplyingBulkJournalProgress}
-                        onClick={() => void restoreUbdProgressBackup(backup)}
+              {ubdProgressBackupsOpen ? (
+                ubdProgressBackups.length ? (
+                  <div className="documents-journal-bulk-progress-backups">
+                    {ubdProgressBackups.map((backup) => (
+                      <div
+                        className="documents-journal-bulk-progress-backup-row"
+                        key={backup.id}
                       >
-                        Відновити
-                      </Button>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <code className="documents-journal-bulk-progress-empty">
-                  Копій ще немає. Перед масовим прогресом копія створюється
-                  автоматично; також можна зберегти вручну.
-                </code>
-              )}
+                        <span>
+                          {formatUbdProgressBackupWhen(backup.savedAt)} ·{" "}
+                          {backup.label} · {backup.entries.length} рапортів
+                        </span>
+                        <Button
+                          variant="outlined"
+                          color="warning"
+                          size="small"
+                          disabled={isApplyingBulkJournalProgress}
+                          onClick={() => void restoreUbdProgressBackup(backup)}
+                        >
+                          Відновити
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <code className="documents-journal-bulk-progress-empty">
+                    Копій ще немає. Перед масовим прогресом копія створюється
+                    автоматично; також можна зберегти вручну.
+                  </code>
+                )
+              ) : null}
             </div>
           ) : null}
           {journalTypeFilter === "ubdReport" && journalBulkProgressUndo?.length ? (
@@ -7457,9 +8160,26 @@ export function DocumentsPage(_props: {
                   document.id === selectedDocumentId && mode === "ubdReport"
                     ? (ubdFields as unknown as Record<string, unknown>)
                     : ((journalDocument.fields || {}) as Record<string, unknown>);
+                const liveWorkflow =
+                  document.id === selectedDocumentId
+                    ? mergeSalaryWorkflow(journalDocument.workflow)
+                    : undefined;
+                const isComplete = ubdDocumentIsComplete(
+                  journalDocument,
+                  liveWorkflow,
+                );
+                const exportBlocked = journalUbdExportBlockedIds.has(
+                  document.id,
+                );
                 const hasMissingFields =
                   journalDocument.type === "ubdReport" &&
+                  !isComplete &&
                   ubdDocumentHasEmptyInputs(liveFields);
+                const hasBasisDateMismatch =
+                  journalDocument.type === "ubdReport" &&
+                  !isComplete &&
+                  !hasMissingFields &&
+                  ubdDocumentHasBasisDateMismatch(liveFields);
                 const openDocument = () => {
                   void openPersonDocument(journalDocument).then(() => {
                     window.requestAnimationFrame(() => {
@@ -7480,13 +8200,24 @@ export function DocumentsPage(_props: {
                         ? "documents-journal-row-with-exit-date"
                         : "",
                       document.id === selectedDocumentId ? "active" : "",
+                      isComplete ? "is-complete" : "",
                       hasMissingFields ? "is-incomplete" : "",
+                      hasBasisDateMismatch ? "is-basis-mismatch" : "",
                     ]
                       .filter(Boolean)
                       .join(" ")}
                     key={document.id}
                     role="button"
                     tabIndex={0}
+                    title={
+                      isComplete
+                        ? "Весь прогрес заповнений — готовий, в експорт «Не подавалися» не входить"
+                        : hasMissingFields
+                          ? "Не заповнені обов’язкові поля рапорту УБД"
+                          : hasBasisDateMismatch
+                            ? "Дата БР не збігається з початком періоду завдань"
+                            : undefined
+                    }
                     onClick={openDocument}
                     onKeyDown={(event) => {
                       if (event.key !== "Enter" && event.key !== " ") return;
@@ -7496,11 +8227,20 @@ export function DocumentsPage(_props: {
                   >
                     <span
                       className="documents-journal-export-check"
+                      title={
+                        exportBlocked
+                          ? "Не входить в експорт «Не подавалися»: прогрес заповнений повністю"
+                          : undefined
+                      }
                       onClick={(event) => event.stopPropagation()}
                       onKeyDown={(event) => event.stopPropagation()}
                     >
                       <Checkbox
-                        checked={!journalExportDeselectedIds[document.id]}
+                        checked={
+                          !exportBlocked &&
+                          !journalExportDeselectedIds[document.id]
+                        }
+                        disabled={exportBlocked}
                         onCheckedChange={(checked) =>
                           toggleJournalExportDocument(
                             document.id,
@@ -7524,7 +8264,14 @@ export function DocumentsPage(_props: {
                       <i style={{ width: `${progress}%` }} />
                       <b>{progress}%</b>
                     </span>
-                    <span>{documentWorkflowStatusLabel(journalDocument)}</span>
+                    <span>
+                      {documentHighestWorkflowStatusLabel(
+                        journalDocument,
+                        document.id === selectedDocumentId
+                          ? mergeSalaryWorkflow(journalDocument.workflow)
+                          : undefined,
+                      )}
+                    </span>
                     <span
                       className="documents-journal-note"
                       title={statusNote}
@@ -7812,6 +8559,49 @@ export function DocumentsPage(_props: {
             </section>
           </section>
         ) : null}
+        {mode === "lostMilitaryId" &&
+        selectedDocument?.type === "lostMilitaryId" ? (
+          <section className="documents-journal-ubd" id="documents-journal-ubd">
+            <header className="topbar analytics-topbar salary-document-topbar">
+              <div className="salary-document-main-row">
+                <Box className="salary-document-title">
+                  <Typography component="h1" variant="h4">
+                    Втрата військового квитка
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    {getDocumentPersonName(selectedDocument)}
+                    {selectedDocument.personExternalId
+                      ? ` · ID ${selectedDocument.personExternalId}`
+                      : ""}
+                    {selectedDocument.title ? ` · ${selectedDocument.title}` : ""}
+                  </Typography>
+                </Box>
+                <Stack direction="row" spacing={1}>
+                  {questionnaireHeaderButton}
+                  <Button
+                    variant="outlined"
+                    startIcon={<ArticleOutlinedIcon />}
+                    onClick={() => void saveLostMilitaryIdAsWord()}
+                  >
+                    Рапорт у Word
+                  </Button>
+                  <Button
+                    variant="contained"
+                    startIcon={<FileDownloadOutlinedIcon />}
+                    onClick={() => void saveLostMilitaryIdKit()}
+                    sx={{ color: "#1a1a14" }}
+                  >
+                    Сформувати комплект
+                  </Button>
+                </Stack>
+              </div>
+              {documentStepProgress}
+            </header>
+            <section className="salary-documents-layout ubd-report-layout documents-journal-ubd-layout">
+              {lostMilitaryIdWorkspace}
+            </section>
+          </section>
+        ) : null}
         {mode === "salaryPowerAttorney" &&
         selectedDocument?.type === "salaryPowerAttorney" ? (
           <section className="documents-journal-ubd" id="documents-journal-ubd">
@@ -7946,6 +8736,119 @@ export function DocumentsPage(_props: {
           </section>
 
           {ticketWorkspace}
+        </section>
+      </main>
+      {questionnairePreviewDialog}
+      </>
+    );
+  }
+
+  if (mode === "lostMilitaryId") {
+    return (
+      <>
+      <main className="main-panel documents-ubd-page">
+        <header className="topbar analytics-topbar salary-document-topbar">
+          <div className="salary-document-main-row">
+            <Box className="salary-document-title">
+              <Typography component="h1" variant="h4">
+                Втрата військового квитка
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                {summary.name} ·{" "}
+                {summary.externalId
+                  ? `ID ${summary.externalId}`
+                  : "дані з картки особи"}
+                {selectedDocument ? ` · ${selectedDocument.title}` : ""}
+              </Typography>
+            </Box>
+            {selectedDocument ? (
+              <Stack direction="row" spacing={1}>
+                {questionnaireHeaderButton}
+                <Button
+                  variant="outlined"
+                  startIcon={<ArticleOutlinedIcon />}
+                  onClick={() => void saveLostMilitaryIdAsWord()}
+                >
+                  Рапорт у Word
+                </Button>
+                <Button
+                  variant="contained"
+                  startIcon={<FileDownloadOutlinedIcon />}
+                  onClick={() => void saveLostMilitaryIdKit()}
+                  sx={{ color: "#1a1a14" }}
+                >
+                  Сформувати комплект
+                </Button>
+              </Stack>
+            ) : (
+              questionnaireHeaderButton
+            )}
+          </div>
+          {documentStepProgress}
+        </header>
+
+        <section
+          className={
+            selectedDocument
+              ? "salary-documents-layout ubd-report-layout"
+              : "salary-documents-layout empty"
+          }
+        >
+          <section className="analytics-panel salary-person-documents-panel">
+            <div className="panel-heading">Документи службовця</div>
+            <div className="salary-document-sync">
+              <span>
+                {isSavingDocument ? "збереження..." : "БД синхронізована"}
+              </span>
+              <p>{documentMessage || "Виберіть документ зі списку."}</p>
+            </div>
+            <div className="salary-person-documents-list">
+              {personQuestionnaireRow}
+              {visiblePersonDocuments.length ? (
+                visiblePersonDocuments.map((document) => (
+                  <article
+                    className={
+                      document.id === selectedDocumentId
+                        ? "salary-person-document-shell active"
+                        : "salary-person-document-shell"
+                    }
+                    key={document.id}
+                  >
+                    <button
+                      className="salary-person-document"
+                      type="button"
+                      onClick={() => openPersonDocument(document)}
+                    >
+                      <strong>{document.title}</strong>
+                      <span>{salaryDocumentTypeLabel(document.type)}</span>
+                      <em>{documentWorkflowStatusLabel(document)}</em>
+                      {documentListStatusNote(document)}
+                      <small>
+                        {new Date(document.updatedAt).toLocaleString("uk-UA")}
+                      </small>
+                    </button>
+                    <button
+                      aria-label="Видалити документ"
+                      className="salary-person-document-delete"
+                      disabled={isSavingDocument}
+                      onClick={() => void deleteDocument(document)}
+                      title="Видалити документ"
+                      type="button"
+                    >
+                      <DeleteOutlineOutlinedIcon />
+                    </button>
+                  </article>
+                ))
+              ) : (
+                <p className="salary-empty-documents">
+                  Документів по цьому службовцю ще немає.
+                </p>
+              )}
+            </div>
+            {personDocumentCreateSelect}
+          </section>
+
+          {lostMilitaryIdWorkspace}
         </section>
       </main>
       {questionnairePreviewDialog}

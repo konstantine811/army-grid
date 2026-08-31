@@ -1,19 +1,17 @@
 export type AppPage =
   | "overview"
-  | "import"
   | "analytics"
   | "ejournal"
   | "bchs"
-  | "bchsLab"
   | "excelFill"
-  | "questionnaireParser"
   | "anketaData"
   | "socPassport"
   | "personnel"
   | "documents"
   | "documentSettings"
   | "usersAccess"
-  | "profile";
+  | "profile"
+  | "workTasks";
 export type BchsAnalyticsTab = "overview" | "comparison" | "combat" | "supplement";
 
 /** Pages available to non-admin users (USER). Admins see all pages. */
@@ -24,6 +22,7 @@ export const USER_ALLOWED_PAGES: readonly AppPage[] = [
   "anketaData",
   "documents",
   "profile",
+  "workTasks",
 ] as const;
 
 export const isUserAllowedPage = (page: AppPage) =>
@@ -49,13 +48,10 @@ export const writeAreaForPage = (
 
 export const pagePaths: Record<AppPage, string> = {
   overview: "/overview",
-  import: "/import",
   analytics: "/analytics",
   ejournal: "/ejournal",
   bchs: "/bchs",
-  bchsLab: "/bchs-lab",
   excelFill: "/excel-fill",
-  questionnaireParser: "/questionnaire-parser",
   anketaData: "/anketa-data",
   socPassport: "/soc-passport",
   personnel: "/personnel",
@@ -63,7 +59,18 @@ export const pagePaths: Record<AppPage, string> = {
   documentSettings: "/document-settings",
   usersAccess: "/users-access",
   profile: "/profile",
+  workTasks: "/work-tasks",
 };
+
+/** Old app pages that now bounce to Огляд. */
+const RETIRED_PAGE_PATHS = new Set([
+  "/import",
+  "/bchs-lab",
+  "/questionnaire-parser",
+]);
+
+export const isRetiredPagePath = (pathname: string) =>
+  RETIRED_PAGE_PATHS.has(pathname);
 
 const pathPages = Object.fromEntries(
   Object.entries(pagePaths).map(([page, path]) => [path, page]),
@@ -193,6 +200,7 @@ export const buildDocumentRoute = ({
     | "form6Report"
     | "form12Report"
     | "temporaryMilitaryId"
+    | "lostMilitaryId"
     | "default"
     | string;
 }) => {
@@ -209,6 +217,7 @@ export const buildDocumentRoute = ({
   if (type === "zhbdCertificate") params.set("type", "zhbd-certificate");
   if (type === "temporaryMilitaryId")
     params.set("type", "temporary-military-id");
+  if (type === "lostMilitaryId") params.set("type", "lost-military-id");
 
   const path = `${pagePaths.documents}${
     personExternalId ? `/${encodeURIComponent(personExternalId)}` : ""

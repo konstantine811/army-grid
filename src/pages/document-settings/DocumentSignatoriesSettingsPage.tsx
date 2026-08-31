@@ -29,6 +29,7 @@ const documentTypes = [
   { value: "serviceCharacteristic", label: "Службова характеристика" },
   { value: "zhbdCertificate", label: "Довідка ЖБД" },
   { value: "salaryPowerAttorney", label: "Довіреність на зарплату" },
+  { value: "lostMilitaryId", label: "Втрата військового квитка" },
   { value: "default", label: "Звичайний рапорт" },
 ];
 

@@ -3,18 +3,16 @@ import {
   CacheKeys,
   fetchWithCache,
   jsonChanged,
-  readDataCache,
 } from "../../data/idbDataCache";
 import type {
-  DbPreviewState,
   EjournalPreviewRow,
 } from "../ejournal/ejournalTypes";
 import {
   buildPersonSummary,
   findEjournalPersonnelSheet,
   getPersonExternalId,
+  loadAllEjournalSheetRows,
   normalizePersonBirthKey,
-  sheetRowsCacheKey,
 } from "../personnel/personnelUtils";
 import { mergeRosterRowsIntoPreview } from "../personnel/personnelRosterMerge";
 import { mapRosterLatestToPreviewRows } from "../excel-fill/rosterSourceSnapshot";
@@ -30,6 +28,16 @@ export const normalizeAnketaNameKey = (value: unknown) =>
     .toLocaleLowerCase("uk-UA");
 
 const normalizeNameKey = normalizeAnketaNameKey;
+
+export const normalizeAnketaExternalIdKey = (value: unknown) => {
+  const text = String(value ?? "").trim();
+  const compact = text
+    .replace(/[\s'`(),+-]/g, "")
+    .replaceAll("[", "")
+    .replaceAll("]", "");
+  const numeric = compact.match(/^(\d+)(?:\.0+)?$/);
+  return numeric?.[1] ?? text;
+};
 
 export type AnketaPersonnelMatch = {
   row: EjournalPreviewRow;
@@ -58,13 +66,17 @@ const buildPersonnelIndex = (rows: EjournalPreviewRow[]): PersonnelIndex => {
     const base = { row, summary, matchBy: "name" as const };
     const spreadsheetId = getPersonExternalId(row).trim();
     if (spreadsheetId) {
-      byExternalId.set(spreadsheetId, { ...base, matchBy: "externalId" });
+      const match = { ...base, matchBy: "externalId" as const };
+      byExternalId.set(spreadsheetId, match);
+      byExternalId.set(normalizeAnketaExternalIdKey(spreadsheetId), match);
     }
     if (summary.externalId) {
-      byExternalId.set(summary.externalId, {
+      const match = {
         ...base,
-        matchBy: "externalId",
-      });
+        matchBy: "externalId" as const,
+      };
+      byExternalId.set(summary.externalId, match);
+      byExternalId.set(normalizeAnketaExternalIdKey(summary.externalId), match);
     }
     const rnokpp = summary.rnokpp.trim();
     if (rnokpp) {
@@ -89,7 +101,11 @@ const buildPersonnelIndex = (rows: EjournalPreviewRow[]): PersonnelIndex => {
 
 const loadMergedPersonnelRows = async (): Promise<EjournalPreviewRow[]> => {
   const [imports, latestRoster] = await Promise.all([
-    readDataCache<BackendEjournalImport[]>(CacheKeys.ejournalImports),
+    fetchWithCache<BackendEjournalImport[]>({
+      key: CacheKeys.ejournalImports,
+      fetcher: () => api.listEjournalImports(),
+      isChanged: jsonChanged,
+    }).catch(() => []),
     fetchWithCache({
       key: CacheKeys.rosterLatest,
       fetcher: () => api.getLatestPersonnelRoster(),
@@ -98,16 +114,45 @@ const loadMergedPersonnelRows = async (): Promise<EjournalPreviewRow[]> => {
   ]);
 
   const rosterRows = mapRosterLatestToPreviewRows(latestRoster);
-  const sheet = imports?.length ? findEjournalPersonnelSheet(imports) : undefined;
+  const orderedImports = [...imports].sort(
+    (left, right) =>
+      new Date(left.updatedAt).getTime() - new Date(right.updatedAt).getTime(),
+  );
+  // Повна історія може містити десятки великих імпортів. Для доповнення
+  // достатньо найближчих версій; найновіша картка все одно має пріоритет.
+  const oosSheets = orderedImports
+    .map((item) => findEjournalPersonnelSheet([item]))
+    .filter((sheet): sheet is NonNullable<typeof sheet> => Boolean(sheet))
+    .slice(-8);
 
-  if (!sheet) {
+  if (!oosSheets.length) {
     return rosterRows.length
       ? mergeRosterRowsIntoPreview({ rows: [] }, rosterRows)
       : [];
   }
 
-  const preview = await readDataCache<DbPreviewState>(sheetRowsCacheKey(sheet));
-  const oosRows = preview?.rows ?? [];
+  // Історичні ООС потрібні для «Виключені»: у найновішому ООС людини вже може не бути.
+  // Імпорти йдуть від старого до нового, тому новіша картка перезаписує старішу.
+  const previews = await Promise.all(
+    oosSheets.map((sheet) => loadAllEjournalSheetRows(sheet).catch(() => null)),
+  );
+  const uniqueRows = new Map<string, EjournalPreviewRow>();
+  let fallbackIndex = 0;
+  for (const preview of previews) {
+    for (const row of preview?.rows ?? []) {
+      const summary = buildPersonSummary(row);
+      const id = getPersonExternalId(row).trim();
+      const nameKey = normalizeNameKey(summary.name);
+      const birthKey = normalizePersonBirthKey(summary.birthDate);
+      const key =
+        (id && `id:${id}`) ||
+        (nameKey && birthKey && `name-birth:${nameKey}|${birthKey}`) ||
+        (nameKey && `name:${nameKey}`) ||
+        `row:${fallbackIndex++}`;
+      uniqueRows.set(key, row);
+    }
+  }
+  const oosRows = [...uniqueRows.values()];
   return mergeRosterRowsIntoPreview({ rows: oosRows }, rosterRows);
 };
 

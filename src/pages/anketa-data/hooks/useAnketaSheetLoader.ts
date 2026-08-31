@@ -13,10 +13,12 @@ import {
 import { readAnketaAppsScriptUrl } from "../anketaGaps";
 import { loadAnketaMissingNameKeys } from "../anketaMissingList";
 import {
+  addMissingEjoosPeopleToCachedAnketa,
+  formatAddMissingEjoosPeopleReport,
+} from "../anketaEjoosPeople";
+import {
   formatAnketaBulkMergeReport,
-  formatPersonnelToAnketaMergeReport,
   mergeCachedAnketaToPersonnel,
-  mergePersonnelToCachedAnketa,
 } from "../anketaPersonMerge";
 import {
   buildStaffSheetEnrichmentEntries,
@@ -50,7 +52,7 @@ export function useAnketaSheetLoader() {
     Set<string>
   >(() => new Set());
   const [isMergingPersonnel, setIsMergingPersonnel] = useState(false);
-  const [isMergingFromPersonnel, setIsMergingFromPersonnel] = useState(false);
+  const [isAddingFromEjoos, setIsAddingFromEjoos] = useState(false);
   const [isPushingStaffSheet, setIsPushingStaffSheet] = useState(false);
   const [isDownloadingStaffSheet, setIsDownloadingStaffSheet] = useState(false);
   const [staffSheetImportName, setStaffSheetImportName] = useState("");
@@ -189,20 +191,16 @@ export function useAnketaSheetLoader() {
     }
   };
 
-  const mergeFromPersonnel = async () => {
-    if (!rows.length) {
-      setMessage("Спочатку завантажте анкетні дані.");
-      return;
-    }
-    setIsMergingFromPersonnel(true);
+  const addMissingFromEjoos = async () => {
+    setIsAddingFromEjoos(true);
     try {
       let lastProgressAt = 0;
-      const report = await mergePersonnelToCachedAnketa({
+      const report = await addMissingEjoosPeopleToCachedAnketa({
         onProgress: (done, total) => {
           const now = Date.now();
           if (done !== total && now - lastProgressAt < 250) return;
           lastProgressAt = now;
-          setMessage(`Доповнення з особового складу… ${done}/${total}`);
+          setMessage(`Додаю відсутніх з ЕЖООС… ${done}/${total}`);
         },
       });
       const refreshed = await loadAnketaSheetPreferCache({
@@ -212,16 +210,18 @@ export function useAnketaSheetLoader() {
       const edits = await loadAnketaEdits();
       setEditsCount(countAnketaEdits(edits));
       setMessage(
-        `Доповнено з особового складу · ${formatPersonnelToAnketaMergeReport(report)}.`,
+        report.added
+          ? `Додано з ЕЖООС (ООС + Виключені) · ${formatAddMissingEjoosPeopleReport(report)}.`
+          : `Нових осіб немає · ${formatAddMissingEjoosPeopleReport(report)}.`,
       );
     } catch (error) {
       setMessage(
         error instanceof Error
           ? error.message
-          : "Не вдалося доповнити анкети з особового складу.",
+          : "Не вдалося додати осіб з ЕЖООС.",
       );
     } finally {
-      setIsMergingFromPersonnel(false);
+      setIsAddingFromEjoos(false);
     }
   };
 
@@ -347,7 +347,7 @@ export function useAnketaSheetLoader() {
     setAppsScriptUrl,
     missingQuestionnaireNames,
     isMergingPersonnel,
-    isMergingFromPersonnel,
+    isAddingFromEjoos,
     isPushingStaffSheet,
     isDownloadingStaffSheet,
     isImportingStaffSheet,
@@ -360,7 +360,7 @@ export function useAnketaSheetLoader() {
     loadFromGoogle,
     loadFromCsvFile,
     mergeToPersonnel,
-    mergeFromPersonnel,
+    addMissingFromEjoos,
     pushStaffSheetEnrichment,
     downloadStaffSheetExcel,
     importStaffSheetFile,

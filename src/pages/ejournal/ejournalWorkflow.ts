@@ -369,7 +369,12 @@ function writeExcludedMovement(
   sheet.cell(`AB${targetRow}`).value(event.orderDate);
   sheet.cell(`AC${targetRow}`).value(event.orderDate);
   sheet.cell(`AD${targetRow}`).value(event.orderNumber);
-  sheet.cell(`AE${targetRow}`).value(event.destination || event.note || null);
+  sheet.cell(`AE${targetRow}`).value(
+    (event.destination || event.note || "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .toLocaleLowerCase("uk-UA") || null,
+  );
   sheet.cell(`AF${targetRow}`).value(event.type === "РОЗПОРЯДЖ" ? "Розпорядження" : "Переведення");
   sheet.cell(`AG${targetRow}`).value(`Рух №${event.movementNumber}`);
 }

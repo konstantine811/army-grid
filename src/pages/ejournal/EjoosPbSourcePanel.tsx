@@ -5,7 +5,7 @@ import {
   parsePbMovements,
   parsePbShPeople,
 } from "./ejoosSyncPlan";
-import { useEjoosWorkspace } from "./EjoosWorkspaceContext";
+import { useEjoosWorkspace } from "./ejoosWorkspaceState";
 
 type PbSourceTab = "sh" | "movements" | "archive";
 
@@ -52,6 +52,7 @@ const ARCHIVE_COLUMNS = [
   { key: "absenceType", label: "Вибуття", className: "is-text" },
   { key: "departDate", label: "З дати" },
   { key: "place", label: "Куди", className: "is-text" },
+  { key: "duration", label: "Строк" },
   { key: "plannedReturn", label: "План" },
   { key: "returnDate", label: "Факт" },
   { key: "orderNumber", label: "Наказ" },

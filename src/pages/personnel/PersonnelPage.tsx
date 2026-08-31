@@ -311,7 +311,8 @@ export function PersonnelPage({
       | "serviceCharacteristic"
       | "zhbdCertificate"
       | "ubdRestoreReport"
-      | "temporaryMilitaryId",
+      | "temporaryMilitaryId"
+      | "lostMilitaryId",
     meta?: { fullPosition?: string },
   ) => void;
 }) {
@@ -346,6 +347,9 @@ export function PersonnelPage({
   const [questionnaireByExternalId, setQuestionnaireByExternalId] = useState<
     Record<string, true>
   >({});
+  const [questionnaireFilter, setQuestionnaireFilter] = useState<
+    "all" | "with" | "without"
+  >("all");
   const [photoCropFile, setPhotoCropFile] = useState<File | null>(null);
   const [isPhotoCropOpen, setIsPhotoCropOpen] = useState(false);
   const [questionnaire, setQuestionnaire] =
@@ -380,9 +384,15 @@ export function PersonnelPage({
   const filteredPersonnel = useMemo(() => {
     const normalizedQuery = normalizePersonnelSearchText(query);
 
-    if (!normalizedQuery) return personnelRows;
-
     return personnelRows.filter((record) => {
+      const hasQuestionnaire = Boolean(
+        record.summary.externalId &&
+          questionnaireByExternalId[record.summary.externalId],
+      );
+      if (questionnaireFilter === "with" && !hasQuestionnaire) return false;
+      if (questionnaireFilter === "without" && hasQuestionnaire) return false;
+      if (!normalizedQuery) return true;
+
       const searchableText = normalizePersonnelSearchText(
         [
         record.summary.name,
@@ -405,7 +415,27 @@ export function PersonnelPage({
 
       return searchableText.includes(normalizedQuery);
     });
-  }, [personnelRows, phonesByExternalId, query]);
+  }, [
+    personnelRows,
+    phonesByExternalId,
+    query,
+    questionnaireByExternalId,
+    questionnaireFilter,
+  ]);
+
+  const questionnaireCounts = useMemo(() => {
+    const withQuestionnaire = personnelRows.reduce((count, record) => {
+      const externalId = record.summary.externalId;
+      return externalId && questionnaireByExternalId[externalId]
+        ? count + 1
+        : count;
+    }, 0);
+    return {
+      all: personnelRows.length,
+      with: withQuestionnaire,
+      without: personnelRows.length - withQuestionnaire,
+    };
+  }, [personnelRows, questionnaireByExternalId]);
   const selectedRecord = useMemo(
     () =>
       personnelRows.find((record) => record.row.__dbRowId === selectedRowId) ??
@@ -852,6 +882,57 @@ export function PersonnelPage({
     }
   };
 
+  const revealCurrentQuestionnaireInFinder = async () => {
+    const externalId = selectedSummary.externalId;
+    if (!externalId || !questionnaire) return;
+
+    setMessage("Шукаю оригінал анкети на диску…");
+    try {
+      const person = {
+        externalId,
+        fullName: selectedSummary.name,
+        callSign: selectedSummary.callSign,
+      };
+      let result = await api.searchQuestionnairesOnDisk({
+        people: [person],
+        refreshIndex: false,
+      });
+      let matches = result.people[0]?.matches ?? [];
+      if (!matches.length) {
+        result = await api.searchQuestionnairesOnDisk({
+          people: [person],
+          refreshIndex: true,
+        });
+        matches = result.people[0]?.matches ?? [];
+      }
+
+      const storedName = String(questionnaire.fileName ?? "")
+        .normalize("NFC")
+        .toLocaleLowerCase("uk-UA");
+      const match =
+        matches.find(
+          (item) =>
+            item.fileName
+              .normalize("NFC")
+              .toLocaleLowerCase("uk-UA") === storedName,
+        ) ?? matches[0];
+      if (!match) {
+        throw new Error(
+          "Оригінальний PDF не знайдено у папці анкет. У БД збережена лише копія.",
+        );
+      }
+
+      await api.revealDiskQuestionnaireInFinder(match.relativePath);
+      setMessage(`Відкрито у Finder: ${match.fileName}`);
+    } catch (error) {
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "Не вдалося показати анкету у Finder",
+      );
+    }
+  };
+
   const downloadCurrentQuestionnaire = () => {
     if (pendingQuestionnaireFile) {
       downloadQuestionnairePdf(questionnaireExportFileName, {
@@ -1180,17 +1261,6 @@ export function PersonnelPage({
       // Background heal must never block the personnel list.
     }
   };
-
-  const filteredWithQuestionnaireCount = useMemo(
-    () =>
-      filteredPersonnel.reduce((count, record) => {
-        const externalId = record.summary.externalId;
-        return externalId && questionnaireByExternalId[externalId]
-          ? count + 1
-          : count;
-      }, 0),
-    [filteredPersonnel, questionnaireByExternalId],
-  );
 
   const missingDiskSearchPeople = useMemo(() => {
     const people: Array<{
@@ -1656,7 +1726,7 @@ export function PersonnelPage({
         !pendingQuestionnaireFile &&
         !diskPreviewFile
       ) {
-        nextUrl = await api.getPersonQuestionnaireObjectUrl(
+        nextUrl = await api.createPersonQuestionnairePreviewUrl(
           externalId,
           questionnaireExportFileName,
         );
@@ -1698,12 +1768,11 @@ export function PersonnelPage({
       !diskPreviewFile
     ) {
       try {
-        const url = await api.getPersonQuestionnaireObjectUrl(
+        const url = await api.createPersonQuestionnairePreviewUrl(
           externalId,
           questionnaireExportFileName,
         );
         window.open(url, "_blank", "noopener,noreferrer");
-        window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
         return;
       } catch (error) {
         setMessage(
@@ -1760,7 +1829,7 @@ export function PersonnelPage({
       const exportFileName = sanitizeFileName(
         buildQuestionnaireExportFileName(
           selectedSummary.name,
-          selectedSummary.callSign,
+          selectedCallSign,
         ),
       );
       const fileToSave = renameQuestionnaireFile(file, exportFileName);
@@ -1936,10 +2005,6 @@ export function PersonnelPage({
         <aside className="analytics-panel personnel-list-panel">
           <div className="panel-heading">
             Військовослужбовці · {filteredPersonnel.length}
-            <span className="personnel-list-questionnaire-count">
-              {" "}
-              · з анкетами {filteredWithQuestionnaireCount}
-            </span>
           </div>
           <label className="personnel-search">
             <SearchOutlinedIcon fontSize="small" />
@@ -1949,6 +2014,34 @@ export function PersonnelPage({
               placeholder="ПІБ, позивний, звання, посада"
             />
           </label>
+          <div
+            aria-label="Фільтр за наявністю анкети"
+            className="personnel-questionnaire-filter"
+            role="group"
+          >
+            {(
+              [
+                ["all", "Усі", questionnaireCounts.all],
+                ["with", "З анкетами", questionnaireCounts.with],
+                ["without", "Без анкет", questionnaireCounts.without],
+              ] as const
+            ).map(([value, label, count]) => (
+              <button
+                aria-pressed={questionnaireFilter === value}
+                className={
+                  questionnaireFilter === value ? "is-active" : undefined
+                }
+                key={value}
+                onClick={() => {
+                  setQuestionnaireFilter(value);
+                  setSelectedRowId("");
+                }}
+                type="button"
+              >
+                {label} · {count}
+              </button>
+            ))}
+          </div>
           <PersonnelVirtualList
             items={filteredPersonnel}
             selectedRowId={selectedRowId}
@@ -2235,6 +2328,7 @@ export function PersonnelPage({
                                 [field.key]: event.target.value,
                               }))
                             }
+                            onBlur={() => void saveSelectedPerson()}
                           />
                         ) : (
                           <input
@@ -2245,6 +2339,7 @@ export function PersonnelPage({
                                 [field.key]: event.target.value,
                               }))
                             }
+                            onBlur={() => void saveSelectedPerson()}
                           />
                         )}
                       </label>
@@ -2254,39 +2349,6 @@ export function PersonnelPage({
               </div>
             ))}
           </div>
-
-          <Stack
-            className="person-card-actions"
-            direction="row"
-            spacing={1}
-            sx={{ justifyContent: "flex-end" }}
-          >
-            <Button
-              component="label"
-              disabled={!selectedRow || !selectedSummary.externalId || isUploadingQuestionnaire}
-              variant="outlined"
-              startIcon={<PictureAsPdfOutlinedIcon />}
-            >
-              {questionnaire ? "Замінити анкету" : "Додати анкету"}
-              <input
-                hidden
-                type="file"
-                accept="application/pdf,.pdf"
-                onChange={(event) => {
-                  beginQuestionnaireReview(event.target.files?.[0]);
-                  event.target.value = "";
-                }}
-              />
-            </Button>
-            <Button
-              disabled={!selectedRow}
-              variant="contained"
-              onClick={() => void saveSelectedPerson()}
-              sx={{ color: "#1a1a14" }}
-            >
-              Зберегти зміни
-            </Button>
-          </Stack>
         </section>
 
         <aside className="person-side-panel">
@@ -2382,26 +2444,38 @@ export function PersonnelPage({
                       </small>
                     </span>
                   </button>
-                  <button
-                    aria-label="Експорт анкети"
-                    className="person-document-delete"
-                    disabled={!selectedRow}
-                    onClick={() => void exportCurrentQuestionnaire()}
-                    title={`Експорт: ${questionnaireExportFileName}`}
-                    type="button"
-                  >
-                    <FileDownloadOutlinedIcon />
-                  </button>
-                  <button
-                    aria-label="Видалити анкету"
-                    className="person-document-delete"
-                    disabled={!selectedRow}
-                    onClick={() => void deleteSelectedQuestionnaire()}
-                    title="Видалити анкету"
-                    type="button"
-                  >
-                    <DeleteOutlineOutlinedIcon />
-                  </button>
+                  <div className="person-document-actions">
+                    <button
+                      aria-label="Експорт анкети"
+                      className="person-document-delete"
+                      disabled={!selectedRow}
+                      onClick={() => void exportCurrentQuestionnaire()}
+                      title={`Експорт: ${questionnaireExportFileName}`}
+                      type="button"
+                    >
+                      <FileDownloadOutlinedIcon />
+                    </button>
+                    <button
+                      aria-label="Показати анкету у Finder"
+                      className="person-document-delete person-document-action--finder"
+                      disabled={!selectedRow}
+                      onClick={() => void revealCurrentQuestionnaireInFinder()}
+                      title="Показати оригінал у Finder"
+                      type="button"
+                    >
+                      <SearchOutlinedIcon />
+                    </button>
+                    <button
+                      aria-label="Видалити анкету"
+                      className="person-document-delete"
+                      disabled={!selectedRow}
+                      onClick={() => void deleteSelectedQuestionnaire()}
+                      title="Видалити анкету"
+                      type="button"
+                    >
+                      <DeleteOutlineOutlinedIcon />
+                    </button>
+                  </div>
                 </article>
               ) : (
                 <div className="person-document-empty">
@@ -2620,6 +2694,29 @@ export function PersonnelPage({
                 <span>
                   <strong>Тимчасовий військовий квиток</strong>
                   <small>фото, рядок для замовлення, прогрес</small>
+                </span>
+              </button>
+              <button
+                className={[
+                  "person-document-item",
+                  personRelatedDocuments.some(
+                    (document) => document.type === "lostMilitaryId",
+                  )
+                    ? "is-ready"
+                    : "",
+                ]
+                  .filter(Boolean)
+                  .join(" ")}
+                disabled={!selectedRow}
+                type="button"
+                onClick={() =>
+                  selectedRow && onOpenDocuments(selectedRow, "lostMilitaryId")
+                }
+              >
+                <ArticleOutlinedIcon />
+                <span>
+                  <strong>Втрата військового квитка</strong>
+                  <small>рапорт, наказ, акт розслідування</small>
                 </span>
               </button>
             </div>

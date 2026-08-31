@@ -24,6 +24,7 @@ import {
   MoreHorizontal,
   MoreVertical,
   Pin,
+  Pencil,
   ArrowDown,
   ArrowUp,
   ArrowUpDown,
@@ -85,6 +86,7 @@ export const CloudUploadOutlinedIcon = withCompatIcon(Upload);
 export const ContentCopyOutlinedIcon = withCompatIcon(Copy);
 export const DashboardOutlinedIcon = withCompatIcon(Grid2X2);
 export const DeleteOutlineOutlinedIcon = withCompatIcon(XCircle);
+export const EditOutlinedIcon = withCompatIcon(Pencil);
 export const DescriptionOutlinedIcon = withCompatIcon(FileText);
 export const ErrorOutlineOutlinedIcon = withCompatIcon(XCircle);
 export const VisibilityOutlinedIcon = withCompatIcon(Eye);

@@ -7,6 +7,7 @@ import {
   ANKETA_COLUMNS,
   ANKETA_SHEET_GID,
   ANKETA_SHEET_ID,
+  createEmptyAnketaRow,
   type AnketaColumnKey,
   type AnketaRow,
   type AnketaSheetSnapshot,
@@ -177,27 +178,91 @@ export const upsertAnketaCellEdit = async (input: {
   }
 };
 
+export const bulkWriteAnketaCellEdits = async (
+  items: Array<{
+    rowNumber: number;
+    columnId: AnketaColumnKey;
+    value: string;
+    externalId?: string;
+    fullName?: string;
+  }>,
+): Promise<UpsertAnketaCellEditResult> => {
+  if (!items.length) {
+    return { edits: await loadLocalAnketaEdits(), serverSynced: true };
+  }
+
+  const current = await loadLocalAnketaEdits();
+  const now = new Date().toISOString();
+  const next: AnketaEditsMap = { ...current };
+  for (const item of items) {
+    const key = anketaEditKey(item.rowNumber, item.columnId);
+    next[key] = {
+      rowNumber: item.rowNumber,
+      columnId: item.columnId,
+      value: item.value,
+      updatedAt: now,
+      externalId: item.externalId?.trim() || undefined,
+      fullName: item.fullName?.trim() || undefined,
+    };
+  }
+  await saveAnketaEdits(next);
+
+  try {
+    const synced = await syncAnketaEdits();
+    return { edits: synced, serverSynced: true };
+  } catch (error) {
+    return {
+      edits: next,
+      serverSynced: false,
+      serverError:
+        error instanceof Error ? error.message : "Сервер недоступний",
+    };
+  }
+};
+
+const applyEditsToRow = (row: AnketaRow, edits: AnketaEditsMap): AnketaRow => {
+  let next = row;
+  let changed = false;
+  for (const column of ANKETA_COLUMNS) {
+    const edit = edits[anketaEditKey(row.__rowNumber, column.key)];
+    if (!edit) continue;
+    if (String(next[column.key] ?? "") === edit.value) continue;
+    if (!changed) {
+      next = { ...row };
+      changed = true;
+    }
+    next[column.key] = edit.value;
+  }
+  if (changed) {
+    next.__rowId = `anketa-${next.__rowNumber}-${next.externalId || next.fullName}`;
+  }
+  return next;
+};
+
 export const applyAnketaEditsToRows = (
   rows: AnketaRow[],
   edits: AnketaEditsMap,
 ): AnketaRow[] => {
   if (!edits || !Object.keys(edits).length) return rows;
 
-  return rows.map((row) => {
-    let next = row;
-    let changed = false;
-    for (const column of ANKETA_COLUMNS) {
-      const edit = edits[anketaEditKey(row.__rowNumber, column.key)];
-      if (!edit) continue;
-      if (String(next[column.key] ?? "") === edit.value) continue;
-      if (!changed) {
-        next = { ...row };
-        changed = true;
-      }
-      next[column.key] = edit.value;
-    }
-    return next;
-  });
+  const updated = rows.map((row) => applyEditsToRow(row, edits));
+  const existingNumbers = new Set(updated.map((row) => row.__rowNumber));
+  const extras: AnketaRow[] = [];
+
+  const orphanNumbers = new Set<number>();
+  for (const edit of Object.values(edits)) {
+    if (!existingNumbers.has(edit.rowNumber)) orphanNumbers.add(edit.rowNumber);
+  }
+
+  for (const rowNumber of [...orphanNumbers].sort((a, b) => a - b)) {
+    const fullName = edits[anketaEditKey(rowNumber, "fullName")]?.value.trim() ?? "";
+    const externalId =
+      edits[anketaEditKey(rowNumber, "externalId")]?.value.trim() ?? "";
+    if (!fullName && !externalId) continue;
+    extras.push(applyEditsToRow(createEmptyAnketaRow(rowNumber), edits));
+  }
+
+  return extras.length ? [...updated, ...extras] : updated;
 };
 
 export const applyAnketaEditsToSnapshot = (

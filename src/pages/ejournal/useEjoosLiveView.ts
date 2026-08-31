@@ -1,6 +1,6 @@
 import { useEffect, useMemo } from "react";
 import { buildEjoosLiveView } from "./ejoosLiveViews";
-import { useEjoosWorkspace } from "./EjoosWorkspaceContext";
+import { useEjoosWorkspace } from "./ejoosWorkspaceState";
 
 const VIEW_TABS = new Set([
   "shpo",

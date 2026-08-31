@@ -132,7 +132,7 @@ export function useAnketaPersonPanel(
         String(storedFileName ?? "").trim() ||
         buildQuestionnaireExportFileName(name, callSign);
       try {
-        const nextUrl = await api.getPersonQuestionnaireObjectUrl(
+        const nextUrl = await api.createPersonQuestionnairePreviewUrl(
           externalId,
           fileName,
         );
@@ -364,12 +364,11 @@ export function useAnketaPersonPanel(
   const openQuestionnaireTab = async () => {
     if (!questionnaire || !personnelExternalId) return;
     try {
-      const url = await api.getPersonQuestionnaireObjectUrl(
+      const url = await api.createPersonQuestionnairePreviewUrl(
         personnelExternalId,
         exportFileName,
       );
       window.open(url, "_blank", "noopener,noreferrer");
-      window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
     } catch {
       /* ignore */
     }

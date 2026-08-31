@@ -56,6 +56,9 @@ export const DEFAULT_ANKETA_GAP_COLUMNS: AnketaColumnKey[] = [
   "additionalInfo",
   "location",
   "militaryId",
+  "conscriptedWhen",
+  "conscriptedBy",
+  "education",
 ];
 
 const sanitizeGapColumns = (value: unknown): AnketaColumnKey[] | null => {

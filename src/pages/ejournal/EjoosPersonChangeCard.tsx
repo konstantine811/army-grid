@@ -1,0 +1,721 @@
+import { memo, useMemo } from "react";
+import {
+  Box,
+  Button,
+  Chip,
+  MenuItem,
+  Select,
+  Stack,
+  Typography,
+} from "@/components/sci/SciPrimitives";
+import {
+  type PersonChange,
+  type PersonChangeCategory,
+  buildSheetImpacts,
+  buildTimesheetPreview,
+  personIsInformationalOnly,
+} from "./ejoosPersonDiff";
+import { formatTimesheetTransferMark } from "./ejoosExcludedColumns";
+import { timesheetOpNeedsManualCode } from "./ejoosOpRequirements";
+import { EJOOS_TIMESHEET_CODES } from "./ejoosRules";
+import { dayFromOrderLabel } from "./ejoosTimesheetText";
+
+export type PersonChangeCardMode = "review" | "history";
+
+export type PersonChangeCardHistoryMeta = {
+  version: number;
+  appliedAt: string;
+  pbFileName?: string;
+  timesheetDayLabel?: string;
+};
+
+const categoryLabel: Record<PersonChangeCategory, string> = {
+  status: "Статус",
+  position: "Посада",
+  arrival: "Новий",
+  data: "Дані",
+  error: "Помилка",
+  mixed: "Змішане",
+};
+
+const timesheetMarkClass = (mark: string) => {
+  const text = String(mark ?? "").trim().toLocaleLowerCase("uk-UA");
+  if (text === "+") return "present";
+  if (text === "-" || text === "—") return "empty";
+  if (text.includes("вибув") || text.includes("перев")) return "depart";
+  if (text === "зб" || text === "сзч") return "missing";
+  if (text === "вп" || text === "лік" || text === "лп") return "med";
+  if (text === "від" || text === "вдр") return "leave";
+  return "other";
+};
+
+const severityColor = (
+  severity: PersonChange["severity"],
+): "success" | "warning" | "error" | "default" => {
+  if (severity === "ready") return "success";
+  if (severity === "needs_input") return "warning";
+  return "error";
+};
+
+const severityLabel = (severity: PersonChange["severity"]) => {
+  if (severity === "ready") return "Авто";
+  if (severity === "needs_input") return "Перевірити";
+  return "Конфлікт";
+};
+
+const formatAppliedAt = (iso: string) => {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return iso;
+  return date.toLocaleString("uk-UA");
+};
+
+export const PersonChangeRow = memo(function PersonChangeRow({
+  person,
+  selected,
+  onSelect,
+  mode = "review",
+  historyMeta,
+}: {
+  person: PersonChange;
+  selected: boolean;
+  onSelect: () => void;
+  mode?: PersonChangeCardMode;
+  historyMeta?: Pick<PersonChangeCardHistoryMeta, "version" | "appliedAt">;
+}) {
+  return (
+    <button
+      type="button"
+      className={
+        [
+          "ejoos-change-row",
+          selected ? "is-selected" : "",
+          `severity-${person.severity}`,
+          mode === "history" ? "is-history" : "",
+        ]
+          .filter(Boolean)
+          .join(" ")
+      }
+      onClick={onSelect}
+    >
+      <div className="ejoos-change-row-main">
+        <strong>{person.fullName}</strong>
+        <span className="ejoos-change-meta">
+          {[person.rank, person.positionIndex || person.personId]
+            .filter(Boolean)
+            .join(" · ")}
+        </span>
+        {mode === "history" && historyMeta ? (
+          <span className="ejoos-history-applied-meta">
+            {formatAppliedAt(historyMeta.appliedAt)}
+          </span>
+        ) : null}
+      </div>
+      <div className="ejoos-change-diff">
+        <span>{person.summaryBefore}</span>
+        <span aria-hidden>→</span>
+        <span>{person.summaryAfter}</span>
+      </div>
+      <div className="ejoos-change-will">
+        {mode === "history"
+          ? person.ejoosWillDo.slice(0, 3).join(" · ") || "—"
+          : person.ejoosWillDo[0] || "—"}
+        {person.ejoosWillDo.length > (mode === "history" ? 3 : 1)
+          ? ` (+${person.ejoosWillDo.length - (mode === "history" ? 3 : 1)})`
+          : ""}
+      </div>
+      <div className="ejoos-change-sheet-chips">
+        {(person.sheetImpacts ?? buildSheetImpacts(person.ops))
+          .filter(
+            (item) =>
+              item.effect !== "untouched" && item.effect !== "skip",
+          )
+          .map((item) => (
+            <span
+              key={item.sheetKey}
+              className={`ejoos-mini-chip effect-${item.effect}`}
+              title={item.detail}
+            >
+              {item.sheetLabel.replace(/^\d+\.\s*/, "")}
+            </span>
+          ))}
+      </div>
+      <div className="ejoos-change-badges">
+        {mode === "history" ? (
+          <>
+            <Chip
+              size="small"
+              label={categoryLabel[person.category]}
+              variant="outlined"
+            />
+            <Chip size="small" color="success" label="Застосовано" />
+          </>
+        ) : (
+          <>
+            <Chip
+              size="small"
+              label={categoryLabel[person.category]}
+              variant="outlined"
+            />
+            <Chip
+              size="small"
+              color={severityColor(person.severity)}
+              label={severityLabel(person.severity)}
+            />
+            {person.decision === "accepted" ? (
+              <Chip size="small" color="success" label="✓" />
+            ) : null}
+            {person.decision === "rejected" ? (
+              <Chip size="small" label="✕" />
+            ) : null}
+          </>
+        )}
+      </div>
+    </button>
+  );
+});
+
+export function PersonChangeCard({
+  person,
+  timesheetDay,
+  mode = "review",
+  historyMeta,
+  onAccept,
+  onApplyNow,
+  onReject,
+  onClose,
+  onPatchPayload,
+  isLoading,
+}: {
+  person: PersonChange;
+  timesheetDay: number;
+  mode?: PersonChangeCardMode;
+  historyMeta?: PersonChangeCardHistoryMeta;
+  onAccept?: () => void;
+  onApplyNow?: () => void;
+  onReject?: () => void;
+  onClose: () => void;
+  onPatchPayload?: (opId: string, patch: Record<string, string>) => void;
+  isLoading?: boolean;
+}) {
+  const isHistory = mode === "history";
+  const timesheetPreview = useMemo(
+    () =>
+      person.timesheetPreview ??
+      buildTimesheetPreview(person.ops, timesheetDay),
+    [person.ops, person.timesheetPreview, timesheetDay],
+  );
+  const excludeOp = person.ops.find((op) => op.kind === "exclude_transfer");
+  const needsDestination = Boolean(
+    excludeOp && !excludeOp.payload.destination?.trim(),
+  );
+  const needsExclusionDetails = Boolean(
+    excludeOp &&
+      (!excludeOp.payload.excludeDate?.trim() ||
+        !excludeOp.payload.orderNumber?.trim() ||
+        !excludeOp.payload.orderDate?.trim()),
+  );
+  const timesheetOps = person.ops.filter(
+    (op) =>
+      op.kind === "timesheet_day" && op.payload.clearStalePerson !== "1",
+  );
+  const needsTimesheetCode = timesheetOps.some(timesheetOpNeedsManualCode);
+  const manualTimesheetOps = timesheetOps.filter(timesheetOpNeedsManualCode);
+  const reviewOnly = personIsInformationalOnly(person.ops);
+  const bySheet = useMemo(() => {
+    const map = new Map<string, typeof person.sheetActions>();
+    person.sheetActions.forEach((action) => {
+      const list = map.get(action.sheet) ?? [];
+      list.push(action);
+      map.set(action.sheet, list);
+    });
+    return [...map.entries()];
+  }, [person.sheetActions]);
+
+  const sheetImpacts = useMemo(
+    () =>
+      person.sheetImpacts?.length
+        ? person.sheetImpacts
+        : buildSheetImpacts(person.ops),
+    [person.ops, person.sheetImpacts],
+  );
+
+  const timesheetDepartSample = useMemo(() => {
+    const phraseFromPreview = timesheetPreview?.departPhrase?.trim();
+    const dayFromPreview = timesheetPreview?.departDay || 0;
+    const transferOp =
+      excludeOp ||
+      person.ops.find((op) => op.kind === "move_to_disposition") ||
+      person.ops.find(
+        (op) =>
+          op.kind === "position_change" && op.payload.closeOldPosition === "1",
+      );
+    const phrase =
+      phraseFromPreview ||
+      (transferOp ? formatTimesheetTransferMark(transferOp.payload) : "");
+    if (!phrase) return null;
+    const day =
+      dayFromPreview ||
+      dayFromOrderLabel(
+        transferOp?.payload.excludeDate ||
+          transferOp?.payload.orderDate ||
+          "",
+      );
+    return { day, phrase };
+  }, [excludeOp, person.ops, timesheetPreview]);
+
+  const patch = onPatchPayload ?? (() => undefined);
+
+  return (
+    <Box className="ejoos-change-card">
+      <Stack
+        direction="row"
+        justifyContent="space-between"
+        alignItems="flex-start"
+        spacing={1}
+      >
+        <Box>
+          <Typography variant="h6">{person.fullName}</Typography>
+          <Typography variant="body2" className="ejoos-muted">
+            {[person.rank, person.positionIndex, person.personId]
+              .filter(Boolean)
+              .join(" · ")}
+          </Typography>
+          {isHistory ? (
+            <Chip
+              size="small"
+              color="success"
+              label="Застосовано"
+              sx={{ mt: 0.5 }}
+            />
+          ) : person.decision === "accepted" ? (
+            <Chip
+              size="small"
+              color="success"
+              label="Підтверджено"
+              sx={{ mt: 0.5 }}
+            />
+          ) : null}
+        </Box>
+        <Button size="small" onClick={onClose}>
+          Закрити
+        </Button>
+      </Stack>
+
+      <div className="ejoos-change-summary-pair">
+        <div>
+          <span className="ejoos-stat-label">Було (ЕЖООС)</span>
+          <strong>{person.summaryBefore}</strong>
+        </div>
+        <div>
+          <span className="ejoos-stat-label">Стало (1ПБ)</span>
+          <strong>{person.summaryAfter}</strong>
+        </div>
+      </div>
+
+      {person.sourceInfluences?.length ? (
+        <Box sx={{ mt: 1.5 }}>
+          <Typography variant="subtitle2" sx={{ mb: 0.5 }}>
+            Що з 1ПБ впливає
+          </Typography>
+          <Typography variant="body2" className="ejoos-muted" sx={{ mb: 1 }}>
+            {isHistory
+              ? "Події Рух і archive, з яких зібрано ці застосовані операції."
+              : "Події Рух і archive, з яких зібрано ці операції."}
+          </Typography>
+          <div className="ejoos-source-list">
+            {person.sourceInfluences.map((item) => (
+              <div
+                key={`${item.source}-${item.event}`}
+                className={`ejoos-source-item source-${item.source}`}
+              >
+                <div className="ejoos-source-item-head">
+                  <span className="ejoos-source-badge">{item.sourceLabel}</span>
+                  {item.ref ? (
+                    <span className="ejoos-source-ref">{item.ref}</span>
+                  ) : null}
+                </div>
+                <strong>{item.event}</strong>
+                <p>{item.effect}</p>
+              </div>
+            ))}
+          </div>
+        </Box>
+      ) : null}
+
+      {timesheetPreview ? (
+        <Box sx={{ mt: 1.5 }}>
+          <Typography variant="subtitle2" sx={{ mb: 0.5 }}>
+            Табель після застосування
+          </Typography>
+          <Typography variant="body2" className="ejoos-muted" sx={{ mb: 1 }}>
+            {timesheetPreview.runs
+              .map((run) =>
+                run.from === run.to
+                  ? `${String(run.from).padStart(2, "0")}: ${run.mark}`
+                  : `${String(run.from).padStart(2, "0")}–${String(run.to).padStart(2, "0")}: ${run.mark}`,
+              )
+              .join(" · ")}
+            {timesheetPreview.note && !timesheetDepartSample
+              ? ` · ${timesheetPreview.note}`
+              : ""}
+          </Typography>
+          <div className="ejoos-timesheet-preview">
+            {timesheetPreview.days.map((cell) => (
+              <div
+                key={cell.day}
+                className={`ejoos-timesheet-day mark-${timesheetMarkClass(cell.mark)}`}
+                title={`${cell.day}: ${cell.title || cell.mark}`}
+              >
+                <span>{String(cell.day).padStart(2, "0")}</span>
+                <strong>
+                  {String(cell.mark || "").length > 6
+                    ? `${String(cell.mark).slice(0, 5)}…`
+                    : cell.mark}
+                </strong>
+              </div>
+            ))}
+          </div>
+          {timesheetDepartSample ? (
+            <div className="ejoos-timesheet-phrase">
+              <span className="ejoos-stat-label">
+                {timesheetDepartSample.day
+                  ? `День ${String(timesheetDepartSample.day).padStart(2, "0")} у Табелі запишеться так`
+                  : "У клітинку вибуття Табеля запишеться"}
+              </span>
+              <strong>{timesheetDepartSample.phrase}</strong>
+              <span className="ejoos-muted">
+                На сітці день позначено «ПЕРЕВ». У Excel піде саме ця фраза, не
+                скорочення.
+              </span>
+            </div>
+          ) : null}
+        </Box>
+      ) : null}
+
+      {excludeOp ? (
+        <Box className="ejoos-transfer-box" sx={{ mt: 1.5 }}>
+          <Typography variant="subtitle2">
+            Переведення з обліку (ПЕРЕВ → Виключені)
+          </Typography>
+          <Typography variant="body2" className="ejoos-muted" sx={{ mb: 1 }}>
+            Не внутрішня зміна посади. Алгоритм: Виключені → Табель → ШПО/ООС.
+            Тимч. відсутні/прибулі не чіпаємо.
+          </Typography>
+          <ol className="ejoos-transfer-steps">
+            {person.ejoosWillDo.map((step) => (
+              <li key={step}>{step}</li>
+            ))}
+          </ol>
+          <div className="ejoos-sheet-block" style={{ marginBottom: "0.75rem" }}>
+            <Typography variant="caption" className="ejoos-muted">
+              З ЕЖООС беремо
+            </Typography>
+            <strong>
+              {[
+                excludeOp.payload.fromRank || excludeOp.rank,
+                excludeOp.payload.fromName || excludeOp.fullName,
+                excludeOp.payload.fromPositionIndex || excludeOp.positionIndex,
+                excludeOp.payload.fromPersonId || excludeOp.personId,
+              ]
+                .filter(Boolean)
+                .join(" · ") || "— (ШПО не знайдено)"}
+            </strong>
+            {excludeOp.payload.shpoExcelRow ? (
+              <span className="ejoos-muted">
+                рядок ШПО {excludeOp.payload.shpoExcelRow}
+              </span>
+            ) : (
+              <span className="ejoos-muted">
+                ШПО не знайдено автоматично — ПІБ/ID з Рух все одно застосуються
+              </span>
+            )}
+          </div>
+          {excludeOp.payload.basisNumber || excludeOp.payload.basisDate ? (
+            <Typography variant="body2" className="ejoos-muted" sx={{ mb: 1 }}>
+              Документ-підстава з РУХ:{" "}
+              {excludeOp.payload.basisNumber || "без номера"}
+              {excludeOp.payload.basisDate
+                ? ` від ${excludeOp.payload.basisDate}`
+                : ""}
+              . Він не замінює стройовий наказ.
+            </Typography>
+          ) : null}
+          <div className="ejoos-transfer-fields">
+            {isHistory ? (
+              <>
+                <label>
+                  Куди вибув / документи
+                  <strong>
+                    {excludeOp.payload.documentsDest ||
+                      excludeOp.payload.destination ||
+                      "—"}
+                  </strong>
+                </label>
+                <label>
+                  Куди для табеля
+                  <strong>
+                    {excludeOp.payload.timesheetDestination ||
+                      excludeOp.payload.destination ||
+                      "—"}
+                  </strong>
+                </label>
+                <label>
+                  Дата виключення
+                  <strong>{excludeOp.payload.excludeDate || "—"}</strong>
+                </label>
+                <label>
+                  № наказу
+                  <strong>{excludeOp.payload.orderNumber || "—"}</strong>
+                </label>
+                <label>
+                  Дата наказу
+                  <strong>{excludeOp.payload.orderDate || "—"}</strong>
+                </label>
+              </>
+            ) : (
+              <>
+                <label>
+                  Куди вибув / документи
+                  <input
+                    value={
+                      excludeOp.payload.documentsDest ||
+                      excludeOp.payload.destination ||
+                      ""
+                    }
+                    onChange={(event) =>
+                      patch(excludeOp.id, {
+                        documentsDest: event.target.value,
+                      })
+                    }
+                    placeholder="повний текст із «Яка зміна»"
+                  />
+                </label>
+                <label>
+                  Куди для табеля
+                  <input
+                    value={
+                      excludeOp.payload.timesheetDestination ||
+                      excludeOp.payload.destination ||
+                      ""
+                    }
+                    onChange={(event) =>
+                      patch(excludeOp.id, {
+                        timesheetDestination: event.target.value,
+                      })
+                    }
+                    placeholder="вибув до ..."
+                  />
+                </label>
+                <label>
+                  Дата виключення
+                  <input
+                    value={excludeOp.payload.excludeDate || ""}
+                    onChange={(event) =>
+                      patch(excludeOp.id, {
+                        excludeDate: event.target.value,
+                      })
+                    }
+                    placeholder="дд.мм.рррр"
+                  />
+                </label>
+                <label>
+                  № наказу
+                  <input
+                    value={excludeOp.payload.orderNumber || ""}
+                    onChange={(event) =>
+                      patch(excludeOp.id, {
+                        orderNumber: event.target.value,
+                      })
+                    }
+                  />
+                </label>
+                <label>
+                  Дата наказу
+                  <input
+                    value={excludeOp.payload.orderDate || ""}
+                    onChange={(event) =>
+                      patch(excludeOp.id, {
+                        orderDate: event.target.value,
+                      })
+                    }
+                    placeholder="дд.мм.рррр"
+                  />
+                </label>
+              </>
+            )}
+          </div>
+          {!isHistory && needsDestination ? (
+            <Typography variant="body2" color="warning.main" sx={{ mt: 1 }}>
+              Заповніть «Куди вибув» — інакше застосувати не можна.
+            </Typography>
+          ) : null}
+          {!isHistory && needsExclusionDetails ? (
+            <Typography variant="body2" color="warning.main" sx={{ mt: 1 }}>
+              Вкажіть дату виключення, номер і дату стройового наказу. Дані
+              розпорядження з РУХ навмисно не підставляються автоматично.
+            </Typography>
+          ) : null}
+        </Box>
+      ) : null}
+
+      {!isHistory && manualTimesheetOps.length ? (
+        <Box className="ejoos-transfer-box" sx={{ mt: 1.5 }}>
+          <Typography variant="subtitle2">Код для Табеля</Typography>
+          <Typography variant="body2" className="ejoos-muted" sx={{ mb: 1 }}>
+            Потрібен ручний вибір — статус у sh не зводиться до одного коду
+            автоматично.
+          </Typography>
+          <div className="ejoos-transfer-fields">
+            {manualTimesheetOps.map((op) => (
+              <label key={op.id}>
+                День {op.payload.day || "—"}
+                <Select
+                  value={op.payload.timesheetCode || ""}
+                  onChange={(event) =>
+                    patch(op.id, {
+                      timesheetCode: event.target.value,
+                    })
+                  }
+                >
+                  {EJOOS_TIMESHEET_CODES.map((code) => (
+                    <MenuItem key={code} value={code}>
+                      {code}
+                    </MenuItem>
+                  ))}
+                </Select>
+              </label>
+            ))}
+          </div>
+          {needsTimesheetCode ? (
+            <Typography variant="body2" color="warning.main" sx={{ mt: 1 }}>
+              Виберіть код перед підтвердженням.
+            </Typography>
+          ) : null}
+        </Box>
+      ) : null}
+
+      <Typography variant="subtitle2" sx={{ mt: 1.5, mb: 0.5 }}>
+        Карта аркушів ЕЖООС
+      </Typography>
+      <Typography variant="body2" className="ejoos-muted" sx={{ mb: 1 }}>
+        {isHistory
+          ? "Що було записано в журнал для цього бійця."
+          : reviewOnly
+            ? "Лише перевірка джерел. У журнал при підтвердженні нічого не пишемо."
+            : "Що саме зміниться в журналі при застосуванні для цього бійця."}
+      </Typography>
+      <div className="ejoos-sheet-impact-grid">
+        {sheetImpacts.map((item) => (
+          <div
+            key={item.sheetKey}
+            className={`ejoos-sheet-impact effect-${item.effect}`}
+          >
+            <div className="ejoos-sheet-impact-head">
+              <strong>{item.sheetLabel}</strong>
+              <span className="ejoos-sheet-impact-badge">
+                {isHistory
+                  ? item.effect === "append"
+                    ? "Додано рядок"
+                    : item.effect === "clear"
+                      ? "Очищено"
+                      : item.effect === "edit"
+                        ? "Змінено"
+                        : item.effect === "history"
+                          ? "Історія + очистка"
+                          : item.effect === "skip"
+                            ? "Не чіпали"
+                            : "Без змін"
+                  : item.effectLabel}
+              </span>
+            </div>
+            <p>{item.detail}</p>
+            {item.rowHint ? (
+              <span className="ejoos-sheet-impact-row">{item.rowHint}</span>
+            ) : null}
+          </div>
+        ))}
+      </div>
+
+      <Typography variant="subtitle2" sx={{ mt: 1.5, mb: 0.5 }}>
+        Деталі ops
+      </Typography>
+      <Stack spacing={1}>
+        {bySheet.map(([sheet, actions]) => (
+          <Box key={sheet} className="ejoos-sheet-block">
+            <Typography variant="caption" className="ejoos-muted">
+              {sheet}
+            </Typography>
+            {actions.map((action) => (
+              <div key={action.opId} className="ejoos-sheet-action">
+                <span>
+                  {action.before} → {action.after}
+                </span>
+                <span className="ejoos-sheet-why">{action.why}</span>
+              </div>
+            ))}
+          </Box>
+        ))}
+      </Stack>
+
+      {isHistory ? (
+        <Stack
+          className="ejoos-change-actions"
+          direction="row"
+          spacing={1}
+          flexWrap="wrap"
+          alignItems="center"
+        >
+          <Chip size="small" color="success" label="У журналі" />
+          {historyMeta ? (
+            <Typography variant="body2" className="ejoos-muted">
+              Записано {formatAppliedAt(historyMeta.appliedAt)}
+              {historyMeta.timesheetDayLabel
+                ? ` · ${historyMeta.timesheetDayLabel}`
+                : ""}
+              {historyMeta.pbFileName ? ` · ${historyMeta.pbFileName}` : ""}
+            </Typography>
+          ) : null}
+        </Stack>
+      ) : (
+        <Stack
+          className="ejoos-change-actions"
+          direction="row"
+          spacing={1}
+          flexWrap="wrap"
+        >
+          <Button
+            variant="contained"
+            disabled={
+              Boolean(isLoading) ||
+              person.severity === "conflict" ||
+              needsDestination ||
+              needsTimesheetCode
+            }
+            onClick={onApplyNow}
+          >
+            {reviewOnly ? "Підтвердити перегляд" : "Підтвердити і застосувати"}
+          </Button>
+          <Button
+            variant="outlined"
+            disabled={
+              person.severity === "conflict" ||
+              needsDestination ||
+              needsTimesheetCode ||
+              Boolean(isLoading)
+            }
+            onClick={onAccept}
+          >
+            {person.decision === "accepted" ? "У черзі" : "Лише в чергу"}
+          </Button>
+          <Button
+            variant="outlined"
+            onClick={onReject}
+            disabled={Boolean(isLoading)}
+          >
+            Відхилити
+          </Button>
+        </Stack>
+      )}
+    </Box>
+  );
+}

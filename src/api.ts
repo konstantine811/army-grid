@@ -17,10 +17,14 @@ const resolveApiBaseUrl = () => {
   const fromEnv = import.meta.env.VITE_API_BASE_URL
   if (typeof fromEnv === 'string' && fromEnv.trim()) return fromEnv.trim()
 
-  // Through Vite proxy (/api → :4000): same origin, works on LAN without CORS.
+  // Through Vite proxy (/api → :4000): same origin, works on LAN / HTTPS
+  // without CORS or mixed-content blocks.
   if (typeof window !== 'undefined') {
     const host = window.location.hostname
-    if (host && host !== 'localhost' && host !== '127.0.0.1') {
+    if (
+      window.location.protocol === 'https:' ||
+      (host && host !== 'localhost' && host !== '127.0.0.1')
+    ) {
       return '/api'
     }
   }
@@ -213,6 +217,30 @@ export type BackendAnketaSheetSnapshot = {
   createdAt: string
 }
 
+export type WorkTaskStatus = "open" | "done" | "irrelevant"
+export type WorkTaskCategory = "ubd_status" | "ubd_send" | "tvk" | "other"
+
+export type BackendWorkTaskComment = {
+  id: string
+  taskId: string
+  body: string
+  createdAt: string
+}
+
+export type BackendWorkTask = {
+  id: string
+  ownerUserId: string
+  ownerEmail: string
+  title: string
+  personName?: string | null
+  category: WorkTaskCategory | string
+  location?: string | null
+  status: WorkTaskStatus | string
+  comments: BackendWorkTaskComment[]
+  createdAt: string
+  updatedAt: string
+}
+
 export type BackendDocumentSignatoryPreset = {
   id: string
   label: string
@@ -323,6 +351,7 @@ export type BackendPersonnelOverviewRow = {
   name: string
   rank: string
   unit: string
+  positionTitle?: string
   status: OverviewStatus | string
   statusLabel: string
   fighterDirection?: string
@@ -694,6 +723,22 @@ export const api = {
     }`
   },
 
+  async createPersonQuestionnairePreviewUrl(
+    personExternalId: string,
+    fileName: string,
+  ) {
+    const query = new URLSearchParams({ fileName }).toString()
+    const result = await request<{
+      ticket: string
+      fileName: string
+      expiresAt: number
+    }>(
+      `/ejournals/personnel/questionnaires/${encodeURIComponent(personExternalId)}/file-ticket?${query}`,
+      { method: 'POST' },
+    )
+    return `${apiBaseUrl()}/ejournals/personnel/questionnaires/file-ticket/${encodeURIComponent(result.ticket)}/${encodeURIComponent(result.fileName)}`
+  },
+
   async fetchPersonQuestionnaireFile(
     personExternalId: string,
     fileName?: string,
@@ -768,6 +813,16 @@ export const api = {
       throw new Error(message)
     }
     return response.blob()
+  },
+
+  revealDiskQuestionnaireInFinder(relativePath: string) {
+    return request<{ revealed: boolean; fileName: string }>(
+      '/ejournals/personnel/questionnaire-disk/reveal',
+      {
+        method: 'POST',
+        body: JSON.stringify({ relativePath }),
+      },
+    )
   },
 
   confirmDiskQuestionnaire(
@@ -1055,6 +1110,7 @@ export const api = {
   rollbackEjournalLive(payload: {
     targetVersionId: string
     unitLabel?: string
+    fileBase64?: string
     notes?: string
   }) {
     return request<BackendEjournalLiveVersion>('/ejournals/live/rollback', {
@@ -1240,6 +1296,61 @@ export const api = {
     return request<BackendAnketaSheetSnapshot>('/anketa/snapshot', {
       method: 'PUT',
       body: JSON.stringify({ ...payload, actor: 'operator' }),
+    })
+  },
+
+  listWorkTasks(status?: string, q?: string) {
+    const params = new URLSearchParams()
+    if (status?.trim()) params.set('status', status.trim())
+    if (q?.trim()) params.set('q', q.trim())
+    const query = params.toString()
+    return request<BackendWorkTask[]>(
+      `/work-tasks${query ? `?${query}` : ''}`,
+    )
+  },
+
+  createWorkTask(payload: {
+    title: string
+    personName?: string
+    category?: string
+    location?: string
+    firstComment?: string
+  }) {
+    return request<BackendWorkTask>('/work-tasks', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    })
+  },
+
+  updateWorkTask(
+    id: string,
+    payload: {
+      title?: string
+      personName?: string
+      category?: string
+      location?: string
+      status?: string
+    },
+  ) {
+    return request<BackendWorkTask>(`/work-tasks/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    })
+  },
+
+  addWorkTaskComment(id: string, body: string) {
+    return request<BackendWorkTask>(
+      `/work-tasks/${encodeURIComponent(id)}/comments`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ body }),
+      },
+    )
+  },
+
+  deleteWorkTask(id: string) {
+    return request<{ ok: boolean }>(`/work-tasks/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
     })
   },
 }

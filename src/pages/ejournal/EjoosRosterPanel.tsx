@@ -13,7 +13,7 @@ import {
 } from "./ejoosLiveViews";
 import { FIELD_SOURCE_LABELS, type EjoosFieldAuthority } from "./ejoosRules";
 import { readOperatorSettings } from "./ejoosStatusMap";
-import { useEjoosWorkspace } from "./EjoosWorkspaceContext";
+import { useEjoosWorkspace } from "./ejoosWorkspaceState";
 import { useEjoosLiveView } from "./useEjoosLiveView";
 
 type CardTab = "main" | "service" | "absents" | "timesheet" | "history";

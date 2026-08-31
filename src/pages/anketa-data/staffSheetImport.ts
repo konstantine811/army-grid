@@ -33,7 +33,8 @@ export type StaffSheetImportSnapshot = {
 const findRosterSheet = (
   sheets: Awaited<ReturnType<typeof readWorkbookSnapshot>>["sheets"],
 ) =>
-  sheets.find((sheet) => /загальний\s*список/i.test(sheet.sheetName));
+  sheets.find((sheet) => /загальний\s*список/i.test(sheet.sheetName)) ??
+  sheets.find((sheet) => /^sh$/i.test(sheet.sheetName.trim()));
 
 const sortRosterRows = (rows: EjournalPreviewRow[]) =>
   [...rows].sort(
@@ -52,7 +53,7 @@ export const parseStaffSheetImportFile = async (
   const rosterSheet = findRosterSheet(snapshot.sheets);
   if (!rosterSheet) {
     throw new Error(
-      "У файлі не знайдено аркуш «Загальний список» (1.ОС Загальний список).",
+      "У файлі не знайдено аркуш «Загальний список» або «sh».",
     );
   }
 
@@ -89,7 +90,7 @@ export const importStaffSheetFromFile = async (
   const rosterSheet = findRosterSheet(snapshot.sheets);
   if (!rosterSheet) {
     throw new Error(
-      "У файлі не знайдено аркуш «Загальний список» (1.ОС Загальний список).",
+      "У файлі не знайдено аркуш «Загальний список» або «sh».",
     );
   }
 

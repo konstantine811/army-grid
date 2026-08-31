@@ -1346,7 +1346,7 @@ export const formatPersonSignatureName = (
   fullName: string,
   callSign?: string | null,
 ) => {
-  const trimmed = String(fullName ?? "").trim();
+  const trimmed = String(fullName ?? "").normalize("NFC").trim();
   if (!trimmed) return "";
 
   const withoutCallSignParen = trimmed.replace(/\s*\([^)]+\)\s*$/, "").trim();
@@ -1358,9 +1358,16 @@ export const formatPersonSignatureName = (
     ...parts.slice(1).map(capitalizePersonNamePart),
   ].join(" ");
 
-  const sign = String(
+  const signRaw = String(
     callSign ?? extractPersonCallSign(trimmed) ?? "",
-  ).trim();
+  )
+    .normalize("NFC")
+    .trim();
+  const sign = /^(?:0|[-—]|немає|відсутн(?:ій|я)|б\/п|#n\/a|\[object object\])$/iu.test(
+    signRaw,
+  )
+    ? ""
+    : signRaw;
   return sign ? `${formatted} (${sign})` : formatted;
 };
 
@@ -1461,7 +1468,9 @@ export const looksLikePersonnelName = (value: string) => {
   }
   if (PERSONNEL_STATUS_AS_NAME_RE.test(text)) return false;
   const parts = text.split(/\s+/).filter(Boolean);
-  if (parts.length < 2 || parts.length > 5) return false;
+  // Подвійні/складені іноземні прізвища можуть давати 6–8 частин ПІБ
+  // (наприклад «КУЕЙРОЗ ПРАТА СОТО УЛЛОА Альваро Ренан»).
+  if (parts.length < 2 || parts.length > 8) return false;
   return parts.every((part) => /^[\p{L}][\p{L}'ʼ’\-]*$/u.test(part));
 };
 

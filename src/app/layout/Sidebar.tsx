@@ -3,8 +3,7 @@ import { Box, IconButton, Stack, Typography } from "@/components/sci/SciPrimitiv
 import { AnalyticsOutlinedIcon } from "@/components/sci/icons";
 import { ArticleOutlinedIcon } from "@/components/sci/icons";
 import { DashboardOutlinedIcon } from "@/components/sci/icons";
-import { FileDownloadOutlinedIcon } from "@/components/sci/icons";
-import { GridViewOutlinedIcon } from "@/components/sci/icons";
+import { FormatListBulletedOutlinedIcon } from "@/components/sci/icons";
 import { GroupsOutlinedIcon } from "@/components/sci/icons";
 import { LogoutOutlinedIcon } from "@/components/sci/icons";
 import { MenuOutlinedIcon } from "@/components/sci/icons";
@@ -23,17 +22,18 @@ const SIDEBAR_COLLAPSED_KEY = "army-grid.sidebar-collapsed";
 const navItems: Array<{ label: string; page?: AppPage; icon: ReactNode; adminOnly?: boolean }> = [
   { label: "Огляд", page: "overview", icon: <DashboardOutlinedIcon /> },
   { label: "Особовий склад", page: "personnel", icon: <PersonSearchOutlinedIcon /> },
-  { label: "Статуси", icon: <GridViewOutlinedIcon /> },
   { label: "ЕЖООС", page: "ejournal", icon: <TableChartOutlinedIcon /> },
   { label: "Заповнення Excel", page: "excelFill", icon: <SyncAltOutlinedIcon /> },
   { label: "БЧС", page: "bchs", icon: <ShieldOutlinedIcon /> },
-  { label: "БЧС Lab", page: "bchsLab", icon: <ShieldOutlinedIcon /> },
   { label: "Аналітика", page: "analytics", icon: <AnalyticsOutlinedIcon /> },
-  { label: "Імпорт", page: "import", icon: <FileDownloadOutlinedIcon /> },
-  { label: "Парсинг анкет", page: "questionnaireParser", icon: <ArticleOutlinedIcon /> },
   { label: "Анкетні дані", page: "anketaData", icon: <TableChartOutlinedIcon /> },
   { label: "Соц. паспорт", page: "socPassport", icon: <TableChartOutlinedIcon /> },
   { label: "Документи", page: "documents", icon: <ArticleOutlinedIcon /> },
+  {
+    label: "Мої завдання",
+    page: "workTasks",
+    icon: <FormatListBulletedOutlinedIcon />,
+  },
   {
     label: "Записи документів",
     page: "documentSettings",

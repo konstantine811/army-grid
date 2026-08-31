@@ -212,7 +212,7 @@ const isMorningBzInOtherUnitLocation = (location: CellValue | string) => {
   return /вик\.?\s*бз\s*в\s*ін/.test(normalized);
 };
 
-/** Червоний фон ПІБ (FFFF0000 тощо) — транзитери, не в строю. */
+/** Червоний фон ПІБ (FFFF0000) — транзитери, не в строю. */
 const isMorningTransiterPibFill = (rgb: string | null | undefined) => {
   if (!rgb) return false;
   const hex = rgb.replace(/^#/, "").toUpperCase();
@@ -222,7 +222,8 @@ const isMorningTransiterPibFill = (rgb: string | null | undefined) => {
   const g = Number.parseInt(argb.slice(4, 6), 16);
   const b = Number.parseInt(argb.slice(6, 8), 16);
   if (![r, g, b].every(Number.isFinite)) return false;
-  return r >= 0x90 && r > g + 40 && r > b + 40;
+  // Лише насичений червоний; коричневий «НЕ ЗАДІЮВАТИ» (FF980000) і персиковий — не транзитер.
+  return r >= 0xc0 && g <= 0x40 && b <= 0x40;
 };
 
 const shouldSkipMorningReportPerson = ({

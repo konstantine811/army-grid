@@ -24,7 +24,7 @@ import type {
   ExcelSheetSnapshot,
   ExcelWorkbookSnapshot,
 } from "../../excelRoundTrip";
-import { useEjoosWorkspace } from "./EjoosWorkspaceContext";
+import { useEjoosWorkspace } from "./ejoosWorkspaceState";
 
 export type EjoosSheetKind =
   | "shpo"
@@ -82,6 +82,14 @@ const DEFAULT_COLUMN_WIDTH = 148;
 const MIN_COLUMN_WIDTH = 32;
 const MAX_COLUMN_WIDTH = 560;
 
+const splitPackedStaffIndexes = (text: string) => {
+  const packed = text.replace(/\s+/g, "");
+  if (/^(?:\d{7}){2,}$/.test(packed)) {
+    return packed.match(/\d{7}/g)?.join("\n") ?? text;
+  }
+  return text;
+};
+
 const cellDisplay = (value: CellValue | undefined): string => {
   if (value == null) return "";
   if (value instanceof Date && !Number.isNaN(value.getTime())) {
@@ -96,9 +104,17 @@ const cellDisplay = (value: CellValue | undefined): string => {
         return date.toLocaleDateString("uk-UA");
       }
     }
-    return String(value);
+    return splitPackedStaffIndexes(String(value));
   }
-  return String(value).replace(/\s+/g, " ").trim();
+  const text = String(value)
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n");
+  if (text.trim() === "[object Object]") return "#N/A";
+  return splitPackedStaffIndexes(text)
+    .split("\n")
+    .map((line) => line.replace(/[^\S\n]+/g, " ").trim())
+    .join("\n")
+    .trim();
 };
 
 const columnWidthsKey = (kind: EjoosSheetKind, sheetName: string) =>
@@ -271,8 +287,13 @@ const buildTable = (sheet: ExcelSheetSnapshot, maxRows: number) => {
 };
 
 export function EjoosSheetViewPanel({ kind }: { kind: EjoosSheetKind }) {
-  const { ejoosSnapshot, setTab, ensureEjoosLoaded, isLoading } =
-    useEjoosWorkspace();
+  const {
+    ejoosSnapshot,
+    setTab,
+    ensureEjoosLoaded,
+    isLoading,
+    fillSheetFromAnketa,
+  } = useEjoosWorkspace();
   const [query, setQuery] = useState("");
   const [columnWidths, setColumnWidths] = useState<number[]>([]);
   const [wrapText, setWrapText] = useState(true);
@@ -464,6 +485,37 @@ export function EjoosSheetViewPanel({ kind }: { kind: EjoosSheetKind }) {
         <Button size="small" variant="outlined" onClick={resetColumnWidths}>
           Скинути ширини
         </Button>
+        {kind === "oos" || kind === "excluded" ? (
+          <Button
+            size="small"
+            variant="contained"
+            disabled={isLoading}
+            onClick={() =>
+              void fillSheetFromAnketa(kind === "excluded" ? "excluded" : "oos")
+            }
+            sx={{ color: "#1a1a14" }}
+            title="Знайти людей в анкетних даних і дописати лише порожні поля"
+          >
+            {isLoading ? "Доповнюю…" : "Доповнити з анкетних даних"}
+          </Button>
+        ) : null}
+        {kind === "oos" || kind === "excluded" ? (
+          <Button
+            size="small"
+            variant="contained"
+            disabled={isLoading}
+            onClick={() =>
+              void fillSheetFromAnketa(
+                kind === "excluded" ? "excluded" : "oos",
+                "merge",
+              )
+            }
+            sx={{ color: "#1a1a14" }}
+            title="Колонки пропусків з анкет → ця таблиця. Збіг по ID, інакше по унікальному ПІБ. Пише в порожнє або якщо в анкеті повніше."
+          >
+            {isLoading ? "Мердж…" : "Мердж"}
+          </Button>
+        ) : null}
         <IconButton
           size="small"
           className={wrapText ? "is-active" : undefined}

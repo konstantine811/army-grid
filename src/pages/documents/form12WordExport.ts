@@ -153,6 +153,15 @@ const paragraphDrawingRuns = (paragraph: string) =>
     .map((match) => match[0])
     .join("");
 
+const removeDrawingByRelId = (documentXml: string, relId: string) =>
+  documentXml.replace(
+    new RegExp(
+      `<w:r\\b[^>]*>(?:(?!<\\/w:r>)[\\s\\S])*?<w:drawing>(?:(?!<\\/w:drawing>)[\\s\\S])*?r:embed="${relId}"(?:(?!<\\/w:drawing>)[\\s\\S])*?<\\/w:drawing>(?:(?!<\\/w:r>)[\\s\\S])*?<\\/w:r>`,
+      "g",
+    ),
+    "",
+  );
+
 const withNameTab = (pPr: string) => {
   const cleaned = pPr
     .replace(/<w:jc\b[^/]*\/>/g, "")
@@ -272,7 +281,7 @@ export const createForm12WordBlob = async (fields: Form12ReportFields) => {
   let actingHits = 0;
   let battalionHits = 0;
 
-  const filled = documentXml.replace(/<w:p\b[\s\S]*?<\/w:p>/g, (paragraph) => {
+  let filled = documentXml.replace(/<w:p\b[\s\S]*?<\/w:p>/g, (paragraph) => {
     const texts = listParagraphTexts(paragraph);
     if (!texts.length) return paragraph;
     const joined = texts.join("");
@@ -350,9 +359,13 @@ export const createForm12WordBlob = async (fields: Form12ReportFields) => {
 
   if (fields.signatureData) {
     await replaceRelImage(zip, "rId7", fields.signatureData, "fighter-sign");
+  } else {
+    filled = removeDrawingByRelId(filled, "rId7");
   }
   if (signer?.signatureData) {
     await replaceRelImage(zip, "rId8", signer.signatureData, "commander-sign");
+  } else {
+    filled = removeDrawingByRelId(filled, "rId8");
   }
 
   writeZipFile(zip, "word/document.xml", filled);

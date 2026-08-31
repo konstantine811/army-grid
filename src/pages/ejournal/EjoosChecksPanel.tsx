@@ -1,5 +1,5 @@
 import { Button, Chip, Stack, Typography } from "@/components/sci/SciPrimitives";
-import { useEjoosWorkspace } from "./EjoosWorkspaceContext";
+import { useEjoosWorkspace } from "./ejoosWorkspaceState";
 import { useEjoosLiveView } from "./useEjoosLiveView";
 
 const severityChip = (
