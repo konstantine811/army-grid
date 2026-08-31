@@ -23,14 +23,18 @@ import {
   clipAbsenceSpansToActiveEpisode,
   currentStatusConfirmsOpenAbsence,
   encodeTimesheetAbsenceSpans,
+  archiveReturnContradictsCurrentSh,
   findTimesheetMonthHeaderCell,
   formatTimesheetMonthHeader,
   isTimesheetDepartureMark,
   journalDayFromDateMs,
   sameTimesheetDayMark,
   timesheetMarkFromArchive,
+  extractTimesheetDestinationFromPosition,
 } from "./ejoosTimesheetText";
 import { findDuplicateTimesheetExtras } from "./ejoosTimesheetDuplicates";
+
+export { extractTimesheetDestinationFromPosition };
 
 export type EjoosOpClass = "ready" | "needs_input" | "conflict";
 
@@ -402,66 +406,6 @@ const isCancelledMovementRecord = (event: PbMovement) => {
     if (/^скас(?:овано|увано)$/iu.test(text)) return true;
     return /(?:^|[\s,;./(])скас(?:овано|увано)(?:$|[\s,;./)])/iu.test(text);
   });
-};
-
-const STRUCTURE_POSITION_WORDS = new Set([
-  "ВІДДІЛЕННЯ",
-  "ВІДДІЛЕННІ",
-  "ВЗВОДУ",
-  "ВЗВОДІ",
-  "РОТИ",
-  "РОТІ",
-  "БАТАЛЬЙОНУ",
-  "БАТАЛЬЙОНІ",
-  "БАТАРЕЇ",
-  "ДИВІЗІОНУ",
-  "УПРАВЛІННЯ",
-  "ШТАБУ",
-  "СЕКЦІЇ",
-  "СЛУЖБИ",
-  "ВІДДІЛУ",
-  "ГРУПИ",
-  "КОМАНДИ",
-]);
-
-const isStructureModifier = (token: string) => {
-  const word = token.toUpperCase().replace(/[^0-9А-ЯІЇЄҐA-Z]/gu, "");
-  if (!word) return false;
-  if (/^\d+$/.test(word)) return true;
-  return (
-    word.endsWith("ОГО") ||
-    word.endsWith("ЬКОГО") ||
-    word.endsWith("НОГО") ||
-    word.endsWith("ОВОГО") ||
-    word.endsWith("ЕВОГО") ||
-    word.endsWith("ОЇ") ||
-    word.endsWith("ЬКОЇ") ||
-    word.endsWith("НОЇ") ||
-    word.endsWith("ОВОЇ") ||
-    word.endsWith("ЕВОЇ") ||
-    word.endsWith("ИХ") ||
-    word.endsWith("ЬКИХ") ||
-    word.endsWith("НИХ") ||
-    word.endsWith("ОВИХ") ||
-    word.endsWith("ЕВИХ")
-  );
-};
-
-export const extractTimesheetDestinationFromPosition = (positionTitle: string) => {
-  const text = String(positionTitle ?? "").replace(/\s+/g, " ").trim();
-  if (!text) return "";
-  const tokens = text.split(" ");
-  const structureIndex = tokens.findIndex((token) => {
-    const word = token.toUpperCase().replace(/[^А-ЯІЇЄҐA-Z]/gu, "");
-    return STRUCTURE_POSITION_WORDS.has(word);
-  });
-  if (structureIndex < 0) return text;
-
-  let start = structureIndex;
-  while (start > 0 && isStructureModifier(tokens[start - 1])) {
-    start -= 1;
-  }
-  return tokens.slice(start).join(" ").trim();
 };
 
 export const parsePbShPeople = (workbook: ExcelWorkbookSnapshot): PbShPerson[] => {
@@ -2564,6 +2508,43 @@ export const buildEjoosSyncPlan = (
       (period.personId && shPersonById.get(period.personId)) ||
       byPersonName(shPersonByName, period.personId, period.fullName) ||
       null;
+    const archiveReturnVsSh = archiveReturnContradictsCurrentSh(
+      shPerson ? mapStatus(shPerson.status).timesheetCode : "",
+      mapStatus(period.absenceType).timesheetCode,
+      hasActualReturn(period.returnDate),
+    );
+    if (archiveReturnVsSh) {
+      ops.push({
+        id: opId([
+          "archive_sh_return",
+          period.personId || period.fullName,
+          String(period.excelRow),
+        ]),
+        kind: "absent_upsert",
+        class: "needs_input",
+        sheet: "5. Тимч. відсутні / archive vs sh",
+        personId: shPerson?.personId || period.personId,
+        fullName: shPerson?.fullName || period.fullName,
+        positionIndex: shPerson?.positionIndex || "",
+        rank: period.rank,
+        before,
+        after: `archive: повернення ${period.returnDate}; sh досі ${shPerson?.status || period.absenceType}`,
+        sourceRef: `archive!R${period.excelRow} · sh`,
+        why: `NEEDS_REVIEW: archive вже має повернення ${period.returnDate}, а поточний sh досі ${shPerson?.status || "відсутній"}. Не закриваємо період і не тягнемо СЗЧ/ЗБ до дня звіту — перевірте, що саме застаріло.`,
+        confidence: "manual",
+        payload: {
+          mismatchKind: "ARCHIVE_RETURN_SH_STILL_ABSENT",
+          absenceType: period.absenceType,
+          place: period.place,
+          departDate: period.departDate,
+          returnDate: period.returnDate,
+          statusRaw: shPerson?.status || "",
+          existingExcelRow: reuseAbsent ? String(reuseAbsent.excelRow) : "",
+        },
+        checkedDefault: false,
+      });
+      return;
+    }
     const activeTs = activeTimesheetRowOf(
       period.personId,
       period.fullName,
@@ -2639,6 +2620,15 @@ export const buildEjoosSyncPlan = (
     if (!personStillInSh(person.personId, person.fullName)) continue;
     if (positionEventForShPerson(person)) continue;
     if (timesheetAlreadyPainted(person.personId, person.fullName)) continue;
+    if (
+      ops.some(
+        (op) =>
+          op.payload.mismatchKind === "ARCHIVE_RETURN_SH_STILL_ABSENT" &&
+          isSamePerson(person, op),
+      )
+    ) {
+      continue;
+    }
     const spans = augustAbsenceSpansFor(person.personId, person.fullName);
     const appointmentDate = staffAppointmentDateFor(
       person.personId,
@@ -3453,9 +3443,14 @@ export const buildEjoosSyncPlan = (
         (/[АA]\s*\d{4}/iu.test(unitFromS) ? unitFromS : "") ||
         event.note ||
         event.changeText;
-      // Табель: «вибув до/у» + напрямок. Для зовнішнього ПЕРЕВ пріоритет —
-      // в/ч А#### з примітки, а не стара назва посади в «Яка зміна».
+      // Табель: «вибув до/у» + підрозділ з «Яка зміна» без назви посади.
+      // Код в/ч А#### лишається для Виключених (AE / підстава), не для Табеля.
       const timesheetDestination = (() => {
+        const positionSource =
+          positionChangeDestination(event) || event.changeText;
+        const fromPosition =
+          extractTimesheetDestinationFromPosition(positionSource);
+        if (fromPosition) return fromPosition;
         const unitPhrase =
           formatTransferDestinationForTimesheet(
             [rawDestination, event.note, unitFromS, event.changeText]
@@ -3467,11 +3462,6 @@ export const buildEjoosSyncPlan = (
             ? event.note
             : unitPhrase;
         }
-        const positionSource =
-          positionChangeDestination(event) || event.changeText;
-        const fromPosition =
-          extractTimesheetDestinationFromPosition(positionSource);
-        if (fromPosition) return fromPosition;
         return unitPhrase;
       })();
       const exclusionReason =

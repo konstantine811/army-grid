@@ -58,6 +58,7 @@ export type EjoosExcludedRow = {
   destination: string;
   orderNumber: string;
   orderDate: string;
+  excludeDate: string;
   note: string;
 };
 
@@ -134,23 +135,27 @@ const personKey = (personId: string, fullName: string, positionIndex: string) =>
   return `idx:${positionIndex}`;
 };
 
-const parseExcluded = (sheet: ExcelSheetSnapshot | undefined): EjoosExcludedRow[] => {
+/** Канонічний шаблон «3. Виключені»: A звання, B ПІБ, C ID, AB–AF вибуття. */
+export const parseExcluded = (
+  sheet: ExcelSheetSnapshot | undefined,
+): EjoosExcludedRow[] => {
   if (!sheet) return [];
   const rows: EjoosExcludedRow[] = [];
   for (let i = 5; i < sheet.rawRows.length; i += 1) {
     const row = sheet.rawRows[i];
-    const fullName = norm(row?.[6]) || norm(row?.[1]);
-    const personId = norm(row?.[7]) || norm(row?.[2]);
+    const fullName = norm(row?.[1]);
+    const personId = norm(row?.[2]);
     if (!fullName && !personId) continue;
     rows.push({
       excelRow: i + 1,
       personId,
       fullName,
-      rank: norm(row?.[5]) || norm(row?.[3]),
-      destination: norm(row?.[10]) || norm(row?.[8]),
-      orderNumber: norm(row?.[11]) || norm(row?.[9]),
-      orderDate: norm(row?.[12]) || norm(row?.[10]),
-      note: norm(row?.[13]) || norm(row?.[4]),
+      rank: norm(row?.[0]),
+      excludeDate: norm(row?.[27]),
+      orderDate: norm(row?.[28]),
+      orderNumber: norm(row?.[29]),
+      destination: norm(row?.[30]),
+      note: norm(row?.[31]),
     });
   }
   return rows;

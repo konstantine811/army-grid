@@ -99,6 +99,8 @@ export const DEFAULT_STATUS_RULES: EjoosStatusRule[] = [
       "полон",
       "загиб",
       "не в строю",
+      "не присут",
+      "неприсут",
     ],
     timesheetCode: "+",
     absenceGround: null,

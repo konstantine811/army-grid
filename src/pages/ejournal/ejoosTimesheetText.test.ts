@@ -7,7 +7,13 @@ import {
   historyAbsenceSpansForClosedEpisode,
   timesheetMarkBeforeDeparture,
   timesheetMarkFromArchive,
+  extractTimesheetDestinationFromPosition,
+  formatTimesheetDeparture,
+  archiveReturnContradictsCurrentSh,
 } from "./ejoosTimesheetText";
+import { formatTimesheetTransferMark } from "./ejoosExcludedColumns";
+import { buildSheetRowPreviews } from "./ejoosSheetRowPreview";
+import type { EjoosSyncOp } from "./ejoosSyncPlan";
 
 const AUG_2026_START = Date.UTC(2026, 7, 1);
 const AUG_2026_END = Date.UTC(2026, 7, 31);
@@ -170,3 +176,112 @@ describe("currentStatusConfirmsOpenAbsence", () => {
     expect(currentStatusConfirmsOpenAbsence("ЗБ", "СЗЧ")).toBe(false);
   });
 });
+
+describe("archiveReturnContradictsCurrentSh", () => {
+  it("flags archive return while sh still СЗЧ", () => {
+    expect(archiveReturnContradictsCurrentSh("СЗЧ", "СЗЧ", true)).toBe(true);
+    expect(archiveReturnContradictsCurrentSh("СЗЧ", "СЗЧ", false)).toBe(false);
+    expect(archiveReturnContradictsCurrentSh("+", "СЗЧ", true)).toBe(false);
+  });
+});
+
+const BASOVSKYI_UNIT =
+  "МЕХАНІЗОВАНОГО ВІДДІЛЕННЯ МЕХАНІЗОВАНОГО ВЗВОДУ МЕХАНІЗОВАНОЇ РОТИ МЕХАНІЗОВАНОГО БАТАЛЬЙОНУ";
+const BASOVSKYI_POSITION = `Стрілець ${BASOVSKYI_UNIT}`;
+const BASOVSKYI_UNIT_NOTE =
+  "А4784 ВІЙСЬКОВОЇ ЧАСТИНИ А4655 ВІЙСЬКОВОЇ ЧАСТИНИ А1314";
+
+describe("timesheet departure phrase strips position and picks до/у", () => {
+  it("Basovskyi: drop job title, use до + subunit chain", () => {
+    expect(extractTimesheetDestinationFromPosition(BASOVSKYI_POSITION)).toBe(
+      BASOVSKYI_UNIT,
+    );
+    expect(formatTimesheetDeparture(BASOVSKYI_UNIT)).toBe(
+      `вибув до ${BASOVSKYI_UNIT}`,
+    );
+  });
+
+  it("uses у for розпорядження", () => {
+    expect(formatTimesheetDeparture("розпорядження командира")).toBe(
+      "вибув у розпорядження командира",
+    );
+  });
+
+  it("does not treat a bare job title as a destination", () => {
+    expect(extractTimesheetDestinationFromPosition("Стрілець")).toBe("");
+  });
+
+  it("prefers subunit chain over A#### even if timesheetDestination is the unit note", () => {
+    expect(
+      formatTimesheetTransferMark({
+        timesheetDestination: BASOVSKYI_UNIT_NOTE,
+        documentsDest: BASOVSKYI_UNIT_NOTE,
+        destination: BASOVSKYI_UNIT_NOTE,
+        changeText: BASOVSKYI_POSITION,
+      }),
+    ).toBe(`вибув до ${BASOVSKYI_UNIT}`);
+  });
+
+  it("keeps a manual timesheet destination that is not a military-unit code", () => {
+    expect(
+      formatTimesheetTransferMark({
+        timesheetDestination: "розпорядження командира",
+        changeText: BASOVSKYI_POSITION,
+      }),
+    ).toBe("вибув у розпорядження командира");
+  });
+});
+
+describe("buildSheetRowPreviews", () => {
+  it("shows Excluded / SHPO / timesheet cells for outbound ПЕРЕВ", () => {
+    const op: EjoosSyncOp = {
+      id: "excl-1",
+      kind: "exclude_transfer",
+      class: "ready",
+      sheet: "Виключені → Табель → ШПО/ООС",
+      personId: "12521",
+      fullName: "БАСОВСЬКИЙ Юрій Михайлович",
+      positionIndex: "2103200",
+      rank: "солдат",
+      before: "",
+      after: "",
+      sourceRef: "",
+      why: "",
+      confidence: "high",
+      checkedDefault: true,
+      payload: {
+        fromRank: "солдат",
+        fromName: "БАСОВСЬКИЙ Юрій Михайлович",
+        fromPersonId: "12521",
+        fromPositionIndex: "2103200",
+        documentsDest: BASOVSKYI_UNIT_NOTE,
+        destination: BASOVSKYI_UNIT_NOTE,
+        timesheetDestination: BASOVSKYI_UNIT_NOTE,
+        changeText: BASOVSKYI_POSITION,
+        excludeDate: "05.08.2026",
+        orderDate: "05.08.2026",
+        orderNumber: "123",
+        exclusionReason: "ПЕРЕВЕДЕННЯ",
+        type: "ПЕРЕВ",
+        shpoExcelRow: "104",
+        oosExcelRow: "80",
+        timesheetExcelRow: "110",
+      },
+    };
+    const previews = buildSheetRowPreviews([op], 31);
+    const excluded = previews.find((row) => row.sheetKey === "excluded");
+    const timesheet = previews.find((row) => row.sheetKey === "timesheet-history");
+    const shpo = previews.find((row) => row.sheetKey === "shpo");
+    expect(excluded?.cells.find((cell) => cell.letter === "AE")?.value).toContain(
+      "а4784",
+    );
+    expect(
+      timesheet?.cells.some((cell) =>
+        cell.value.includes(`вибув до ${BASOVSKYI_UNIT}`),
+      ),
+    ).toBe(true);
+    expect(shpo?.cells.find((cell) => cell.letter === "A")?.kind).toBe("keep");
+    expect(shpo?.cells.find((cell) => cell.letter === "G")?.kind).toBe("empty");
+  });
+});
+

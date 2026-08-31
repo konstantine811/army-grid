@@ -69,5 +69,12 @@ export function personOpsBlockApply(ops: EjoosSyncOp[]) {
   if (ops.some(ambiguousTransferOpBlocksApply)) return true;
   if (ops.some(timesheetOpBlocksApply)) return true;
   if (contradictoryStatusOpsBlockApply(ops)) return true;
+  if (
+    ops.some(
+      (op) => op.payload.mismatchKind === "ARCHIVE_RETURN_SH_STILL_ABSENT",
+    )
+  ) {
+    return true;
+  }
   return false;
 }

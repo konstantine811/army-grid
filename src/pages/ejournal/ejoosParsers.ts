@@ -558,7 +558,7 @@ export const parseEjoosExcluded = (
       excelRow: i + 1,
       personId,
       fullName,
-      rank: norm(row?.[0]) || norm(row?.[5]),
+      rank: norm(row?.[0]),
       positionIndex: norm(row?.[3]) || norm(row?.[4]),
       orderDate: norm(row?.[28]) || norm(row?.[10]),
       orderNumber: norm(row?.[29]) || norm(row?.[11]),

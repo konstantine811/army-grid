@@ -1,4 +1,8 @@
-import { formatTimesheetDeparture } from "./ejoosTimesheetText";
+import {
+  extractTimesheetDestinationFromPosition,
+  formatTimesheetDeparture,
+  positionTitleTail,
+} from "./ejoosTimesheetText";
 
 /**
  * Карта колонок «2. ООС» → «3. Виключені» для історичної частини A:AA.
@@ -214,17 +218,34 @@ export const formatExcludedDestinationText = (value: string) =>
     .toLocaleLowerCase("uk-UA");
 
 /**
- * День вибуття в Табелі: «вибув до/у» + фраза з «Яка зміна» без назви посади.
- * Не плутати з короткою підставою у Виключених (ПЕРЕВЕДЕННЯ / _ А4784).
+ * День вибуття в Табелі: «вибув до/у» + підрозділ з «Яка зміна» без назви посади.
+ * Не плутати з короткою підставою у Виключених (ПЕРЕВЕДЕННЯ / _ А4784)
+ * і не підставляти в/ч А####, якщо в «Яка зміна» є відділення/взвод/рота.
  */
 export const formatTimesheetTransferMark = (payload: TransferUnitPayload) => {
-  const dest = [
-    payload.timesheetDestination,
-    payload.documentsDest,
-    payload.destination,
-    payload.changeText,
-  ]
-    .map((value) => String(value || "").replace(/\s+/g, " ").trim())
-    .find(Boolean) || "";
-  return formatTimesheetDeparture(dest);
+  const structured = (raw: string | undefined) =>
+    extractTimesheetDestinationFromPosition(positionTitleTail(String(raw || "")));
+  const fromTimesheet = structured(payload.timesheetDestination);
+  if (fromTimesheet) return formatTimesheetDeparture(fromTimesheet);
+
+  const timesheetRaw = String(payload.timesheetDestination || "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const timesheetIsUnitCode = /[АA]\s*\d{4}|в\s*\/\s*ч/iu.test(timesheetRaw);
+  const fromChange = structured(payload.changeText);
+  if (fromChange && (!timesheetRaw || timesheetIsUnitCode)) {
+    return formatTimesheetDeparture(fromChange);
+  }
+
+  const dest =
+    [
+      payload.timesheetDestination,
+      payload.changeText,
+      payload.documentsDest,
+      payload.destination,
+    ]
+      .map((value) => String(value || "").replace(/\s+/g, " ").trim())
+      .find(Boolean) || "";
+  const fromDest = structured(dest);
+  return formatTimesheetDeparture(fromDest || dest);
 };

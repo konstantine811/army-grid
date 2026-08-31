@@ -339,6 +339,7 @@ export const buildSheetImpacts = (ops: EjoosSyncOp[]): SheetImpactItem[] => {
       exclude.payload.documentsDest || exclude.payload.destination || "(куди?)";
     const date =
       exclude.payload.excludeDate || exclude.payload.orderDate || "?";
+    const departPhrase = formatTimesheetTransferMark(exclude.payload);
     const who = [
       exclude.payload.fromRank || exclude.rank,
       exclude.payload.fromName || exclude.fullName,
@@ -365,8 +366,8 @@ export const buildSheetImpacts = (ops: EjoosSyncOp[]): SheetImpactItem[] => {
       "timesheet",
       "history",
       excludeWritePlan(exclude.payload).createTimesheetHistory
-        ? `Новий історичний рядок: «+» з ${exclude.payload.timesheetActiveFrom || "дати постановки"} до вибуття ${date}, далі −; чужий рядок ${idx} не чіпаємо`
-        : `Копія рядка з +${exclude.payload.timesheetActiveFrom ? ` з ${exclude.payload.timesheetActiveFrom}` : ""} до дня вибуття ${date}, далі −; особу з активного рядка прибрати`,
+        ? `Новий історичний рядок: «+» з ${exclude.payload.timesheetActiveFrom || "дати постановки"} до вибуття ${date}; у день вибуття «${departPhrase}» (посаду прибрано, до/у за підрозділом), далі −; чужий рядок ${idx} не чіпаємо`
+        : `Копія рядка з +${exclude.payload.timesheetActiveFrom ? ` з ${exclude.payload.timesheetActiveFrom}` : ""} до дня вибуття ${date}; у день вибуття «${departPhrase}» (посаду прибрано, до/у за підрозділом), далі −; особу з активного рядка прибрати`,
       exclude.payload.timesheetExcelRow
         ? `R${exclude.payload.timesheetExcelRow}`
         : undefined,
@@ -575,6 +576,21 @@ export const buildSheetImpacts = (ops: EjoosSyncOp[]): SheetImpactItem[] => {
         );
       }
     } else if (op.kind === "absent_upsert" || op.kind === "absent_close") {
+      if (op.payload.mismatchKind === "ARCHIVE_RETURN_SH_STILL_ABSENT") {
+        setImpact(
+          map,
+          "absents",
+          "skip",
+          `Перевірте: archive повернення ${op.payload.returnDate || "?"} vs sh «${op.payload.statusRaw || "СЗЧ"}»`,
+        );
+        setImpact(
+          map,
+          "timesheet",
+          "skip",
+          "Табель не фарбуємо: не відомо, чи archive рано закритий, чи sh застарів",
+        );
+        return;
+      }
       if (op.kind === "absent_upsert" || op.payload.excelRow) {
         setImpact(
           map,
@@ -657,15 +673,19 @@ export const buildSheetImpacts = (ops: EjoosSyncOp[]): SheetImpactItem[] => {
           ? "Закрити штатний рядок і зберегти історію розпорядження"
           : "Штатного рядка немає — Табель не змінюємо",
       );
-    } else if (op.kind === "data_mismatch") {
+    } else if (op.kind === "data_mismatch" || op.payload.mismatchKind === "ARCHIVE_RETURN_SH_STILL_ABSENT") {
       const rankIssue = op.payload.mismatchKind === "RANK";
       const archiveMissing =
         op.payload.mismatchKind === "ARCHIVE_REFERENCE_MISSING";
+      const archiveReturnVsSh =
+        op.payload.mismatchKind === "ARCHIVE_RETURN_SH_STILL_ABSENT";
       setImpact(
         map,
         "shpo",
         "skip",
-        archiveMissing
+        archiveReturnVsSh
+          ? "Не закриваємо штат автоматично: archive каже повернувся, sh досі відсутній"
+          : archiveMissing
           ? "Не вигадуємо відсутність у ШПО зі статусу «ВІДСУТНІЙ в АРХІВІ»"
           : rankIssue
             ? "Звання в ШПО не змінюємо автоматично — потрібен наказ про присвоєння"
@@ -675,7 +695,9 @@ export const buildSheetImpacts = (ops: EjoosSyncOp[]): SheetImpactItem[] => {
         map,
         "oos",
         "skip",
-        archiveMissing
+        archiveReturnVsSh
+          ? "ООС не чіпаємо, доки не звірите archive і sh"
+          : archiveMissing
           ? "Не вигадуємо ЛІК / ВІД / СЗЧ / БЕЗВІСТИ в ООС"
           : rankIssue
             ? "Звання в ООС не змінюємо автоматично — потрібен наказ про присвоєння"
@@ -686,12 +708,22 @@ export const buildSheetImpacts = (ops: EjoosSyncOp[]): SheetImpactItem[] => {
         map,
         "timesheet",
         "skip",
-        archiveMissing
+        archiveReturnVsSh
+          ? "Табель не фарбуємо: не відомо, чи archive рано закритий, чи sh застарів"
+          : archiveMissing
           ? "Немає рядка archive — табельні коди відсутності не підставляємо"
           : rankIssue
             ? "Звання в Табелі не змінюємо — лише інформаційна перевірка"
             : "Помилка даних — Табель не змінюємо",
       );
+      if (archiveReturnVsSh) {
+        setImpact(
+          map,
+          "absents",
+          "skip",
+          `Перевірте: archive повернення ${op.payload.returnDate || "?"} vs sh «${op.payload.statusRaw || "СЗЧ"}»`,
+        );
+      }
     } else if (op.kind === "other_manual") {
       if (op.payload.chainWaiting === "1") {
         setImpact(
@@ -1244,6 +1276,16 @@ export const buildSourceInfluences = (
       });
       continue;
     }
+    if (op.payload.mismatchKind === "ARCHIVE_RETURN_SH_STILL_ABSENT") {
+      push({
+        source: "archive",
+        sourceLabel: SOURCE_LABEL.archive,
+        ref,
+        event: `archive повернення ${op.payload.returnDate || "?"} vs sh «${op.payload.statusRaw || "СЗЧ"}»`,
+        effect: "NEEDS_REVIEW: не закриваємо період і не фарбуємо Табель",
+      });
+      continue;
+    }
     if (op.payload.mismatchKind === "ARCHIVE_REFERENCE_MISSING") {
       push({
         source: "sh",
@@ -1529,18 +1571,6 @@ export const setPersonDecisions = (
   };
 };
 
-export const personCanEnterApplyQueue = (person: PersonChange) =>
-  person.severity === "ready" && !personOpsBlockApply(person.ops);
-
-export const acceptAllReady = (session: EjoosDiffSession): EjoosDiffSession => ({
-  ...session,
-  people: session.people.map((person) =>
-    person.severity === "ready"
-      ? { ...person, decision: "accepted" }
-      : person,
-  ),
-});
-
 export const collectedAcceptedOps = (session: EjoosDiffSession): EjoosSyncOp[] =>
   session.people
     .filter((person) => person.decision === "accepted")
@@ -1584,6 +1614,20 @@ export const personHasWorkbookApplyOps = (ops: EjoosSyncOp[]) =>
 
 export const personIsInformationalOnly = (ops: EjoosSyncOp[]) =>
   ops.length > 0 && writableOps(ops).length === 0;
+
+export const personCanEnterApplyQueue = (person: PersonChange) =>
+  person.severity === "ready" &&
+  personHasWorkbookApplyOps(person.ops) &&
+  !personOpsBlockApply(person.ops);
+
+export const acceptAllReady = (session: EjoosDiffSession): EjoosDiffSession => ({
+  ...session,
+  people: session.people.map((person) =>
+    personCanEnterApplyQueue(person)
+      ? { ...person, decision: "accepted" as const }
+      : person,
+  ),
+});
 
 export const collectedWritableAcceptedOps = (
   session: EjoosDiffSession,

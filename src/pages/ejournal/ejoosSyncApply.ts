@@ -1,5 +1,9 @@
 import JSZip from "jszip";
-import type { ExcelWorkbookSnapshot } from "../../excelRoundTrip";
+import {
+  EJOOS_SYNC_READ_OPTIONS,
+  readWorkbookSnapshot,
+  type ExcelWorkbookSnapshot,
+} from "../../excelRoundTrip";
 import type { EjoosSyncOp, EjoosSyncPlan } from "./ejoosSyncPlan";
 import {
   buildProtocolText,
@@ -111,18 +115,20 @@ const personKeyOf = (op: EjoosSyncOp) =>
     .trim()
     .toLocaleLowerCase("uk-UA");
 
-const snapshotWithAppliedBlob = (
-  ejoos: ExcelWorkbookSnapshot,
+const XLSX_MIME =
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+
+/** Після пачки треба читати вже записаний .xlsx, а не лишати старі rawRows. */
+const rereadWorkbookAfterBatch = async (
   blob: Blob,
-): ExcelWorkbookSnapshot => ({
-  ...ejoos,
-  file: new File([blob], ejoos.fileName, {
-    type:
-      blob.type ||
-      ejoos.file.type ||
-      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-  }),
-});
+  fileName: string,
+): Promise<ExcelWorkbookSnapshot> =>
+  readWorkbookSnapshot(
+    new File([blob], fileName, {
+      type: blob.type || XLSX_MIME,
+    }),
+    EJOOS_SYNC_READ_OPTIONS,
+  );
 
 /**
  * Змішана черга (виключення + посади інших людей) не йде одним rewrite.
@@ -336,6 +342,9 @@ export async function applyConfirmedEjoosOps(input: {
         `Для ${contradiction.fullName || contradiction.personId} спочатку закрийте відкритий СЗЧ / тимчасову відсутність, потім ставте на штат.`,
       );
     }
+    throw new Error(
+      "Одна або кілька операцій не мають усіх даних для безпечного застосування",
+    );
   }
 
   const fileName = `ЄЖООС_станом_на_${plan.timesheetDayLabel.replaceAll(".", "-")}.xlsx`;
@@ -351,7 +360,7 @@ export async function applyConfirmedEjoosOps(input: {
     });
     blob = applied.blob;
     directXml = directXml && applied.directXml;
-    working = snapshotWithAppliedBlob(ejoos, blob);
+    working = await rereadWorkbookAfterBatch(blob, ejoos.fileName);
   }
   const protocolText = buildProtocolText(plan, appliedOps, {
     actor,

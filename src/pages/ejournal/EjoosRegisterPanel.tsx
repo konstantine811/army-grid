@@ -69,7 +69,11 @@ export function EjoosRegisterPanel({ kind }: { kind: RegisterKind }) {
         key: String(row.excelRow),
         title: row.fullName || row.personId || "—",
         meta: [row.rank, row.personId].filter(Boolean).join(" · "),
-        detail: `${row.destination || "—"} · наказ ${row.orderNumber || "—"} ${row.orderDate || ""}`.trim(),
+        detail: `${row.destination || "—"} · ${row.excludeDate || "—"}${
+          row.orderNumber || row.orderDate
+            ? ` · наказ ${row.orderNumber || "—"} ${row.orderDate || ""}`
+            : ""
+        }`.trim(),
       }));
     }
     if (kind === "timesheet") {

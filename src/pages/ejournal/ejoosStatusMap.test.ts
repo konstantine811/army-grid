@@ -12,6 +12,14 @@ describe("mapPbStatusToEjoosWithRules", () => {
     expect(mapped.timesheetCode).toBe("СЗЧ");
   });
 
+  it("does not map «НЕ ПРИСУТНІЙ» to on_duty", () => {
+    const mapped = mapPbStatusToEjoosWithRules(
+      "НЕ ПРИСУТНІЙ",
+      DEFAULT_STATUS_RULES,
+    );
+    expect(mapped.timesheetCode).not.toBe("+");
+  });
+
   it("maps exact «В СТРОЮ» to +", () => {
     const mapped = mapPbStatusToEjoosWithRules("В СТРОЮ", DEFAULT_STATUS_RULES);
     expect(mapped.ruleId).toBe("on_duty");

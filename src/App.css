@@ -11410,6 +11410,101 @@ html.auth-lock .auth-shell {
   opacity: 0.55;
 }
 
+.ejoos-row-preview-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+
+.ejoos-row-preview {
+  padding: 0.7rem 0.8rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.ejoos-row-preview-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.ejoos-row-preview-head strong {
+  font-size: 0.88rem;
+  color: var(--text-primary);
+}
+
+.ejoos-row-preview-head span {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: rgba(224, 224, 224, 0.62);
+}
+
+.ejoos-row-preview-note {
+  margin: 0.35rem 0 0.55rem;
+  font-size: 0.78rem;
+  line-height: 1.35;
+  color: var(--text-secondary);
+}
+
+.ejoos-row-preview-table-wrap {
+  overflow-x: auto;
+}
+
+.ejoos-row-preview-table {
+  border-collapse: collapse;
+  min-width: 100%;
+  font-size: 0.75rem;
+}
+
+.ejoos-row-preview-table th,
+.ejoos-row-preview-table td {
+  border: 1px solid rgba(224, 224, 224, 0.18);
+  padding: 0.35rem 0.45rem;
+  text-align: left;
+  vertical-align: top;
+  max-width: 14rem;
+}
+
+.ejoos-row-preview-table th {
+  background: rgba(255, 255, 255, 0.04);
+  font-weight: 600;
+  color: rgba(224, 224, 224, 0.72);
+  white-space: nowrap;
+}
+
+.ejoos-row-preview-table th span {
+  display: block;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.66rem;
+  color: rgba(224, 224, 224, 0.45);
+  font-weight: 500;
+}
+
+.ejoos-row-preview-table td {
+  color: var(--text-primary);
+  line-height: 1.35;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.ejoos-row-preview-table td.kind-empty {
+  color: rgba(239, 154, 154, 0.9);
+  font-style: italic;
+}
+
+.ejoos-row-preview-table td.kind-keep {
+  color: rgba(129, 199, 132, 0.95);
+}
+
+.ejoos-row-preview-table td.kind-depart {
+  color: #ffb74d;
+  min-width: 12rem;
+}
+
 .ejoos-sheet-impact.effect-untouched .ejoos-sheet-impact-badge {
   color: rgba(224, 224, 224, 0.4);
   border-style: dashed;

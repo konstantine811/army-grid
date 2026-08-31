@@ -39,6 +39,87 @@ export const formatTimesheetDeparture = (rawDestination: string) => {
   return `вибув ${timesheetDeparturePreposition(destination)} ${destination}`;
 };
 
+/**
+ * Хвіст «Яка зміна»: «2103200 Стрілець → 2103xxx Стрілець МЕХАНІЗОВАНОГО…»
+ * → нова посада без службового індексу.
+ */
+export const positionTitleTail = (value: string) => {
+  const text = String(value ?? "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!text) return "";
+  const tail = text.split(/→|->|=>/).pop()?.trim() || text;
+  return tail.replace(/^\d{5,}[\s.:;-]*/, "").trim() || tail;
+};
+
+const STRUCTURE_POSITION_WORDS = new Set([
+  "ВІДДІЛЕННЯ",
+  "ВІДДІЛЕННІ",
+  "ВЗВОДУ",
+  "ВЗВОДІ",
+  "РОТИ",
+  "РОТІ",
+  "БАТАЛЬЙОНУ",
+  "БАТАЛЬЙОНІ",
+  "БАТАРЕЇ",
+  "ДИВІЗІОНУ",
+  "УПРАВЛІННЯ",
+  "ШТАБУ",
+  "СЕКЦІЇ",
+  "СЛУЖБИ",
+  "ВІДДІЛУ",
+  "ГРУПИ",
+  "КОМАНДИ",
+]);
+
+const isStructureModifier = (token: string) => {
+  const word = token.toUpperCase().replace(/[^0-9А-ЯІЇЄҐA-Z]/gu, "");
+  if (!word) return false;
+  if (/^\d+$/.test(word)) return true;
+  return (
+    word.endsWith("ОГО") ||
+    word.endsWith("ЬКОГО") ||
+    word.endsWith("НОГО") ||
+    word.endsWith("ОВОГО") ||
+    word.endsWith("ЕВОГО") ||
+    word.endsWith("ОЇ") ||
+    word.endsWith("ЬКОЇ") ||
+    word.endsWith("НОЇ") ||
+    word.endsWith("ОВОЇ") ||
+    word.endsWith("ЕВОЇ") ||
+    word.endsWith("ИХ") ||
+    word.endsWith("ЬКИХ") ||
+    word.endsWith("НИХ") ||
+    word.endsWith("ОВИХ") ||
+    word.endsWith("ЕВИХ")
+  );
+};
+
+/**
+ * З назви посади лишаємо лише ланцюг підрозділу:
+ * «Стрілець МЕХАНІЗОВАНОГО ВІДДІЛЕННЯ … БАТАЛЬЙОНУ»
+ * → «МЕХАНІЗОВАНОГО ВІДДІЛЕННЯ … БАТАЛЬЙОНУ».
+ * Без слів відділення/взвод/рота/батальйон — порожньо (не підставляти посаду).
+ */
+export const extractTimesheetDestinationFromPosition = (
+  positionTitle: string,
+) => {
+  const text = positionTitleTail(positionTitle);
+  if (!text) return "";
+  const tokens = text.split(" ");
+  const structureIndex = tokens.findIndex((token) => {
+    const word = token.toUpperCase().replace(/[^А-ЯІЇЄҐA-Z]/gu, "");
+    return STRUCTURE_POSITION_WORDS.has(word);
+  });
+  if (structureIndex < 0) return "";
+
+  let start = structureIndex;
+  while (start > 0 && isStructureModifier(tokens[start - 1])) {
+    start -= 1;
+  }
+  return tokens.slice(start).join(" ").trim();
+};
+
 /** Історична позначка вибуття в дні Табеля, а не поточний стан. */
 export const isTimesheetDepartureMark = (value: unknown) => {
   const text = String(value ?? "").replace(/\s+/g, " ");
@@ -412,7 +493,17 @@ export const buildTimesheetAbsenceSpans = (
     );
 };
 
-/** Якщо sh досі СЗЧ/ЗБ, а archive вже має «повернення» — Табель ведемо до дня звіту. */
+/** Якщо sh досі СЗЧ/ЗБ, а archive вже має «повернення» — не здогадуємось. */
+export const archiveReturnContradictsCurrentSh = (
+  shTimesheetCode: string | null | undefined,
+  archiveTimesheetCode: string | null | undefined,
+  hasReturn: boolean,
+) => hasReturn && currentStatusConfirmsOpenAbsence(shTimesheetCode, archiveTimesheetCode);
+
+/**
+ * Не підключати до SyncPlan: суперечність archive-return vs sh-still-absent
+ * йде в NEEDS_REVIEW, а не в автопродовження коду до дня звіту.
+ */
 export const extendDispositionSpanToReportDay = (
   spans: TimesheetAbsenceSpan[],
   options: {

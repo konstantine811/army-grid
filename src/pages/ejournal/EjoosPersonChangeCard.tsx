@@ -18,6 +18,7 @@ import {
   personIsInformationalOnly,
 } from "./ejoosPersonDiff";
 import { formatTimesheetTransferMark } from "./ejoosExcludedColumns";
+import { buildSheetRowPreviews } from "./ejoosSheetRowPreview";
 import { timesheetOpNeedsManualCode } from "./ejoosOpRequirements";
 import { EJOOS_TIMESHEET_CODES } from "./ejoosRules";
 import { dayFromOrderLabel } from "./ejoosTimesheetText";
@@ -270,6 +271,11 @@ export function PersonChangeCard({
         ? person.sheetImpacts
         : buildSheetImpacts(person.ops),
     [person.ops, person.sheetImpacts],
+  );
+
+  const sheetRowPreviews = useMemo(
+    () => buildSheetRowPreviews(person.ops, timesheetDay),
+    [person.ops, timesheetDay],
   );
 
   const timesheetDepartSample = useMemo(() => {
@@ -668,6 +674,64 @@ export function PersonChangeCard({
           </div>
         ))}
       </div>
+
+      {sheetRowPreviews.length ? (
+        <Box sx={{ mt: 1.5 }}>
+          <Typography variant="subtitle2" sx={{ mb: 0.5 }}>
+            Вигляд рядків після застосування
+          </Typography>
+          <Typography variant="body2" className="ejoos-muted" sx={{ mb: 1 }}>
+            Ключові колонки Excel на аркушах, які зміняться. Порожньо = клітинку
+            очищаємо; «лишається» = значення не чіпаємо.
+          </Typography>
+          <div className="ejoos-row-preview-list">
+            {sheetRowPreviews.map((preview) => (
+              <div
+                key={`${preview.sheetKey}-${preview.role}`}
+                className={`ejoos-row-preview sheet-${preview.sheetKey}`}
+              >
+                <div className="ejoos-row-preview-head">
+                  <strong>{preview.sheetLabel}</strong>
+                  <span>{preview.role}</span>
+                </div>
+                {preview.note ? (
+                  <p className="ejoos-row-preview-note">{preview.note}</p>
+                ) : null}
+                {preview.cells.length ? (
+                  <div className="ejoos-row-preview-table-wrap">
+                    <table className="ejoos-row-preview-table">
+                      <thead>
+                        <tr>
+                          {preview.cells.map((cell, index) => (
+                            <th
+                              key={`${cell.letter}-${cell.header}-${index}`}
+                            >
+                              <span>{cell.letter}</span>
+                              {cell.header}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr>
+                          {preview.cells.map((cell, index) => (
+                            <td
+                              key={`${cell.letter}-${cell.header}-v-${index}`}
+                              className={`kind-${cell.kind}`}
+                            >
+                              {cell.value}
+                            </td>
+                          ))}
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        </Box>
+      ) : null}
 
       <Typography variant="subtitle2" sx={{ mt: 1.5, mb: 0.5 }}>
         Деталі ops
