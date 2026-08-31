@@ -9,7 +9,10 @@ import {
   cellValueToOosText,
   findOosStyleSourceRow,
   formatOosRelativesText,
+  findExistingOosPersonRow,
   isJammedOosHistory,
+  isOosBlankOrErrorText,
+  isOosSectionHeaderText,
   isOosWrapColumn,
   mergeOosHistoryValue,
   OOS_DATA_COLUMNS,
@@ -45,18 +48,23 @@ const nextEmptyOosRow = (
   sheet: ExcelSheetSnapshot,
   reserved: Set<number>,
 ) => {
-  for (let row = 6; row <= sheet.rawRows.length + 30; row += 1) {
+  let sectionStart = sheet.rawRows.length + 30;
+  for (let row = 6; row <= sheet.rawRows.length; row += 1) {
+    if (isOosSectionHeaderText(cellValueToOosText(cellAt(sheet, row, 2)))) {
+      sectionStart = row;
+      break;
+    }
+  }
+  for (let row = 6; row < sectionStart; row += 1) {
     if (reserved.has(row)) continue;
     const name = cellValueToOosText(cellAt(sheet, row, 2));
     const id = cellValueToOosText(cellAt(sheet, row, 3));
-    if (!name && !id) {
+    if (isOosBlankOrErrorText(name) && isOosBlankOrErrorText(id)) {
       reserved.add(row);
       return row;
     }
   }
-  const row = sheet.rawRows.length + reserved.size + 1;
-  reserved.add(row);
-  return row;
+  return 0;
 };
 
 const oosIdentityNumber = (column: number, value: string | null) =>
@@ -196,6 +204,18 @@ export async function applyOosHistoryPresentation(input: {
     if (found) {
       if (key) rowByPersonKey.set(key, found.excelRow);
       return found.excelRow;
+    }
+    const scanned = findExistingOosPersonRow(
+      (row, column) => cellAt(oos, row, column),
+      {
+        personId,
+        fullName: op.payload.nextName || op.fullName,
+        lastRow: oos.rawRows.length,
+      },
+    );
+    if (scanned) {
+      if (key) rowByPersonKey.set(key, scanned);
+      return scanned;
     }
     if (
       op.payload.excludedSourceExcelRow ||

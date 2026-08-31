@@ -77,6 +77,9 @@ export type EjoosSyncPlan = {
   pbName: string;
   timesheetDay: number;
   timesheetDayLabel: string;
+  /** Місяць Табеля ЕЖООС ≠ місяць 1ПБ — apply заборонено. */
+  monthRolloverRequired?: boolean;
+  ejoosTimesheetMonthLabel?: string;
   ops: EjoosSyncOp[];
   summary: {
     ready: number;
@@ -836,6 +839,13 @@ export const parseEjoosOos = (
     const fullName = norm(row?.[1]);
     const personId = normId(row?.[2]);
     if (!fullName && !personId) continue;
+    if (
+      /вибув\s+у\s+розпорядж/i.test(fullName) ||
+      /розпорядження\s+командира/i.test(fullName)
+    ) {
+      continue;
+    }
+    if (/^#/u.test(fullName) && !personId) continue;
     rows.push({
       excelRow: i + 1,
       personId,
@@ -905,38 +915,27 @@ export const parseTimesheetDayFromPbName = (
 /** День табеля з назви файлу 1ПБ / ЄЖООС або сьогодні. */
 export const resolveJournalTimesheetDay = parseTimesheetDayFromPbName;
 
-/** Якщо план зібрано раніше в цьому місяці — на застосуванні тягнемо табель до сьогодні. */
+export const MONTH_ROLLOVER_BLOCK_MESSAGE =
+  "MONTH_ROLLOVER_REQUIRED: місяць Табеля ЕЖООС не збігається з місяцем 1ПБ. Заголовок не перейменовуємо — потрібен новий файл ЕЖООС на цей місяць.";
+
+export const sourceTimesheetHorizonNote = (timesheetDayLabel: string) =>
+  `Джерело 1ПБ станом на ${timesheetDayLabel}. Табель буде оновлено лише по ${timesheetDayLabel}.`;
+
+export const planBlocksWorkbookApply = (
+  plan: Pick<EjoosSyncPlan, "monthRolloverRequired"> | null | undefined,
+) => Boolean(plan?.monthRolloverRequired);
+
+/**
+ * Горизонт Табеля = дата джерела 1ПБ. Не дотягуємо до «сьогодні»:
+ * у файлі за 25.08 немає даних за 26–31, тож `+` туди не вигадуємо.
+ */
 export const refreshPlanTimesheetHorizon = (
   plan: Pick<EjoosSyncPlan, "timesheetDay" | "timesheetDayLabel">,
-  now = new Date(),
-): Pick<EjoosSyncPlan, "timesheetDay" | "timesheetDayLabel"> => {
-  const today = now.getDate();
-  const todayLabel = now.toLocaleDateString("uk-UA");
-  const match = String(plan.timesheetDayLabel || "").match(
-    /(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})/,
-  );
-  if (match) {
-    const planMonth = Number(match[2]);
-    const planYear =
-      Number(match[3]) < 100 ? 2000 + Number(match[3]) : Number(match[3]);
-    const sameMonth =
-      planMonth === now.getMonth() + 1 && planYear === now.getFullYear();
-    if (sameMonth && today > plan.timesheetDay) {
-      return { timesheetDay: today, timesheetDayLabel: todayLabel };
-    }
-    return {
-      timesheetDay: plan.timesheetDay,
-      timesheetDayLabel: plan.timesheetDayLabel,
-    };
-  }
-  if (today > plan.timesheetDay) {
-    return { timesheetDay: today, timesheetDayLabel: todayLabel };
-  }
-  return {
-    timesheetDay: plan.timesheetDay,
-    timesheetDayLabel: plan.timesheetDayLabel,
-  };
-};
+  _now = new Date(),
+): Pick<EjoosSyncPlan, "timesheetDay" | "timesheetDayLabel"> => ({
+  timesheetDay: plan.timesheetDay,
+  timesheetDayLabel: plan.timesheetDayLabel,
+});
 
 const opId = (parts: string[]) =>
   parts
@@ -1757,7 +1756,9 @@ export const buildEjoosSyncPlan = (
     ejoosOos.filter((row) => row.personId).map((row) => [row.personId, row]),
   );
   const oosByName = new Map(
-    ejoosOos.map((row) => [normKey(row.fullName), row]),
+    ejoosOos
+      .filter((row) => row.fullName)
+      .map((row) => [canonicalName(row.fullName), row]),
   );
   const latestPositionByName = new Map<string, PbMovement>();
   for (const event of effectiveMovements) {
@@ -3825,6 +3826,7 @@ export const buildEjoosSyncPlan = (
       const existingOos =
         (personId && oosById.get(personId)) ||
         byPersonName(oosByName, personId, fullName) ||
+        ejoosOos.find((row) => isSamePerson({ personId, fullName }, row)) ||
         null;
       const excludedSource =
         existingOos ? null : findLatestExcludedRow(personId, fullName);
@@ -4711,7 +4713,10 @@ export const buildEjoosSyncPlan = (
     timesheetDayLabel,
     ops,
     summary,
+    monthRolloverRequired: timesheetMonthHeaderMismatch,
+    ejoosTimesheetMonthLabel: timesheetHeaderCell?.matched || "",
     limitsNote:
+      `${sourceTimesheetHorizonNote(timesheetDayLabel)} ` +
       `РУХ: перевірено всі ${movementsAll.length} рядків, активних ` +
       `${activeMovementsAll.length}, останніх кадрових подій ` +
       `${effectiveMovements.length}` +
@@ -4721,7 +4726,7 @@ export const buildEjoosSyncPlan = (
       `; archive — ${archive.length} періодів цього місяця ` +
       `з ${archiveAll.length}.` +
       (timesheetMonthHeaderMismatch && timesheetMonthHeader
-        ? ` Заголовок «6. Табель» зараз «${timesheetHeaderCell?.matched}», має бути «${timesheetMonthHeader}» — оновимо при застосуванні; коди пишемо лише за ${timesheetMonthHeader.replace(" р.", "")}.`
+        ? ` MONTH_ROLLOVER_REQUIRED: заголовок «6. Табель» зараз «${timesheetHeaderCell?.matched}», 1ПБ — «${timesheetMonthHeader}». Apply заблоковано, заголовок не перейменовуємо.`
         : ""),
   };
 };

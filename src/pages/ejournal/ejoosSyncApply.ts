@@ -8,7 +8,8 @@ import type { EjoosSyncOp, EjoosSyncPlan } from "./ejoosSyncPlan";
 import {
   buildProtocolText,
   findEjoosSheet,
-  refreshPlanTimesheetHorizon,
+  MONTH_ROLLOVER_BLOCK_MESSAGE,
+  planBlocksWorkbookApply,
 } from "./ejoosSyncPlan";
 import {
   EXCLUDED_TO_OOS_BASE,
@@ -60,6 +61,7 @@ import {
 import { appendApplyHistorySheetRows } from "./ejoosChangeHistorySheet";
 import {
   cellValueToOosText,
+  findExistingOosPersonRow,
   findOosStyleSourceRow,
   formatOosRelativesText,
   mergeOosHistoryValue,
@@ -277,10 +279,10 @@ export async function applyConfirmedEjoosOps(input: {
   directXml: boolean;
 }> {
   const { ejoos, actor } = input;
-  const plan: EjoosSyncPlan = {
-    ...input.plan,
-    ...refreshPlanTimesheetHorizon(input.plan),
-  };
+  const plan = input.plan;
+  if (planBlocksWorkbookApply(plan)) {
+    throw new Error(MONTH_ROLLOVER_BLOCK_MESSAGE);
+  }
   // Позначка помилки даних — інформаційна: у книгу нічого не пишемо.
   const ops = input.ops.filter((op) => op.kind !== "data_mismatch");
   if (!input.ops.length) {
@@ -1060,6 +1062,15 @@ async function applyTimesheetMonthHeader(input: {
   ) {
     return input.file;
   }
+  if (
+    found &&
+    expected &&
+    parseTimesheetMonthHeaderText(expected) &&
+    (found.month !== parseTimesheetMonthHeaderText(expected)?.month ||
+      found.year !== parseTimesheetMonthHeaderText(expected)?.year)
+  ) {
+    return input.file;
+  }
   const row = found?.row || 2;
   const column = found?.column || 9;
   const current = found
@@ -1790,6 +1801,15 @@ function restoreOosFromExcluded(
     positionIndex: string;
   },
 ) {
+  const existingRow = findExistingOosPersonRow(
+    (row, column) => oos.cell(row, column).value(),
+    {
+      personId: person.personId,
+      fullName: person.fullName,
+      lastRow: oos.usedRange()?.endCell().rowNumber() ?? 40,
+    },
+  );
+  if (existingRow) return;
   const targetRow = nextEmptyPersonRow(oos, 6, col("B"));
   copyRowPresentation(
     oos,

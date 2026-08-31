@@ -12,6 +12,49 @@ const excelSerialToUaDate = (value: number) => {
   return `${day}.${month}.${date.getUTCFullYear()}`;
 };
 
+const oosNameKey = (value: string) =>
+  value
+    .toLocaleLowerCase("uk-UA")
+    .replace(/[''`´]/g, "")
+    .replace(/\([^)]*\)/g, " ")
+    .replace(/[.,;]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+/** Підзаголовок блоку ООС, не картка особи. */
+export const isOosSectionHeaderText = (value: string) =>
+  /вибув\s+у\s+розпорядж/i.test(value) ||
+  /розпорядження\s+командира/i.test(value);
+
+export const isOosBlankOrErrorText = (value: string) =>
+  !value.trim() || /^#/u.test(value.trim()) || value.trim() === "[object Object]";
+
+/** Перша чинна картка в основному списку ООС — не дописуємо другу. */
+export const findExistingOosPersonRow = (
+  getCell: (row: number, column: number) => unknown,
+  options: {
+    personId?: string;
+    fullName?: string;
+    lastRow: number;
+    startRow?: number;
+  },
+) => {
+  const wantId = String(options.personId || "").trim();
+  const wantName = oosNameKey(options.fullName || "");
+  if (!wantId && !wantName) return 0;
+  let nameHit = 0;
+  const lastRow = Math.max(6, options.lastRow);
+  for (let row = options.startRow ?? 6; row <= lastRow; row += 1) {
+    const name = cellValueToOosText(getCell(row, 2));
+    const id = cellValueToOosText(getCell(row, 3));
+    if (isOosSectionHeaderText(name)) continue;
+    if (isOosBlankOrErrorText(name) && isOosBlankOrErrorText(id)) continue;
+    if (wantId && id === wantId) return row;
+    if (wantName && oosNameKey(name) === wantName && !nameHit) nameHit = row;
+  }
+  return nameHit;
+};
+
 export const cellValueToOosText = (value: unknown) => {
   if (value instanceof Date && !Number.isNaN(value.getTime())) {
     const day = String(value.getDate()).padStart(2, "0");
