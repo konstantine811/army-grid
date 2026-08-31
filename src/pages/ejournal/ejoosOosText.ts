@@ -12,7 +12,7 @@ const excelSerialToUaDate = (value: number) => {
   return `${day}.${month}.${date.getUTCFullYear()}`;
 };
 
-const oosNameKey = (value: string) =>
+export const oosNameKey = (value: string) =>
   value
     .toLocaleLowerCase("uk-UA")
     .replace(/[''`´]/g, "")
@@ -20,6 +20,134 @@ const oosNameKey = (value: string) =>
     .replace(/[.,;]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+
+export type OosIdentity = { personId: string; fullName: string };
+
+export const oosIdentityFromOp = (op: {
+  personId?: string;
+  fullName?: string;
+  payload?: Record<string, string>;
+}): OosIdentity => ({
+  personId: String(
+    op.payload?.nextPersonId ||
+      op.personId ||
+      op.payload?.fromPersonId ||
+      "",
+  ).trim(),
+  fullName: String(
+    op.payload?.nextName || op.fullName || op.payload?.fromName || "",
+  ).trim(),
+});
+
+export const oosIdentityAliasKeys = (identity: OosIdentity) => {
+  const keys: string[] = [];
+  if (identity.personId) keys.push(`id:${identity.personId}`);
+  const name = oosNameKey(identity.fullName);
+  if (name) keys.push(`name:${name}`);
+  return keys;
+};
+
+export const findNextEmptyOosDataRow = (
+  getCell: (row: number, column: number) => unknown,
+  options: {
+    lastRow: number;
+    startRow?: number;
+    reserved?: Set<number>;
+  },
+) => {
+  const startRow = options.startRow ?? 6;
+  const lastRow = Math.max(startRow, options.lastRow);
+  let sectionStart = lastRow + 1;
+  for (let row = startRow; row <= lastRow; row += 1) {
+    if (isOosSectionHeaderText(cellValueToOosText(getCell(row, 2)))) {
+      sectionStart = row;
+      break;
+    }
+  }
+  for (let row = startRow; row < sectionStart; row += 1) {
+    if (options.reserved?.has(row)) continue;
+    const name = cellValueToOosText(getCell(row, 2));
+    const id = cellValueToOosText(getCell(row, 3));
+    if (isOosBlankOrErrorText(name) && isOosBlankOrErrorText(id)) return row;
+  }
+  return 0;
+};
+
+export const createOosRowResolver = (input: {
+  getCell: (row: number, column: number) => unknown;
+  lastRow: number;
+  allocateEmpty: () => number;
+}) => {
+  const cache = new Map<string, number>();
+  const remember = (row: number, identity: OosIdentity) => {
+    if (!row) return;
+    for (const key of oosIdentityAliasKeys(identity)) cache.set(key, row);
+  };
+  const resolve = (
+    identity: OosIdentity,
+    options?: { knownRow?: number; create?: boolean },
+  ) => {
+    for (const key of oosIdentityAliasKeys(identity)) {
+      const hit = cache.get(key);
+      if (hit) return hit;
+    }
+    const known = Number(options?.knownRow || 0);
+    if (known > 0) {
+      remember(known, identity);
+      return known;
+    }
+    const existing = findExistingOosPersonRow(input.getCell, {
+      personId: identity.personId,
+      fullName: identity.fullName,
+      lastRow: input.lastRow,
+    });
+    if (existing) {
+      remember(existing, identity);
+      return existing;
+    }
+    if (!options?.create) return 0;
+    const created = input.allocateEmpty();
+    remember(created, identity);
+    return created;
+  };
+  return { resolve, remember };
+};
+
+export const findDuplicateOosById = <
+  T extends { excelRow: number; personId: string; fullName: string },
+>(
+  rows: T[],
+) => {
+  const byId = new Map<string, T[]>();
+  for (const row of rows) {
+    const id = String(row.personId || "").trim();
+    if (!id) continue;
+    const list = byId.get(id) ?? [];
+    list.push(row);
+    byId.set(id, list);
+  }
+  return [...byId.values()].filter((group) => group.length > 1);
+};
+
+export const findPossibleDuplicateOosByName = <
+  T extends { excelRow: number; personId: string; fullName: string },
+>(
+  rows: T[],
+) => {
+  const byName = new Map<string, T[]>();
+  for (const row of rows) {
+    const name = oosNameKey(row.fullName);
+    if (!name) continue;
+    const list = byName.get(name) ?? [];
+    list.push(row);
+    byName.set(name, list);
+  }
+  return [...byName.values()].filter(
+    (group) =>
+      group.length > 1 &&
+      group.some((row) => !String(row.personId || "").trim()),
+  );
+};
 
 /** Підзаголовок блоку ООС, не картка особи. */
 export const isOosSectionHeaderText = (value: string) =>

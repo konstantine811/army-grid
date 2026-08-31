@@ -322,6 +322,12 @@ export function EjoosLiveSyncPanel() {
 
   const applySelected = async () => {
     if (!plan || !ejoosSnapshot || !live?.current) return;
+    if (plan.monthRolloverRequired) {
+      setError(
+        "MONTH_ROLLOVER_REQUIRED: місяць Табеля ЕЖООС не збігається з місяцем 1ПБ. Застосування заблоковано.",
+      );
+      return;
+    }
     if (!selectedOps.length) {
       setError("Не вибрано жодної зміни");
       return;
@@ -648,8 +654,8 @@ export function EjoosLiveSyncPanel() {
               justifyContent="space-between"
             >
               <Typography variant="subtitle2">
-                3. Огляд змін · день табеля {plan.timesheetDayLabel} (день{" "}
-                {plan.timesheetDay}) · всього {plan.ops.length}
+                3. Огляд змін · джерело 1ПБ станом на {plan.timesheetDayLabel}{" "}
+                (табель лише по цей день) · всього {plan.ops.length}
               </Typography>
               <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
                 <Select
@@ -793,7 +799,11 @@ export function EjoosLiveSyncPanel() {
               <Button
                 variant="contained"
                 color="primary"
-                disabled={!selectedOps.length || isLoading}
+                disabled={
+                  !selectedOps.length ||
+                  isLoading ||
+                  Boolean(plan.monthRolloverRequired)
+                }
                 onClick={() => setConfirmOpen(true)}
               >
                 Застосувати вибрані ({selectedOps.length})

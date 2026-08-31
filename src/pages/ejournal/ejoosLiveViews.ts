@@ -2,6 +2,7 @@ import type { CellValue, ExcelSheetSnapshot, ExcelWorkbookSnapshot } from "../..
 import {
   findEjoosSheet,
   parseEjoosAbsents,
+  parseEjoosOos,
   parseEjoosShpo,
   parseEjoosTimesheetDay,
   parseEjoosTimesheetPeople,
@@ -11,8 +12,13 @@ import {
   type EjoosShpoRow,
   type EjoosTimesheetRow,
 } from "./ejoosSyncPlan";
+import {
+  findDuplicateOosById,
+  findPossibleDuplicateOosByName,
+} from "./ejoosOosText";
 import { findDuplicateTimesheetExtras } from "./ejoosTimesheetDuplicates";
 import type { BackendEjournalLiveVersion } from "../../api";
+import type { EjoosDiffSession } from "./ejoosPersonDiff";
 import { formatValueForDisplay } from "../../shared/format";
 
 const norm = (value: CellValue | unknown) => {
@@ -297,6 +303,10 @@ const buildChecks = (input: {
   absentsOpen: EjoosAbsentRow[];
   session: EjoosDiffSession | null;
   duplicateTimesheet?: number;
+  duplicateOosById?: Array<Array<{ excelRow: number; personId: string }>>;
+  possibleDuplicateOosByName?: Array<
+    Array<{ excelRow: number; personId: string; fullName: string }>
+  >;
 }): EjoosCheckItem[] => {
   const checks: EjoosCheckItem[] = [];
 
@@ -375,6 +385,49 @@ const buildChecks = (input: {
       severity: "ok",
       title: "Табель без дублів",
       detail: "Немає двох активних рядків на одну особу чи один індекс.",
+    });
+  }
+
+  const duplicateOosById = input.duplicateOosById ?? [];
+  if (duplicateOosById.length) {
+    checks.push({
+      id: "dup-oos-id",
+      severity: "error",
+      title: `DUPLICATE_OOS_ID: ${duplicateOosById.length}`,
+      detail: duplicateOosById
+        .slice(0, 6)
+        .map(
+          (group) =>
+            `ID ${group[0]?.personId}: ${group
+              .map((row) => `R${row.excelRow}`)
+              .join(", ")}`,
+        )
+        .join("; "),
+    });
+  } else {
+    checks.push({
+      id: "dup-oos-id-ok",
+      severity: "ok",
+      title: "ООС без дублів ID",
+      detail: "Кожен ID має рівно одну активну картку в «2. ООС».",
+    });
+  }
+
+  const possibleOosNameDups = input.possibleDuplicateOosByName ?? [];
+  if (possibleOosNameDups.length) {
+    checks.push({
+      id: "dup-oos-name",
+      severity: "warn",
+      title: `POSSIBLE_DUPLICATE_OOS_NAME: ${possibleOosNameDups.length}`,
+      detail: possibleOosNameDups
+        .slice(0, 6)
+        .map(
+          (group) =>
+            `${group[0]?.fullName}: ${group
+              .map((row) => `R${row.excelRow}${row.personId ? ` ID${row.personId}` : " без ID"}`)
+              .join(", ")}`,
+        )
+        .join("; "),
     });
   }
 
@@ -503,6 +556,7 @@ export const buildEjoosLiveView = (input: {
   const excludedSheet = findEjoosSheet(input.workbook, /виключ/i);
   const timesheetSheet = findEjoosSheet(input.workbook, /табель/i);
   const shpoSheet = findEjoosSheet(input.workbook, /шпо|штатно.?посад/i);
+  const oosSheet = findEjoosSheet(input.workbook, /оос/i);
 
   const absents = parseEjoosAbsents(absentSheet);
   const absentsOpen = absents.filter((row) => !row.actualReturn);
@@ -511,6 +565,9 @@ export const buildEjoosLiveView = (input: {
   const timesheet = parseEjoosTimesheetDay(timesheetSheet, dayInfo.day);
   const timesheetPeople = parseEjoosTimesheetPeople(timesheetSheet);
   const duplicateTimesheet = findDuplicateTimesheetExtras(timesheetPeople).length;
+  const oosPeople = parseEjoosOos(oosSheet);
+  const duplicateOosById = findDuplicateOosById(oosPeople);
+  const possibleDuplicateOosByName = findPossibleDuplicateOosByName(oosPeople);
   const roster = buildRoster(shpo, timesheet);
   const arrivals = parseArrivals(arrivalSheet);
   const irrevocableLosses = parseIrrevocableLosses(irrevocableLossSheet);
@@ -540,6 +597,8 @@ export const buildEjoosLiveView = (input: {
       absentsOpen,
       session: input.session ?? null,
       duplicateTimesheet,
+      duplicateOosById,
+      possibleDuplicateOosByName,
     }),
     todayChanges,
     counts: {

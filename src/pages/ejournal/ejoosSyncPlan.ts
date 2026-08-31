@@ -33,6 +33,7 @@ import {
   extractTimesheetDestinationFromPosition,
 } from "./ejoosTimesheetText";
 import { findDuplicateTimesheetExtras } from "./ejoosTimesheetDuplicates";
+import { findDuplicateOosById } from "./ejoosOosText";
 
 export { extractTimesheetDestinationFromPosition };
 
@@ -2175,6 +2176,12 @@ export const buildEjoosSyncPlan = (
       return;
     }
 
+    const episodePaint = staffEpisodePaintPayload(
+      person.personId,
+      person.fullName,
+      person.positionIndex,
+      ts?.excelRow || 0,
+    );
     ops.push({
       id: opId(["shpo", person.positionIndex, person.personId || afterName]),
       kind: "shpo_occupant",
@@ -2200,14 +2207,16 @@ export const buildEjoosSyncPlan = (
         excludedSourceExcelRow: occupantExcluded
           ? String(occupantExcluded.excelRow)
           : "",
-        timesheetActiveFrom: needsRestoreFromExcluded
-          ? transferCancelForPerson(person.personId, person.fullName)
-              ?.orderDate || ""
-          : "",
-        timesheetPreserveHistory: needsRestoreFromExcluded ? "1" : "",
-        timesheetAbsenceSpans: encodeTimesheetAbsenceSpans(
-          augustAbsenceSpansFor(person.personId, person.fullName),
-        ),
+        ...episodePaint,
+        timesheetActiveFrom:
+          episodePaint.timesheetActiveFrom ||
+          (needsRestoreFromExcluded
+            ? transferCancelForPerson(person.personId, person.fullName)
+                ?.orderDate || ""
+            : ""),
+        timesheetPreserveHistory: needsRestoreFromExcluded
+          ? "1"
+          : episodePaint.timesheetPreserveHistory,
       },
       checkedDefault: true,
     });
@@ -2614,7 +2623,9 @@ export const buildEjoosSyncPlan = (
       (op) =>
         isSamePerson({ personId, fullName }, op) &&
         Boolean(
-          op.payload.timesheetAbsenceSpans || op.payload.timesheetActiveFrom,
+          op.payload.timesheetAbsenceSpans ||
+            op.payload.timesheetActiveFrom ||
+            op.payload.restoreTimesheet === "1",
         ),
     );
   for (const person of shPeople) {
@@ -3902,11 +3913,12 @@ export const buildEjoosSyncPlan = (
           nextIndex === shPerson.positionIndex &&
           historyTimesheet?.hasDepartureText &&
           isOwnUnitStaffMove(event) &&
-          !samePersonRow(targetShpo),
+          !samePersonRow(targetShpo) &&
+          !transferCancel,
       );
       // Якщо особа вже стоїть на цільовому індексі в ЕЖООС і стару посаду
-      // закривати не треба — у РУХ лише історія, змін немає. Скасоване
-      // переведення — виняток: Табель треба розкласти на історію + новий рядок.
+      // закривати не треба — у РУХ лише історія. Скасоване переведення не
+      // розкладає Табель: один рядок, «вибув» знімаємо на місці.
       if (samePersonRow(targetShpo) && !closeOldPosition && !returningToStaffIndex) {
         const arrivalStillOpen = Boolean(arrival);
         const oosMissing = !existingOos;
@@ -3985,10 +3997,11 @@ export const buildEjoosSyncPlan = (
           ? event.orderDate
           : staffTimesheetFrom;
       const timesheetPreserveHistory =
-        !carryAbsenceFromMonthStart &&
-        journalDayFromDateMs(dateMs(timesheetActiveFrom), leadWindowStart) > 1
-          ? "1"
-          : "";
+        transferCancel ||
+        carryAbsenceFromMonthStart ||
+        journalDayFromDateMs(dateMs(timesheetActiveFrom), leadWindowStart) <= 1
+          ? ""
+          : "1";
       const staleTimesheet =
         timesheetRowsOf(personId, fullName).find(
           (row) =>
@@ -4088,7 +4101,9 @@ export const buildEjoosSyncPlan = (
             ? String(targetTimesheet.excelRow)
             : "",
           previousTimesheetExcelRow:
-            returningToStaffIndex && historyTimesheet
+            transferCancel
+              ? ""
+              : returningToStaffIndex && historyTimesheet
               ? String(historyTimesheet.excelRow)
               : currentTimesheet &&
                   currentTimesheet.excelRow !== targetTimesheet?.excelRow
@@ -4122,7 +4137,7 @@ export const buildEjoosSyncPlan = (
                 ),
           ),
           historyTimesheetExcelRow: (() => {
-            if (carryAbsenceFromMonthStart) return "";
+            if (transferCancel || carryAbsenceFromMonthStart) return "";
             const fromDay = journalDayFromDateMs(
               dateMs(timesheetActiveFrom),
               leadWindowStart,
@@ -4634,6 +4649,12 @@ export const buildEjoosSyncPlan = (
           movementEventTime(right) - movementEventTime(left) ||
           right.excelRow - left.excelRow,
       )[0];
+    const episodePaint = staffEpisodePaintPayload(
+      shPerson.personId,
+      shPerson.fullName,
+      positionIndex,
+      ts?.excelRow || 0,
+    );
     ops.push({
       id: opId([
         "shpo-reconcile",
@@ -4661,10 +4682,9 @@ export const buildEjoosSyncPlan = (
         nextRank: shPerson.rank,
         nextPersonId: shPerson.personId,
         reconcileFromSh: "1",
-        timesheetActiveFrom: returnEvent?.orderDate || "",
-        timesheetAbsenceSpans: encodeTimesheetAbsenceSpans(
-          augustAbsenceSpansFor(shPerson.personId, shPerson.fullName),
-        ),
+        ...episodePaint,
+        timesheetActiveFrom:
+          episodePaint.timesheetActiveFrom || returnEvent?.orderDate || "",
       },
       checkedDefault: true,
     });
@@ -4695,6 +4715,32 @@ export const buildEjoosSyncPlan = (
         type: "ARCHIVE_REFERENCE_MISSING",
         mismatchKind: "ARCHIVE_REFERENCE_MISSING",
         statusRaw: person.status,
+      },
+      checkedDefault: false,
+    });
+  }
+
+  for (const group of findDuplicateOosById(ejoosOos)) {
+    const id = group[0]?.personId || "";
+    ops.push({
+      id: opId(["dup-oos", id]),
+      kind: "data_mismatch",
+      class: "conflict",
+      sheet: "2. ООС",
+      personId: id,
+      fullName: group[0]?.fullName || "",
+      positionIndex: group[0]?.positionIndex || "",
+      rank: group[0]?.rank || "",
+      before: group.map((row) => `R${row.excelRow}`).join(", "),
+      after: "DUPLICATE_OOS",
+      sourceRef: `2. ООС ID ${id}`,
+      why: `ID ${id} має більше ніж одну активну картку ООС (${group
+        .map((row) => `R${row.excelRow}`)
+        .join(", ")}). Apply заблоковано, доки дубль не прибрано.`,
+      confidence: "review",
+      payload: {
+        type: "DUPLICATE_OOS",
+        mismatchKind: "DUPLICATE_OOS_ID",
       },
       checkedDefault: false,
     });

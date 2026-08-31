@@ -12,7 +12,6 @@ import {
   planBlocksWorkbookApply,
 } from "./ejoosSyncPlan";
 import {
-  EXCLUDED_TO_OOS_BASE,
   formatExcludedListBasis,
   formatTimesheetTransferMark,
   OOS_TO_EXCLUDED_BASE,
@@ -40,6 +39,7 @@ import {
   dayFromOrderLabel,
   findTimesheetMonthHeaderCell,
   formatTimesheetMonthHeader,
+  parseTimesheetMonthHeaderText,
   historyAbsenceSpansForClosedEpisode,
   isTimesheetDepartureMark,
   parseTimesheetAbsenceSpans,
@@ -59,15 +59,7 @@ import {
   serializeSyncOp,
 } from "./ejoosAppliedHistory";
 import { appendApplyHistorySheetRows } from "./ejoosChangeHistorySheet";
-import {
-  cellValueToOosText,
-  findExistingOosPersonRow,
-  findOosStyleSourceRow,
-  formatOosRelativesText,
-  mergeOosHistoryValue,
-  OOS_HISTORY_COLUMNS,
-  OOS_RELATIVES_COLUMN,
-} from "./ejoosOosText";
+import { mergeOosHistoryValue } from "./ejoosOosText";
 
 const col = (letter: string) => {
   let index = 0;
@@ -613,7 +605,7 @@ function applyTransferCancelled(input: {
   oos: SheetLike | undefined;
   timesheet: SheetLike | undefined;
 }) {
-  const { op, plan, excluded, shpo, oos, timesheet } = input;
+  const { op, plan, excluded, shpo, timesheet } = input;
   if (op.payload.reviewReason === "CANCEL_TRANSFER_BUT_NOT_IN_CURRENT_SH") {
     return;
   }
@@ -623,20 +615,6 @@ function applyTransferCancelled(input: {
   const fullName = op.fullName;
   const rank = op.rank;
   const positionIndex = op.payload.previousIndex || op.positionIndex;
-
-  if (
-    op.payload.restoreOos === "1" &&
-    excluded &&
-    excludedRowNumber > 0 &&
-    oos
-  ) {
-    restoreOosFromExcluded(excluded, excludedRowNumber, oos, {
-      rank,
-      fullName,
-      personId,
-      positionIndex,
-    });
-  }
 
   if (excluded && excludedRowNumber > 0) {
     for (let column = col("A"); column <= col("AF"); column += 1) {
@@ -925,7 +903,7 @@ function applyPositionChange(input: {
       for (let day = appointmentDay; day <= 31; day += 1) {
         timesheet.cell(historyRow, col("I") + day - 1).value(null);
       }
-    } else if (preserveHistory) {
+    } else if (preserveHistory && !op.payload.transferCancelOrder) {
       preserveCancelledTransferTimesheetHistory({
         timesheet,
         staffRow: timesheetRow,
@@ -1062,12 +1040,11 @@ async function applyTimesheetMonthHeader(input: {
   ) {
     return input.file;
   }
+  const expectedMonth = parseTimesheetMonthHeaderText(expected);
   if (
     found &&
-    expected &&
-    parseTimesheetMonthHeaderText(expected) &&
-    (found.month !== parseTimesheetMonthHeaderText(expected)?.month ||
-      found.year !== parseTimesheetMonthHeaderText(expected)?.year)
+    expectedMonth &&
+    (found.month !== expectedMonth.month || found.year !== expectedMonth.year)
   ) {
     return input.file;
   }
@@ -1678,19 +1655,6 @@ function applyExcludeTransfer(input: {
   }
 }
 
-function copyRowPresentation(
-  sheet: SheetLike,
-  sourceRow: number,
-  targetRow: number,
-  endCol: number,
-) {
-  const height = sheet.row?.(sourceRow).height();
-  if (typeof height === "number") sheet.row?.(targetRow).height(height);
-  for (let column = 1; column <= endCol; column += 1) {
-    copyCellStyle(sheet.cell(sourceRow, column), sheet.cell(targetRow, column));
-  }
-}
-
 function copyRowHeight(
   sheet: SheetLike,
   sourceRow: number,
@@ -1766,70 +1730,6 @@ function fillExcludedBaseValuesFromOos(
       excluded.cell(targetRow, toCol).value(null);
     }
   });
-}
-
-function fillOosBaseValuesFromExcluded(
-  excluded: SheetLike,
-  sourceRow: number,
-  oos: SheetLike,
-  targetRow: number,
-) {
-  EXCLUDED_TO_OOS_BASE.forEach(([fromCol, toCol]) => {
-    const value = excluded.cell(sourceRow, fromCol).value();
-    if (!isMeaningfulCellValue(value)) return;
-    if (toCol === OOS_RELATIVES_COLUMN) {
-      writeOosWrappedCell(oos, targetRow, toCol, formatOosRelativesText(value));
-      return;
-    }
-    if (OOS_HISTORY_COLUMNS.includes(toCol)) {
-      writeOosWrappedCell(oos, targetRow, toCol, mergeOosHistoryValue("", value));
-      return;
-    }
-    const text = cellValueToOosText(value);
-    oos.cell(targetRow, toCol).value(text || value);
-  });
-}
-
-function restoreOosFromExcluded(
-  excluded: SheetLike,
-  sourceRow: number,
-  oos: SheetLike,
-  person: {
-    rank: string;
-    fullName: string;
-    personId: string;
-    positionIndex: string;
-  },
-) {
-  const existingRow = findExistingOosPersonRow(
-    (row, column) => oos.cell(row, column).value(),
-    {
-      personId: person.personId,
-      fullName: person.fullName,
-      lastRow: oos.usedRange()?.endCell().rowNumber() ?? 40,
-    },
-  );
-  if (existingRow) return;
-  const targetRow = nextEmptyPersonRow(oos, 6, col("B"));
-  copyRowPresentation(
-    oos,
-    findOosStyleSourceRow(
-      (row, column) => oos.cell(row, column).value(),
-      {
-        skipRows: [targetRow],
-        lastRow: oos.usedRange()?.endCell().rowNumber() ?? 40,
-      },
-    ),
-    targetRow,
-    col("AG"),
-  );
-  fillOosBaseValuesFromExcluded(excluded, sourceRow, oos, targetRow);
-  if (person.rank) oos.cell(targetRow, col("A")).value(person.rank);
-  if (person.fullName) oos.cell(targetRow, col("B")).value(person.fullName);
-  if (person.personId) oos.cell(targetRow, col("C")).value(person.personId);
-  if (person.positionIndex) {
-    appendCellHistory(oos, targetRow, col("D"), person.positionIndex);
-  }
 }
 
 function isMeaningfulCellValue(value: unknown) {
@@ -2110,7 +2010,10 @@ const paintTimesheetArchiveDays = (
 ) => {
   if (rowNumber <= 0) return;
   const activeFromDay = dayFromOrderLabel(payload.timesheetActiveFrom || "");
-  if (timesheetRowIsHistoryOnly(timesheet, rowNumber, activeFromDay)) {
+  if (
+    timesheetRowIsHistoryOnly(timesheet, rowNumber, activeFromDay) &&
+    !payload.transferCancelOrder
+  ) {
     return;
   }
   const rawSpans = parseTimesheetAbsenceSpans(payload.timesheetAbsenceSpans || "");
@@ -2207,18 +2110,6 @@ function nextAppendRow(
 ) {
   const used = sheet.usedRange();
   return Math.max(minRow, (used?.endCell().rowNumber() ?? minRow - 1) + 1);
-}
-
-function nextEmptyPersonRow(
-  sheet: SheetLike,
-  minRow: number,
-  nameColumn: number,
-) {
-  const end = sheet.usedRange()?.endCell().rowNumber() ?? minRow;
-  for (let row = minRow; row <= end + 5; row += 1) {
-    if (!isMeaningfulCellValue(sheet.cell(row, nameColumn).value())) return row;
-  }
-  return end + 1;
 }
 
 function writeOosWrappedCell(

@@ -55,6 +55,8 @@ import {
   buildEjoosSyncPlan,
   buildProtocolText,
   collectProcessedMovementKeys,
+  MONTH_ROLLOVER_BLOCK_MESSAGE,
+  planBlocksWorkbookApply,
   resolveJournalTimesheetDay,
 } from "./ejoosSyncPlan";
 import { buildNormalizedSnapshotFromWorkbook } from "./ejoosNormalized";
@@ -750,6 +752,10 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
       setError("Немає сесії змін або канонічного ЕЖООС");
       return;
     }
+    if (planBlocksWorkbookApply(session.plan)) {
+      setError(MONTH_ROLLOVER_BLOCK_MESSAGE);
+      return;
+    }
     const accepted = collectedAcceptedOps(session);
     const ops = collectedWritableAcceptedOps(session);
     if (!accepted.length) {
@@ -849,6 +855,10 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
   const acceptAndApplyPerson = async (personChangeId: string) => {
     if (!session || !ejoosSnapshot || !live?.current) {
       setError("Немає сесії змін або канонічного ЕЖООС");
+      return;
+    }
+    if (planBlocksWorkbookApply(session.plan)) {
+      setError(MONTH_ROLLOVER_BLOCK_MESSAGE);
       return;
     }
     const person = session.people.find((item) => item.id === personChangeId);

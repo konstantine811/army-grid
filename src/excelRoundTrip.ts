@@ -602,6 +602,11 @@ export type ReadWorkbookOptions = {
   skipStyleFills?: boolean;
   /** Skip building `rows[]` objects — rawRows only (less memory). */
   skipRowObjects?: boolean;
+  /**
+   * Keep empty leading columns so rawRows[0] stays Excel column A.
+   * ЕЖООС parsers address Табель/ШПО by letter (B=індекс, G=ПІБ).
+   */
+  preserveLeadingColumns?: boolean;
 };
 
 /** Fast path for ЕЖООС↔1ПБ sync: few sheets, few columns, no style scans. */
@@ -619,6 +624,7 @@ export const EJOOS_SYNC_READ_OPTIONS: ReadWorkbookOptions = {
   maxColumns: 48,
   skipStyleFills: true,
   skipRowObjects: true,
+  preserveLeadingColumns: true,
 };
 
 export async function readWorkbookSnapshot(
@@ -674,7 +680,9 @@ export async function readWorkbookSnapshot(
 
       return hasHeader || hasData;
     });
-    const firstUsedColumnIndex = usedColumnIndexes[0] ?? 0;
+    const firstUsedColumnIndex = options.preserveLeadingColumns
+      ? 0
+      : usedColumnIndexes[0] ?? 0;
     let lastUsedColumnIndex =
       usedColumnIndexes.at(-1) ?? Math.max(0, rawColumnCount - 1);
     if (options.maxColumns) {

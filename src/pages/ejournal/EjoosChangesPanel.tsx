@@ -181,10 +181,23 @@ export function EjoosChangesPanel() {
             Зміни · {session.plan.timesheetDayLabel}
           </Typography>
           <Typography variant="body2" className="ejoos-muted">
+            Джерело 1ПБ станом на {session.plan.timesheetDayLabel}. Табель буде
+            оновлено лише по {session.plan.timesheetDayLabel}.
+          </Typography>
+          <Typography variant="body2" className="ejoos-muted">
             {session.pbFileName} · {session.counters.changes} людей ·{" "}
             {session.counters.autoReady} авто · {session.counters.needsReview}{" "}
             перевірити · у черзі {queuedPeople.length}
           </Typography>
+          {session.plan.monthRolloverRequired ? (
+            <Typography variant="body2" sx={{ mt: 0.5, color: "#f5c16c" }}>
+              MONTH_ROLLOVER_REQUIRED: Табель зараз «
+              {session.plan.ejoosTimesheetMonthLabel || "інший місяць"}», 1ПБ —
+              {session.plan.timesheetDayLabel}. Apply заблоковано. Заголовок не
+              перейменовуємо, щоб серпневі клітинки не стали вересневими. Потрібен
+              окремий файл ЕЖООС на новий місяць.
+            </Typography>
+          ) : null}
         </Box>
         <Stack direction="row" spacing={1} style={{ flexWrap: "wrap" }}>
           <Button
@@ -209,7 +222,11 @@ export function EjoosChangesPanel() {
             <Button
               size="small"
               variant="contained"
-              disabled={!writableQueuedCount || isLoading}
+              disabled={
+                !writableQueuedCount ||
+                isLoading ||
+                Boolean(session.plan.monthRolloverRequired)
+              }
               onClick={() => setBulkApplyOpen(true)}
               sx={{ color: "#1a1a14" }}
             >
@@ -322,7 +339,11 @@ export function EjoosChangesPanel() {
             <PersonChangeCard
               person={selectedPerson}
               timesheetDay={session?.plan.timesheetDay ?? 31}
-              canQueue={personCanEnterApplyQueue(selectedPerson)}
+              canQueue={
+                personCanEnterApplyQueue(selectedPerson) &&
+                !session.plan.monthRolloverRequired
+              }
+              applyBlocked={Boolean(session.plan.monthRolloverRequired)}
               onAccept={() => {
                 if (selectedPerson.decision === "accepted") {
                   setDecision(selectedPerson.id, "pending");

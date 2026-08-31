@@ -8,6 +8,7 @@ import { applyConfirmedEjoosOps } from "./ejoosSyncApply";
 import { parseExcluded } from "./ejoosLiveViews";
 import {
   buildEjoosSyncPlan,
+  MONTH_ROLLOVER_BLOCK_MESSAGE,
   parseEjoosOos,
   parseEjoosShpo,
 } from "./ejoosSyncPlan";
@@ -85,6 +86,8 @@ type CancelRestoreCase = {
   title: string;
   nameRe: RegExp;
   julyFromIndex?: string;
+  existingOos?: boolean;
+  expectedTimesheetDays?: string[];
   archive: ArchivePeriod[];
 };
 
@@ -248,6 +251,12 @@ const buildStaleEjoos = async (person: CancelRestoreCase) => {
   oos.cell(6, 2).value("НОВІКОВ Олександр Сергійович");
   oos.cell(6, 3).value("1");
   oos.cell(6, 4).value("2103378");
+  if (person.existingOos) {
+    oos.cell(7, 1).value("солдат");
+    oos.cell(7, 2).value(person.name);
+    oos.cell(7, 3).value(person.id);
+    oos.cell(7, 4).value(person.index);
+  }
 
   excluded.cell(1, 1).value("3. Виключені");
   excluded.cell(6, 1).value("солдат");
@@ -292,6 +301,7 @@ const assertCancelRestoreRoundTrip = async (person: CancelRestoreCase) => {
     (op) => `${op.kind}:${op.payload.type || ""}:${op.class}`,
   );
 
+  expect(plan.monthRolloverRequired).toBe(false);
   expect(ops.some((op) => op.kind === "exclude_transfer")).toBe(false);
   expect(
     ops.some(
@@ -329,48 +339,55 @@ const assertCancelRestoreRoundTrip = async (person: CancelRestoreCase) => {
     index: string;
     name: string;
     id: string;
-    day4: string;
-    day25: string;
+    days: string[];
   }> = [];
   for (let row = 7; row <= 40; row += 1) {
     const name = String(timesheetSheet.cell(row, 7).value() ?? "").trim();
     const id = String(timesheetSheet.cell(row, 8).value() ?? "").trim();
     if (!name && !id) continue;
     if (id !== person.id && !person.nameRe.test(name)) continue;
+    const days = Array.from({ length: 25 }, (_, index) =>
+      String(timesheetSheet.cell(row, 9 + index).value() ?? "").trim(),
+    );
     timesheetHits.push({
       row,
       index: String(timesheetSheet.cell(row, 2).value() ?? "").trim(),
       name,
       id,
-      day4: String(timesheetSheet.cell(row, 12).value() ?? "").trim(),
-      day25: String(timesheetSheet.cell(row, 33).value() ?? "").trim(),
+      days,
     });
   }
   const activeTimesheet = timesheetHits.filter(
-    (row) => !/вибув/i.test(row.day4) && row.day25 !== "",
+    (row) => !/вибув/i.test(row.days[3] || "") && row.days[24] !== "",
   );
   const slot = shpo.find((row) => row.positionIndex === person.index);
+  const personOos = oos.filter((row) => row.personId === person.id);
 
   expect(slot?.fullName).toMatch(person.nameRe);
   expect(slot?.personId).toBe(person.id);
-  expect(oos.some((row) => row.personId === person.id)).toBe(true);
+  expect(personOos, JSON.stringify(oos)).toHaveLength(1);
   expect(excluded.some((row) => row.personId === person.id)).toBe(false);
   expect(activeTimesheet, JSON.stringify(timesheetHits)).toHaveLength(1);
   expect(activeTimesheet[0]?.index).toBe(person.index);
-  expect(activeTimesheet[0]?.day25).toBe("+");
+  expect(activeTimesheet[0]?.days[24]).toBe("+");
+  if (person.expectedTimesheetDays) {
+    expect(activeTimesheet[0]?.days).toEqual(person.expectedTimesheetDays);
+  }
 
   const rebuilt = buildEjoosSyncPlan(after, pb, {
     statusRules: DEFAULT_STATUS_RULES,
   });
-  const rebuiltCancel = rebuilt.ops.filter(
+  const remaining = rebuilt.ops.filter(
     (op) =>
-      (op.personId === person.id || person.nameRe.test(op.fullName)) &&
-      op.payload.type === "TRANSFER_CANCELLED" &&
-      isWorkbookApplyOp(op),
+      isWorkbookApplyOp(op) &&
+      (op.personId === person.id || person.nameRe.test(op.fullName)),
   );
-  expect(rebuiltCancel, rebuiltCancel.map((op) => op.after).join(" | ")).toHaveLength(
-    0,
-  );
+  expect(
+    remaining,
+    remaining
+      .map((op) => `${op.kind}:${op.payload.type || ""}:${op.after}`)
+      .join(" | "),
+  ).toHaveLength(0);
 };
 
 const dobrovolskyi: CancelRestoreCase = {
@@ -380,6 +397,33 @@ const dobrovolskyi: CancelRestoreCase = {
   title: "Водій зенітного ракетного відділення",
   nameRe: /добровольськ/i,
   julyFromIndex: "2103239",
+  expectedTimesheetDays: [
+    "-",
+    "+",
+    "+",
+    "+",
+    "+",
+    "+",
+    "+",
+    "+",
+    "+",
+    "+",
+    "лік",
+    "лік",
+    "лік",
+    "лік",
+    "лік",
+    "лік",
+    "лік",
+    "лік",
+    "СЗЧ",
+    "СЗЧ",
+    "+",
+    "+",
+    "+",
+    "+",
+    "+",
+  ],
   archive: [
     {
       type: "ЛІКУВАННЯ",
@@ -410,6 +454,33 @@ const yamkovyi: CancelRestoreCase = {
   index: "2103435",
   title: "Стрілець",
   nameRe: /ямков/i,
+  expectedTimesheetDays: [
+    "-",
+    "+",
+    "+",
+    "+",
+    "+",
+    "+",
+    "+",
+    "+",
+    "+",
+    "+",
+    "+",
+    "+",
+    "+",
+    "+",
+    "+",
+    "+",
+    "+",
+    "+",
+    "лік",
+    "лік",
+    "+",
+    "+",
+    "+",
+    "+",
+    "+",
+  ],
   archive: [
     {
       type: "ЛІКУВАННЯ",
@@ -431,6 +502,10 @@ describe("August fixtures: cancelled transfer still in sh", () => {
 
   it("ЯМКОВИЙ: ПОСАДА → ПЕРЕВ → СКАСУВАННЯ → лікування → повернення", async () => {
     await assertCancelRestoreRoundTrip(yamkovyi);
+  }, 30_000);
+
+  it("ДОБРОВОЛЬСЬКИЙ: існуюча картка ООС не дублюється при restore", async () => {
+    await assertCancelRestoreRoundTrip({ ...dobrovolskyi, existingOos: true });
   }, 30_000);
 });
 
@@ -480,5 +555,35 @@ describe("August fixture: ОЛІЙНИК Нема в sh", () => {
     }
     const after = new Uint8Array(await ejoos.file.arrayBuffer());
     expect(after).toEqual(before);
+  }, 30_000);
+});
+
+describe("month rollover: September 1PB vs August EJOOS", () => {
+  it("blocks apply and does not rename the August timesheet header", async () => {
+    const [pbAugust, ejoos] = await Promise.all([
+      buildPb(dobrovolskyi),
+      buildStaleEjoos(dobrovolskyi),
+    ]);
+    const pb = await snapshotOf(pbAugust.file, "1ПБ_01092026.xlsx");
+    const plan = buildEjoosSyncPlan(ejoos, pb, {
+      statusRules: DEFAULT_STATUS_RULES,
+    });
+    expect(plan.timesheetDay).toBe(1);
+    expect(plan.timesheetDayLabel).toBe("01.09.2026");
+    expect(plan.monthRolloverRequired).toBe(true);
+    expect(plan.ejoosTimesheetMonthLabel).toMatch(/серпень/i);
+
+    const applyOps = plan.ops.filter(isWorkbookApplyOp);
+    await expect(
+      applyConfirmedEjoosOps({ ejoos, plan, ops: applyOps }),
+    ).rejects.toThrow(MONTH_ROLLOVER_BLOCK_MESSAGE);
+
+    const XlsxPopulate = await loadPopulate();
+    const written = await XlsxPopulate.fromDataAsync(ejoos.file);
+    const header = String(
+      written.sheet("6. Табель").cell(2, 9).value() ?? "",
+    );
+    expect(header).toMatch(/серпень/i);
+    expect(header).not.toMatch(/вересень/i);
   }, 30_000);
 });

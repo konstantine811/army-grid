@@ -217,6 +217,7 @@ export function PersonChangeCard({
   onPatchPayload,
   isLoading,
   canQueue,
+  applyBlocked,
 }: {
   person: PersonChange;
   timesheetDay: number;
@@ -229,6 +230,7 @@ export function PersonChangeCard({
   onPatchPayload?: (opId: string, patch: Record<string, string>) => void;
   isLoading?: boolean;
   canQueue?: boolean;
+  applyBlocked?: boolean;
 }) {
   const isHistory = mode === "history";
   const timesheetPreview = useMemo(
@@ -784,6 +786,7 @@ export function PersonChangeCard({
             variant="contained"
             disabled={
               Boolean(isLoading) ||
+              Boolean(applyBlocked) ||
               person.severity === "conflict" ||
               needsDestination ||
               needsTimesheetCode ||

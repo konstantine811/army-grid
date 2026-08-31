@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { parseEjoosOos } from "./ejoosSyncPlan";
 import {
+  createOosRowResolver,
+  findDuplicateOosById,
   findExistingOosPersonRow,
+  findPossibleDuplicateOosByName,
   isOosSectionHeaderText,
+  oosIdentityFromOp,
 } from "./ejoosOosText";
 import type { ExcelSheetSnapshot } from "../../excelRoundTrip";
 
@@ -80,5 +84,90 @@ describe("parseEjoosOos", () => {
     const parsed = parseEjoosOos(sheet);
     expect(parsed.map((row) => row.excelRow)).toEqual([6, 9]);
     expect(isOosSectionHeaderText(sheet.rawRows[6][1] as string)).toBe(true);
+  });
+});
+
+describe("createOosRowResolver identity aliases", () => {
+  it("keeps nextPersonId and personId on the same reserved row", () => {
+    let allocated = 0;
+    const resolver = createOosRowResolver({
+      getCell: () => "",
+      lastRow: 10,
+      allocateEmpty: () => {
+        allocated += 1;
+        return 20;
+      },
+    });
+    const first = resolver.resolve(
+      oosIdentityFromOp({
+        personId: "",
+        fullName: "ДОБРОВОЛЬСЬКИЙ Володимир Миколайович",
+        payload: { nextPersonId: "12840" },
+      }),
+      { create: true },
+    );
+    const second = resolver.resolve(
+      oosIdentityFromOp({
+        personId: "12840",
+        fullName: "ДОБРОВОЛЬСЬКИЙ Володимир Миколайович",
+      }),
+      { create: true },
+    );
+    expect(first).toBe(20);
+    expect(second).toBe(20);
+    expect(allocated).toBe(1);
+  });
+
+  it("updates an existing ID instead of allocating a new row", () => {
+    let allocated = 0;
+    const resolver = createOosRowResolver({
+      getCell: (row, column) => {
+        if (row !== 7) return "";
+        if (column === 2) return "ДОБРОВОЛЬСЬКИЙ Володимир Миколайович";
+        if (column === 3) return "12840";
+        return "";
+      },
+      lastRow: 10,
+      allocateEmpty: () => {
+        allocated += 1;
+        return 20;
+      },
+    });
+    expect(
+      resolver.resolve(
+        { personId: "12840", fullName: "ДОБРОВОЛЬСЬКИЙ Володимир Миколайович" },
+        { create: true },
+      ),
+    ).toBe(7);
+    expect(allocated).toBe(0);
+  });
+});
+
+describe("OOS duplicate checks", () => {
+  it("groups two cards with the same ID", () => {
+    expect(
+      findDuplicateOosById([
+        { excelRow: 100, personId: "12840", fullName: "A" },
+        { excelRow: 101, personId: "12840", fullName: "A" },
+        { excelRow: 102, personId: "1", fullName: "B" },
+      ]).map((group) => group.map((row) => row.excelRow)),
+    ).toEqual([[100, 101]]);
+  });
+
+  it("warns when the same name has a row without ID", () => {
+    expect(
+      findPossibleDuplicateOosByName([
+        {
+          excelRow: 100,
+          personId: "12840",
+          fullName: "ДОБРОВОЛЬСЬКИЙ Володимир Миколайович",
+        },
+        {
+          excelRow: 101,
+          personId: "",
+          fullName: "ДОБРОВОЛЬСЬКИЙ, Володимир Миколайович.",
+        },
+      ]).map((group) => group.map((row) => row.excelRow)),
+    ).toEqual([[100, 101]]);
   });
 });

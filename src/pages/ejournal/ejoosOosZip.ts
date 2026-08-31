@@ -7,12 +7,14 @@ import type {
 import { EXCLUDED_TO_OOS_BASE } from "./ejoosExcludedColumns";
 import {
   cellValueToOosText,
+  createOosRowResolver,
+  findNextEmptyOosDataRow,
   findOosStyleSourceRow,
   formatOosRelativesText,
-  findExistingOosPersonRow,
   isJammedOosHistory,
   isOosBlankOrErrorText,
-  isOosSectionHeaderText,
+  oosIdentityAliasKeys,
+  oosIdentityFromOp,
   isOosWrapColumn,
   mergeOosHistoryValue,
   OOS_DATA_COLUMNS,
@@ -25,7 +27,6 @@ import {
 } from "./ejoosOosText";
 import {
   findEjoosSheet,
-  parseEjoosOos,
   type EjoosSyncOp,
   type EjoosSyncPlan,
 } from "./ejoosSyncPlan";
@@ -43,29 +44,6 @@ const cellAt = (
 
 const excludedColumnForOos = (oosColumn: number) =>
   EXCLUDED_TO_OOS_BASE.find(([, toCol]) => toCol === oosColumn)?.[0];
-
-const nextEmptyOosRow = (
-  sheet: ExcelSheetSnapshot,
-  reserved: Set<number>,
-) => {
-  let sectionStart = sheet.rawRows.length + 30;
-  for (let row = 6; row <= sheet.rawRows.length; row += 1) {
-    if (isOosSectionHeaderText(cellValueToOosText(cellAt(sheet, row, 2)))) {
-      sectionStart = row;
-      break;
-    }
-  }
-  for (let row = 6; row < sectionStart; row += 1) {
-    if (reserved.has(row)) continue;
-    const name = cellValueToOosText(cellAt(sheet, row, 2));
-    const id = cellValueToOosText(cellAt(sheet, row, 3));
-    if (isOosBlankOrErrorText(name) && isOosBlankOrErrorText(id)) {
-      reserved.add(row);
-      return row;
-    }
-  }
-  return 0;
-};
 
 const oosIdentityNumber = (column: number, value: string | null) =>
   (column === 3 || column === 15) && value && /^\d+$/.test(value.trim())
@@ -111,20 +89,33 @@ const oosStyleOnlyWrite = (
   wrapText: true,
 });
 
-const personTouchKey = (op: EjoosSyncOp) =>
-  String(op.personId || op.fullName || "")
-    .trim()
-    .toLocaleLowerCase("uk-UA");
+const excludedSourceRowOf = (op: EjoosSyncOp) =>
+  Number(
+    op.payload.excludedSourceExcelRow ||
+      (op.payload.restoreOos === "1" ? op.payload.excludedExcelRow : "") ||
+      0,
+  );
+
+const shouldCreateOosRow = (op: EjoosSyncOp) =>
+  Boolean(excludedSourceRowOf(op)) ||
+  op.payload.restoreOos === "1" ||
+  op.kind === "position_change" ||
+  op.payload.isTempArrivalPlacement === "1";
 
 const shouldTouchOos = (op: EjoosSyncOp, excludedKeys: Set<string>) => {
   if (op.kind === "exclude_transfer") return false;
-  const key = personTouchKey(op);
-  if (key && excludedKeys.has(key)) return false;
+  if (
+    oosIdentityAliasKeys(oosIdentityFromOp(op)).some((key) =>
+      excludedKeys.has(key),
+    )
+  ) {
+    return false;
+  }
   return (
     op.kind === "position_change" ||
     op.kind === "rank_change" ||
-    (op.kind === "shpo_occupant" &&
-      Number(op.payload.excludedSourceExcelRow || 0) > 0) ||
+    op.payload.restoreOos === "1" ||
+    (op.kind === "shpo_occupant" && excludedSourceRowOf(op) > 0) ||
     Number(op.payload.oosExcelRow || 0) > 0
   );
 };
@@ -173,61 +164,30 @@ export async function applyOosHistoryPresentation(input: {
   const excludedKeys = new Set(
     input.ops
       .filter((op) => op.kind === "exclude_transfer")
-      .map(personTouchKey)
-      .filter(Boolean),
+      .flatMap((op) => oosIdentityAliasKeys(oosIdentityFromOp(op))),
   );
   const touchOps = input.ops.filter((op) => shouldTouchOos(op, excludedKeys));
 
-  const oosPeople = parseEjoosOos(oos);
   const reserved = new Set<number>();
-  const rowByPersonKey = new Map<string, number>();
   const writes: ZipCellWrite[] = [];
-
-  const resolveRow = (op: EjoosSyncOp) => {
-    const key = personTouchKey(op);
-    if (key && rowByPersonKey.has(key)) return rowByPersonKey.get(key)!;
-
-    const known = Number(op.payload.oosExcelRow || 0);
-    if (known > 0) {
-      if (key) rowByPersonKey.set(key, known);
-      return known;
-    }
-    const personId = op.payload.nextPersonId || op.personId;
-    const fullName = (op.payload.nextName || op.fullName).toLocaleLowerCase(
-      "uk-UA",
-    );
-    const found =
-      (personId && oosPeople.find((row) => row.personId === personId)) ||
-      oosPeople.find(
-        (row) => row.fullName.toLocaleLowerCase("uk-UA") === fullName,
+  const resolver = createOosRowResolver({
+    getCell: (row, column) => cellAt(oos, row, column),
+    lastRow: oos.rawRows.length,
+    allocateEmpty: () => {
+      const row = findNextEmptyOosDataRow(
+        (scanRow, column) => cellAt(oos, scanRow, column),
+        { lastRow: oos.rawRows.length + 30, reserved },
       );
-    if (found) {
-      if (key) rowByPersonKey.set(key, found.excelRow);
-      return found.excelRow;
-    }
-    const scanned = findExistingOosPersonRow(
-      (row, column) => cellAt(oos, row, column),
-      {
-        personId,
-        fullName: op.payload.nextName || op.fullName,
-        lastRow: oos.rawRows.length,
-      },
-    );
-    if (scanned) {
-      if (key) rowByPersonKey.set(key, scanned);
-      return scanned;
-    }
-    if (
-      op.payload.excludedSourceExcelRow ||
-      op.kind === "position_change" ||
-      op.payload.isTempArrivalPlacement === "1"
-    ) {
-      const row = nextEmptyOosRow(oos, reserved);
-      if (key) rowByPersonKey.set(key, row);
+      if (row) reserved.add(row);
       return row;
-    }
-    return 0;
-  };
+    },
+  });
+
+  const resolveRow = (op: EjoosSyncOp) =>
+    resolver.resolve(oosIdentityFromOp(op), {
+      knownRow: Number(op.payload.oosExcelRow || 0),
+      create: shouldCreateOosRow(op),
+    });
 
   const rowByOpId = new Map<string, number>();
   const targetRows = new Set<number>();
@@ -247,8 +207,11 @@ export async function applyOosHistoryPresentation(input: {
     row: number,
     column: number,
   ): CellValue | undefined => {
-    const excludedRow = Number(op.payload.excludedSourceExcelRow || 0);
-    const isNewCard = !Number(op.payload.oosExcelRow || 0) && excludedRow > 0;
+    const excludedRow = excludedSourceRowOf(op);
+    const isNewCard =
+      excludedRow > 0 &&
+      isOosBlankOrErrorText(cellValueToOosText(cellAt(oos, row, 2))) &&
+      isOosBlankOrErrorText(cellValueToOosText(cellAt(oos, row, 3)));
     if (isNewCard && excluded) {
       const fromCol = excludedColumnForOos(column);
       if (fromCol) return cellAt(excluded, excludedRow, fromCol);
@@ -268,14 +231,12 @@ export async function applyOosHistoryPresentation(input: {
     const personId = op.payload.nextPersonId || op.personId;
     const nextIndex = op.payload.nextIndex || op.positionIndex;
     const appointment = op.payload.orderDate || input.plan.timesheetDayLabel;
-    const excludedSourceRow = Number(op.payload.excludedSourceExcelRow || 0);
-    const fromExcludedCard =
-      excludedSourceRow > 0 && !Number(op.payload.oosExcelRow || 0);
-    const isNewCard =
-      fromExcludedCard ||
-      (!Number(op.payload.oosExcelRow || 0) &&
-        (op.kind === "position_change" ||
-          op.payload.isTempArrivalPlacement === "1"));
+    const excludedSourceRow = excludedSourceRowOf(op);
+    const rowWasEmpty =
+      isOosBlankOrErrorText(cellValueToOosText(cellAt(oos, row, 2))) &&
+      isOosBlankOrErrorText(cellValueToOosText(cellAt(oos, row, 3)));
+    const fromExcludedCard = excludedSourceRow > 0 && rowWasEmpty;
+    const isNewCard = rowWasEmpty && shouldCreateOosRow(op);
     const appendHistory = op.kind === "position_change" || isNewCard;
     const isRankChange = op.kind === "rank_change";
 
