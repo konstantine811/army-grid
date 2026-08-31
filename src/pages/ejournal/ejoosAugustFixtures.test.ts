@@ -358,6 +358,19 @@ const assertCancelRestoreRoundTrip = async (person: CancelRestoreCase) => {
   expect(activeTimesheet, JSON.stringify(timesheetHits)).toHaveLength(1);
   expect(activeTimesheet[0]?.index).toBe(person.index);
   expect(activeTimesheet[0]?.day25).toBe("+");
+
+  const rebuilt = buildEjoosSyncPlan(after, pb, {
+    statusRules: DEFAULT_STATUS_RULES,
+  });
+  const rebuiltCancel = rebuilt.ops.filter(
+    (op) =>
+      (op.personId === person.id || person.nameRe.test(op.fullName)) &&
+      op.payload.type === "TRANSFER_CANCELLED" &&
+      isWorkbookApplyOp(op),
+  );
+  expect(rebuiltCancel, rebuiltCancel.map((op) => op.after).join(" | ")).toHaveLength(
+    0,
+  );
 };
 
 const dobrovolskyi: CancelRestoreCase = {

@@ -47,6 +47,31 @@ describe("isWorkbookApplyOp", () => {
     expect(isWorkbookApplyOp(cancel)).toBe(false);
   });
 
+  it("does not apply TRANSFER_CANCELLED when nothing is left to write", () => {
+    const cancel = op({
+      kind: "other_manual",
+      class: "ready",
+      payload: { type: "TRANSFER_CANCELLED" },
+    });
+    expect(isInformationalOp(cancel)).toBe(true);
+    expect(isWorkbookApplyOp(cancel)).toBe(false);
+  });
+
+  it("applies TRANSFER_CANCELLED when timesheet or excluded still needs a write", () => {
+    const withExcluded = op({
+      kind: "other_manual",
+      class: "ready",
+      payload: { type: "TRANSFER_CANCELLED", excludedExcelRow: "6" },
+    });
+    const withTimesheet = op({
+      kind: "other_manual",
+      class: "ready",
+      payload: { type: "TRANSFER_CANCELLED", restoreTimesheet: "1" },
+    });
+    expect(isWorkbookApplyOp(withExcluded)).toBe(true);
+    expect(isWorkbookApplyOp(withTimesheet)).toBe(true);
+  });
+
   it("allows exclude_transfer", () => {
     expect(
       isWorkbookApplyOp(op({ kind: "exclude_transfer", class: "ready" })),

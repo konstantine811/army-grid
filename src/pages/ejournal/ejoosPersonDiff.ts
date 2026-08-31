@@ -781,10 +781,14 @@ export const buildSheetImpacts = (ops: EjoosSyncOp[]): SheetImpactItem[] => {
               ? "Відновити активну картку з «Виключені»"
               : "Активний ООС уже є — не чіпаємо",
         );
+        const timesheetWrite =
+          op.payload.restoreTimesheet === "1" ||
+          Boolean(op.payload.historyTimesheetExcelRow) ||
+          Boolean(op.payload.duplicateTimesheetExcelRow);
         setImpact(
           map,
           "timesheet",
-          needsShReview ? "skip" : "edit",
+          needsShReview ? "skip" : timesheetWrite ? "edit" : "skip",
           needsShReview
             ? "Історичне вибуття лишаємо; новий активний рядок не створюємо автоматично"
             : op.payload.restoreTimesheet === "1"
@@ -802,8 +806,12 @@ export const buildSheetImpacts = (ops: EjoosSyncOp[]): SheetImpactItem[] => {
                     ? `R${op.payload.timesheetExcelRow || "?"}: «+» до ПЕРЕВ, «−» між ПЕРЕВ і скасуванням; примітка в ШПО R / історії${archivePart}${dupPart}`
                     : `R${op.payload.timesheetExcelRow || "?"}: «+» з ${op.payload.timesheetActiveFrom || "дати постановки"}; скасування №${op.payload.transferCancelOrder || "?"} — у ШПО R / історії, не в денній клітинці${archivePart}${dupPart}`;
                 })()
-              : "Відновити на штатній позиції",
-          op.payload.timesheetExcelRow
+              : op.payload.historyTimesheetExcelRow
+                ? `Очистити історичний рядок R${op.payload.historyTimesheetExcelRow} з «вибув»`
+                : op.payload.duplicateTimesheetExcelRow
+                  ? `Очистити дубль R${op.payload.duplicateTimesheetExcelRow}`
+                  : "Табель уже активний на штатній позиції — не чіпаємо",
+          timesheetWrite && op.payload.timesheetExcelRow
             ? `R${op.payload.timesheetExcelRow}`
             : undefined,
         );
@@ -1037,7 +1045,9 @@ const describeWillDo = (ops: EjoosSyncOp[]): string[] => {
       transferCancelled.payload.restoreOos === "1"
         ? "2. ООС: відновити з «Виключені»"
         : "2. ООС: активна картка вже є",
-      `3. Виключені: прибрати запис №${transferCancelled.payload.cancelledTransferOrder || "?"} (скасовано №${transferCancelled.payload.transferCancelOrder || "?"})`,
+      transferCancelled.payload.excludedExcelRow
+        ? `3. Виключені: прибрати запис №${transferCancelled.payload.cancelledTransferOrder || "?"} (скасовано №${transferCancelled.payload.transferCancelOrder || "?"})`
+        : "3. Виключені: рядка немає — новий не створюємо",
       transferCancelled.payload.restoreTimesheet === "1"
         ? (() => {
             const archiveSummary = formatArchiveSpanSummary(
@@ -1050,7 +1060,14 @@ const describeWillDo = (ops: EjoosSyncOp[]): string[] => {
               ? `6. Табель: R${transferCancelled.payload.timesheetExcelRow || staffIndex} — «+»/«−»; скасування в ШПО R / історії${archivePart}`
               : `6. Табель: R${transferCancelled.payload.timesheetExcelRow || staffIndex} — «+» з ${transferCancelled.payload.timesheetActiveFrom || "дати постановки"}; день скасування теж «+»${archivePart}`;
           })()
-        : `6. Табель: відновити на ${staffIndex}`,
+        : transferCancelled.payload.historyTimesheetExcelRow ||
+            transferCancelled.payload.duplicateTimesheetExcelRow
+          ? `6. Табель: очистити ${
+              transferCancelled.payload.historyTimesheetExcelRow
+                ? `історичний R${transferCancelled.payload.historyTimesheetExcelRow}`
+                : `дубль R${transferCancelled.payload.duplicateTimesheetExcelRow}`
+            }`
+          : `6. Табель: уже активний на ${staffIndex}`,
       transferCancelled.payload.historyTimesheetExcelRow
         ? `6. Табель: очистити історичний рядок R${transferCancelled.payload.historyTimesheetExcelRow} з «вибув»`
         : transferCancelled.payload.duplicateTimesheetExcelRow
@@ -1577,12 +1594,28 @@ export const collectedAcceptedOps = (session: EjoosDiffSession): EjoosSyncOp[] =
     .flatMap((person) => person.ops)
     .filter((op) => op.class !== "conflict");
 
+/** Скасування ПЕРЕВ пише книгу лише якщо є рядок/прапорець відновлення. */
+export const transferCancelledHasWorkbookWrites = (op: EjoosSyncOp) => {
+  if (op.payload.type !== "TRANSFER_CANCELLED") return false;
+  if (op.payload.reviewReason === "CANCEL_TRANSFER_BUT_NOT_IN_CURRENT_SH") {
+    return false;
+  }
+  return Boolean(
+    op.payload.excludedExcelRow ||
+      op.payload.restoreTimesheet === "1" ||
+      op.payload.restoreShpo === "1" ||
+      op.payload.restoreOos === "1" ||
+      op.payload.historyTimesheetExcelRow ||
+      op.payload.duplicateTimesheetExcelRow,
+  );
+};
+
 /** ПІБ / ID / звання або перегляд без запису в книгу. */
 export const isInformationalOp = (op: EjoosSyncOp) =>
   op.kind === "data_mismatch" ||
   (op.kind === "other_manual" &&
     op.payload.type === "TRANSFER_CANCELLED" &&
-    op.payload.reviewReason === "CANCEL_TRANSFER_BUT_NOT_IN_CURRENT_SH");
+    !transferCancelledHasWorkbookWrites(op));
 
 const WORKBOOK_APPLY_KINDS = new Set<EjoosOpKind>([
   "timesheet_day",
@@ -1601,8 +1634,7 @@ export const isWorkbookApplyOp = (op: EjoosSyncOp) => {
   if (isInformationalOp(op)) return false;
   if (WORKBOOK_APPLY_KINDS.has(op.kind)) return true;
   return (
-    op.kind === "other_manual" &&
-    op.payload.type === "TRANSFER_CANCELLED"
+    op.kind === "other_manual" && transferCancelledHasWorkbookWrites(op)
   );
 };
 

@@ -2749,10 +2749,8 @@ export const buildEjoosSyncPlan = (
     const excludedRow = cancelled
       ? findMovementExcludedRow(cancelled)
       : findMovementExcludedRow(event);
-    const timesheetHasDepart = timesheetRowsOf(
-      event.personId,
-      event.fullName,
-    ).some((row) => row.hasDepartureText);
+    const tsRows = timesheetRowsOf(event.personId, event.fullName);
+    const timesheetHasDepart = tsRows.some((row) => row.hasDepartureText);
     const evidence = Boolean(excludedRow || timesheetHasDepart);
     const shPerson =
       (event.personId && shPersonById.get(event.personId)) ||
@@ -2765,6 +2763,68 @@ export const buildEjoosSyncPlan = (
           [cancelled.destination, cancelled.changeText].filter(Boolean).join(" "),
         ) || cancelled.destination
       : "";
+    const staffIndex =
+      shPerson?.positionIndex ||
+      cancelled?.previousIndex ||
+      event.nextIndex ||
+      event.previousIndex ||
+      "";
+    const staffTs =
+      staffIndexTimesheetForPerson(
+        event.personId,
+        event.fullName,
+        staffIndex,
+      ) ||
+      [...tsRows]
+        .filter((row) => !row.hasDepartureText)
+        .sort((left, right) => right.plusDays.length - left.plusDays.length)[0] ||
+      tsRows.find((row) => row.hasDepartureText) ||
+      null;
+    const historyTs =
+      tsRows.find(
+        (row) =>
+          row.hasDepartureText && row.excelRow !== staffTs?.excelRow,
+      ) ?? null;
+    const staffTsScan = staffTs
+      ? tsRows.find((row) => row.excelRow === staffTs.excelRow)
+      : null;
+    const staffTsHasDepart = Boolean(staffTsScan?.hasDepartureText);
+    const hasActiveStaffTs = tsRows.some((row) => !row.hasDepartureText);
+    const restoreTargetTs =
+      staffTsHasDepart
+        ? staffTs
+        : tsRows.find((row) => row.hasDepartureText) || staffTs;
+    const restoreTimesheet =
+      inCurrentSh &&
+      (staffTsHasDepart || (timesheetHasDepart && !hasActiveStaffTs));
+    const shpoAtIndex = staffIndex ? shpoByIndex.get(staffIndex) ?? null : null;
+    const shpoPerson =
+      shpoAtIndex ||
+      (event.personId && shpoPersonById.get(event.personId)) ||
+      byPersonName(shpoPersonByName, event.personId, event.fullName) ||
+      null;
+    const shpoVacant = Boolean(
+      shpoAtIndex && !shpoAtIndex.fullName && !shpoAtIndex.personId,
+    );
+    const restoreShpo = inCurrentSh && shpoVacant;
+    const oosPerson =
+      (event.personId && oosPersonById.get(event.personId)) ||
+      byPersonName(oosPersonByName, event.personId, event.fullName) ||
+      null;
+    const restoreOos = inCurrentSh && !oosPerson && Boolean(excludedRow);
+    const timesheetActiveFrom =
+      staffAppointmentDateFor(event.personId, event.fullName, staffIndex) ||
+      event.orderDate ||
+      "";
+    const hasWorkbookWrite =
+      Boolean(excludedRow) ||
+      restoreTimesheet ||
+      restoreShpo ||
+      restoreOos ||
+      Boolean(historyTs);
+    // Після успішного rollback скасування лишається в РУХ, але писати вже нічого.
+    // Інакше особа вічно крутиться в «До застосування» з порожнім «Табель».
+    if (!missingFromCurrentSh && !hasWorkbookWrite) continue;
     ops.push({
       id: opId([
         "transfer-cancel",
@@ -2775,7 +2835,9 @@ export const buildEjoosSyncPlan = (
       class: missingFromCurrentSh ? "needs_input" : "ready",
       sheet: missingFromCurrentSh
         ? "Дані джерел / 3. Виключені"
-        : "3. Виключені",
+        : restoreTimesheet && !excludedRow
+          ? "6. Табель"
+          : "3. Виключені",
       personId: shPerson?.personId || event.personId,
       fullName: shPerson?.fullName || event.fullName,
       positionIndex:
@@ -2785,7 +2847,9 @@ export const buildEjoosSyncPlan = (
         ? `РУХ: ПЕРЕВ №${cancelled?.orderNumber || "?"} → ${dest || "?"} скасовано №${event.orderNumber || "?"}; sh: немає; ЕЖООС: Виключені${excludedRow ? ` R${excludedRow.excelRow}` : ""} / Табель закритий`
         : excludedRow
           ? `Виключені R${excludedRow.excelRow}: №${cancelled?.orderNumber || "?"} від ${cancelled?.orderDate || "?"}`
-          : "рядка виключення за скасованим ПЕРЕВ немає",
+          : staffTsHasDepart
+            ? `Табель R${staffTs?.excelRow}: ще стоїть «вибув» після скасованого ПЕРЕВ`
+            : "рядка виключення за скасованим ПЕРЕВ немає",
       after: missingFromCurrentSh
         ? "NEEDS_REVIEW — скасування є, але в актуальній sh людини немає; ШПО / ООС / Табель автоматично не відновлюємо"
         : evidence
@@ -2811,7 +2875,27 @@ export const buildEjoosSyncPlan = (
         transferCancelDate: event.orderDate,
         actualExclusionEvidence: evidence ? "1" : "",
         inCurrentSh: inCurrentSh ? "1" : "",
-        previousIndex: cancelled?.previousIndex || event.nextIndex || "",
+        previousIndex: staffIndex,
+        restoreTimesheet: restoreTimesheet ? "1" : "",
+        timesheetExcelRow:
+          restoreTimesheet && restoreTargetTs
+            ? String(restoreTargetTs.excelRow)
+            : "",
+        timesheetActiveFrom: restoreTimesheet ? timesheetActiveFrom : "",
+        timesheetAbsenceSpans: restoreTimesheet
+          ? encodeTimesheetAbsenceSpans(
+              augustAbsenceSpansFor(event.personId, event.fullName),
+            )
+          : "",
+        restoreShpo: restoreShpo ? "1" : "",
+        shpoExcelRow:
+          (restoreShpo || Boolean(excludedRow)) && shpoPerson
+            ? String(shpoPerson.excelRow)
+            : "",
+        restoreOos: restoreOos ? "1" : "",
+        historyTimesheetExcelRow: historyTs
+          ? String(historyTs.excelRow)
+          : "",
       },
       movementKey: createMovementKey(event),
       checkedDefault: !missingFromCurrentSh,
