@@ -802,7 +802,6 @@ function applyPositionChange(input: {
   const appointmentDate = op.payload.orderDate || plan.timesheetDayLabel;
   const appointmentDay = dayFromOrderLabel(appointmentDate) || plan.timesheetDay;
   const preserveHistory = op.payload.timesheetPreserveHistory === "1";
-  const returningToStaffIndex = op.payload.returningToStaffIndex === "1";
   const activeFromDay =
     dayFromOrderLabel(op.payload.timesheetActiveFrom || op.payload.transferCancelDate) ||
     appointmentDay;
@@ -878,35 +877,7 @@ function applyPositionChange(input: {
         (Boolean(personId) && previousId === personId));
     const otherPerson =
       Boolean(previousName || previousId) && !samePersonOnStaff;
-    const existingHistoryRow = Number(op.payload.previousTimesheetExcelRow || 0);
-    if (returningToStaffIndex && existingHistoryRow > 0) {
-      const activeRow = findTimesheetAppendNear(
-        timesheet,
-        Math.max(timesheetRow, existingHistoryRow),
-      );
-      const indexValue = timesheet.cell(timesheetRow, col("B")).value();
-      if (indexValue != null && String(indexValue).trim()) {
-        timesheet.cell(activeRow, col("B")).value(indexValue);
-      }
-      timesheet.cell(activeRow, col("F")).value(rank || null);
-      timesheet.cell(activeRow, col("G")).value(fullName || null);
-      timesheet.cell(activeRow, col("H")).value(personId || null);
-      paintTimesheetArchiveDays(timesheet, activeRow, plan, {
-        ...op.payload,
-        timesheetActiveFrom:
-          op.payload.timesheetActiveFrom || String(activeFromDay || appointmentDay),
-        timesheetPreserveHistory: activeFromDay > 1 ? "1" : "",
-      });
-      if (otherPerson) {
-        timesheet.cell(timesheetRow, col("F")).value(null);
-        timesheet.cell(timesheetRow, col("G")).value(null);
-        timesheet.cell(timesheetRow, col("H")).value(null);
-        for (let day = 1; day <= 31; day += 1) {
-          timesheet.cell(timesheetRow, col("I") + day - 1).value(null);
-        }
-        timesheet.cell(timesheetRow, col("AN")).value(null);
-      }
-    } else if (otherPerson) {
+    if (otherPerson) {
       const historyRow = findTimesheetAppendNear(timesheet, timesheetRow);
       copySheetRow(timesheet, timesheetRow, historyRow, col("AN"));
       for (let day = appointmentDay; day <= 31; day += 1) {
@@ -927,7 +898,6 @@ function applyPositionChange(input: {
         lastDay: plan.timesheetDay,
       });
     }
-    if (!returningToStaffIndex || existingHistoryRow <= 0) {
     timesheet.cell(timesheetRow, col("F")).value(rank || null);
     timesheet.cell(timesheetRow, col("G")).value(fullName || null);
     timesheet.cell(timesheetRow, col("H")).value(personId || null);
@@ -942,7 +912,6 @@ function applyPositionChange(input: {
         (preserveHistory ? String(activeFromDay) : String(appointmentDay)),
       timesheetPreserveHistory: preserveHistory ? "1" : op.payload.timesheetPreserveHistory,
     });
-    }
   }
 
   // ООС не пишемо через xlsx-populate — лише applyOosHistoryPresentation.

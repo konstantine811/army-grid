@@ -30,6 +30,7 @@ import {
   sameTimesheetDayMark,
   timesheetMarkFromArchive,
 } from "./ejoosTimesheetText";
+import { findDuplicateTimesheetExtras } from "./ejoosTimesheetDuplicates";
 
 export type EjoosOpClass = "ready" | "needs_input" | "conflict";
 
@@ -4323,6 +4324,63 @@ export const buildEjoosSyncPlan = (
         excelRow: String(row.excelRow),
       },
       movementKey: createMovementKey(cancel),
+      checkedDefault: true,
+    });
+  }
+
+  const timesheetOccupantByIndex = new Map(
+    shPeople
+      .filter((person) => person.positionIndex)
+      .map((person) => [
+        person.positionIndex,
+        { personId: person.personId, fullName: person.fullName },
+      ]),
+  );
+  const clearedTimesheetRows = new Set(
+    ops
+      .filter(
+        (op) =>
+          op.kind === "timesheet_day" &&
+          op.payload.clearStalePerson === "1" &&
+          Number(op.payload.excelRow || 0) > 0,
+      )
+      .map((op) => Number(op.payload.excelRow)),
+  );
+  for (const item of findDuplicateTimesheetExtras(
+    timesheetPeople,
+    timesheetOccupantByIndex,
+  )) {
+    if (clearedTimesheetRows.has(item.extra.excelRow)) continue;
+    clearedTimesheetRows.add(item.extra.excelRow);
+    const keepName = item.keep.fullName || item.keep.personId || "канонічний рядок";
+    ops.push({
+      id: opId([
+        "dup-tab-row",
+        item.extra.personId || item.extra.fullName,
+        String(item.extra.excelRow),
+      ]),
+      kind: "timesheet_day",
+      class: "ready",
+      sheet: "6. Табель",
+      personId: item.extra.personId,
+      fullName: item.extra.fullName,
+      positionIndex: item.extra.positionIndex,
+      rank: "",
+      before: `дубль R${item.extra.excelRow}: ${item.extra.fullName || "ПІБ"} на ${item.extra.positionIndex || "індексі"}`,
+      after: `прибрати рядок — лишається R${item.keep.excelRow} (${keepName})`,
+      sourceRef: `Табель!R${item.extra.excelRow} · канон R${item.keep.excelRow}`,
+      why:
+        item.reason === "same_person"
+          ? "У Табелі не може бути двох активних записів однієї особи. Повторне застосування раніше дописувало копію замість штатного рядка."
+          : "Один штатний індекс — один активний рядок Табеля. Історія з «вибув» лишається, зайві копії з «+» прибираємо.",
+      confidence: "high",
+      payload: {
+        type: "DUPLICATE_TAB_ROW",
+        clearStalePerson: "1",
+        clearTimesheetIndex: "1",
+        excelRow: String(item.extra.excelRow),
+        keepTimesheetExcelRow: String(item.keep.excelRow),
+      },
       checkedDefault: true,
     });
   }

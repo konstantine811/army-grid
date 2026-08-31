@@ -4,13 +4,14 @@ import {
   parseEjoosAbsents,
   parseEjoosShpo,
   parseEjoosTimesheetDay,
+  parseEjoosTimesheetPeople,
   parseTimesheetDayFromPbName,
   resolveJournalTimesheetDay,
   type EjoosAbsentRow,
   type EjoosShpoRow,
   type EjoosTimesheetRow,
 } from "./ejoosSyncPlan";
-import type { EjoosDiffSession } from "./ejoosPersonDiff";
+import { findDuplicateTimesheetExtras } from "./ejoosTimesheetDuplicates";
 import type { BackendEjournalLiveVersion } from "../../api";
 import { formatValueForDisplay } from "../../shared/format";
 
@@ -290,6 +291,7 @@ const buildChecks = (input: {
   roster: EjoosRegisterPerson[];
   absentsOpen: EjoosAbsentRow[];
   session: EjoosDiffSession | null;
+  duplicateTimesheet?: number;
 }): EjoosCheckItem[] => {
   const checks: EjoosCheckItem[] = [];
 
@@ -351,6 +353,23 @@ const buildChecks = (input: {
       severity: "ok",
       title: "Відкриті відсутності заповнені",
       detail: "Підстава, місце й дата вибуття є у відкритих періодах.",
+    });
+  }
+
+  if (input.duplicateTimesheet) {
+    checks.push({
+      id: "dup-timesheet",
+      severity: "error",
+      title: `Дублі Табеля: ${input.duplicateTimesheet}`,
+      detail:
+        "Одна особа або один штатний індекс не може мати два активні рядки. Перебудуйте операції — зайві копії підуть у чергу на очищення.",
+    });
+  } else {
+    checks.push({
+      id: "dup-timesheet-ok",
+      severity: "ok",
+      title: "Табель без дублів",
+      detail: "Немає двох активних рядків на одну особу чи один індекс.",
     });
   }
 
@@ -485,6 +504,8 @@ export const buildEjoosLiveView = (input: {
   const absentsClosed = absents.filter((row) => Boolean(row.actualReturn));
   const shpo = parseEjoosShpo(shpoSheet);
   const timesheet = parseEjoosTimesheetDay(timesheetSheet, dayInfo.day);
+  const timesheetPeople = parseEjoosTimesheetPeople(timesheetSheet);
+  const duplicateTimesheet = findDuplicateTimesheetExtras(timesheetPeople).length;
   const roster = buildRoster(shpo, timesheet);
   const arrivals = parseArrivals(arrivalSheet);
   const irrevocableLosses = parseIrrevocableLosses(irrevocableLossSheet);
@@ -513,6 +534,7 @@ export const buildEjoosLiveView = (input: {
       roster,
       absentsOpen,
       session: input.session ?? null,
+      duplicateTimesheet,
     }),
     todayChanges,
     counts: {

@@ -137,7 +137,6 @@ const collectWrites = (op: EjoosSyncOp, ctx: PositionChangeContext) => {
   const departDay = dayFromOrderLabel(op.payload.excludeDate || appointmentDate);
   const lastDay = Math.min(31, Math.max(departDay, plan.timesheetDay));
   const preserveHistory = op.payload.timesheetPreserveHistory === "1";
-  const returningToStaffIndex = op.payload.returningToStaffIndex === "1";
   const activeFromDay =
     dayFromOrderLabel(op.payload.timesheetActiveFrom || op.payload.transferCancelDate) ||
     departDay;
@@ -277,73 +276,7 @@ const collectWrites = (op: EjoosSyncOp, ctx: PositionChangeContext) => {
       presenceFrom > 1 ? presenceFrom : 1,
     );
 
-    if (returningToStaffIndex && existingHistoryRow > 0) {
-      const activeRow = nextTimesheetFreeRow(
-        timesheet,
-        Math.max(newTimesheetRow, existingHistoryRow),
-        ctx.reservedTimesheetRows,
-      );
-      const indexValue = valueOf(timesheet.rawRows[newTimesheetRow - 1]?.[1]);
-      if (indexValue != null) {
-        ctx.timesheetWrites.push({
-          row: activeRow,
-          column: 2,
-          value: indexValue,
-          styleSourceRow: newTimesheetRow,
-        });
-      }
-      for (const [column, value] of [
-        [6, rank],
-        [7, fullName],
-        [8, personId],
-      ] as Array<[number, string]>) {
-        ctx.timesheetWrites.push({
-          row: activeRow,
-          column,
-          value: value || null,
-          styleSourceRow: newTimesheetRow,
-        });
-      }
-      for (let day = 1; day <= 31; day += 1) {
-        const value = timesheetMarkFromArchive(day, {
-          activeFromDay: presenceFrom,
-          lastDay,
-          spans: absenceSpans,
-          fillBeforeActive: presenceFrom > 1,
-        });
-        if (value == null) continue;
-        ctx.timesheetWrites.push({
-          row: activeRow,
-          column: 8 + day,
-          value,
-          styleSourceRow: newTimesheetRow,
-        });
-      }
-      if (otherPerson) {
-        for (const column of [6, 7, 8]) {
-          ctx.timesheetWrites.push({
-            row: newTimesheetRow,
-            column,
-            value: null,
-            styleSourceRow: newTimesheetRow,
-          });
-        }
-        for (let day = 1; day <= 31; day += 1) {
-          ctx.timesheetWrites.push({
-            row: newTimesheetRow,
-            column: 8 + day,
-            value: null,
-            styleSourceRow: newTimesheetRow,
-          });
-        }
-        ctx.timesheetWrites.push({
-          row: newTimesheetRow,
-          column: 40,
-          value: null,
-          styleSourceRow: newTimesheetRow,
-        });
-      }
-    } else if (otherPerson || (preserveHistory && existingHistoryRow <= 0)) {
+    if (otherPerson || (preserveHistory && existingHistoryRow <= 0)) {
       const historyRow = nextTimesheetFreeRow(
         timesheet,
         newTimesheetRow,
@@ -415,7 +348,6 @@ const collectWrites = (op: EjoosSyncOp, ctx: PositionChangeContext) => {
         }
       }
     }
-    if (!returningToStaffIndex || existingHistoryRow <= 0) {
     for (const [column, value] of [
       [6, rank],
       [7, fullName],
@@ -440,7 +372,6 @@ const collectWrites = (op: EjoosSyncOp, ctx: PositionChangeContext) => {
         column: 8 + day,
         value,
       });
-    }
     }
   }
 
