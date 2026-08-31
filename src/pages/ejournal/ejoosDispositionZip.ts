@@ -123,6 +123,17 @@ const dispositionLocation = (place: string) => {
     : `, який знаходиться у розпорядженні ${tail}`.trimEnd();
 };
 
+/** У ШПО блок розпорядження тримає короткі коди: ЗБ, СЗЧ, лік — не «БЕЗВІСТИ». */
+const shpoDispositionMark = (op: EjoosSyncOp) => {
+  const code = String(op.payload.absenceCode || "").trim();
+  if (code && code.length <= 8) return code;
+  const raw = String(op.payload.absenceType || "").trim();
+  if (/безвіст/iu.test(raw)) return "ЗБ";
+  if (/сзч|самовіл/iu.test(raw)) return "СЗЧ";
+  if (/полон/iu.test(raw)) return "пол";
+  return raw || "РОЗПОРЯДЖЕННЯ";
+};
+
 type DispositionContext = {
   plan: EjoosSyncPlan;
   shpo: ExcelSheetSnapshot;
@@ -148,14 +159,15 @@ const collectWrites = (op: EjoosSyncOp, ctx: DispositionContext) => {
     }
   }
 
-  const status = op.payload.absenceType || "РОЗПОРЯДЖЕННЯ";
+  const absenceLabel = op.payload.absenceType || "РОЗПОРЯДЖЕННЯ";
+  const statusMark = shpoDispositionMark(op);
   const place = dispositionPlace(op.payload.destination);
   // Якщо особа вже стоїть у блоці «у розпорядженні», другий раз не додаємо.
   if (op.payload.skipShpoDisposition !== "1") {
     const target = dispositionTarget(shpo, ctx.reservedShpoRows);
     for (const [column, value] of [
       [2, dispositionLocation(place)],
-      [3, status],
+      [3, statusMark],
       [6, op.rank],
       [7, op.fullName],
       [8, op.personId],
@@ -185,7 +197,7 @@ const collectWrites = (op: EjoosSyncOp, ctx: DispositionContext) => {
         }) || null,
       ],
       [4, op.positionIndex || null],
-      [5, status || null],
+      [5, absenceLabel || null],
       [6, op.payload.absencePlace || null],
       [7, op.payload.absenceDate || null],
       [
@@ -226,7 +238,7 @@ const collectWrites = (op: EjoosSyncOp, ctx: DispositionContext) => {
     const orderDay = Number(
       String(op.payload.orderDate || "").match(/^(\d{1,2})/)?.[1] || 0,
     );
-    const absenceCode = op.payload.absenceCode || status;
+    const absenceCode = op.payload.absenceCode || statusMark;
     for (let day = 1; day <= Math.min(31, plan.timesheetDay); day += 1) {
       const value =
         day === orderDay

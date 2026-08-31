@@ -6,6 +6,10 @@ import { readFileSync } from "node:fs";
 import { EJOOS_SYNC_READ_OPTIONS, readWorkbookSnapshot } from "../src/excelRoundTrip";
 import { DEFAULT_STATUS_RULES } from "../src/pages/ejournal/ejoosRules";
 import {
+  classifyStaffMove,
+  isOutboundStaffMove,
+} from "../src/pages/ejournal/ejoosMovementRules";
+import {
   buildEjoosSyncPlan,
   findEjoosSheet,
   parseEjoosAbsents,
@@ -37,8 +41,9 @@ const movements = parsePbMovements(pb).filter(
 );
 console.log("\nРУХ:");
 for (const event of movements) {
+  const scope = classifyStaffMove(event);
   console.log(
-    `  R${event.excelRow} ${event.type} | ${event.fullName} | ${event.previousIndex} → ${event.nextIndex} | наказ ${event.orderNumber} від ${event.orderDate} | статус «${event.status}» | куди «${event.destination}» | зміна «${event.changeText}»`,
+    `  R${event.excelRow} ${event.type} | ${event.fullName} | ${event.previousIndex} → ${event.nextIndex} | наказ ${event.orderNumber} від ${event.orderDate} | статус «${event.status}» | куди «${event.destination}» | примітка «${event.note}» | зміна «${event.changeText}» | сфера ${scope}${isOutboundStaffMove(event) ? " (вибуття)" : ""}`,
   );
 }
 

@@ -1,6 +1,9 @@
 import type { CellValue, ExcelSheetSnapshot, ExcelWorkbookSnapshot } from "../../excelRoundTrip";
 import { canonicalName, isJournalPersonId, normId, normKey, usablePersonId } from "./ejoosIdentity";
-import { resolveMovementDestination } from "./ejoosMovementRules";
+import {
+  resolveMovementDestination,
+  resolveOutboundTransferDestination,
+} from "./ejoosMovementRules";
 import { isTimesheetDepartureMark } from "./ejoosTimesheetText";
 
 export const norm = (value: CellValue | unknown): string => {
@@ -344,7 +347,10 @@ export const parsePbMovements = (workbook: ExcelWorkbookSnapshot): PbMovement[] 
       rank: cell(row, rankCol),
       previousIndex: cell(row, prevIdxCol),
       nextIndex: cell(row, nextIdxCol),
-      destination: resolveMovementDestination(rawDest, note),
+      destination:
+        type === "ПЕРЕВ"
+          ? resolveOutboundTransferDestination(rawDest, note)
+          : resolveMovementDestination(rawDest, note),
       orderNumber: cell(row, orderNumCol),
       orderDate: cell(row, orderDateCol),
       basisNumber: cell(row, 14),

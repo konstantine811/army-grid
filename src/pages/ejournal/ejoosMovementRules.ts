@@ -128,17 +128,40 @@ export const mentionsForeignUnit = (value: string) =>
     ` ${normText(value).toUpperCase()} `,
   );
 
+/** Зовнішня військова частина: А7400 / в/ч / «військова частина». */
+export const mentionsExternalMilitaryUnit = (value: string) =>
+  /(?:[АA]\s*-?\s*\d{4}(?!\d)|в\s*\/\s*ч|військов(?:ої|а|у)\s+частин)/iu.test(
+    normText(value),
+  );
+
+/**
+ * Для ПЕРЕВ: якщо «Куди» лишилось 1ПБ, а в примітці в/ч А#### —
+ * фактичний напрямок беремо з примітки.
+ */
+export const resolveOutboundTransferDestination = (
+  rawDest: string,
+  note: string,
+) => {
+  const dest = resolveMovementDestination(rawDest, note);
+  if (mentionsExternalMilitaryUnit(note) && isOwnFirstPbDestination(dest)) {
+    return normText(note);
+  }
+  return dest;
+};
+
 export type StaffMoveScope = "own" | "outbound" | "other";
 
 type StaffMoveEvent = Pick<
   MovementRuleEvent,
-  "type" | "destination" | "changeText" | "previousIndex" | "nextIndex"
+  "type" | "destination" | "changeText" | "previousIndex" | "nextIndex" | "note"
 >;
 
 /**
  * Єдине правило: ПОСАДА і ПЕРЕВ дивляться на ту саму сферу.
  * 1) «Куди» = 1ПБ → свій; інша частина → вибуття.
  * 2) Порожнє «Куди»: чужий батальйон у тексті → вибуття; інакше штат 1ПБ.
+ * Для ПЕРЕВ зовнішню в/ч у примітці дивиться `classifyStaffMove` —
+ * статус РУХ («В СТРОЮ») сюди не входить.
  */
 export const isFirstPbPositionChange = (
   event: Pick<
@@ -158,13 +181,23 @@ export const isFirstPbPositionChange = (
     return true;
   }
   if (isDispositionToStaffPlacement(event)) return true;
-  return /(?:^|[^\d])1\s*(?:ПБ|ПІХОТН)/iu.test(
+  return /(?:^|[^\d])1\s*(?:ПБ|піхотн(?:ий|ого|ому|им)?\s+батальйон)/iu.test(
     normText(event.changeText).toUpperCase(),
   );
 };
 
 export const classifyStaffMove = (event: StaffMoveEvent): StaffMoveScope => {
   if (event.type !== "ПОСАДА" && event.type !== "ПЕРЕВ") return "other";
+  // ПЕРЕВ + в/ч А#### у «Куди» / примітці / «Яка зміна» — вибуття з 1ПБ,
+  // навіть коли «Куди» ще 1ПБ, а статус лишився «В СТРОЮ».
+  if (
+    event.type === "ПЕРЕВ" &&
+    mentionsExternalMilitaryUnit(
+      [event.note, event.destination, event.changeText].join(" "),
+    )
+  ) {
+    return "outbound";
+  }
   return isFirstPbPositionChange(event) ? "own" : "outbound";
 };
 

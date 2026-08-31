@@ -4,7 +4,9 @@ import type { EjoosTimesheetCode } from "./ejoosRules";
 import {
   findLatestPriorOwnUnitStaffMove,
   isOutboundStaffMove,
+  isOwnFirstPbDestination,
   isOwnUnitStaffMove,
+  resolveOutboundTransferDestination,
 } from "./ejoosMovementRules";
 import {
   isUnrecordedSameMonthTransit,
@@ -618,7 +620,10 @@ export const parsePbMovements = (workbook: ExcelWorkbookSnapshot): PbMovement[] 
       rank: cell(row, rankCol),
       previousIndex: cell(row, prevIdxCol),
       nextIndex: cell(row, nextIdxCol),
-      destination: resolveMovementDestination(rawDest, note),
+      destination:
+        type === "ПЕРЕВ"
+          ? resolveOutboundTransferDestination(rawDest, note)
+          : resolveMovementDestination(rawDest, note),
       orderNumber: cell(row, orderNumCol),
       orderDate: cell(row, orderDateCol),
       // У поточному форматі РУХ: O+P — документ-підстава, I+J — стройовий наказ.
@@ -2888,7 +2893,7 @@ export const buildEjoosSyncPlan = (
     if (event.personId) pendingRankByPerson.set(`id:${event.personId}`, rankOp);
   }
 
-  effectiveMovements.forEach((event) => {
+  const considerMovement = (event: PbMovement) => {
     const movementDate = dateMs(event.orderDate || event.basisDate);
     if (leadWindowStart && movementDate && movementDate < leadWindowStart) {
       return;
@@ -3245,30 +3250,37 @@ export const buildEjoosSyncPlan = (
         !destinationRaw ||
         destinationUpper.includes("РОЗПОР") ||
         destinationUpper.includes("ПЕРЕВ") ||
-        destinationUpper === event.type
+        destinationUpper === event.type ||
+        isOwnFirstPbDestination(destinationRaw)
           ? ""
           : destinationRaw;
-      // Якщо «Куди» = 0, військова частина часто в S / «Яка зміна» (А7379).
+      // Якщо «Куди» = 0 або лишилось 1ПБ, військова частина часто в S / примітці (А7400).
       const unitFromS = unitCodeFromMovement(event);
       const exclusionPlace =
         rawDestination ||
         (/[АA]\s*\d{4}/iu.test(unitFromS) ? unitFromS : "") ||
+        event.note ||
         event.changeText;
-      // Табель: «вибув до/у» + фраза з «Яка зміна» без назви посади.
-      // Коди А#### — лише якщо структурного тексту немає взагалі.
+      // Табель: «вибув до/у» + напрямок. Для зовнішнього ПЕРЕВ пріоритет —
+      // в/ч А#### з примітки, а не стара назва посади в «Яка зміна».
       const timesheetDestination = (() => {
+        const unitPhrase =
+          formatTransferDestinationForTimesheet(
+            [rawDestination, event.note, unitFromS, event.changeText]
+              .filter(Boolean)
+              .join(" "),
+          ) || rawDestination;
+        if (/[АA]\s*\d{4}/iu.test(unitPhrase) || /в\s*\/\s*ч/iu.test(unitPhrase)) {
+          return event.note && /[АA]\s*\d{4}|в\s*\/\s*ч/iu.test(event.note)
+            ? event.note
+            : unitPhrase;
+        }
         const positionSource =
           positionChangeDestination(event) || event.changeText;
         const fromPosition =
           extractTimesheetDestinationFromPosition(positionSource);
         if (fromPosition) return fromPosition;
-        return (
-          formatTransferDestinationForTimesheet(
-            [event.changeText, rawDestination, event.note, unitFromS]
-              .filter(Boolean)
-              .join(" "),
-          ) || rawDestination
-        );
+        return unitPhrase;
       })();
       const exclusionReason =
         event.type === "ПЕРЕВ" || event.type === "ПОСАДА"
@@ -3450,11 +3462,11 @@ export const buildEjoosSyncPlan = (
             pendingRank?.payload.orderDate ||
             rankBeforeTransfer?.orderDate ||
             "",
-          // AE «Куди вибув»: якщо «Куди»=0, беремо частину з S / «Яка зміна».
+          // AE «Куди вибув»: в/ч з примітки / «Куди», не стара посада з «Яка зміна».
           documentsDest:
+            exclusionPlace ||
             positionChangeDestination(event) ||
-            event.changeText ||
-            exclusionPlace,
+            event.changeText,
           changeText: event.changeText || "",
           exclusionReason,
           awaitRankChange: pendingRank ? "1" : "",
@@ -3878,7 +3890,9 @@ export const buildEjoosSyncPlan = (
         checkedDefault: false,
       });
     }
-  });
+  };
+
+  effectiveMovements.forEach(considerMovement);
 
   const finalExternalTransferByPerson = new Map<string, PbMovement>();
   for (const event of movementsAll) {
@@ -3917,6 +3931,22 @@ export const buildEjoosSyncPlan = (
         op.kind === "exclude_transfer" &&
         isSamePerson({ personId, fullName }, op),
     );
+  // Людина ще в ШПО/ООС, в sh уже немає, останній ПЕРЕВ — зовнішній.
+  // Статус РУХ «В СТРОЮ» ігноруємо: вирішальні ТИП + в/ч А#### + нема в sh.
+  {
+    const seen = new Set<number>();
+    for (const row of ejoosOccupied) {
+      if (personStillInSh(row.personId, row.fullName)) continue;
+      if (excludeAlreadyPlanned(row.personId, row.fullName)) continue;
+      const transfer = finalExternalTransferFor(row.personId, row.fullName);
+      if (!transfer) continue;
+      if (!eventInLeadWindow(transfer)) continue;
+      if (cancelledExternalTransferRows.has(transfer.excelRow)) continue;
+      if (seen.has(transfer.excelRow)) continue;
+      seen.add(transfer.excelRow);
+      considerMovement(transfer);
+    }
+  }
   const staffTimesheetRows = new Set(
     [...dayByIndex.values()].map((row) => row.excelRow),
   );

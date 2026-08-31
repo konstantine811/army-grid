@@ -27,15 +27,19 @@ export const canonicalName = (value: string) =>
   );
 
 export const dateMs = (value: string) => {
-  const match = String(value ?? "").match(/(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})/);
+  const match = String(value ?? "").match(
+    /(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})/,
+  );
   if (!match) return 0;
-  const year = Number(match[3]) < 100 ? 2000 + Number(match[3]) : Number(match[3]);
+  const year =
+    Number(match[3]) < 100 ? 2000 + Number(match[3]) : Number(match[3]);
   const result = Date.UTC(year, Number(match[2]) - 1, Number(match[1]));
   return Number.isFinite(result) ? result : 0;
 };
 
 /** Штатний ID 1ПБ/ЕЖООС — коротке число, не РНОКПП/ІПН з 8+ цифр. */
-export const isJournalPersonId = (value: string) => /^\d{1,7}$/.test(value.trim());
+export const isJournalPersonId = (value: string) =>
+  /^\d{1,7}$/.test(value.trim());
 
 /** ID is never an Excel date. Reject date-shaped fallback values instead of showing them as IDs. */
 export const normId = (value: CellValue | unknown) => {
