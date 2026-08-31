@@ -207,18 +207,62 @@ const timesheetStyledWrite = (
   value: string | number | null,
   sourceRow: number,
   sourceColumn = column,
-): ZipCellWrite => ({
-  row,
-  column,
-  value,
-  styleSourceRow: sourceRow,
-  styleSourceColumn: sourceColumn,
-  copyNeighborStyle: true,
-  heightSourceRow: sourceRow,
-  wrapText:
+): ZipCellWrite => {
+  const wrapText =
     typeof value === "string" &&
-    (value.includes("\n") || /вибув/iu.test(value)),
-});
+    (value.includes("\n") || /вибув/iu.test(value));
+  return {
+    row,
+    column,
+    value,
+    styleSourceRow: sourceRow,
+    styleSourceColumn: sourceColumn,
+    // Як у Виключених: не шукати «канонічний» стиль по аркушу.
+    // Порожні рядки Табеля — жовтий шаблон вакансії без синьої ПІБ і товстої сітки.
+    copyNeighborStyle: false,
+    keepNeighborStyle: !wrapText,
+    heightSourceRow: sourceRow,
+    wrapText,
+  };
+};
+
+const TIMESHEET_STYLE_LAST_COLUMN = 40;
+
+/** Після xlsx-populate: перенести `s=` зайнятого рядка на новий історичний. */
+export async function copyTimesheetRowStylesWithZip(
+  file: Blob,
+  jobs: Array<{ sourceRow: number; targetRow: number }>,
+): Promise<Blob> {
+  const unique = new Map<string, { sourceRow: number; targetRow: number }>();
+  for (const job of jobs) {
+    if (
+      job.sourceRow < 7 ||
+      job.targetRow < 7 ||
+      job.sourceRow === job.targetRow
+    ) {
+      continue;
+    }
+    unique.set(`${job.sourceRow}:${job.targetRow}`, job);
+  }
+  if (!unique.size) return file;
+  const writes: ZipCellWrite[] = [];
+  for (const { sourceRow, targetRow } of unique.values()) {
+    for (let column = 1; column <= TIMESHEET_STYLE_LAST_COLUMN; column += 1) {
+      writes.push({
+        row: targetRow,
+        column,
+        value: null,
+        styleOnly: true,
+        styleSourceRow: sourceRow,
+        styleSourceColumn: column,
+        copyNeighborStyle: false,
+        keepNeighborStyle: true,
+        heightSourceRow: sourceRow,
+      });
+    }
+  }
+  return applyInlineStringWritesToWorkbook(file, /табель/i, writes);
+}
 
 const findArrivalCloseColumns = (sheet: ExcelSheetSnapshot) => {
   let departDateCol = 0;
@@ -415,7 +459,8 @@ export async function applyExcludeTransfersWithZip(input: {
           value: null,
           styleSourceRow: sourceTimesheetRow,
           styleSourceColumn: styleDayColumn,
-          copyNeighborStyle: true,
+          copyNeighborStyle: false,
+          keepNeighborStyle: true,
         });
       }
       timesheetWrites.push(
@@ -461,7 +506,8 @@ export async function applyExcludeTransfersWithZip(input: {
           value: null,
           styleSourceRow: sourceTimesheetRow,
           styleSourceColumn: column,
-          copyNeighborStyle: true,
+          copyNeighborStyle: false,
+          keepNeighborStyle: true,
         });
       }
     } else if (excludeWritePlan(op.payload).createTimesheetHistory) {

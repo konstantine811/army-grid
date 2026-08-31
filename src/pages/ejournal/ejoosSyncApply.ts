@@ -16,7 +16,10 @@ import {
   formatTimesheetTransferMark,
   OOS_TO_EXCLUDED_BASE,
 } from "./ejoosExcludedColumns";
-import { applyExcludeTransfersWithZip } from "./ejoosExcludeTransferZip";
+import {
+  applyExcludeTransfersWithZip,
+  copyTimesheetRowStylesWithZip,
+} from "./ejoosExcludeTransferZip";
 import { applyDispositionWithZip } from "./ejoosDispositionZip";
 import { applyPositionChangeWithZip } from "./ejoosPositionChangeZip";
 import {
@@ -413,6 +416,8 @@ async function mutateToBlob(
   const sortedOps = [...ops].sort(
     (left, right) => applyKindOrder(left) - applyKindOrder(right),
   );
+  const timesheetStyleCopies: Array<{ sourceRow: number; targetRow: number }> =
+    [];
 
   sortedOps.forEach((op) => {
     if (op.kind === "shpo_occupant") {
@@ -557,6 +562,7 @@ async function mutateToBlob(
         shpo,
         oos,
         arrivals,
+        timesheetStyleCopies,
       });
       return;
     }
@@ -569,6 +575,7 @@ async function mutateToBlob(
         timesheet,
         arrivals,
         excluded,
+        timesheetStyleCopies,
       });
       return;
     }
@@ -587,11 +594,12 @@ async function mutateToBlob(
   if (shpo) removeShpoNameOnlyRows(shpo);
 
   const populatedBlob = (await workbook.outputAsync("blob")) as Blob;
-  return finalizeEjoosWorkbookBlob(
+  const finalized = await finalizeEjoosWorkbookBlob(
     populatedBlob,
     ejoos.file,
     touchedSheetNamesForOps(ops),
   );
+  return copyTimesheetRowStylesWithZip(finalized, timesheetStyleCopies);
 }
 
 /** Скасоване переведення: rollback попереднього ПЕРЕВ (не новий рух). */
@@ -799,10 +807,28 @@ function applyPositionChange(input: {
   timesheet: SheetLike | undefined;
   arrivals: SheetLike | undefined;
   excluded: SheetLike | undefined;
+  timesheetStyleCopies: TimesheetStyleCopy[];
 }) {
-  const { op, plan, shpo, oos, timesheet, arrivals, excluded } = input;
+  const {
+    op,
+    plan,
+    shpo,
+    oos,
+    timesheet,
+    arrivals,
+    excluded,
+    timesheetStyleCopies,
+  } = input;
   if (op.payload.closeOldPosition === "1") {
-    closeOldPositionRows({ op, plan, shpo, oos, timesheet, excluded });
+    closeOldPositionRows({
+      op,
+      plan,
+      shpo,
+      oos,
+      timesheet,
+      excluded,
+      timesheetStyleCopies,
+    });
   }
   const personId = op.payload.nextPersonId || op.personId;
   const fullName = op.payload.nextName || op.fullName;
@@ -888,7 +914,12 @@ function applyPositionChange(input: {
       Boolean(previousName || previousId) && !samePersonOnStaff;
     if (otherPerson) {
       const historyRow = findTimesheetAppendNear(timesheet, timesheetRow);
-      copySheetRow(timesheet, timesheetRow, historyRow, col("AN"));
+      copyTimesheetHistoryValues(
+        timesheet,
+        timesheetRow,
+        historyRow,
+        timesheetStyleCopies,
+      );
       for (let day = appointmentDay; day <= 31; day += 1) {
         timesheet.cell(historyRow, col("I") + day - 1).value(null);
       }
@@ -905,7 +936,15 @@ function applyPositionChange(input: {
         cancelledDate: op.payload.cancelledTransferDate,
         cancelledDest: op.payload.cancelledTransferDest,
         lastDay: plan.timesheetDay,
+        timesheetStyleCopies,
       });
+    }
+    if (!previousName && !previousId) {
+      recordTimesheetStyleCopy(
+        timesheetStyleCopies,
+        occupiedTimesheetStyleRow(timesheet, timesheetRow),
+        timesheetRow,
+      );
     }
     timesheet.cell(timesheetRow, col("F")).value(rank || null);
     timesheet.cell(timesheetRow, col("G")).value(fullName || null);
@@ -1076,8 +1115,9 @@ function closeOldPositionRows(input: {
   oos: SheetLike | undefined;
   timesheet: SheetLike | undefined;
   excluded: SheetLike | undefined;
+  timesheetStyleCopies: TimesheetStyleCopy[];
 }) {
-  const { op, shpo, oos, timesheet, excluded } = input;
+  const { op, shpo, oos, timesheet, excluded, timesheetStyleCopies } = input;
   const personId = op.payload.fromPersonId || op.personId;
   const fullName = op.payload.fromName || op.fullName;
   const rank = op.payload.fromRank || op.rank;
@@ -1121,7 +1161,12 @@ function closeOldPositionRows(input: {
   );
   if (timesheet && oldTimesheetRow > 0) {
     const historyRow = findTimesheetAppendNear(timesheet, oldTimesheetRow);
-    copySheetRowValues(timesheet, oldTimesheetRow, historyRow, col("AN"));
+    copyTimesheetHistoryValues(
+      timesheet,
+      oldTimesheetRow,
+      historyRow,
+      timesheetStyleCopies,
+    );
     if (rank) timesheet.cell(historyRow, col("F")).value(rank);
     writeTimesheetTransferHistory(timesheet, historyRow, {
       departDay,
@@ -1392,8 +1437,10 @@ function applyExcludeTransfer(input: {
   shpo: SheetLike | undefined;
   oos: SheetLike | undefined;
   arrivals: SheetLike | undefined;
+  timesheetStyleCopies: TimesheetStyleCopy[];
 }) {
-  const { op, plan, excluded, timesheet, shpo, oos, arrivals } = input;
+  const { op, plan, excluded, timesheet, shpo, oos, arrivals, timesheetStyleCopies } =
+    input;
   const personId = op.payload.fromPersonId || op.personId;
   const fullName = op.payload.fromName || op.fullName;
   const rank = op.payload.fromRank || op.rank;
@@ -1510,9 +1557,12 @@ function applyExcludeTransfer(input: {
   // 2) Табель — історія: копія рядка + + до дня вибуття, далі −; старий рядок без особи
   if (timesheet && timesheetRow > 0) {
     const historyRow = findTimesheetAppendNear(timesheet, timesheetRow);
-    // Порожній рядок Табеля вже має власне оформлення. Копіюємо лише дані,
-    // не серіалізуємо повторно весь набір стилів клітинок.
-    copySheetRowValues(timesheet, timesheetRow, historyRow, col("AN"));
+    copyTimesheetHistoryValues(
+      timesheet,
+      timesheetRow,
+      historyRow,
+      timesheetStyleCopies,
+    );
     if (rank) timesheet.cell(historyRow, col("F")).value(rank);
     writeTimesheetTransferHistory(timesheet, historyRow, {
       departDay,
@@ -1535,6 +1585,11 @@ function applyExcludeTransfer(input: {
     }
   } else if (timesheet && excludeWritePlan(op.payload).createTimesheetHistory) {
     const historyRow = findTimesheetAppendNear(timesheet, 7);
+    recordTimesheetStyleCopy(
+      timesheetStyleCopies,
+      occupiedTimesheetStyleRow(timesheet, historyRow),
+      historyRow,
+    );
     if (positionIndex) timesheet.cell(historyRow, col("B")).value(positionIndex);
     if (rank) timesheet.cell(historyRow, col("F")).value(rank);
     if (fullName) timesheet.cell(historyRow, col("G")).value(fullName);
@@ -1784,22 +1839,6 @@ function copyCell(
   }
 }
 
-function copySheetRow(
-  sheet: SheetLike,
-  sourceRow: number,
-  targetRow: number,
-  endCol: number,
-) {
-  const height = sheet.row?.(sourceRow).height();
-  if (typeof height === "number") sheet.row?.(targetRow).height(height);
-  for (let c = 1; c <= endCol; c += 1) {
-    const sourceCell = sheet.cell(sourceRow, c);
-    const targetCell = sheet.cell(targetRow, c);
-    targetCell.value(sourceCell.value());
-    copyCellStyle(sourceCell, targetCell);
-  }
-}
-
 function copySheetRowValues(
   sheet: SheetLike,
   sourceRow: number,
@@ -1812,6 +1851,42 @@ function copySheetRowValues(
       .cell(targetRow, column)
       .value(sheet.cell(sourceRow, column).value());
   }
+}
+
+type TimesheetStyleCopy = { sourceRow: number; targetRow: number };
+
+function recordTimesheetStyleCopy(
+  jobs: TimesheetStyleCopy[],
+  sourceRow: number,
+  targetRow: number,
+) {
+  if (sourceRow >= 7 && targetRow >= 7 && sourceRow !== targetRow) {
+    jobs.push({ sourceRow, targetRow });
+  }
+}
+
+function copyTimesheetHistoryValues(
+  timesheet: SheetLike,
+  sourceRow: number,
+  targetRow: number,
+  jobs: TimesheetStyleCopy[],
+) {
+  copySheetRowValues(timesheet, sourceRow, targetRow, col("AN"));
+  recordTimesheetStyleCopy(jobs, sourceRow, targetRow);
+}
+
+function occupiedTimesheetStyleRow(timesheet: SheetLike, skipRow: number) {
+  for (let row = skipRow - 1; row >= 7; row -= 1) {
+    const name = String(timesheet.cell(row, col("G")).value() ?? "").trim();
+    if (name) return row;
+  }
+  const end = timesheet.usedRange()?.endCell().rowNumber() ?? skipRow;
+  for (let row = 7; row <= end; row += 1) {
+    if (row === skipRow) continue;
+    const name = String(timesheet.cell(row, col("G")).value() ?? "").trim();
+    if (name) return row;
+  }
+  return 7;
 }
 
 function timesheetRowHasDeparture(sheet: SheetLike, rowNumber: number) {
@@ -1839,6 +1914,7 @@ function preserveCancelledTransferTimesheetHistory(input: {
   cancelledDate: string;
   cancelledDest: string;
   lastDay: number;
+  timesheetStyleCopies: TimesheetStyleCopy[];
 }) {
   const {
     timesheet,
@@ -1852,10 +1928,16 @@ function preserveCancelledTransferTimesheetHistory(input: {
     cancelledDate,
     cancelledDest,
     lastDay,
+    timesheetStyleCopies,
   } = input;
   if (existingHistoryRow > 0 && existingHistoryRow !== staffRow) return;
   const historyRow = findTimesheetAppendNear(timesheet, staffRow);
-  copySheetRow(timesheet, staffRow, historyRow, col("AN"));
+  copyTimesheetHistoryValues(
+    timesheet,
+    staffRow,
+    historyRow,
+    timesheetStyleCopies,
+  );
   if (!copyStaff) {
     timesheet.cell(historyRow, col("F")).value(rank || null);
     timesheet.cell(historyRow, col("G")).value(fullName || null);
@@ -1914,17 +1996,7 @@ function writeTimesheetTransferHistory(
       absenceSpans,
       departMark: departureText,
     });
-    if (day === opts.departDay && mark) {
-      cell.value(mark);
-      cell.style?.("wrapText", true);
-      cell.style?.({
-        wrapText: true,
-        verticalAlignment: "center",
-        horizontalAlignment: "center",
-      });
-    } else {
-      cell.value(mark);
-    }
+    cell.value(mark);
     if (mark === "+") presentDays += 1;
   }
   sheet.cell(rowNumber, col("AN")).value(presentDays);
