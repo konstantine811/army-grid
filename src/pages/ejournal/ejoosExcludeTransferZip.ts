@@ -166,7 +166,9 @@ const excludedStyledWrite = (
   value: excludedNumberValue(column, value),
   styleSourceRow,
   styleSourceColumn: column,
-  copyNeighborStyle: true,
+  // Не шукаємо «канонічний» стиль по аркушу: у шаблоні Виключених
+  // нижні рядки часто жовті, і тоді нова підстава фарбується жовтим.
+  copyNeighborStyle: false,
   heightSourceRow: styleSourceRow,
   wrapText: typeof value === "string" && value.includes("\n"),
 });
@@ -507,21 +509,13 @@ export async function applyExcludeTransfersWithZip(input: {
     if (shpoRow > 0) {
       const rowPersonId = cellText(shpo, shpoRow, 8);
       const rowName = cellText(shpo, shpoRow, 7);
-      const rowPositionIndex = cellText(shpo, shpoRow, 1);
       const fromName = op.payload.fromName || op.fullName || "";
-      const occupiedIndex =
-        op.payload.occupiedPositionIndex ||
-        op.payload.fromPositionIndex ||
-        op.payload.previousIndex ||
-        op.positionIndex ||
-        "";
       const clearingSamePerson =
         (!rowPersonId && !rowName) ||
         (personId && rowPersonId === personId) ||
         (fromName &&
           rowName &&
-          nameKey(rowName) === nameKey(fromName)) ||
-        (occupiedIndex && rowPositionIndex === occupiedIndex);
+          nameKey(rowName) === nameKey(fromName));
       if (clearingSamePerson) {
         for (const column of [6, 7, 8, 18]) {
           shpoWrites.push({ row: shpoRow, column, value: null });

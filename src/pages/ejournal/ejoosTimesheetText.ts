@@ -85,41 +85,68 @@ export const archivePeriodAffectsJournalTimesheet = (
 ): boolean => dateMsInJournalMonth(departMs, monthStartMs, monthEndMs);
 
 /**
+ * Відкритий archive з попереднього місяця фарбує журнал лише коли актуальний
+ * sh досі підтверджує ту саму відсутність (СЗЧ з 25.07 → серпень = СЗЧ).
+ * Старий відкритий 2025 при sh «В СТРОЮ» не тягнемо.
+ */
+export const currentStatusConfirmsOpenAbsence = (
+  shTimesheetCode: string | null | undefined,
+  archiveTimesheetCode: string | null | undefined,
+) => {
+  const sh = String(shTimesheetCode || "").trim();
+  const archive = String(archiveTimesheetCode || "").trim();
+  if (!sh || !archive || sh === "+") return false;
+  return sh.toLocaleLowerCase("uk-UA") === archive.toLocaleLowerCase("uk-UA");
+};
+
+export type ArchiveCarryOptions = {
+  /** Відкритий період, що почався до місяця, продовжити від 1 числа. */
+  carryOpen?: boolean;
+};
+
+/**
  * Табель: період перетинає місяць журналу — у т.ч. відсутність з кінця попереднього
  * місяця (МЕДРОТА 31.07 → повернення 03.08 дає коди на 01–02.08).
  *
  * Старі закриті періоди (напр. відпустка 09.10.2025–07.11.2025) не перетинають
- * серпень 2026. Період без дати повернення, що почався **до** місяця журналу,
- * теж не тягнемо вперед — інакше archive 2025 року фарбує весь поточний місяць.
+ * серпень 2026. Відкритий період до місяця — лише якщо `carryOpen` (sh досі СЗЧ/ЗБ).
  */
 export const archivePeriodOverlapsJournalTimesheet = (
   departMs: number,
   returnMs: number | null,
   monthStartMs: number,
   monthEndMs: number,
+  options?: ArchiveCarryOptions,
 ): boolean => {
   if (!monthStartMs || !monthEndMs || !departMs) return false;
   if (departMs > monthEndMs) return false;
-
-  const effectiveEndMs =
-    returnMs ?? (departMs >= monthStartMs ? monthEndMs : 0);
-
-  return effectiveEndMs >= monthStartMs;
+  if (returnMs != null) return returnMs >= monthStartMs;
+  if (departMs >= monthStartMs) return true;
+  return Boolean(options?.carryOpen);
 };
 
 /**
  * Archive для «Тимч. відсутні» / закриття: торкається місяця, якщо вибуття або
- * повернення в межах [monthStart … monthEnd]. Старі відкриті періоди до місяця — ні.
+ * повернення в межах [monthStart … monthEnd], або відкритий період підтверджений sh.
  */
 export const archivePeriodTouchesJournalMonth = (
   departMs: number,
   returnMs: number | null,
   monthStartMs: number,
   monthEndMs: number,
+  options?: ArchiveCarryOptions,
 ): boolean => {
   if (!monthStartMs || !monthEndMs) return false;
   if (dateMsInJournalMonth(departMs, monthStartMs, monthEndMs)) return true;
   if (returnMs && dateMsInJournalMonth(returnMs, monthStartMs, monthEndMs)) {
+    return true;
+  }
+  if (
+    !returnMs &&
+    departMs &&
+    departMs < monthStartMs &&
+    options?.carryOpen
+  ) {
     return true;
   }
   return false;
@@ -210,6 +237,24 @@ export const absenceSpansBeforeEpisode = (
     .filter((span) => span.fromDay > 0 && span.toDay >= span.fromDay);
 };
 
+/** Коди на історичному рядку закритої посади — до дня вибуття, не суцільні «+». */
+export const historyAbsenceSpansForClosedEpisode = (
+  payload: {
+    historyTimesheetAbsenceSpans?: string;
+    timesheetAbsenceSpans?: string;
+  },
+  departDay: number,
+): TimesheetAbsenceSpan[] => {
+  const history = parseTimesheetAbsenceSpans(
+    payload.historyTimesheetAbsenceSpans || "",
+  );
+  if (history.length) return history;
+  return absenceSpansBeforeEpisode(
+    parseTimesheetAbsenceSpans(payload.timesheetAbsenceSpans || ""),
+    departDay,
+  );
+};
+
 /** Позначка дня **до** вибуття (ПЕРЕВ): archive-код або «+». */
 export const timesheetMarkBeforeDeparture = (
   day: number,
@@ -273,6 +318,8 @@ export type ArchiveAbsencePeriodInput = {
   excelRow?: number;
   departMs?: number;
   returnMs?: number | null;
+  personId?: string;
+  fullName?: string;
 };
 
 /** Ланцюжок archive: лік → СЗЧ тощо; дні лише в межах місяця журналу. */
@@ -285,6 +332,7 @@ export const buildTimesheetAbsenceSpans = (
     reportDayMs?: number;
     mapCode: (absenceType: string) => string;
     hasReturn: (returnDate: string) => boolean;
+    confirmOpenCarry?: (period: ArchiveAbsencePeriodInput) => boolean;
   },
 ): TimesheetAbsenceSpan[] => {
   const sorted = [...periods]
@@ -307,6 +355,9 @@ export const buildTimesheetAbsenceSpans = (
           returnMs,
           monthStartMs,
           monthEndMs,
+          {
+            carryOpen: Boolean(options.confirmOpenCarry?.(period)),
+          },
         )
       ) {
         return null;
@@ -427,4 +478,75 @@ export const sameTimesheetDayMark = (actual: string, expected: string) => {
   if (!right) return !left;
   if (left === right) return true;
   return right === "-" && DASH_MARK.test(left);
+};
+
+const UK_MONTH_TITLES = [
+  "Січень",
+  "Лютий",
+  "Березень",
+  "Квітень",
+  "Травень",
+  "Червень",
+  "Липень",
+  "Серпень",
+  "Вересень",
+  "Жовтень",
+  "Листопад",
+  "Грудень",
+] as const;
+
+const TIMESHEET_MONTH_HEADER_RE =
+  /(січень|лютий|березень|квітень|травень|червень|липень|серпень|вересень|жовтень|листопад|грудень)\s+(\d{4})\s*р\.?/iu;
+
+/** Заголовок вкладки «6. Табель»: «Серпень 2026 р.» з дати журналу. */
+export const formatTimesheetMonthHeader = (label: string) => {
+  const match = String(label || "").match(/(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})/);
+  if (!match) return "";
+  const month = Number(match[2]);
+  const yearRaw = Number(match[3]);
+  const year = yearRaw < 100 ? 2000 + yearRaw : yearRaw;
+  if (month < 1 || month > 12 || !Number.isFinite(year)) return "";
+  return `${UK_MONTH_TITLES[month - 1]} ${year} р.`;
+};
+
+export const parseTimesheetMonthHeaderText = (value: string) => {
+  const match = String(value || "").match(TIMESHEET_MONTH_HEADER_RE);
+  if (!match) return null;
+  const idx = UK_MONTH_TITLES.findIndex(
+    (name) => name.toLocaleLowerCase("uk-UA") === match[1].toLocaleLowerCase("uk-UA"),
+  );
+  if (idx < 0) return null;
+  return { month: idx + 1, year: Number(match[2]), matched: match[0] };
+};
+
+export const findTimesheetMonthHeaderCell = (
+  rows: Array<Array<unknown> | undefined>,
+) => {
+  for (let row = 0; row < Math.min(6, rows.length); row += 1) {
+    const cells = rows[row] ?? [];
+    for (let column = 0; column < Math.min(40, cells.length); column += 1) {
+      const text = String(cells[column] ?? "");
+      const parsed = parseTimesheetMonthHeaderText(text);
+      if (!parsed) continue;
+      return {
+        row: row + 1,
+        column: column + 1,
+        text,
+        month: parsed.month,
+        year: parsed.year,
+        matched: parsed.matched,
+      };
+    }
+  }
+  return null;
+};
+
+export const replaceTimesheetMonthHeaderText = (
+  current: string,
+  nextHeader: string,
+) => {
+  if (!nextHeader) return current;
+  if (!current) return nextHeader;
+  if (!TIMESHEET_MONTH_HEADER_RE.test(current)) return nextHeader;
+  return current.replace(TIMESHEET_MONTH_HEADER_RE, nextHeader);
 };

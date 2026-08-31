@@ -9,6 +9,7 @@ import {
   timesheetTransferMarkForDay,
 } from "./ejoosTimesheetText";
 import { excludeWritePlan } from "./ejoosExcludePolicy";
+import { personOpsBlockApply } from "./ejoosOpRequirements";
 import type { ExcelWorkbookSnapshot } from "../../excelRoundTrip";
 
 const formatArchiveSpanSummary = (raw: string) =>
@@ -539,7 +540,11 @@ export const buildSheetImpacts = (ops: EjoosSyncOp[]): SheetImpactItem[] => {
           "timesheet",
           closesOldPosition ? "history" : "edit",
           op.payload.returningFromDisposition === "1"
-            ? `Новий штатний рядок ${op.payload.nextIndex || op.positionIndex}: «+» з ${op.payload.timesheetActiveFrom || op.payload.orderDate || "дати наказу"}; проміжну посаду в Табелі не відкриваємо`
+            ? `Штатний рядок ${op.payload.nextIndex || op.positionIndex}: на початку місяця коди відсутності (СЗЧ), з фактичного повернення «+»${
+                op.payload.timesheetAbsenceSpans
+                  ? ` (${formatArchiveSpanSummary(op.payload.timesheetAbsenceSpans)})`
+                  : ""
+              }`
             : closesOldPosition
             ? `Закрити рядок ${op.payload.previousIndex} з датою вибуття та поставити на ${op.payload.nextIndex || op.positionIndex} з ${op.payload.orderDate || "дати наказу"}`
             : op.payload.timesheetPreserveHistory === "1"
@@ -1435,8 +1440,7 @@ export const personChangesFromOps = (
       sourceInfluences: buildSourceInfluences(ordered),
       timesheetPreview: buildTimesheetPreview(ordered, timesheetDay),
       ops: ordered,
-      decision:
-        options?.decision ?? (severity === "ready" ? "accepted" : "pending"),
+      decision: options?.decision ?? "pending",
     };
   });
 
@@ -1498,6 +1502,36 @@ export const setPersonDecision = (
   ),
 });
 
+export const dismissPersonFromSession = (
+  session: EjoosDiffSession,
+  personId: string,
+): EjoosDiffSession => ({
+  ...session,
+  people: session.people.filter((person) => person.id !== personId),
+  counters: {
+    ...session.counters,
+    changes: Math.max(0, session.counters.changes - 1),
+  },
+});
+
+export const setPersonDecisions = (
+  session: EjoosDiffSession,
+  personIds: Iterable<string>,
+  decision: PersonChangeDecision,
+): EjoosDiffSession => {
+  const ids = new Set(personIds);
+  if (!ids.size) return session;
+  return {
+    ...session,
+    people: session.people.map((person) =>
+      ids.has(person.id) ? { ...person, decision } : person,
+    ),
+  };
+};
+
+export const personCanEnterApplyQueue = (person: PersonChange) =>
+  person.severity === "ready" && !personOpsBlockApply(person.ops);
+
 export const acceptAllReady = (session: EjoosDiffSession): EjoosDiffSession => ({
   ...session,
   people: session.people.map((person) =>
@@ -1513,11 +1547,40 @@ export const collectedAcceptedOps = (session: EjoosDiffSession): EjoosSyncOp[] =
     .flatMap((person) => person.ops)
     .filter((op) => op.class !== "conflict");
 
-/** ПІБ / ID / звання — лише позначка; у книгу нічого не пишемо. */
-export const isInformationalOp = (op: EjoosSyncOp) => op.kind === "data_mismatch";
+/** ПІБ / ID / звання або перегляд без запису в книгу. */
+export const isInformationalOp = (op: EjoosSyncOp) =>
+  op.kind === "data_mismatch" ||
+  (op.kind === "other_manual" &&
+    op.payload.type === "TRANSFER_CANCELLED" &&
+    op.payload.reviewReason === "CANCEL_TRANSFER_BUT_NOT_IN_CURRENT_SH");
+
+const WORKBOOK_APPLY_KINDS = new Set<EjoosOpKind>([
+  "timesheet_day",
+  "shpo_occupant",
+  "absent_upsert",
+  "absent_close",
+  "exclude_transfer",
+  "move_to_disposition",
+  "position_change",
+  "rank_change",
+]);
+
+/** Є реальний handler у apply; arrival / generic other_manual — ні. */
+export const isWorkbookApplyOp = (op: EjoosSyncOp) => {
+  if (op.class === "conflict") return false;
+  if (isInformationalOp(op)) return false;
+  if (WORKBOOK_APPLY_KINDS.has(op.kind)) return true;
+  return (
+    op.kind === "other_manual" &&
+    op.payload.type === "TRANSFER_CANCELLED"
+  );
+};
 
 export const writableOps = (ops: EjoosSyncOp[]) =>
   ops.filter((op) => op.class !== "conflict" && !isInformationalOp(op));
+
+export const personHasWorkbookApplyOps = (ops: EjoosSyncOp[]) =>
+  ops.some(isWorkbookApplyOp);
 
 export const personIsInformationalOnly = (ops: EjoosSyncOp[]) =>
   ops.length > 0 && writableOps(ops).length === 0;

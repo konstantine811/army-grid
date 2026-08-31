@@ -30,14 +30,22 @@ import {
 import {
   clipAbsenceSpansToActiveEpisode,
   dayFromOrderLabel,
+  findTimesheetMonthHeaderCell,
+  formatTimesheetMonthHeader,
+  historyAbsenceSpansForClosedEpisode,
   isTimesheetDepartureMark,
   parseTimesheetAbsenceSpans,
+  replaceTimesheetMonthHeaderText,
   timesheetCodeOnDay,
   timesheetMarkFromArchive,
   timesheetTransferMarkForDay,
 } from "./ejoosTimesheetText";
 import { excludeWritePlan } from "./ejoosExcludePolicy";
-import { personChangesFromOps } from "./ejoosPersonDiff";
+import { personChangesFromOps, isWorkbookApplyOp } from "./ejoosPersonDiff";
+import {
+  excludeTransferOpBlocksApply,
+  personOpsBlockApply,
+} from "./ejoosOpRequirements";
 import {
   serializeAppliedPerson,
   serializeSyncOp,
@@ -67,14 +75,18 @@ const isRankBeforeExclude = (op: EjoosSyncOp) => op.kind === "rank_change";
 
 const applyKindOrder = (op: EjoosSyncOp) => {
   if (op.kind === "rank_change") return 0;
-  if (op.kind === "exclude_transfer") return 1;
+  if (op.kind === "absent_close") return 1;
+  if (op.kind === "absent_upsert") return 2;
+  if (op.kind === "exclude_transfer") return 3;
+  if (op.kind === "position_change") return 4;
+  if (op.kind === "move_to_disposition") return 5;
   if (
     op.kind === "other_manual" &&
     op.payload.type === "TRANSFER_CANCELLED"
   ) {
-    return 9;
+    return 7;
   }
-  return 2;
+  return 6;
 };
 
 const transferCancelUndoBlocksTimesheet = (
@@ -93,6 +105,149 @@ const transferCancelUndoBlocksTimesheet = (
 
 const closesOldPosition = (op: EjoosSyncOp) =>
   op.kind === "position_change" && op.payload.closeOldPosition === "1";
+
+const personKeyOf = (op: EjoosSyncOp) =>
+  String(op.personId || op.fullName || "")
+    .trim()
+    .toLocaleLowerCase("uk-UA");
+
+const snapshotWithAppliedBlob = (
+  ejoos: ExcelWorkbookSnapshot,
+  blob: Blob,
+): ExcelWorkbookSnapshot => ({
+  ...ejoos,
+  file: new File([blob], ejoos.fileName, {
+    type:
+      blob.type ||
+      ejoos.file.type ||
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  }),
+});
+
+/**
+ * Змішана черга (виключення + посади інших людей) не йде одним rewrite.
+ * Ділимо на безпечні ZIP-проходи: спочатку прості зміни, потім виключення,
+ * потім розпорядження.
+ */
+const partitionSafeApplyBatches = (ops: EjoosSyncOp[]): EjoosSyncOp[][] => {
+  const excludePeople = new Set(
+    ops
+      .filter((op) => op.kind === "exclude_transfer")
+      .map(personKeyOf)
+      .filter(Boolean),
+  );
+  const dispositionPeople = new Set(
+    ops
+      .filter((op) => op.kind === "move_to_disposition")
+      .map(personKeyOf)
+      .filter(Boolean),
+  );
+  const simple: EjoosSyncOp[] = [];
+  const excludes: EjoosSyncOp[] = [];
+  const dispositions: EjoosSyncOp[] = [];
+  for (const op of ops) {
+    const key = personKeyOf(op);
+    if (key && excludePeople.has(key)) {
+      if (op.kind === "exclude_transfer" || op.kind === "rank_change") {
+        excludes.push(op);
+      }
+      continue;
+    }
+    if (key && dispositionPeople.has(key)) {
+      if (
+        op.kind === "move_to_disposition" ||
+        op.kind === "rank_change" ||
+        op.kind === "absent_upsert" ||
+        op.kind === "absent_close"
+      ) {
+        dispositions.push(op);
+      }
+      continue;
+    }
+    simple.push(op);
+  }
+  return [simple, excludes, dispositions].filter((batch) => batch.length > 0);
+};
+
+async function applyUniformBatchToBlob(input: {
+  ejoos: ExcelWorkbookSnapshot;
+  plan: EjoosSyncPlan;
+  ops: EjoosSyncOp[];
+}): Promise<{ blob: Blob; directXml: boolean }> {
+  const { ejoos, plan, ops: appliedOps } = input;
+  const personKey = personKeyOf;
+  const integratedPersons = new Set(
+    appliedOps.filter(isSinglePersonMovement).map(personKey).filter(Boolean),
+  );
+  const onlyExcludeAndRank = appliedOps.every(
+    (op) => op.kind === "exclude_transfer" || op.kind === "rank_change",
+  );
+  const onlyDispositionFamily = appliedOps.every(
+    (op) =>
+      op.kind === "move_to_disposition" ||
+      op.kind === "rank_change" ||
+      op.kind === "absent_upsert" ||
+      op.kind === "absent_close",
+  );
+  const onePerson =
+    new Set(appliedOps.map(personKey).filter(Boolean)).size <= 1;
+  const uniformIntegratedKind =
+    appliedOps.every((op) => op.kind === "exclude_transfer") ||
+    appliedOps.every((op) => op.kind === "move_to_disposition") ||
+    (integratedPersons.size > 0 && onlyExcludeAndRank) ||
+    (onePerson && onlyDispositionFamily);
+  if (integratedPersons.size > 0 && !uniformIntegratedKind && !onePerson) {
+    throw new Error(
+      "Комплексний рух (виключення або розпорядження) застосовуйте окремо від інших змін. Це захищає ЕЖООС від повного перезапису та пошкодження аркушів.",
+    );
+  }
+
+  const excludeOps = appliedOps.filter((op) => op.kind === "exclude_transfer");
+  const dispositionOps = appliedOps.filter(
+    (op) => op.kind === "move_to_disposition",
+  );
+  const positionOps = appliedOps.filter(closesOldPosition);
+  const useExcludeZip =
+    excludeOps.length > 0 &&
+    (onePerson || onlyExcludeAndRank || excludeOps.length === appliedOps.length);
+  const useDispositionZip =
+    !useExcludeZip &&
+    dispositionOps.length > 0 &&
+    (onePerson ||
+      onlyDispositionFamily ||
+      dispositionOps.length === appliedOps.length);
+  const usePositionZip =
+    !useExcludeZip &&
+    !useDispositionZip &&
+    positionOps.length > 0 &&
+    appliedOps.every((op) => closesOldPosition(op) || op.kind === "rank_change");
+  const directXml = useExcludeZip || useDispositionZip || usePositionZip;
+  const rawBlob = useExcludeZip
+    ? await applyExcludeTransfersWithZip({ ejoos, plan, ops: excludeOps })
+    : useDispositionZip
+      ? await applyDispositionWithZip({ ejoos, plan, ops: dispositionOps })
+      : usePositionZip
+        ? await applyPositionChangeWithZip({ ejoos, plan, ops: positionOps })
+        : await mutateToBlob(ejoos, appliedOps, plan);
+  const blob = await applyTimesheetMonthHeader({
+    file: await applyExcludedClearsWithZip({
+      file: await applyRankLabelsWithZip({
+        file: await applyOosHistoryPresentation({
+          file: rawBlob,
+          ejoos,
+          ops: appliedOps,
+          plan,
+        }),
+        ops: appliedOps,
+      }),
+      ejoos,
+      ops: appliedOps,
+    }),
+    ejoos,
+    plan,
+  });
+  return { blob, directXml };
+}
 
 /**
  * Apply only confirmed ops to a copy of the live ЕЖООС workbook.
@@ -127,12 +282,8 @@ export async function applyConfirmedEjoosOps(input: {
       "Обрано лише позначки ПІБ / ID / звання. Їх виправляють у джерелах — у ЕЖООС нічого не пишемо.",
     );
   }
-  const personKey = (op: EjoosSyncOp) =>
-    String(op.personId || op.fullName || "")
-      .trim()
-      .toLocaleLowerCase("uk-UA");
   const integratedPersons = new Set(
-    ops.filter(isSinglePersonMovement).map(personKey).filter(Boolean),
+    ops.filter(isSinglePersonMovement).map(personKeyOf).filter(Boolean),
   );
   // Комплексний рух уже включає всі потрібні аркуші. Окремі операції
   // цієї ж особи не повинні запускати повторний повний rewrite книги.
@@ -142,92 +293,66 @@ export async function applyConfirmedEjoosOps(input: {
       (op) =>
         isSinglePersonMovement(op) ||
         isRankBeforeExclude(op) ||
-        !integratedPersons.has(personKey(op)),
+        !integratedPersons.has(personKeyOf(op)),
     )
     .sort((left, right) => applyKindOrder(left) - applyKindOrder(right));
-  // Комплексні рухи пишемо точково в XML, тому кілька осіх одного типу — можна.
-  // Небезпечний лише змішаний набір: він тягне повний rewrite книги.
-  const onlyExcludeAndRank = appliedOps.every(
-    (op) => op.kind === "exclude_transfer" || op.kind === "rank_change",
-  );
-  const onlyDispositionFamily = appliedOps.every(
-    (op) =>
-      op.kind === "move_to_disposition" ||
-      op.kind === "rank_change" ||
-      op.kind === "absent_upsert" ||
-      op.kind === "absent_close",
-  );
-  const onePerson =
-    new Set(appliedOps.map(personKey).filter(Boolean)).size <= 1;
-  const uniformIntegratedKind =
-    appliedOps.every((op) => op.kind === "exclude_transfer") ||
-    appliedOps.every((op) => op.kind === "move_to_disposition") ||
-    (integratedPersons.size > 0 && onlyExcludeAndRank) ||
-    (onePerson && onlyDispositionFamily);
-  // Одна картка (звання + СЗЧ / розпорядження) — не «змішана пачка».
-  if (integratedPersons.size > 0 && !uniformIntegratedKind && !onePerson) {
+  const unsupported = appliedOps.find((op) => !isWorkbookApplyOp(op));
+  if (unsupported) {
     throw new Error(
-      "Комплексний рух (виключення або розпорядження) застосовуйте окремо від інших змін. Це захищає ЕЖООС від повного перезапису та пошкодження аркушів.",
+      `Операція «${unsupported.kind}» для ${unsupported.fullName || unsupported.personId} не має apply — підтвердження не записує ЕЖООС.`,
     );
   }
 
-  const incompleteTransfer = appliedOps.find(
-    (op) =>
-      op.kind === "exclude_transfer" &&
-      (!op.payload.destination?.trim() ||
-        !op.payload.excludeDate?.trim() ||
-        !op.payload.orderNumber?.trim() ||
-        !op.payload.orderDate?.trim()),
-  );
+  const incompleteTransfer = appliedOps.find(excludeTransferOpBlocksApply);
   if (incompleteTransfer) {
     throw new Error(
       `Для ${incompleteTransfer.fullName || incompleteTransfer.personId} вкажіть куди вибув, дату виключення, номер і дату стройового наказу.`,
     );
   }
+  const unclearTransfer = appliedOps.find(
+    (op) =>
+      op.payload.transferScope === "unclear" ||
+      op.payload.type === "TRANSFER_SCOPE_UNCLEAR",
+  );
+  if (unclearTransfer) {
+    throw new Error(
+      `Для ${unclearTransfer.fullName || unclearTransfer.personId} не визначено, внутрішнє чи зовнішнє переведення. Уточніть «куди вибув» або в/ч.`,
+    );
+  }
+  if (personOpsBlockApply(appliedOps)) {
+    const contradiction = appliedOps.find(
+      (op) =>
+        op.kind === "position_change" && op.payload.openAbsenceExcelRow,
+    );
+    if (
+      contradiction &&
+      !appliedOps.some(
+        (op) =>
+          op.kind === "absent_close" ||
+          (op.kind === "absent_upsert" && op.payload.returnDate),
+      )
+    ) {
+      throw new Error(
+        `Для ${contradiction.fullName || contradiction.personId} спочатку закрийте відкритий СЗЧ / тимчасову відсутність, потім ставте на штат.`,
+      );
+    }
+  }
 
   const fileName = `ЄЖООС_станом_на_${plan.timesheetDayLabel.replaceAll(".", "-")}.xlsx`;
-  // Точковий запис XML безпечніший для книги, тому вибираємо його, коли всі
-  // підтверджені операції одного типу. Змішаний набір іде звичайним шляхом.
-  const excludeOps = appliedOps.filter((op) => op.kind === "exclude_transfer");
-  const dispositionOps = appliedOps.filter(
-    (op) => op.kind === "move_to_disposition",
-  );
-  const positionOps = appliedOps.filter(closesOldPosition);
-  const useExcludeZip =
-    excludeOps.length > 0 &&
-    (onePerson || onlyExcludeAndRank || excludeOps.length === appliedOps.length);
-  const useDispositionZip =
-    !useExcludeZip &&
-    dispositionOps.length > 0 &&
-    (onePerson ||
-      onlyDispositionFamily ||
-      dispositionOps.length === appliedOps.length);
-  const usePositionZip =
-    !useExcludeZip &&
-    !useDispositionZip &&
-    positionOps.length > 0 &&
-    appliedOps.every((op) => closesOldPosition(op) || op.kind === "rank_change");
-  const directXml = useExcludeZip || useDispositionZip || usePositionZip;
-  const rawBlob = useExcludeZip
-    ? await applyExcludeTransfersWithZip({ ejoos, plan, ops: excludeOps })
-    : useDispositionZip
-      ? await applyDispositionWithZip({ ejoos, plan, ops: dispositionOps })
-      : usePositionZip
-        ? await applyPositionChangeWithZip({ ejoos, plan, ops: positionOps })
-        : await mutateToBlob(ejoos, appliedOps, plan);
-  const blob = await applyExcludedClearsWithZip({
-    file: await applyRankLabelsWithZip({
-      file: await applyOosHistoryPresentation({
-        file: rawBlob,
-        ejoos,
-        ops: appliedOps,
-        plan,
-      }),
-      ops: appliedOps,
-    }),
-    ejoos,
-    ops: appliedOps,
-  });
+  const batches = partitionSafeApplyBatches(appliedOps);
+  let working = ejoos;
+  let blob: Blob = ejoos.file;
+  let directXml = true;
+  for (const batch of batches) {
+    const applied = await applyUniformBatchToBlob({
+      ejoos: working,
+      plan,
+      ops: batch,
+    });
+    blob = applied.blob;
+    directXml = directXml && applied.directXml;
+    working = snapshotWithAppliedBlob(ejoos, blob);
+  }
   const protocolText = buildProtocolText(plan, appliedOps, {
     actor,
     at: new Date().toLocaleString("uk-UA"),
@@ -360,8 +485,7 @@ async function mutateToBlob(
         if (!transferCancelUndoBlocksTimesheet(sortedOps, op)) {
           paintTimesheetArchiveDays(timesheet, timesheetRow, plan, {
             ...op.payload,
-            timesheetActiveFrom:
-              op.payload.timesheetActiveFrom || op.payload.returnDay || "",
+            timesheetActiveFrom: op.payload.timesheetActiveFrom || "",
             timesheetSkipHistory: op.payload.timesheetSkipHistory || "1",
           });
         }
@@ -703,6 +827,12 @@ function applyPositionChange(input: {
     shpo.cell(dispositionShpoRow, col("G")).value(null);
     shpo.cell(dispositionShpoRow, col("H")).value(null);
   }
+  const dispositionTimesheetRow = Number(
+    op.payload.dispositionTimesheetExcelRow || 0,
+  );
+  if (timesheet && dispositionTimesheetRow > 0) {
+    clearTimesheetOccupantRow(timesheet, dispositionTimesheetRow);
+  }
   if (shpo && shpoRow > 0) {
     shpo.cell(shpoRow, col("F")).value(rank || null);
     shpo.cell(shpoRow, col("G")).value(fullName || null);
@@ -858,9 +988,31 @@ function applyPositionChange(input: {
   }
 
   clearStaleExcludedRow(excluded, op.payload.clearExcludedExcelRow);
+  const staleTimesheetRow = Number(op.payload.clearTimesheetExcelRow || 0);
+  if (
+    timesheet &&
+    staleTimesheetRow > 0 &&
+    staleTimesheetRow !== Number(op.payload.timesheetExcelRow || 0)
+  ) {
+    clearTimesheetOccupantRow(timesheet, staleTimesheetRow);
+  }
 }
 
 const EXCLUDED_CLEAR_LAST_COLUMN = 32;
+
+const clearTimesheetOccupantRow = (
+  timesheet: SheetLike,
+  rowNumber: number,
+) => {
+  if (rowNumber <= 0) return;
+  timesheet.cell(rowNumber, col("F")).value(null);
+  timesheet.cell(rowNumber, col("G")).value(null);
+  timesheet.cell(rowNumber, col("H")).value(null);
+  for (let day = 1; day <= 31; day += 1) {
+    timesheet.cell(rowNumber, col("I") + day - 1).value(null);
+  }
+  timesheet.cell(rowNumber, col("AN")).value(null);
+};
 
 const clearStaleExcludedRow = (
   excluded: SheetLike | undefined,
@@ -873,6 +1025,34 @@ const clearStaleExcludedRow = (
   }
   excluded.cell(rowNumber, col("Z")).value(null);
 };
+
+async function applyTimesheetMonthHeader(input: {
+  file: Blob;
+  ejoos: ExcelWorkbookSnapshot;
+  plan: EjoosSyncPlan;
+}): Promise<Blob> {
+  const timesheet = findEjoosSheet(input.ejoos, /табель/i);
+  if (!timesheet) return input.file;
+  const expected = formatTimesheetMonthHeader(input.plan.timesheetDayLabel);
+  if (!expected) return input.file;
+  const found = findTimesheetMonthHeaderCell(timesheet.rawRows);
+  if (
+    found &&
+    found.matched.replace(/\s+/g, " ").trim().toLocaleLowerCase("uk-UA") ===
+      expected.toLocaleLowerCase("uk-UA")
+  ) {
+    return input.file;
+  }
+  const row = found?.row || 2;
+  const column = found?.column || 9;
+  const current = found
+    ? String(timesheet.rawRows[found.row - 1]?.[found.column - 1] ?? "")
+    : "";
+  const value = replaceTimesheetMonthHeaderText(current, expected);
+  return applyInlineStringWritesToWorkbook(input.file, timesheet.sheetName, [
+    { row, column, value },
+  ]);
+}
 
 async function applyExcludedClearsWithZip(input: {
   file: Blob;
@@ -974,6 +1154,7 @@ function closeOldPositionRows(input: {
       // Особа не відсутня в частині, а переходить на іншу посаду:
       // після дня вибуття старий рядок лишається порожнім.
       lastDay: departDay,
+      absenceSpans: historyAbsenceSpansForClosedEpisode(op.payload, departDay),
     });
     timesheet.cell(oldTimesheetRow, col("F")).value(null);
     timesheet.cell(oldTimesheetRow, col("G")).value(null);
@@ -1878,7 +2059,12 @@ const paintTimesheetArchiveDays = (
       spans,
       fillBeforeActive,
     });
-    if (mark == null) continue;
+    if (mark == null) {
+      if (day > lastDay) {
+        timesheet.cell(rowNumber, col("I") + day - 1).value(null);
+      }
+      continue;
+    }
     timesheet.cell(rowNumber, col("I") + day - 1).value(mark);
     if (day <= lastDay && mark === "+") presentDays += 1;
   }

@@ -207,6 +207,39 @@ export const isOwnUnitStaffMove = (event: StaffMoveEvent) =>
 export const isOutboundStaffMove = (event: StaffMoveEvent) =>
   classifyStaffMove(event) === "outbound";
 
+/**
+ * ПЕРЕВ без однозначної сфери: немає в/ч А####, немає 1ПБ, немає пари
+ * штатних індексів. Масове застосування блокуємо, поки оператор не уточнить.
+ */
+export const isAmbiguousStaffTransfer = (event: StaffMoveEvent) => {
+  if (event.type !== "ПЕРЕВ") return false;
+  const blob = [event.note, event.destination, event.changeText].join(" ");
+  if (mentionsExternalMilitaryUnit(blob) || mentionsForeignUnit(blob)) {
+    return false;
+  }
+  if (isOwnFirstPbDestination(event.destination)) return false;
+  if (
+    isStaffIndexToken(event.previousIndex) &&
+    isStaffIndexToken(event.nextIndex)
+  ) {
+    return false;
+  }
+  if (isDispositionToStaffPlacement(event)) return false;
+  if (isFirstPbPositionChange(event)) return false;
+  const dest = normText(event.destination);
+  if (!dest && !normText(event.note)) return true;
+  if (
+    dest &&
+    !isOwnFirstPbDestination(dest) &&
+    !mentionsExternalMilitaryUnit(dest) &&
+    !mentionsForeignUnit(dest) &&
+    !normText(event.note)
+  ) {
+    return true;
+  }
+  return false;
+};
+
 export const findLatestPriorOwnUnitStaffMove = <
   T extends StaffMoveEvent & {
     orderDate?: string;
@@ -227,7 +260,13 @@ export const findLatestPriorOwnUnitStaffMove = <
   for (const candidate of events) {
     if (!opts.samePerson(event, candidate)) continue;
     if (!opts.inWindow(candidate)) continue;
-    if (opts.eventTime(candidate) >= limit) continue;
+    if (opts.eventTime(candidate) > limit) continue;
+    if (
+      opts.eventTime(candidate) === limit &&
+      candidate.excelRow >= event.excelRow
+    ) {
+      continue;
+    }
     if (!isOwnUnitStaffMove(candidate)) continue;
     const candidateTime = opts.eventTime(candidate);
     const foundTime = found ? opts.eventTime(found) : 0;

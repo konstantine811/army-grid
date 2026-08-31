@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import {
   Box,
   Button,
+  Checkbox,
   Dialog,
   DialogActions,
   DialogContent,
@@ -10,7 +11,10 @@ import {
   Stack,
   Typography,
 } from "@/components/sci/SciPrimitives";
-import { personIsInformationalOnly } from "./ejoosPersonDiff";
+import {
+  personCanEnterApplyQueue,
+  personIsInformationalOnly,
+} from "./ejoosPersonDiff";
 import {
   PersonChangeCard,
   PersonChangeRow,
@@ -24,6 +28,8 @@ type ChangeFilter =
   | "position"
   | "data"
   | "error";
+
+type ChangesView = "list" | "queue";
 
 const FILTERS: { id: ChangeFilter; label: string }[] = [
   { id: "ALL", label: "Усі" },
@@ -40,6 +46,8 @@ export function EjoosChangesPanel() {
     selectedPersonId,
     setSelectedPersonId,
     setDecision,
+    dismissPerson,
+    setDecisions,
     patchOpPayload,
     acceptReady,
     applyAccepted,
@@ -48,6 +56,7 @@ export function EjoosChangesPanel() {
     setTab,
     isLoading,
   } = useEjoosWorkspace();
+  const [view, setView] = useState<ChangesView>("list");
   const [filter, setFilter] = useState<ChangeFilter>("ALL");
   const [query, setQuery] = useState("");
   const [applyConfirm, setApplyConfirm] = useState<{
@@ -55,11 +64,17 @@ export function EjoosChangesPanel() {
     name: string;
     reviewOnly?: boolean;
   } | null>(null);
+  const [bulkApplyOpen, setBulkApplyOpen] = useState(false);
 
   const people = session?.people ?? [];
+  const queuedPeople = useMemo(
+    () => people.filter((person) => person.decision === "accepted"),
+    [people],
+  );
   const filtered = useMemo(() => {
+    const source = view === "queue" ? queuedPeople : people;
     const q = query.trim().toLowerCase();
-    return people.filter((person) => {
+    return source.filter((person) => {
       if (filter === "error") {
         if (person.severity !== "conflict" && person.category !== "error") {
           return false;
@@ -104,16 +119,39 @@ export function EjoosChangesPanel() {
         person.positionIndex.toLowerCase().includes(q)
       );
     });
-  }, [people, filter, query]);
+  }, [filter, people, query, queuedPeople, view]);
+
+  const queueableVisible = useMemo(
+    () => filtered.filter(personCanEnterApplyQueue),
+    [filtered],
+  );
+  const visibleQueuedCount = queueableVisible.filter(
+    (person) => person.decision === "accepted",
+  ).length;
+  const allVisibleQueued =
+    queueableVisible.length > 0 &&
+    visibleQueuedCount === queueableVisible.length;
+  const someVisibleQueued =
+    visibleQueuedCount > 0 && !allVisibleQueued;
 
   const selectedPerson =
     people.find((p) => p.id === selectedPersonId) ?? null;
 
-  const acceptedCount = people.filter((p) => p.decision === "accepted").length;
-  const writableAcceptedCount = people.filter(
-    (person) =>
-      person.decision === "accepted" && !personIsInformationalOnly(person.ops),
+  const writableQueuedCount = queuedPeople.filter(
+    (person) => !personIsInformationalOnly(person.ops),
   ).length;
+
+  const toggleQueue = (personId: string, next: boolean) => {
+    setDecision(personId, next ? "accepted" : "pending");
+  };
+
+  const toggleVisibleQueue = (next: boolean) => {
+    setDecisions(
+      queueableVisible.map((person) => person.id),
+      next ? "accepted" : "pending",
+    );
+    if (next) setView("queue");
+  };
 
   if (!session) {
     return (
@@ -145,12 +183,19 @@ export function EjoosChangesPanel() {
           <Typography variant="body2" className="ejoos-muted">
             {session.pbFileName} · {session.counters.changes} людей ·{" "}
             {session.counters.autoReady} авто · {session.counters.needsReview}{" "}
-            перевірити · підтверджено {acceptedCount}
+            перевірити · у черзі {queuedPeople.length}
           </Typography>
         </Box>
         <Stack direction="row" spacing={1} style={{ flexWrap: "wrap" }}>
-          <Button size="small" variant="outlined" onClick={acceptReady}>
-            Підтвердити всі «зелені»
+          <Button
+            size="small"
+            variant="outlined"
+            onClick={() => {
+              acceptReady();
+              setView("queue");
+            }}
+          >
+            Додати всі «авто» в чергу
           </Button>
           <Button
             size="small"
@@ -160,16 +205,37 @@ export function EjoosChangesPanel() {
           >
             Перебудувати
           </Button>
-          <Button
-            size="small"
-            variant="contained"
-            disabled={!writableAcceptedCount || isLoading}
-            onClick={() => void applyAccepted()}
-            sx={{ color: "#1a1a14" }}
-          >
-            Застосувати підтверджені ({writableAcceptedCount || acceptedCount})
-          </Button>
+          {view === "queue" ? (
+            <Button
+              size="small"
+              variant="contained"
+              disabled={!writableQueuedCount || isLoading}
+              onClick={() => setBulkApplyOpen(true)}
+              sx={{ color: "#1a1a14" }}
+            >
+              Застосувати всі ({writableQueuedCount || queuedPeople.length})
+            </Button>
+          ) : null}
         </Stack>
+      </Stack>
+
+      <Stack direction="row" spacing={1} style={{ flexWrap: "wrap" }}>
+        <Button
+          size="small"
+          variant={view === "list" ? "contained" : "outlined"}
+          onClick={() => setView("list")}
+          sx={view === "list" ? { color: "#1a1a14" } : undefined}
+        >
+          Список
+        </Button>
+        <Button
+          size="small"
+          variant={view === "queue" ? "contained" : "outlined"}
+          onClick={() => setView("queue")}
+          sx={view === "queue" ? { color: "#1a1a14" } : undefined}
+        >
+          До застосування ({queuedPeople.length})
+        </Button>
       </Stack>
 
       <Stack
@@ -194,23 +260,61 @@ export function EjoosChangesPanel() {
           onChange={(event) => setQuery(event.target.value)}
           placeholder="Пошук ПІБ / ID / індекс"
         />
+        {view === "list" && query.trim() && queueableVisible.length > 0 ? (
+          <Button
+            size="small"
+            variant="outlined"
+            onClick={() => toggleVisibleQueue(true)}
+          >
+            Знайдені в чергу ({queueableVisible.length})
+          </Button>
+        ) : null}
       </Stack>
 
       <div className="ejoos-changes-layout">
         <div className="ejoos-change-list">
           {filtered.length === 0 ? (
             <Typography variant="body2" className="ejoos-muted" sx={{ p: 2 }}>
-              Немає змін за фільтром
+              {view === "queue"
+                ? "Черга порожня. Знайдіть людей у списку й поставте чекбокс — вони з’являться тут."
+                : "Немає змін за фільтром"}
             </Typography>
           ) : (
-            filtered.map((person) => (
-              <PersonChangeRow
-                key={person.id}
-                person={person}
-                selected={person.id === selectedPersonId}
-                onSelect={() => setSelectedPersonId(person.id)}
-              />
-            ))
+            <>
+              {queueableVisible.length > 0 ? (
+                <div className="ejoos-change-list-toolbar">
+                  <Checkbox
+                    id={`ejoos-queue-visible-${view}`}
+                    checked={
+                      allVisibleQueued
+                        ? true
+                        : someVisibleQueued
+                          ? "indeterminate"
+                          : false
+                    }
+                    onCheckedChange={(value) =>
+                      toggleVisibleQueue(value === true)
+                    }
+                    label={
+                      allVisibleQueued
+                        ? `Зняти видимі (${queueableVisible.length})`
+                        : `Обрати видимі (${queueableVisible.length})`
+                    }
+                  />
+                </div>
+              ) : null}
+              {filtered.map((person) => (
+                <PersonChangeRow
+                  key={person.id}
+                  person={person}
+                  selected={person.id === selectedPersonId}
+                  onSelect={() => setSelectedPersonId(person.id)}
+                  queued={person.decision === "accepted"}
+                  queueDisabled={!personCanEnterApplyQueue(person)}
+                  onToggleQueue={(next) => toggleQueue(person.id, next)}
+                />
+              ))}
+            </>
           )}
         </div>
         <div className="ejoos-change-detail">
@@ -218,7 +322,15 @@ export function EjoosChangesPanel() {
             <PersonChangeCard
               person={selectedPerson}
               timesheetDay={session?.plan.timesheetDay ?? 31}
-              onAccept={() => setDecision(selectedPerson.id, "accepted")}
+              canQueue={personCanEnterApplyQueue(selectedPerson)}
+              onAccept={() => {
+                if (selectedPerson.decision === "accepted") {
+                  setDecision(selectedPerson.id, "pending");
+                  return;
+                }
+                setDecision(selectedPerson.id, "accepted");
+                setView("queue");
+              }}
               onApplyNow={() =>
                 setApplyConfirm({
                   id: selectedPerson.id,
@@ -226,7 +338,13 @@ export function EjoosChangesPanel() {
                   reviewOnly: personIsInformationalOnly(selectedPerson.ops),
                 })
               }
-              onReject={() => setDecision(selectedPerson.id, "rejected")}
+              onReject={() => {
+                if (personIsInformationalOnly(selectedPerson.ops)) {
+                  dismissPerson(selectedPerson.id);
+                  return;
+                }
+                setDecision(selectedPerson.id, "rejected");
+              }}
               onClose={() => setSelectedPersonId(null)}
               onPatchPayload={(opId, patch) =>
                 patchOpPayload(selectedPerson.id, opId, patch)
@@ -236,8 +354,9 @@ export function EjoosChangesPanel() {
           ) : (
             <Box className="ejoos-change-card is-empty">
               <Typography variant="body2" className="ejoos-muted">
-                Оберіть людину зі списку, щоб побачити було / стало і дії по
-                аркушах.
+                {view === "queue"
+                  ? "Черга зліва. Кнопка «Застосувати всі» запише всіх у ЕЖООС одним кроком."
+                  : "Знайдіть людину, поставте чекбокс — вона перейде у «До застосування»."}
               </Typography>
             </Box>
           )}
@@ -262,14 +381,14 @@ export function EjoosChangesPanel() {
               </>
             ) : (
               <>
-                Застосувати підтверджені зміни для{" "}
+                Застосувати зміни для{" "}
                 <strong>{applyConfirm?.name}</strong> зараз?
               </>
             )}
           </Typography>
           <Typography variant="body2" className="ejoos-muted" sx={{ mt: 1 }}>
             {applyConfirm?.reviewOnly
-              ? "Це лише позначка ПІБ / ID / звання. Виправлення роблять у джерелах (1ПБ або наказ про присвоєння)."
+              ? "Немає автоматичних змін по аркушах. Підтвердження лише прибирає запис з операцій."
               : "Буде створено нову версію ЕЖООС (ШПО, ООС, Табель, Тимч. відсутні — те, що в картці). Файл не качається — експорт з вкладки «Експорт»."}
           </Typography>
         </DialogContent>
@@ -292,6 +411,44 @@ export function EjoosChangesPanel() {
             sx={{ color: "#1a1a14" }}
           >
             {applyConfirm?.reviewOnly ? "Підтвердити" : "Застосувати"}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={bulkApplyOpen} onClose={() => setBulkApplyOpen(false)}>
+        <DialogTitle>Застосувати чергу</DialogTitle>
+        <DialogContent>
+          <Typography variant="body1">
+            Застосувати зміни для{" "}
+            <strong>
+              {writableQueuedCount || queuedPeople.length}{" "}
+              {writableQueuedCount === 1 ? "особи" : "осіб"}
+            </strong>{" "}
+            одним кроком?
+          </Typography>
+          <Typography variant="body2" className="ejoos-muted" sx={{ mt: 1 }}>
+            Буде нова версія ЕЖООС. Після запису операції перерахуються, черга
+            очиститься. Файл не качається — експорт з вкладки «Експорт».
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button
+            variant="outlined"
+            disabled={isLoading}
+            onClick={() => setBulkApplyOpen(false)}
+          >
+            Скасувати
+          </Button>
+          <Button
+            variant="contained"
+            disabled={isLoading || !writableQueuedCount}
+            onClick={() => {
+              setBulkApplyOpen(false);
+              void applyAccepted();
+            }}
+            sx={{ color: "#1a1a14" }}
+          >
+            Застосувати всі
           </Button>
         </DialogActions>
       </Dialog>

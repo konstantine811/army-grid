@@ -29,6 +29,17 @@ export const skipExternalIfAlreadyProcessed = (input: {
   unrecordedTransit: boolean;
 }) => !input.stillInEjoos && !input.unrecordedTransit;
 
+/**
+ * Відкрита відсутність + немає на штаті ШПО = проведений вивід,
+ * лише якщо людини вже немає в актуальному sh. Якщо sh каже «в строю» —
+ * це повернення, і СЗЧ треба закрити, а не вважати стан завершеним.
+ */
+export const isStaleVacatedAbsence = (input: {
+  onStaffShpo: boolean;
+  hasOpenAbsence: boolean;
+  stillInSh: boolean;
+}) => input.hasOpenAbsence && !input.onStaffShpo && !input.stillInSh;
+
 export const excludeWritePlan = (payload: Record<string, string>) => {
   const transitSameMonth = payload.transitSameMonth === "1";
   const createTimesheetHistory = payload.timesheetCreateHistory === "1";

@@ -355,27 +355,32 @@ const buildChecks = (input: {
   }
 
   if (input.session) {
-    const pending = input.session.people.filter(
-      (person) => person.decision === "pending",
+    const queued = input.session.people.filter(
+      (person) => person.decision === "accepted",
     ).length;
     const conflicts = input.session.people.filter(
       (person) => person.severity === "conflict",
     ).length;
-    if (pending || conflicts) {
+    if (conflicts) {
       checks.push({
         id: "session-open",
-        severity: conflicts ? "error" : "warn",
-        title: `Є непідтверджені зміни з 1ПБ: ${pending}`,
-        detail: conflicts
-          ? `Конфліктів: ${conflicts}. Перейдіть у «Зміни» перед експортом.`
-          : "Підтвердіть або відхиліть зміни перед застосуванням.",
+        severity: "error",
+        title: `Конфлікти в операціях: ${conflicts}`,
+        detail: "Розберіть конфлікти на вкладці «Операції» перед експортом.",
+      });
+    } else if (queued) {
+      checks.push({
+        id: "session-queued",
+        severity: "warn",
+        title: `У черзі до застосування: ${queued}`,
+        detail: "Застосуйте чергу на вкладці «Операції → До застосування» або експортуйте поточну версію як є.",
       });
     } else {
       checks.push({
         id: "session-ready",
         severity: "ok",
-        title: "Сесія 1ПБ без відкритих конфліктів",
-        detail: "Можна застосовувати підтверджені або експортувати поточну версію.",
+        title: "Немає змін у черзі застосування",
+        detail: "Позначте людей у «Операціях» і застосуйте чергу, або експортуйте поточну версію.",
       });
     }
   } else {

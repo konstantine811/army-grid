@@ -184,10 +184,29 @@ const xfXmlForStyle = (stylesXml: string, styleId: string) => {
   return xfListFromStyles(stylesXml)[index] ?? "";
 };
 
+const fillsFromStyles = (stylesXml: string) => {
+  const body = stylesXml.match(/<fills\b[^>]*>([\s\S]*?)<\/fills>/i)?.[1] ?? "";
+  return [...body.matchAll(/<fill\b[^>]*(?:\/>|>[\s\S]*?<\/fill>)/gi)].map(
+    (match) => match[0],
+  );
+};
+
+/** Жовта / кольорова заливка шаблону — не «звичайний» стиль рядка даних. */
+const styleHasHighlightFill = (stylesXml: string, styleId: string) => {
+  const xf = xfXmlForStyle(stylesXml, styleId);
+  if (!xf) return false;
+  const fillId = Number(xf.match(/\bfillId="(\d+)"/i)?.[1] ?? 0);
+  const fill = fillsFromStyles(stylesXml)[fillId] ?? "";
+  if (!fill) return fillId > 0;
+  if (/patternType="(?:none|gray125)"/i.test(fill)) return false;
+  return /patternType="solid"|<fgColor\b|<bgColor\b/i.test(fill);
+};
+
 const styleIsRegularCentered = (stylesXml: string, styleId: string) => {
   const xf = xfXmlForStyle(stylesXml, styleId);
   if (!xf) return false;
   if (fontIdIsBold(stylesXml, xfFontId(xf))) return false;
+  if (styleHasHighlightFill(stylesXml, styleId)) return false;
   return (
     /vertical="center"/i.test(xf) && /horizontal="center"/i.test(xf)
   );
@@ -232,6 +251,7 @@ const findNearestColumnStyleId = (
       continue;
     }
     if (skip.has(row)) continue;
+    if (styleHasHighlightFill(stylesXml, styleId)) continue;
     rows.push(row);
     ids.set(row, styleId);
     if (styleIsRegularFont(stylesXml, styleId)) regular.push(styleId);

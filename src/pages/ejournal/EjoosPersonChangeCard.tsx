@@ -2,6 +2,7 @@ import { memo, useMemo } from "react";
 import {
   Box,
   Button,
+  Checkbox,
   Chip,
   MenuItem,
   Select,
@@ -13,6 +14,7 @@ import {
   type PersonChangeCategory,
   buildSheetImpacts,
   buildTimesheetPreview,
+  personHasWorkbookApplyOps,
   personIsInformationalOnly,
 } from "./ejoosPersonDiff";
 import { formatTimesheetTransferMark } from "./ejoosExcludedColumns";
@@ -75,28 +77,55 @@ export const PersonChangeRow = memo(function PersonChangeRow({
   onSelect,
   mode = "review",
   historyMeta,
+  queued,
+  onToggleQueue,
+  queueDisabled,
 }: {
   person: PersonChange;
   selected: boolean;
   onSelect: () => void;
   mode?: PersonChangeCardMode;
   historyMeta?: Pick<PersonChangeCardHistoryMeta, "version" | "appliedAt">;
+  queued?: boolean;
+  onToggleQueue?: (next: boolean) => void;
+  queueDisabled?: boolean;
 }) {
+  const showQueue = Boolean(onToggleQueue) && mode !== "history";
   return (
-    <button
-      type="button"
+    <div
       className={
         [
           "ejoos-change-row",
           selected ? "is-selected" : "",
           `severity-${person.severity}`,
           mode === "history" ? "is-history" : "",
+          showQueue ? "has-check" : "",
+          queued ? "is-queued" : "",
         ]
           .filter(Boolean)
           .join(" ")
       }
-      onClick={onSelect}
     >
+      {showQueue ? (
+        <span
+          className="ejoos-change-row-check"
+          onClick={(event) => event.stopPropagation()}
+          onPointerDown={(event) => event.stopPropagation()}
+        >
+          <Checkbox
+            id={`ejoos-queue-${person.id}`}
+            className="ejoos-queue-checkbox"
+            checked={Boolean(queued)}
+            disabled={Boolean(queueDisabled) && !queued}
+            onCheckedChange={(value) => onToggleQueue?.(value === true)}
+          />
+        </span>
+      ) : null}
+      <button
+        type="button"
+        className="ejoos-change-row-body"
+        onClick={onSelect}
+      >
       <div className="ejoos-change-row-main">
         <strong>{person.fullName}</strong>
         <span className="ejoos-change-meta">
@@ -162,15 +191,16 @@ export const PersonChangeRow = memo(function PersonChangeRow({
               label={severityLabel(person.severity)}
             />
             {person.decision === "accepted" ? (
-              <Chip size="small" color="success" label="✓" />
+              <Chip size="small" color="success" label="У черзі" />
             ) : null}
             {person.decision === "rejected" ? (
               <Chip size="small" label="✕" />
             ) : null}
           </>
         )}
-      </div>
-    </button>
+        </div>
+      </button>
+    </div>
   );
 });
 
@@ -185,6 +215,7 @@ export function PersonChangeCard({
   onClose,
   onPatchPayload,
   isLoading,
+  canQueue,
 }: {
   person: PersonChange;
   timesheetDay: number;
@@ -196,6 +227,7 @@ export function PersonChangeCard({
   onClose: () => void;
   onPatchPayload?: (opId: string, patch: Record<string, string>) => void;
   isLoading?: boolean;
+  canQueue?: boolean;
 }) {
   const isHistory = mode === "history";
   const timesheetPreview = useMemo(
@@ -221,6 +253,7 @@ export function PersonChangeCard({
   const needsTimesheetCode = timesheetOps.some(timesheetOpNeedsManualCode);
   const manualTimesheetOps = timesheetOps.filter(timesheetOpNeedsManualCode);
   const reviewOnly = personIsInformationalOnly(person.ops);
+  const hasWorkbookApply = personHasWorkbookApplyOps(person.ops);
   const bySheet = useMemo(() => {
     const map = new Map<string, typeof person.sheetActions>();
     person.sheetActions.forEach((action) => {
@@ -291,7 +324,7 @@ export function PersonChangeCard({
             <Chip
               size="small"
               color="success"
-              label="Підтверджено"
+              label="У черзі"
               sx={{ mt: 0.5 }}
             />
           ) : null}
@@ -689,30 +722,39 @@ export function PersonChangeCard({
               Boolean(isLoading) ||
               person.severity === "conflict" ||
               needsDestination ||
-              needsTimesheetCode
+              needsTimesheetCode ||
+              (!reviewOnly && !hasWorkbookApply)
             }
             onClick={onApplyNow}
           >
-            {reviewOnly ? "Підтвердити перегляд" : "Підтвердити і застосувати"}
+            {reviewOnly
+              ? "Підтвердити перегляд"
+              : hasWorkbookApply
+                ? "Застосувати зараз"
+                : "Немає apply"}
           </Button>
           <Button
             variant="outlined"
             disabled={
-              person.severity === "conflict" ||
-              needsDestination ||
-              needsTimesheetCode ||
-              Boolean(isLoading)
+              Boolean(isLoading) ||
+              (person.decision !== "accepted" &&
+                (canQueue === false ||
+                  person.severity === "conflict" ||
+                  needsDestination ||
+                  needsTimesheetCode))
             }
             onClick={onAccept}
           >
-            {person.decision === "accepted" ? "У черзі" : "Лише в чергу"}
+            {person.decision === "accepted"
+              ? "Прибрати з черги"
+              : "Додати в чергу"}
           </Button>
           <Button
             variant="outlined"
             onClick={onReject}
             disabled={Boolean(isLoading)}
           >
-            Відхилити
+            {reviewOnly ? "Прибрати" : "Відхилити"}
           </Button>
         </Stack>
       )}

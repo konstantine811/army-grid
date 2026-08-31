@@ -42,6 +42,9 @@ import {
 import {
   timesheetOpBlocksApply,
   timesheetOpNeedsManualCode,
+  excludeTransferOpBlocksApply,
+  ambiguousTransferOpBlocksApply,
+  contradictoryStatusOpsBlockApply,
 } from "./ejoosOpRequirements";
 import {
   assertEjoosWorkbook,
@@ -263,18 +266,20 @@ export function EjoosLiveSyncPanel() {
 
   const blockedSelected = selectedOps.filter((op) => {
     if (op.class === "conflict") return true;
-    if (op.kind === "timesheet_day") {
-      return timesheetOpBlocksApply(op);
-    }
-    if (op.kind === "exclude_transfer") {
-      return !op.payload.destination;
-    }
+    if (timesheetOpBlocksApply(op)) return true;
+    if (excludeTransferOpBlocksApply(op)) return true;
+    if (ambiguousTransferOpBlocksApply(op)) return true;
     if (op.kind === "absent_upsert") {
       return !(op.payload.absenceType && op.payload.departDate);
     }
     if (op.class === "needs_input") return true;
     return false;
   });
+  if (contradictoryStatusOpsBlockApply(selectedOps)) {
+    blockedSelected.push(
+      ...selectedOps.filter((op) => op.kind === "position_change"),
+    );
+  }
 
   const toggleOp = (id: string) => {
     setCheckedIds((current) => {

@@ -9,7 +9,12 @@ import {
   type EjoosSyncOp,
   type EjoosSyncPlan,
 } from "./ejoosSyncPlan";
-import { formatTimesheetDeparture } from "./ejoosTimesheetText";
+import {
+  dayFromOrderLabel,
+  formatTimesheetDeparture,
+  parseTimesheetAbsenceSpans,
+  timesheetMarkFromArchive,
+} from "./ejoosTimesheetText";
 import {
   applyInlineStringWritesToWorkbook,
   type ZipCellWrite,
@@ -235,32 +240,44 @@ const collectWrites = (op: EjoosSyncOp, ctx: DispositionContext) => {
         styleSourceRow: sourceTimesheetRow,
       });
     }
-    const orderDay = Number(
-      String(op.payload.orderDate || "").match(/^(\d{1,2})/)?.[1] || 0,
-    );
+    const orderDay = dayFromOrderLabel(op.payload.orderDate);
+    const lastDay = Math.min(31, plan.timesheetDay);
     const absenceCode = op.payload.absenceCode || statusMark;
-    for (let day = 1; day <= Math.min(31, plan.timesheetDay); day += 1) {
-      const value =
-        day === orderDay
-          ? [
-              formatTimesheetDeparture(place),
-              op.payload.orderNumber
-                ? `наказ №${op.payload.orderNumber}`
-                : "",
-              op.payload.orderDate ? `від ${op.payload.orderDate}` : "",
-            ]
-              .filter(Boolean)
-              .join(" ")
-          : day > orderDay && orderDay > 0
-            ? absenceCode
-            : valueOf(
-                timesheet.rawRows[sourceTimesheetRow - 1]?.[8 + day - 1],
-              );
+    const absenceSpans = parseTimesheetAbsenceSpans(
+      op.payload.timesheetAbsenceSpans || "",
+    );
+    const departMark = [
+      formatTimesheetDeparture(place),
+      op.payload.orderNumber ? `наказ №${op.payload.orderNumber}` : "",
+      op.payload.orderDate ? `від ${op.payload.orderDate}` : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
+    for (let day = 1; day <= lastDay; day += 1) {
+      let value: string | number | null;
+      if (orderDay > 0 && day === orderDay) {
+        value = departMark;
+      } else if (absenceSpans.length) {
+        value =
+          timesheetMarkFromArchive(day, {
+            activeFromDay: 1,
+            lastDay,
+            spans: absenceSpans,
+            fillBeforeActive: true,
+          }) ?? absenceCode;
+      } else if (orderDay > 0 && day > orderDay) {
+        value = absenceCode;
+      } else {
+        value = valueOf(
+          timesheet.rawRows[sourceTimesheetRow - 1]?.[8 + day - 1],
+        );
+      }
       timesheetWrites.push({
         row: historyRow,
         column: 8 + day,
         value,
         styleSourceRow: sourceTimesheetRow,
+        wrapText: typeof value === "string" && /вибув/iu.test(value),
       });
       timesheetWrites.push({
         row: sourceTimesheetRow,

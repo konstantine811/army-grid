@@ -41,12 +41,16 @@ import {
   collectedWritableAcceptedOps,
   groupOpsIntoPersonChanges,
   personIsInformationalOnly,
+  personCanEnterApplyQueue,
   mergePersonDecisions,
   patchPersonOpPayload,
+  dismissPersonFromSession,
   setPersonDecision,
+  setPersonDecisions,
   type EjoosDiffSession,
   type PersonChangeDecision,
 } from "./ejoosPersonDiff";
+import { personOpsBlockApply } from "./ejoosOpRequirements";
 import {
   buildEjoosSyncPlan,
   buildProtocolText,
@@ -624,6 +628,28 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
     );
   };
 
+  const dismissPerson = (personChangeId: string) => {
+    setSession((current) =>
+      current ? dismissPersonFromSession(current, personChangeId) : current,
+    );
+    setSelectedPersonId((current) =>
+      current === personChangeId ? null : current,
+    );
+    setError("");
+    setMessage("Запис прибрано з операцій. У ЕЖООС нічого не змінювалось.");
+  };
+
+  const setDecisions = (
+    personChangeIds: string[],
+    decision: PersonChangeDecision,
+  ) => {
+    setSession((current) =>
+      current
+        ? setPersonDecisions(current, personChangeIds, decision)
+        : current,
+    );
+  };
+
   const patchOpPayload = (
     personChangeId: string,
     opId: string,
@@ -727,37 +753,92 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
     const accepted = collectedAcceptedOps(session);
     const ops = collectedWritableAcceptedOps(session);
     if (!accepted.length) {
-      setError("Немає підтверджених змін");
+      setError("Немає людей у черзі застосування");
       return;
     }
     if (!ops.length) {
       setError("");
       setMessage(
-        "Серед підтверджених немає змін для журналу. Позначки ПІБ / ID / звання виправляють у джерелах вручну — у ЕЖООС нічого не пишемо.",
+        "У черзі немає змін для журналу. Позначки ПІБ / ID / звання виправляють у джерелах вручну — у ЕЖООС нічого не пишемо.",
+      );
+      return;
+    }
+    const missingDest = session.people.filter(
+      (person) =>
+        person.decision === "accepted" &&
+        person.ops.some(
+          (op) =>
+            op.kind === "exclude_transfer" && !op.payload.destination?.trim(),
+        ),
+    );
+    if (missingDest.length) {
+      setError(
+        `Спочатку вкажіть «куди вибув»: ${missingDest
+          .slice(0, 4)
+          .map((person) => person.fullName)
+          .join(", ")}${missingDest.length > 4 ? "…" : ""}`,
+      );
+      return;
+    }
+    const blockedPeople = session.people.filter(
+      (person) =>
+        person.decision === "accepted" &&
+        !personIsInformationalOnly(person.ops) &&
+        !personCanEnterApplyQueue(person),
+    );
+    if (blockedPeople.length) {
+      setError(
+        `Масове застосування заблоковано, доки не уточнено дані: ${blockedPeople
+          .slice(0, 4)
+          .map((person) => person.fullName)
+          .join(", ")}${blockedPeople.length > 4 ? "…" : ""}`,
+      );
+      return;
+    }
+    if (personOpsBlockApply(ops)) {
+      setError(
+        "У черзі є неповне переведення, немає наказу/«куди вибув», або відкритий СЗЧ суперечить новій постановці.",
       );
       return;
     }
     setIsLoading(true);
     setError("");
     try {
+      const queuedPeople = session.people.filter(
+        (person) => person.decision === "accepted",
+      ).length;
       const skippedNotes = accepted.length - ops.length;
-      const { saved, normalizedWarning } = await runApplyOps(
-        session,
-        ops,
-        `Застосовано ${ops.length} ops / ${session.people.filter((p) => p.decision === "accepted").length} людей` +
-          (skippedNotes
-            ? ` · пропущено ${skippedNotes} позначок даних`
-            : ""),
-      );
-      setSession(null);
+      const { saved, normalizedWarning, nextEjoosSnapshot, liveVersions } =
+        await runApplyOps(
+          session,
+          ops,
+          `Застосовано ${ops.length} ops / ${queuedPeople} людей з черги` +
+            (skippedNotes
+              ? ` · пропущено ${skippedNotes} позначок даних`
+              : ""),
+        );
+      if (pbSnapshot && nextEjoosSnapshot) {
+        const rebuilt = mergePersonDecisions(
+          rebuildSessionFromSnapshots(
+            nextEjoosSnapshot,
+            pbSnapshot,
+            liveVersions,
+          ),
+          session,
+        );
+        setSession(rebuilt);
+      } else {
+        setSession(null);
+      }
+      setSelectedPersonId(null);
       setMessage(
-        `Записано ЕЖООС v${saved.version}. Застосовано ${ops.length} змін.` +
+        `Записано ЕЖООС v${saved.version}. Застосовано ${ops.length} змін з черги.` +
           (skippedNotes
             ? ` Позначки даних (${skippedNotes}) пропущено — їх виправляють у джерелах.`
             : "") +
-          normalizedWarning,
+          (pbSnapshot && nextEjoosSnapshot ? " Операції перераховано." : "") +
+          ` Файл не качається — експорт з вкладки «Експорт».${normalizedWarning}`,
       );
-      setTab("import");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Не вдалося застосувати");
     } finally {
@@ -797,17 +878,17 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
 
     if (personIsInformationalOnly(ops)) {
       setError("");
-      setSession({
-        ...nextSession,
-        people: nextSession.people.filter((item) => item.id !== personChangeId),
-        counters: {
-          ...nextSession.counters,
-          changes: Math.max(0, nextSession.counters.changes - 1),
-        },
-      });
+      setSession(dismissPersonFromSession(nextSession, personChangeId));
       setSelectedPersonId(null);
+      const cancelNotInSh = ops.every(
+        (op) =>
+          op.payload.type === "TRANSFER_CANCELLED" &&
+          op.payload.reviewReason === "CANCEL_TRANSFER_BUT_NOT_IN_CURRENT_SH",
+      );
       setMessage(
-        `Перегляд «${person.fullName}» підтверджено. У ЕЖООС нічого не змінюється — звання / ПІБ / ID виправляють у джерелах.`,
+        cancelNotInSh
+          ? `Перегляд «${person.fullName}» підтверджено. У ЕЖООС нічого не змінюється — людини немає в актуальній sh, аркуші не чіпаємо.`
+          : `Перегляд «${person.fullName}» підтверджено. У ЕЖООС нічого не змінюється — звання / ПІБ / ID виправляють у джерелах.`,
       );
       return;
     }
@@ -846,19 +927,8 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
         });
       }
       setSelectedPersonId(null);
-      const reviewOnlyAck = ops.every(
-        (op) =>
-          op.payload.type === "TRANSFER_CANCELLED" &&
-          op.payload.reviewReason === "CANCEL_TRANSFER_BUT_NOT_IN_CURRENT_SH",
-      );
       setMessage(
-        reviewOnlyAck
-          ? `Перегляд «${person.fullName}» підтверджено (v${saved.version}). У файлі без змін — людини немає в актуальній sh.` +
-              (pbSnapshot && nextEjoosSnapshot
-                ? " Операції перераховано."
-                : "") +
-              normalizedWarning
-          : `Зміни «${person.fullName}» записано в ЕЖООС v${saved.version}.` +
+        `Зміни «${person.fullName}» записано в ЕЖООС v${saved.version}.` +
               (pbSnapshot && nextEjoosSnapshot
                 ? " Операції перераховано з оновленого файлу."
                 : "") +
@@ -1214,6 +1284,8 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
     savePbToDb,
     loadPbFromDb,
     setDecision,
+    dismissPerson,
+    setDecisions,
     patchOpPayload,
     acceptReady,
     applyAccepted,

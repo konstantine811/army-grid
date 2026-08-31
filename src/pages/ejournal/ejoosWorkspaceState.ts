@@ -46,6 +46,11 @@ export type EjoosWorkspaceContextValue = {
     personChangeId: string,
     decision: PersonChangeDecision,
   ) => void;
+  dismissPerson: (personChangeId: string) => void;
+  setDecisions: (
+    personChangeIds: string[],
+    decision: PersonChangeDecision,
+  ) => void;
   patchOpPayload: (
     personChangeId: string,
     opId: string,

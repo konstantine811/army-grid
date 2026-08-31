@@ -28,3 +28,46 @@ export function timesheetOpBlocksApply(op: EjoosSyncOp) {
   if (timesheetOpNeedsManualCode(op)) return true;
   return !op.payload.excelRow;
 }
+
+export function excludeTransferOpBlocksApply(op: EjoosSyncOp) {
+  if (op.kind !== "exclude_transfer") return false;
+  return !(
+    op.payload.destination?.trim() &&
+    op.payload.excludeDate?.trim() &&
+    op.payload.orderNumber?.trim() &&
+    op.payload.orderDate?.trim()
+  );
+}
+
+export function ambiguousTransferOpBlocksApply(op: EjoosSyncOp) {
+  return (
+    op.payload.transferScope === "unclear" ||
+    (op.kind === "other_manual" && op.payload.type === "TRANSFER_SCOPE_UNCLEAR")
+  );
+}
+
+/** Відкритий СЗЧ / розпорядження суперечить новій штатній постановці. */
+export function contradictoryStatusOpsBlockApply(ops: EjoosSyncOp[]) {
+  const placement = ops.find(
+    (op) =>
+      op.kind === "position_change" && Boolean(op.payload.openAbsenceExcelRow),
+  );
+  if (!placement) return false;
+  return !ops.some(
+    (op) =>
+      (op.kind === "absent_close" &&
+        op.payload.excelRow === placement.payload.openAbsenceExcelRow) ||
+      (op.kind === "absent_upsert" &&
+        Boolean(op.payload.returnDate) &&
+        op.payload.existingExcelRow === placement.payload.openAbsenceExcelRow),
+  );
+}
+
+export function personOpsBlockApply(ops: EjoosSyncOp[]) {
+  if (ops.some((op) => op.class === "conflict")) return true;
+  if (ops.some(excludeTransferOpBlocksApply)) return true;
+  if (ops.some(ambiguousTransferOpBlocksApply)) return true;
+  if (ops.some(timesheetOpBlocksApply)) return true;
+  if (contradictoryStatusOpsBlockApply(ops)) return true;
+  return false;
+}

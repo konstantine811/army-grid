@@ -4,6 +4,7 @@ import type {
   ExcelWorkbookSnapshot,
 } from "../../excelRoundTrip";
 import {
+  EJOOS_PERSON_DATA_START_ROW,
   formatExcludedListBasis,
   formatTimesheetTransferMark,
   OOS_TO_EXCLUDED_BASE,
@@ -22,9 +23,11 @@ import {
 import {
   clipAbsenceSpansToActiveEpisode,
   dayFromOrderLabel,
+  historyAbsenceSpansForClosedEpisode,
   isTimesheetDepartureMark,
   parseTimesheetAbsenceSpans,
   timesheetCodeOnDay,
+  timesheetMarkBeforeDeparture,
   timesheetMarkFromArchive,
 } from "./ejoosTimesheetText";
 import {
@@ -113,6 +116,7 @@ type PositionChangeContext = {
   timesheetWrites: ZipCellWrite[];
   reservedTimesheetRows: Set<number>;
   takeExcludedRow: () => number;
+  excludedStyleSourceRow: number;
 };
 
 const collectWrites = (op: EjoosSyncOp, ctx: PositionChangeContext) => {
@@ -147,9 +151,8 @@ const collectWrites = (op: EjoosSyncOp, ctx: PositionChangeContext) => {
         row: excludedRow,
         column: toColumn,
         value: valueOf(oos.rawRows[oosRow - 1]?.[fromColumn - 1]),
-        styleSourceRow: 6,
+        styleSourceRow: ctx.excludedStyleSourceRow,
         wrapText: true,
-        copyNeighborStyle: true,
       });
     }
   }
@@ -186,9 +189,8 @@ const collectWrites = (op: EjoosSyncOp, ctx: PositionChangeContext) => {
       row: excludedRow,
       column,
       value,
-      styleSourceRow: 6,
+      styleSourceRow: ctx.excludedStyleSourceRow,
       wrapText: true,
-      copyNeighborStyle: true,
     });
   }
 
@@ -211,11 +213,15 @@ const collectWrites = (op: EjoosSyncOp, ctx: PositionChangeContext) => {
       });
     }
     let presentDays = 0;
+    const historySpans = historyAbsenceSpansForClosedEpisode(
+      op.payload,
+      departDay,
+    );
     for (let day = 1; day <= 31; day += 1) {
       let value: string | null = null;
       if (departDay > 0 && day < departDay) {
-        value = "+";
-        presentDays += 1;
+        value = timesheetMarkBeforeDeparture(day, departDay, historySpans);
+        if (value === "+") presentDays += 1;
       } else if (day === departDay) {
         value = formatTimesheetTransferMark(op.payload);
       }
@@ -478,6 +484,51 @@ const collectWrites = (op: EjoosSyncOp, ctx: PositionChangeContext) => {
       ctx.shpoWrites.push({ row: dispositionShpoRow, column, value: null });
     }
   }
+  const dispositionTimesheetRow = Number(
+    op.payload.dispositionTimesheetExcelRow || 0,
+  );
+  if (dispositionTimesheetRow > 0) {
+    for (const column of [6, 7, 8]) {
+      ctx.timesheetWrites.push({
+        row: dispositionTimesheetRow,
+        column,
+        value: null,
+      });
+    }
+    for (let day = 1; day <= 31; day += 1) {
+      ctx.timesheetWrites.push({
+        row: dispositionTimesheetRow,
+        column: 8 + day,
+        value: null,
+      });
+    }
+    ctx.timesheetWrites.push({
+      row: dispositionTimesheetRow,
+      column: 40,
+      value: null,
+    });
+  }
+  const staleTimesheetRow = Number(op.payload.clearTimesheetExcelRow || 0);
+  if (
+    staleTimesheetRow > 0 &&
+    staleTimesheetRow !== Number(op.payload.timesheetExcelRow || 0)
+  ) {
+    for (const column of [6, 7, 8]) {
+      ctx.timesheetWrites.push({
+        row: staleTimesheetRow,
+        column,
+        value: null,
+      });
+    }
+    for (let day = 1; day <= 31; day += 1) {
+      ctx.timesheetWrites.push({
+        row: staleTimesheetRow,
+        column: 8 + day,
+        value: null,
+      });
+    }
+    ctx.timesheetWrites.push({ row: staleTimesheetRow, column: 40, value: null });
+  }
   const newShpoRow = Number(op.payload.shpoExcelRow || 0);
   if (newShpoRow > 0) {
     const orderText = [
@@ -520,11 +571,13 @@ const collectWrites = (op: EjoosSyncOp, ctx: PositionChangeContext) => {
         wrapText: true,
       });
     }
-    const historyDates = oosHistoryIndexes
-      .split("\n")
-      .filter(Boolean)
-      .map(() => appointmentDate)
-      .join("\n");
+    const historyDates =
+      op.payload.oosHistoryDates ||
+      oosHistoryIndexes
+        .split("\n")
+        .filter(Boolean)
+        .map(() => appointmentDate)
+        .join("\n");
     const oosHistory: Array<[number, string]> = [
       [4, oosHistoryIndexes || nextIndex],
       [5, historyDates || appointmentDate],
@@ -577,6 +630,10 @@ export async function applyPositionChangeWithZip(input: {
     timesheetWrites: [],
     reservedTimesheetRows: new Set<number>(),
     takeExcludedRow: () => excludedRow++,
+    excludedStyleSourceRow: Math.max(
+      EJOOS_PERSON_DATA_START_ROW,
+      excludedRow - 1,
+    ),
   };
   for (const op of ops) {
     collectWrites(op, ctx);

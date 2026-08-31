@@ -11061,20 +11061,51 @@ html.auth-lock .auth-shell {
 }
 
 .ejoos-change-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 1.1fr) auto;
-  gap: 0.5rem;
-  align-items: center;
+  display: flex;
+  align-items: stretch;
   width: 100%;
-  text-align: left;
   border: 0;
   border-bottom: 1px solid var(--border);
   border-left: 3px solid transparent;
   background: transparent;
-  padding: 0.65rem 0.75rem;
+  color: var(--text-secondary);
+}
+
+.ejoos-change-row-check {
+  display: flex;
+  align-items: center;
+  padding: 0.65rem 0 0.65rem 0.7rem;
+  flex-shrink: 0;
+}
+
+.ejoos-queue-checkbox {
+  width: 1.15rem;
+  height: 1.15rem;
+}
+
+.ejoos-change-list-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.45rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+  background: rgba(0, 237, 63, 0.04);
+}
+
+.ejoos-change-row-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 1.1fr) auto;
+  gap: 0.5rem;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  padding: 0.65rem 0.75rem 0.65rem 0.55rem;
   cursor: pointer;
   font: inherit;
-  color: var(--text-secondary);
+  color: inherit;
 }
 
 .ejoos-change-row:hover {
@@ -11083,6 +11114,10 @@ html.auth-lock .auth-shell {
 
 .ejoos-change-row.is-selected {
   background: rgba(0, 237, 63, 0.12);
+}
+
+.ejoos-change-row.is-queued {
+  background: rgba(0, 237, 63, 0.08);
 }
 
 .ejoos-change-row.severity-ready {
@@ -11134,6 +11169,9 @@ html.auth-lock .auth-shell {
 
 .ejoos-change-row.is-history {
   align-items: start;
+}
+
+.ejoos-change-row.is-history .ejoos-change-row-body {
   grid-template-columns: minmax(0, 1.2fr) minmax(0, 1.5fr) minmax(0, 1.3fr) auto;
 }
 
@@ -11824,7 +11862,7 @@ html.auth-lock .auth-shell {
 }
 
 @media (max-width: 720px) {
-  .ejoos-change-row {
+  .ejoos-change-row-body {
     grid-template-columns: 1fr;
     gap: 0.35rem;
   }

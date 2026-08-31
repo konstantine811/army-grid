@@ -299,7 +299,8 @@ export async function applyOosHistoryPresentation(input: {
       }
       if (column === 5) {
         const historyDates = appendHistory
-          ? (op.payload.oosHistoryIndexes || nextIndex || "")
+          ? op.payload.oosHistoryDates ||
+            (op.payload.oosHistoryIndexes || nextIndex || "")
               .split("\n")
               .filter(Boolean)
               .map(() => appointment)
