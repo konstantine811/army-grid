@@ -87,6 +87,8 @@ type CancelRestoreCase = {
   nameRe: RegExp;
   julyFromIndex?: string;
   existingOos?: boolean;
+  vacantStaffTimesheet?: boolean;
+  missingFromTimesheet?: boolean;
   expectedTimesheetDays?: string[];
   archive: ArchivePeriod[];
 };
@@ -274,13 +276,25 @@ const buildStaleEjoos = async (person: CancelRestoreCase) => {
   timesheet.cell(4, 2).value("індекс");
   timesheet.cell(4, 7).value("ПІБ");
   timesheet.cell(7, 2).value(person.index);
-  timesheet.cell(7, 6).value("солдат");
-  timesheet.cell(7, 7).value(person.name);
-  timesheet.cell(7, 8).value(person.id);
-  timesheet.cell(7, 9).value("+");
-  timesheet.cell(7, 10).value("+");
-  timesheet.cell(7, 11).value("+");
-  timesheet.cell(7, 12).value("вибув до А0409");
+  if (person.missingFromTimesheet) {
+    // штатний рядок є, ПІБ немає — типовий стан після виключення
+  } else if (person.vacantStaffTimesheet) {
+    timesheet.cell(8, 6).value("солдат");
+    timesheet.cell(8, 7).value(person.name);
+    timesheet.cell(8, 8).value(person.id);
+    timesheet.cell(8, 9).value("+");
+    timesheet.cell(8, 10).value("+");
+    timesheet.cell(8, 11).value("+");
+    timesheet.cell(8, 12).value("вибув до А0409");
+  } else {
+    timesheet.cell(7, 6).value("солдат");
+    timesheet.cell(7, 7).value(person.name);
+    timesheet.cell(7, 8).value(person.id);
+    timesheet.cell(7, 9).value("+");
+    timesheet.cell(7, 10).value("+");
+    timesheet.cell(7, 11).value("+");
+    timesheet.cell(7, 12).value("вибув до А0409");
+  }
 
   const blob = (await workbook.outputAsync("blob")) as Blob;
   return snapshotOf(blob, "ЄЖООС_станом_на_12-08-2026.xlsx");
@@ -506,6 +520,20 @@ describe("August fixtures: cancelled transfer still in sh", () => {
 
   it("ДОБРОВОЛЬСЬКИЙ: існуюча картка ООС не дублюється при restore", async () => {
     await assertCancelRestoreRoundTrip({ ...dobrovolskyi, existingOos: true });
+  }, 30_000);
+
+  it("ДОБРОВОЛЬСЬКИЙ: вакантний штатний Табель + історичний «вибув»", async () => {
+    await assertCancelRestoreRoundTrip({
+      ...dobrovolskyi,
+      vacantStaffTimesheet: true,
+    });
+  }, 30_000);
+
+  it("ДОБРОВОЛЬСЬКИЙ: у Табелі немає ПІБ — записати на штатний рядок", async () => {
+    await assertCancelRestoreRoundTrip({
+      ...dobrovolskyi,
+      missingFromTimesheet: true,
+    });
   }, 30_000);
 });
 

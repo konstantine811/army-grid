@@ -2801,14 +2801,18 @@ export const buildEjoosSyncPlan = (
       ? tsRows.find((row) => row.excelRow === staffTs.excelRow)
       : null;
     const staffTsHasDepart = Boolean(staffTsScan?.hasDepartureText);
+    const staffRowVacant = isVacantStaffRow(staffTs);
     const hasActiveStaffTs = tsRows.some((row) => !row.hasDepartureText);
     const restoreTargetTs =
-      staffTsHasDepart
+      staffTsHasDepart || staffRowVacant
         ? staffTs
         : tsRows.find((row) => row.hasDepartureText) || staffTs;
     const restoreTimesheet =
       inCurrentSh &&
-      (staffTsHasDepart || (timesheetHasDepart && !hasActiveStaffTs));
+      (staffTsHasDepart ||
+        staffRowVacant ||
+        (timesheetHasDepart && !hasActiveStaffTs) ||
+        (!tsRows.length && Boolean(staffTs)));
     const shpoAtIndex = staffIndex ? shpoByIndex.get(staffIndex) ?? null : null;
     const shpoPerson =
       shpoAtIndex ||

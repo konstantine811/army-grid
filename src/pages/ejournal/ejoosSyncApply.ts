@@ -416,7 +416,7 @@ async function mutateToBlob(
   sortedOps.forEach((op) => {
     if (op.kind === "shpo_occupant") {
       const shpoRow = Number(op.payload.shpoExcelRow || 0);
-      const tsRow = Number(op.payload.timesheetExcelRow || 0);
+      let tsRow = Number(op.payload.timesheetExcelRow || 0);
       const name = op.payload.nextName || op.fullName;
       const rank = op.payload.nextRank || op.rank;
       const personId = op.payload.nextPersonId || op.personId;
@@ -424,6 +424,17 @@ async function mutateToBlob(
         if (rank) shpo.cell(shpoRow, col("F")).value(rank);
         if (name) shpo.cell(shpoRow, col("G")).value(name);
         if (personId) shpo.cell(shpoRow, col("H")).value(personId);
+      }
+      if (timesheet && tsRow <= 0 && op.positionIndex) {
+        tsRow = findPersonRowFlexible(timesheet, {
+          personId: "",
+          fullName: "",
+          positionIndex: op.positionIndex,
+          startRow: 7,
+          nameCol: col("G"),
+          idCol: col("H"),
+          indexCol: col("B"),
+        });
       }
       if (timesheet && tsRow > 0) {
         if (rank) timesheet.cell(tsRow, col("F")).value(rank);
@@ -660,9 +671,34 @@ function applyTransferCancelled(input: {
   }
 
   const historyRowNumber = Number(op.payload.historyTimesheetExcelRow || 0);
-  if (timesheet && historyRowNumber > 0 && historyRowNumber !== timesheetRowNumber) {
-    for (let column = col("B"); column <= col("AN"); column += 1) {
-      timesheet.cell(historyRowNumber, column).value(null);
+  if (
+    timesheet &&
+    historyRowNumber > 0 &&
+    timesheetRowNumber > 0 &&
+    historyRowNumber !== timesheetRowNumber
+  ) {
+    const restoredName = String(
+      timesheet.cell(timesheetRowNumber, col("G")).value() ?? "",
+    ).trim();
+    const restoredId = String(
+      timesheet.cell(timesheetRowNumber, col("H")).value() ?? "",
+    ).trim();
+    const historyName = String(
+      timesheet.cell(historyRowNumber, col("G")).value() ?? "",
+    ).trim();
+    const historyId = String(
+      timesheet.cell(historyRowNumber, col("H")).value() ?? "",
+    ).trim();
+    const restoredHasPerson = Boolean(restoredName || restoredId);
+    const historyIsSamePerson =
+      (personId && historyId === personId) ||
+      (fullName &&
+        historyName.toLocaleLowerCase("uk-UA") ===
+          fullName.toLocaleLowerCase("uk-UA"));
+    if (restoredHasPerson && historyIsSamePerson) {
+      for (let column = col("B"); column <= col("AN"); column += 1) {
+        timesheet.cell(historyRowNumber, column).value(null);
+      }
     }
   }
 
@@ -1966,12 +2002,11 @@ function findPersonRowFlexible(
     if (nameKey && name === nameKey) return row;
     if (
       opts.matchByIndex !== false &&
-      !indexMatch &&
       opts.positionIndex &&
-      index === opts.positionIndex &&
-      (id || name)
+      index === opts.positionIndex
     ) {
-      indexMatch = row;
+      if (id || name) indexMatch = row;
+      else if (!indexMatch) indexMatch = row;
     }
   }
   // Якщо ПІБ/ID не збіглися (розбіжності написання) — посада з людиною на індексі.
@@ -2169,6 +2204,10 @@ function clearDuplicateTimesheetRow(
   if (!sheet) return;
   const rowNumber = Number(op.payload.duplicateTimesheetExcelRow || 0);
   if (rowNumber <= 0) return;
+  const keepRow =
+    Number(op.payload.timesheetExcelRow || 0) ||
+    Number(op.payload.keepTimesheetExcelRow || 0);
+  if (keepRow > 0 && rowNumber === keepRow) return;
   if (
     op.kind === "timesheet_day" &&
     Number(op.payload.excelRow || 0) === rowNumber
