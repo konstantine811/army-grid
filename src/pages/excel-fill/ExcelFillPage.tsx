@@ -1,11 +1,19 @@
 import { useEffect, useMemo, useState } from "react";
 import { Box, Button, Stack, Typography } from "@/components/sci/SciPrimitives";
+import type { EjournalPreviewRow } from "../ejournal/ejournalTypes";
 import {
   FileDownloadOutlinedIcon,
   FileUploadOutlinedIcon,
   SyncAltOutlinedIcon,
 } from "@/components/sci/icons";
 import { api } from "../../api";
+import {
+  CacheKeys,
+  fetchWithCache,
+  jsonChanged,
+  readDataCache,
+  writeDataCache,
+} from "../../data/idbDataCache";
 import {
   type CellValue,
   type ExcelSheetSnapshot,
@@ -25,6 +33,31 @@ import {
   type PositionsVozFillRule,
   type PositionsVozPerson,
 } from "./positionsVozFill";
+import {
+  mapRosterLatestToPreviewRows,
+  rosterLatestToSourceSnapshot,
+  rosterRowsToSourceSnapshot,
+} from "./rosterSourceSnapshot";
+import {
+  loadStaffSheetImport,
+  type StaffSheetImportSnapshot,
+} from "../anketa-data/staffSheetImport";
+import {
+  buildStaffSheetPreviewRows,
+  STAFF_SHEET_PREVIEW_COLUMNS,
+} from "../anketa-data/staffSheetPreview";
+
+type ActiveRosterSourceKind = "upload" | "staff-import" | "personnel";
+
+type ActiveRosterSource = {
+  kind: ActiveRosterSourceKind;
+  snapshot: ExcelWorkbookSnapshot;
+  label: string;
+  importedAt: string | null;
+  loadedAt: string | null;
+  /** ISO for comparing freshness (upload / staff import / DB). */
+  freshnessAt: number;
+};
 
 type ColumnMeta = {
   index: number;
@@ -120,12 +153,13 @@ const STATUS_OPTIONS = [
   "Шквал",
 ] as const;
 
-const MORNING_REPORT_SOURCE_STATUSES = new Set([
-  "В строю",
-  "Відком. за межі ПБ",
-  "Відрядження",
-  "Новоприбулий",
-]);
+const isMorningReportAllowedSourceStatus = (status: CellValue | string) => {
+  const normalized = normalizeReportText(status);
+  return (
+    normalized === "в строю" ||
+    normalized.includes("новоприбулий")
+  );
+};
 
 const MORNING_REPORT_STATUSES = [
   "На виконанні",
@@ -172,53 +206,130 @@ const isMorningTransiterNote = (note: CellValue | string) => {
   );
 };
 
+/** «Вик.БЗ в ін. п-лі» у «Місце перебування» — не в строю батальйону. */
+const isMorningBzInOtherUnitLocation = (location: CellValue | string) => {
+  const normalized = normalizeReportText(location);
+  return /вик\.?\s*бз\s*в\s*ін/.test(normalized);
+};
+
+/** Червоний фон ПІБ (FFFF0000) — транзитери, не в строю. */
+const isMorningTransiterPibFill = (rgb: string | null | undefined) => {
+  if (!rgb) return false;
+  const hex = rgb.replace(/^#/, "").toUpperCase();
+  const argb = hex.length === 6 ? `FF${hex}` : hex;
+  if (argb.length !== 8) return false;
+  const r = Number.parseInt(argb.slice(2, 4), 16);
+  const g = Number.parseInt(argb.slice(4, 6), 16);
+  const b = Number.parseInt(argb.slice(6, 8), 16);
+  if (![r, g, b].every(Number.isFinite)) return false;
+  // Лише насичений червоний; коричневий «НЕ ЗАДІЮВАТИ» (FF980000) і персиковий — не транзитер.
+  return r >= 0xc0 && g <= 0x40 && b <= 0x40;
+};
+
+const shouldSkipMorningReportPerson = ({
+  note,
+  destination,
+  location,
+  activity,
+  pibFillRgb,
+}: {
+  note: string;
+  destination: string;
+  location: string;
+  activity?: string;
+  pibFillRgb?: string | null;
+}) => {
+  if (isMorningBzInOtherUnitLocation(location)) return true;
+  if (
+    isMorningTransiterNote(note) ||
+    isMorningTransiterNote(destination) ||
+    isMorningTransiterNote(activity ?? "")
+  ) {
+    return true;
+  }
+  if (isMorningTransiterPibFill(pibFillRgb)) return true;
+  return false;
+};
+
 const findMorningSheet = (workbook: ExcelWorkbookSnapshot) =>
   workbook.sheets.find((sheet) => normalizeReportText(sheet.sheetName).includes("ос загальний")) ??
   workbook.sheets[0];
 
-const getMorningValue = (row: CellValue[], columnNumber: number) =>
-  valueToDisplay(row[columnNumber - 1]).trim();
-
-const findMorningReportTable = (sheet: ExcelSheetSnapshot) => {
-  for (const excelRow of sheet.rows.slice(0, 12)) {
-    const headers = excelRow.values.map((value) => normalizeReportText(value));
-    const hasName = headers.some((header) => header === "піб" || header === "пип");
-    const hasStatus = headers.some((header) => header === "статус");
-    const hasLocation = headers.some((header) => header.includes("локац"));
-    if (!hasName || !hasStatus || !hasLocation) continue;
-
-    const findHeader = (patterns: RegExp[]) =>
-      headers.findIndex((header) => patterns.some((pattern) => pattern.test(header)));
-
-    return {
-      headerRowNumber: excelRow.excelRowNumber,
-      sequence: findHeader([/^№/, /номер/]),
-      name: findHeader([/^піб$/, /^пип$/]),
-      callsign: findHeader([/позив/]),
-      actualUnit: findHeader([/підрозділ фактич/]),
-      location: findHeader([/локац/]),
-      activity: findHeader([/чим займа/]),
-      reportStatus: findHeader([/^статус$/]),
-      note: findHeader([/приміт/]),
-    };
-  }
-
-  return null;
+const getMorningValue = (
+  sheet: ExcelSheetSnapshot,
+  row: CellValue[],
+  columnNumber: number,
+) => {
+  const pickedIndex = sheet.columnIndexes.indexOf(columnNumber - 1);
+  if (pickedIndex < 0) return "";
+  return valueToDisplay(row[pickedIndex]).trim();
 };
 
-const makeMorningActivity = (row: CellValue[]) =>
-  getMorningValue(row, 22) || getMorningValue(row, 5) || getMorningValue(row, 7);
+const getMorningSourceStatus = (
+  sheet: ExcelSheetSnapshot,
+  row: CellValue[],
+) => {
+  for (const columnNumber of [21, 37]) {
+    const value = getMorningValue(sheet, row, columnNumber);
+    if (!value) continue;
+    if (isMorningReportAllowedSourceStatus(value)) return value;
+  }
+  // Fallback: інколи статус потрапляє не в 21-у після зсуву колонок.
+  for (const value of row) {
+    const text = valueToDisplay(value).trim();
+    if (isMorningReportAllowedSourceStatus(text)) return text;
+  }
+  return (
+    getMorningValue(sheet, row, 21) || getMorningValue(sheet, row, 37) || ""
+  );
+};
 
-const makeMorningLocation = (row: CellValue[]) =>
-  getMorningValue(row, 31) || getMorningValue(row, 33) || getMorningValue(row, 29);
+const getMorningPersonName = (
+  sheet: ExcelSheetSnapshot,
+  row: CellValue[],
+) => {
+  const fromColumn = getMorningValue(sheet, row, 14);
+  if (fromColumn && !/посада|командир 1 піхот/i.test(fromColumn)) {
+    return fromColumn;
+  }
+  for (const value of row) {
+    const text = valueToDisplay(value).trim();
+    if (
+      text.length >= 5 &&
+      text.length <= 80 &&
+      !/\d/.test(text) &&
+      text.split(/\s+/).length >= 2 &&
+      text.split(/\s+/).length <= 4 &&
+      !/посада|командир|заступник|статус|підрозділ/i.test(text)
+    ) {
+      return text;
+    }
+  }
+  return fromColumn;
+};
 
-const classifyMorningReportStatus = (row: CellValue[]) => {
-  const activity = normalizeReportText(getMorningValue(row, 22));
-  const readiness = normalizeReportText(getMorningValue(row, 23));
-  const bzvp = normalizeReportText(getMorningValue(row, 24));
-  const unit = normalizeReportText(getMorningValue(row, 29));
-  const location = normalizeReportText(makeMorningLocation(row));
-  const position = normalizeReportText(`${getMorningValue(row, 5)} ${getMorningValue(row, 7)}`);
+const makeMorningActivity = (sheet: ExcelSheetSnapshot, row: CellValue[]) =>
+  getMorningValue(sheet, row, 22) ||
+  getMorningValue(sheet, row, 5) ||
+  getMorningValue(sheet, row, 7);
+
+const makeMorningLocation = (sheet: ExcelSheetSnapshot, row: CellValue[]) =>
+  getMorningValue(sheet, row, 31) ||
+  getMorningValue(sheet, row, 33) ||
+  getMorningValue(sheet, row, 29);
+
+const classifyMorningReportStatus = (
+  sheet: ExcelSheetSnapshot,
+  row: CellValue[],
+) => {
+  const activity = normalizeReportText(getMorningValue(sheet, row, 22));
+  const readiness = normalizeReportText(getMorningValue(sheet, row, 23));
+  const bzvp = normalizeReportText(getMorningValue(sheet, row, 24));
+  const unit = normalizeReportText(getMorningValue(sheet, row, 29));
+  const location = normalizeReportText(makeMorningLocation(sheet, row));
+  const position = normalizeReportText(
+    `${getMorningValue(sheet, row, 5)} ${getMorningValue(sheet, row, 7)}`,
+  );
 
   if (bzvp.includes("брез")) return "БРЕЗ";
   if (bzvp.includes("без бзвп")) return "Без БЗВП";
@@ -237,6 +348,51 @@ const classifyMorningReportStatus = (row: CellValue[]) => {
   if (readiness === "бг") return "БГ";
 
   return "Забезпечення";
+};
+
+const findMorningReportTable = (sheet: ExcelSheetSnapshot) => {
+  for (const excelRow of sheet.rows.slice(0, 12)) {
+    const headers = excelRow.values.map((value) => normalizeReportText(value));
+    // Не плутати рядок Кіяненка / іншої особи з «шапкою» готового звіту.
+    const looksLikePersonRow = excelRow.values.some((value) => {
+      const text = valueToDisplay(value).trim();
+      const parts = text.split(/\s+/).filter(Boolean);
+      return (
+        parts.length >= 2 &&
+        parts.length <= 4 &&
+        text.length <= 80 &&
+        !/\d/.test(text) &&
+        /^[A-ZА-ЯІЇЄҐ]/u.test(parts[0] ?? "")
+      );
+    });
+    if (looksLikePersonRow) continue;
+
+    const hasName = headers.some((header) => header === "піб" || header === "пип");
+    const hasStatus = headers.some(
+      (header) => header === "статус" || header.startsWith("статус "),
+    );
+    const hasLocation = headers.some(
+      (header) => header.includes("локац") || header.includes("перебуван"),
+    );
+    if (!hasName || !hasStatus || !hasLocation) continue;
+
+    const findHeader = (patterns: RegExp[]) =>
+      headers.findIndex((header) => patterns.some((pattern) => pattern.test(header)));
+
+    return {
+      headerRowNumber: excelRow.excelRowNumber,
+      sequence: findHeader([/^№/, /номер/]),
+      name: findHeader([/^піб$/, /^пип$/]),
+      callsign: findHeader([/позив/]),
+      actualUnit: findHeader([/підрозділ фактич/]),
+      location: findHeader([/локац/, /перебуван/]),
+      activity: findHeader([/чим займа/, /тип\s*в/]),
+      reportStatus: findHeader([/^статус$/, /^статус\s/]),
+      note: findHeader([/приміт/]),
+    };
+  }
+
+  return null;
 };
 
 function analyzeMorningReport(
@@ -263,7 +419,23 @@ function analyzeMorningReport(
           existingReportTable.note >= 0
             ? valueToDisplay(row[existingReportTable.note]).trim()
             : "";
-        if (isMorningTransiterNote(note)) {
+        const location =
+          existingReportTable.location >= 0
+            ? valueToDisplay(row[existingReportTable.location]).trim()
+            : "";
+        if (
+          shouldSkipMorningReportPerson({
+            note,
+            destination: "",
+            location,
+            activity:
+              existingReportTable.activity >= 0
+                ? valueToDisplay(row[existingReportTable.activity]).trim()
+                : "",
+            pibFillRgb:
+              sourceSheet.pibFillByExcelRow?.[excelRow.excelRowNumber] ?? null,
+          })
+        ) {
           skippedRows += 1;
           return;
         }
@@ -281,10 +453,7 @@ function analyzeMorningReport(
             existingReportTable.actualUnit >= 0
               ? valueToDisplay(row[existingReportTable.actualUnit]).trim()
               : "_5 1ПБ",
-          location:
-            existingReportTable.location >= 0
-              ? valueToDisplay(row[existingReportTable.location]).trim()
-              : "",
+          location,
           activity:
             existingReportTable.activity >= 0
               ? valueToDisplay(row[existingReportTable.activity]).trim()
@@ -306,15 +475,29 @@ function analyzeMorningReport(
 
   sourceSheet.rows.forEach((excelRow) => {
     const row = excelRow.values;
-    const name = getMorningValue(row, 14);
-    const sourceStatus = getMorningValue(row, 21);
-    if (!name || !MORNING_REPORT_SOURCE_STATUSES.has(sourceStatus)) {
+    const name = getMorningPersonName(sourceSheet, row);
+    const sourceStatus = getMorningSourceStatus(sourceSheet, row);
+    if (!name || !isMorningReportAllowedSourceStatus(sourceStatus)) {
       if (name) skippedRows += 1;
       return;
     }
 
-    const note = getMorningValue(row, 32) || getMorningValue(row, 34);
-    if (isMorningTransiterNote(note)) {
+    const note =
+      getMorningValue(sourceSheet, row, 32) ||
+      getMorningValue(sourceSheet, row, 34);
+    const location = makeMorningLocation(sourceSheet, row);
+    const destination = getMorningValue(sourceSheet, row, 29);
+    const activity = makeMorningActivity(sourceSheet, row);
+    if (
+      shouldSkipMorningReportPerson({
+        note,
+        destination,
+        location,
+        activity,
+        pibFillRgb:
+          sourceSheet.pibFillByExcelRow?.[excelRow.excelRowNumber] ?? null,
+      })
+    ) {
       skippedRows += 1;
       return;
     }
@@ -324,11 +507,11 @@ function analyzeMorningReport(
       sequence: rows.length + 1,
       staffUnit: "",
       name,
-      callsign: getMorningValue(row, 15),
+      callsign: getMorningValue(sourceSheet, row, 15),
       actualUnit: "_5 1ПБ",
-      location: makeMorningLocation(row),
-      activity: makeMorningActivity(row),
-      reportStatus: classifyMorningReportStatus(row),
+      location,
+      activity,
+      reportStatus: classifyMorningReportStatus(sourceSheet, row),
       sourceStatus,
       note,
       submittedBy,
@@ -463,8 +646,12 @@ function analyzeFill(source?: ExcelWorkbookSnapshot | null, target?: ExcelWorkbo
       weaponKind: getWeaponKind(rowValue(row.values, findColumn(sourceColumns, ["weaponName"]))),
     };
 
-    sourceByStrictKey.set(strictKey, [...(sourceByStrictKey.get(strictKey) ?? []), record]);
-    sourceByNameKey.set(nameKey, [...(sourceByNameKey.get(nameKey) ?? []), record]);
+    const strictBucket = sourceByStrictKey.get(strictKey);
+    if (strictBucket) strictBucket.push(record);
+    else sourceByStrictKey.set(strictKey, [record]);
+    const nameBucket = sourceByNameKey.get(nameKey);
+    if (nameBucket) nameBucket.push(record);
+    else sourceByNameKey.set(nameKey, [record]);
   });
 
   const changes: FillChange[] = [];
@@ -550,6 +737,9 @@ function pickSourceRecordForTargetColumn(records: SourceRecord[], targetColumn: 
 }
 
 const MORNING_REPORT_TEMPLATE_URL = "/templates/Поіменний список 1 ПБ.xlsm";
+
+const formatSourceTimestamp = (iso: string | null | undefined) =>
+  iso ? new Date(iso).toLocaleString("uk-UA") : null;
 const MORNING_REPORT_DATA_START_ROW = 5;
 const MORNING_REPORT_DATA_COLUMN_COUNT = 10;
 const MORNING_REPORT_TEMPLATE_CLEAR_UNTIL_ROW = 600;
@@ -604,7 +794,24 @@ function writeMorningReportIntoTemplate(workbook: any, result: MorningReportResu
 }
 
 export function ExcelFillPage() {
-  const [source, setSource] = useState<ExcelWorkbookSnapshot | null>(null);
+  const [sourceUpload, setSourceUpload] = useState<ExcelWorkbookSnapshot | null>(
+    null,
+  );
+  const [sourceUploadLoadedAt, setSourceUploadLoadedAt] = useState<string | null>(
+    null,
+  );
+  const [rosterSource, setRosterSource] = useState<ExcelWorkbookSnapshot | null>(
+    null,
+  );
+  const [rosterLabel, setRosterLabel] = useState("");
+  const [rosterImportedAt, setRosterImportedAt] = useState<string | null>(null);
+  const [rosterLoadedAt, setRosterLoadedAt] = useState<string | null>(null);
+  const [rosterRowCount, setRosterRowCount] = useState(0);
+  const [rosterPreviewRows, setRosterPreviewRows] = useState<EjournalPreviewRow[]>(
+    [],
+  );
+  const [staffSheetImport, setStaffSheetImport] =
+    useState<StaffSheetImportSnapshot | null>(null);
   const [target, setTarget] = useState<ExcelWorkbookSnapshot | null>(null);
   const [positionsTemplate, setPositionsTemplate] =
     useState<ExcelWorkbookSnapshot | null>(null);
@@ -621,8 +828,79 @@ export function ExcelFillPage() {
   const [morningSubmittedBy, setMorningSubmittedBy] = useState("");
   const [isBusy, setIsBusy] = useState(false);
   const [message, setMessage] = useState(
-    "Завантажте файл-джерело і файл, який треба дозаповнити.",
+    "Завантажте дані з персоналу або файл-джерело Excel.",
   );
+
+  /** Ранковий звіт / заповнення — з найсвіжішого джерела (файл, імпорт Штатки, БД). */
+  const activeRosterSource = useMemo((): ActiveRosterSource | null => {
+    const candidates: ActiveRosterSource[] = [];
+
+    if (sourceUpload) {
+      const loaded = sourceUploadLoadedAt || "";
+      candidates.push({
+        kind: "upload",
+        snapshot: sourceUpload,
+        label: sourceUpload.fileName,
+        importedAt: null,
+        loadedAt: sourceUploadLoadedAt,
+        freshnessAt: Date.parse(loaded) || Date.now(),
+      });
+    }
+
+    if (staffSheetImport?.rows.length) {
+      const snapshot = rosterRowsToSourceSnapshot(
+        staffSheetImport.rows,
+        staffSheetImport.fileName,
+      );
+      if (snapshot) {
+        candidates.push({
+          kind: "staff-import",
+          snapshot,
+          label: staffSheetImport.fileName,
+          importedAt: staffSheetImport.importedAt,
+          loadedAt: staffSheetImport.importedAt,
+          freshnessAt: Date.parse(staffSheetImport.importedAt) || 0,
+        });
+      }
+    }
+
+    if (rosterSource) {
+      candidates.push({
+        kind: "personnel",
+        snapshot: rosterSource,
+        label: rosterLabel || "Загальний список",
+        importedAt: rosterImportedAt,
+        loadedAt: rosterLoadedAt,
+        freshnessAt: Date.parse(rosterImportedAt || "") || 0,
+      });
+    }
+
+    if (!candidates.length) return null;
+
+    // Явний Excel на цій сторінці завжди має пріоритет.
+    const upload = candidates.find((item) => item.kind === "upload");
+    if (upload) return upload;
+
+    // Інакше — найновіший імпорт. При однаковому часі — Штатка (кращі колонки з .xlsx).
+    return [...candidates].sort((left, right) => {
+      if (right.freshnessAt !== left.freshnessAt) {
+        return right.freshnessAt - left.freshnessAt;
+      }
+      if (left.kind === "staff-import") return -1;
+      if (right.kind === "staff-import") return 1;
+      return 0;
+    })[0];
+  }, [
+    rosterImportedAt,
+    rosterLabel,
+    rosterLoadedAt,
+    rosterSource,
+    sourceUpload,
+    sourceUploadLoadedAt,
+    staffSheetImport,
+  ]);
+
+  const source = activeRosterSource?.snapshot ?? null;
   const result = useMemo(() => analyzeFill(source, target), [source, target]);
   const positionsResult = useMemo(
     () =>
@@ -634,18 +912,169 @@ export function ExcelFillPage() {
     [positionsPeople, positionsRules, positionsTemplate],
   );
   const morningSubmittedByValue = morningSubmittedBy.trim();
-  const morningReport = useMemo(
-    () => analyzeMorningReport(source, morningSubmittedByValue),
-    [morningSubmittedByValue, source],
+  const morningReportBase = useMemo(
+    () => analyzeMorningReport(source, ""),
+    [source],
   );
+  const morningReport = useMemo(() => {
+    if (!morningReportBase) return null;
+    if (!morningSubmittedByValue) return morningReportBase;
+    return {
+      ...morningReportBase,
+      rows: morningReportBase.rows.map((row) => ({
+        ...row,
+        submittedBy: morningSubmittedByValue,
+      })),
+    };
+  }, [morningReportBase, morningSubmittedByValue]);
   const morningLocationCounts = useMemo(
-    () => (morningReport ? getMorningLocationCounts(morningReport.rows) : []),
-    [morningReport],
+    () => (morningReportBase ? getMorningLocationCounts(morningReportBase.rows) : []),
+    [morningReportBase],
   );
+  const staffSheetPreviewMeta = useMemo(() => {
+    if (activeRosterSource?.kind === "staff-import" && staffSheetImport?.rows.length) {
+      return {
+        source: "import" as const,
+        label: staffSheetImport.fileName,
+        detail: staffSheetImport.sheetName,
+        timestamp: staffSheetImport.importedAt,
+        rows: buildStaffSheetPreviewRows(staffSheetImport.rows),
+      };
+    }
+    if (rosterPreviewRows.length) {
+      return {
+        source: "personnel" as const,
+        label: rosterLabel || "Загальний список",
+        detail: "БД персоналу / Google «Штатка»",
+        timestamp: rosterImportedAt,
+        rows: buildStaffSheetPreviewRows(rosterPreviewRows),
+      };
+    }
+    if (staffSheetImport?.rows.length) {
+      return {
+        source: "import" as const,
+        label: staffSheetImport.fileName,
+        detail: staffSheetImport.sheetName,
+        timestamp: staffSheetImport.importedAt,
+        rows: buildStaffSheetPreviewRows(staffSheetImport.rows),
+      };
+    }
+    return {
+      source: "none" as const,
+      label: "",
+      detail: "",
+      timestamp: null as string | null,
+      rows: [],
+    };
+  }, [
+    activeRosterSource?.kind,
+    staffSheetImport,
+    rosterPreviewRows,
+    rosterLabel,
+    rosterImportedAt,
+  ]);
+  const staffSheetPreviewRows = staffSheetPreviewMeta.rows;
+  const morningSourceMeta = useMemo(() => {
+    if (!activeRosterSource) return null;
+    const kindLabel =
+      activeRosterSource.kind === "upload"
+        ? "Excel-файл на цій сторінці"
+        : activeRosterSource.kind === "staff-import"
+          ? "імпорт Штатки з Анкетних даних"
+          : "БД персоналу";
+    return {
+      label: activeRosterSource.label,
+      importedAt: activeRosterSource.importedAt,
+      loadedAt: activeRosterSource.loadedAt,
+      fromPersonnel: activeRosterSource.kind !== "upload",
+      kindLabel,
+    };
+  }, [activeRosterSource]);
 
   useEffect(() => {
     setPositionsRulesText(JSON.stringify(positionsRules, null, 2));
   }, [positionsRules]);
+
+  useEffect(() => {
+    void loadSourceFromPersonnel();
+  }, []);
+
+  useEffect(() => {
+    void loadStaffSheetImport().then((imported) => {
+      if (imported) setStaffSheetImport(imported);
+    });
+  }, []);
+
+  const applyRosterLatest = (
+    latest: NonNullable<Awaited<ReturnType<typeof api.getLatestPersonnelRoster>>>,
+    fromCache = false,
+  ) => {
+    const snapshot = rosterLatestToSourceSnapshot(latest);
+    const rows = mapRosterLatestToPreviewRows(latest);
+    setRosterSource(snapshot);
+    setSourceUpload(null);
+    setSourceUploadLoadedAt(null);
+    setRosterPreviewRows(rows);
+    setRosterRowCount(rows.length);
+    setRosterLabel(latest.sourceFileName || latest.importName || "Загальний список");
+    setRosterImportedAt(latest.createdAt || null);
+    setRosterLoadedAt(new Date().toISOString());
+    if (snapshot) {
+      setMessage(
+        fromCache
+          ? `Кеш персоналу: ${rows.length} рядків · оновлюю з БД…`
+          : `Джерело з персоналу: ${rows.length} рядків · ${latest.sourceFileName || latest.importName}.`,
+      );
+    }
+  };
+
+  const loadSourceFromPersonnel = async (forceRefresh = false) => {
+    setIsBusy(true);
+    try {
+      if (!forceRefresh) {
+        const cached = await readDataCache<
+          Awaited<ReturnType<typeof api.getLatestPersonnelRoster>>
+        >(CacheKeys.rosterLatest);
+        if (cached?.sheet) {
+          applyRosterLatest(cached, true);
+          setIsBusy(false);
+        }
+      }
+
+      const latest = forceRefresh
+        ? await (async () => {
+            const fresh = await api.getLatestPersonnelRoster();
+            if (fresh) await writeDataCache(CacheKeys.rosterLatest, fresh);
+            return fresh;
+          })()
+        : await fetchWithCache({
+            key: CacheKeys.rosterLatest,
+            fetcher: () => api.getLatestPersonnelRoster(),
+            isChanged: jsonChanged,
+          });
+      if (!latest?.sheet) {
+        setRosterSource(null);
+        setRosterPreviewRows([]);
+        setRosterRowCount(0);
+        setRosterLabel("");
+        setRosterImportedAt(null);
+        setRosterLoadedAt(null);
+        setMessage(
+          "У БД немає «Загального списку». Імпортуйте «Штатку» на «Анкетні дані».",
+        );
+        return;
+      }
+      applyRosterLatest(latest);
+    } catch (error) {
+      setMessage(
+        error instanceof Error
+          ? `Не вдалося завантажити персонал: ${error.message}`
+          : "Не вдалося завантажити персонал.",
+      );
+    } finally {
+      setIsBusy(false);
+    }
+  };
 
   const loadFile = async (
     file: File | undefined,
@@ -655,10 +1084,18 @@ export function ExcelFillPage() {
     setIsBusy(true);
     try {
       const snapshot = await readWorkbookSnapshot(file);
-      if (role === "source") setSource(snapshot);
-      else if (role === "target") setTarget(snapshot);
+      if (role === "source") {
+        setSourceUpload(snapshot);
+        setSourceUploadLoadedAt(new Date().toISOString());
+        const report = analyzeMorningReport(snapshot, "");
+        setMessage(
+          `Завантажено ${file.name} · ранковий звіт: ${report?.rows.length ?? 0} осіб (з файлу, не з БД).`,
+        );
+      } else if (role === "target") setTarget(snapshot);
       else setPositionsTemplate(snapshot);
-      setMessage(`Завантажено ${file.name}.`);
+      if (role !== "source") {
+        setMessage(`Завантажено ${file.name}.`);
+      }
     } catch (error) {
       setMessage(
         error instanceof Error ? error.message : "Не вдалося прочитати Excel.",
@@ -671,7 +1108,43 @@ export function ExcelFillPage() {
   const loadPositionsFromDb = async () => {
     setIsBusy(true);
     try {
-      const latest = await api.getLatestPersonnelRoster();
+      const applyLatest = (
+        latest: NonNullable<Awaited<ReturnType<typeof api.getLatestPersonnelRoster>>>,
+        fromCache = false,
+      ) => {
+        if (!latest?.sheet) {
+          setPositionsPeople([]);
+          setPositionsRosterLabel("");
+          setMessage(
+            "У БД немає імпортованого «Загального списку». Спочатку імпортуйте ранковий звіт у персонал.",
+          );
+          return;
+        }
+        const people = parseRosterLatestToPeople(latest);
+        setPositionsPeople(people);
+        setPositionsRosterLabel(
+          latest.sourceFileName || latest.importName || "Загальний список",
+        );
+        setMessage(
+          fromCache
+            ? `Кеш: ${people.length} осіб · оновлюю з БД…`
+            : `З БД завантажено ${people.length} осіб · ${latest.sourceFileName || latest.importName}.`,
+        );
+      };
+
+      const cached = await readDataCache<
+        Awaited<ReturnType<typeof api.getLatestPersonnelRoster>>
+      >(CacheKeys.rosterLatest);
+      if (cached?.sheet) {
+        applyLatest(cached, true);
+        setIsBusy(false);
+      }
+
+      const latest = await fetchWithCache({
+        key: CacheKeys.rosterLatest,
+        fetcher: () => api.getLatestPersonnelRoster(),
+        isChanged: jsonChanged,
+      });
       if (!latest?.sheet) {
         setPositionsPeople([]);
         setPositionsRosterLabel("");
@@ -680,14 +1153,7 @@ export function ExcelFillPage() {
         );
         return;
       }
-      const people = parseRosterLatestToPeople(latest);
-      setPositionsPeople(people);
-      setPositionsRosterLabel(
-        latest.sourceFileName || latest.importName || "Загальний список",
-      );
-      setMessage(
-        `З БД завантажено ${people.length} осіб · ${latest.sourceFileName || latest.importName}.`,
-      );
+      applyLatest(latest);
     } catch (error) {
       setMessage(
         error instanceof Error
@@ -849,16 +1315,54 @@ export function ExcelFillPage() {
 
       <div className="dashboard-grid">
         <section className="panel">
-          <div className="panel-heading">1. Файл-джерело</div>
+          <div className="panel-heading">1. Джерело · персонал</div>
           <Typography variant="body2" color="text.secondary">
-            Таблиця, звідки беремо дані. Наприклад, 1ПБ по ЗББР.
+            Ранковий звіт бере найсвіжіше: імпорт «Штатки» з Анкетних даних, БД
+            або Excel на цій сторінці. Зараз:{" "}
+            {morningSourceMeta
+              ? `${morningSourceMeta.kindLabel} · ${morningSourceMeta.label} · ${formatSourceTimestamp(morningSourceMeta.importedAt || morningSourceMeta.loadedAt) ?? "—"}`
+              : "немає даних — імпортуйте «Штатку» на «Анкетні дані»"}.
           </Typography>
-          <Stack direction="row" spacing={1} sx={{ mt: 2, alignItems: "center" }}>
-            <Button component="label" startIcon={<FileUploadOutlinedIcon />}>
-              Завантажити
-              <input hidden type="file" accept=".xlsx,.xlsm" onChange={(event) => void loadFile(event.target.files?.[0], "source")} />
+          <Stack direction="row" spacing={1} sx={{ mt: 2, alignItems: "center", flexWrap: "wrap" }}>
+            <Button
+              variant="outlined"
+              disabled={isBusy}
+              onClick={() => void loadSourceFromPersonnel(true)}
+              title="Перечитати вже збережене в БД"
+            >
+              З БД
             </Button>
-            <Typography variant="body2">{source?.fileName ?? "Файл не вибрано"}</Typography>
+            <Typography variant="body2">
+              {rosterSource
+                ? `${rosterRowCount} рядків · ${rosterLabel}`
+                : staffSheetImport
+                  ? `${staffSheetImport.personCount || staffSheetImport.rows.length} · ${staffSheetImport.fileName}`
+                  : "Дані не завантажено"}
+            </Typography>
+          </Stack>
+          {rosterSource ? (
+            <Stack spacing={0.5} sx={{ mt: 1 }}>
+              <Typography variant="body2" color="text.secondary">
+                Імпорт у БД (Персонал): {formatSourceTimestamp(rosterImportedAt) ?? "—"}
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                Завантажено на сторінці: {formatSourceTimestamp(rosterLoadedAt) ?? "—"}
+              </Typography>
+            </Stack>
+          ) : null}
+          <Stack direction="row" spacing={1} sx={{ mt: 1.5, alignItems: "center", flexWrap: "wrap" }}>
+            <Button component="label" size="small" startIcon={<FileUploadOutlinedIcon />}>
+              Або Excel
+              <input
+                hidden
+                type="file"
+                accept=".xlsx,.xlsm"
+                onChange={(event) => void loadFile(event.target.files?.[0], "source")}
+              />
+            </Button>
+            <Typography variant="body2" color="text.secondary">
+              {sourceUpload?.fileName ?? "файл не вибрано"}
+            </Typography>
           </Stack>
         </section>
 
@@ -880,12 +1384,36 @@ export function ExcelFillPage() {
           <div className="panel-heading">Ранковий звіт 1ПБ</div>
           <Stack spacing={1}>
             <Typography variant="body2">
-              Для експорту беруться статуси: В строю, Відком. за межі ПБ,
-              Відрядження, Новоприбулий.
+              Для експорту беруться лише статуси: В строю, Новоприбулий.
             </Typography>
             <Typography variant="body2" color="text.secondary">
               ID-файл більше не потрібен: колонка «Підрозділ за штатом»
               лишається пустою.
+            </Typography>
+            <Typography variant="body2" color="text.secondary">
+              {morningSourceMeta ? (
+                <>
+                  Джерело: {morningSourceMeta.label}
+                  <br />
+                  Тип: {morningSourceMeta.kindLabel}
+                  {morningSourceMeta.importedAt ? (
+                    <>
+                      <br />
+                      Оновлено: {formatSourceTimestamp(morningSourceMeta.importedAt)}
+                    </>
+                  ) : morningSourceMeta.loadedAt ? (
+                    <>
+                      <br />
+                      Завантажено: {formatSourceTimestamp(morningSourceMeta.loadedAt)}
+                    </>
+                  ) : null}
+                </>
+              ) : (
+                "Джерело не завантажено — імпортуйте «Штатку» на «Анкетні дані» або Excel."
+              )}
+            </Typography>
+            <Typography variant="body2" color="text.secondary">
+              У звіт потрапляють статуси «В строю» / «Новоприбулий».
             </Typography>
             <label className="excel-fill-inline-field">
               <span>Хто подав / позивний</span>
@@ -896,7 +1424,10 @@ export function ExcelFillPage() {
               />
             </label>
             <Typography variant="body2">Осіб у звіті: {morningReport?.rows.length ?? 0}</Typography>
-            <Typography variant="body2">Пропущено інших статусів: {morningReport?.skippedRows ?? 0}</Typography>
+            <Typography variant="body2">
+              Пропущено (інший статус / Вик.БЗ в ін. п-лі / транзитери):{" "}
+              {morningReport?.skippedRows ?? 0}
+            </Typography>
             <Typography variant="body2">
               Локацій у чисельному складі: {morningLocationCounts.length}
             </Typography>
@@ -1097,6 +1628,55 @@ export function ExcelFillPage() {
 
       <section className="panel excel-fill-preview-panel">
         <div className="panel-heading">
+          <FileDownloadOutlinedIcon fontSize="small" /> Preview · Штатка
+        </div>
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+          {staffSheetPreviewMeta.source === "personnel"
+            ? `Джерело: ${staffSheetPreviewMeta.label} · ${staffSheetPreviewRows.length} осіб з ПІБ (до 300).`
+            : staffSheetPreviewMeta.source === "import"
+              ? `Імпорт з Анкетних даних «${staffSheetPreviewMeta.detail}» · ${staffSheetPreviewRows.length} осіб (до 300).`
+              : "Імпортуйте «Штатку» на «Анкетні дані»."}
+          {staffSheetPreviewMeta.timestamp ? (
+            <>
+              {" "}
+              · оновлено{" "}
+              {formatSourceTimestamp(staffSheetPreviewMeta.timestamp)}
+            </>
+          ) : null}
+        </Typography>
+        <div className="excel-fill-preview-wrap">
+          <table className="excel-preview-table">
+            <thead>
+              <tr>
+                <th>Рядок</th>
+                {STAFF_SHEET_PREVIEW_COLUMNS.map((column) => (
+                  <th key={column.number}>{column.label}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {staffSheetPreviewRows.slice(0, 300).map((row) => (
+                <tr key={row.excelRowNumber}>
+                  <td>{row.excelRowNumber}</td>
+                  {row.cells.map((value, index) => (
+                    <td key={`${row.excelRowNumber}-${index}`}>{value || "—"}</td>
+                  ))}
+                </tr>
+              ))}
+              {!staffSheetPreviewRows.length ? (
+                <tr>
+                  <td colSpan={STAFF_SHEET_PREVIEW_COLUMNS.length + 1}>
+                    Імпортуйте «Штатку» на «Анкетні дані» або натисніть «З БД».
+                  </td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section className="panel excel-fill-preview-panel">
+        <div className="panel-heading">
           <FileDownloadOutlinedIcon fontSize="small" /> Preview Ранковий звіт 1ПБ
         </div>
         <div className="excel-fill-preview-wrap">
@@ -1124,7 +1704,11 @@ export function ExcelFillPage() {
               ))}
               {!morningReport?.rows.length ? (
                 <tr>
-                  <td colSpan={6}>Завантажте першу таблицю, щоб сформувати ранковий звіт.</td>
+                  <td colSpan={6}>
+                    {source
+                      ? `У джерелі немає осіб зі статусом «В строю» / «Новоприбулий» (пропущено: ${morningReport?.skippedRows ?? "—"}). Перевірте «Штатку» на «Анкетні дані».`
+                      : "Імпортуйте «Штатку» на «Анкетні дані» або натисніть «З БД»."}
+                  </td>
                 </tr>
               ) : null}
             </tbody>

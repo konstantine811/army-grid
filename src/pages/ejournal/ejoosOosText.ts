@@ -1,0 +1,147 @@
+/** Історія посад / наказів в ООС — кожне значення з нового рядка, як у шаблоні. */
+
+export const OOS_HISTORY_COLUMNS = [4, 5, 11, 12];
+export const OOS_RELATIVES_COLUMN = 32;
+
+const excelSerialToUaDate = (value: number) => {
+  if (!Number.isFinite(value) || value <= 20000 || value >= 80000) return "";
+  const utc = Date.UTC(1899, 11, 30) + Math.floor(value) * 86400000;
+  const date = new Date(utc);
+  const day = String(date.getUTCDate()).padStart(2, "0");
+  const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+  return `${day}.${month}.${date.getUTCFullYear()}`;
+};
+
+export const cellValueToOosText = (value: unknown) => {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    const day = String(value.getDate()).padStart(2, "0");
+    const month = String(value.getMonth() + 1).padStart(2, "0");
+    return `${day}.${month}.${value.getFullYear()}`;
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return excelSerialToUaDate(value) || String(Math.trunc(value));
+  }
+  return String(value ?? "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .trim();
+};
+
+export const splitOosHistoryLines = (raw: string) => {
+  const text = cellValueToOosText(raw);
+  if (!text) return [];
+  const explicit = text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (explicit.length > 1) {
+    return explicit.flatMap((line) => splitPackedOosIndexes(line));
+  }
+  const one = explicit[0];
+  const packed = splitPackedOosIndexes(one);
+  if (packed.length > 1) return packed;
+  const indexes = one.match(/\d{7}/g);
+  if (
+    indexes &&
+    indexes.length > 1 &&
+    indexes.join("") === one.replace(/\s+/g, "")
+  ) {
+    return indexes;
+  }
+  const dates = [...one.matchAll(/\d{1,2}\.\d{1,2}\.\d{4}/g)].map(
+    (match) => match[0],
+  );
+  if (dates.length > 1 && dates.join("") === one.replace(/\s+/g, "")) {
+    return dates;
+  }
+  const dateAndTail = one.match(/^(\d{1,2}\.\d{1,2}\.\d{4})(\d{4,})$/);
+  if (dateAndTail) {
+    const converted = excelSerialToUaDate(Number(dateAndTail[2]));
+    return [dateAndTail[1], converted || dateAndTail[2]];
+  }
+  return [one];
+};
+
+export const mergeOosHistoryValue = (current: unknown, next: unknown) => {
+  const values = splitOosHistoryLines(cellValueToOosText(current));
+  const incoming = splitOosHistoryLines(cellValueToOosText(next));
+  for (const value of incoming.reverse()) {
+    if (value && !values.includes(value)) values.unshift(value);
+  }
+  return values.join("\n");
+};
+
+/** Склеєні штатні індекси `21107862103239` → два рядки, як у шаблоні ООС. */
+export const splitPackedOosIndexes = (raw: string) => {
+  const packed = raw.replace(/\s+/g, "");
+  if (!/^\d{14,}$/.test(packed) || packed.length % 7 !== 0) return [raw];
+  return packed.match(/\d{7}/g) ?? [raw];
+};
+
+export const isJammedOosHistory = (raw: unknown) => {
+  const text = cellValueToOosText(raw);
+  if (!text || text.includes("\n")) return false;
+  return splitOosHistoryLines(text).length > 1;
+};
+
+/** Родичі в ООС: кожна особа з нового рядка, адреса — окремим рядком. */
+export const formatOosRelativesText = (raw: unknown) => {
+  const text = cellValueToOosText(raw);
+  if (!text) return "";
+  if (text.includes("\n")) {
+    return text
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .join("\n");
+  }
+  return text
+    .replace(
+      /\s*(мати|батько|дружина|чоловік|син|дочка|донька|брат|сестра|довірена\s+особа)\s*:/giu,
+      "\n$1 : ",
+    )
+    .replace(/\s*;\s*/g, ";\n")
+    .replace(/,?\s*(вул\.|вулиця)\s+/giu, "\n$1 ")
+    .replace(/^\n+/, "")
+    .replace(/\n{2,}/g, "\n")
+    .replace(/\s+:\s+/g, " : ")
+    .trim();
+};
+
+export const isOosWrapColumn = (column: number) =>
+  OOS_HISTORY_COLUMNS.includes(column) || column === OOS_RELATIVES_COLUMN;
+
+/** Значення, які дописуємо (звання / ПІБ / ID / історія посад / зарахування). */
+export const OOS_RESTYLE_COLUMNS = [1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12];
+/** O/P — останнє звання; у сусідів часто порожні, стиль беремо з K/L. */
+export const OOS_RANK_ORDER_COLUMNS = [15, 16] as const;
+export const oosStyleSourceColumn = (column: number) =>
+  column === 15 ? 11 : column === 16 ? 12 : undefined;
+/** Увесь рядок картки ООС — A:AG, щоб шрифт і центрування були як у сусіда. */
+export const OOS_LAST_DATA_COLUMN = 33;
+export const OOS_DATA_COLUMNS = Array.from(
+  { length: OOS_LAST_DATA_COLUMN },
+  (_, index) => index + 1,
+);
+
+/**
+ * Шаблон стилю ООС — зайнятий рядок з переносом у індексі, не заголовок
+ * і не рядок, який зараз переписуємо (він уже може бути зламаний).
+ */
+export const findOosStyleSourceRow = (
+  getCell: (row: number, column: number) => unknown,
+  options?: { skipRows?: Iterable<number>; lastRow?: number },
+) => {
+  const skip = new Set(options?.skipRows ?? []);
+  const lastRow = Math.max(6, options?.lastRow ?? 40);
+  let fallback = 0;
+  for (let row = 7; row <= lastRow; row += 1) {
+    if (skip.has(row)) continue;
+    const name = cellValueToOosText(getCell(row, 2));
+    const index = cellValueToOosText(getCell(row, 4));
+    if (!name) continue;
+    if (!fallback) fallback = row;
+    if (index.includes("\n")) return row;
+  }
+  return fallback || 7;
+};

@@ -14,11 +14,15 @@ export type DocumentsJournalExcelRow = {
   status: string;
   note: string;
   files: string;
+  taskPeriodEnd?: string;
   createdAt: string;
   updatedAt: string;
 };
 
-const COLUMNS = 11;
+const BASE_COLUMNS = 11;
+
+const journalColumnCount = (includeUbdExitDate: boolean) =>
+  includeUbdExitDate ? BASE_COLUMNS + 1 : BASE_COLUMNS;
 const HEADER_GREEN = "#1F4E3D";
 const TITLE_GREEN = "#14382C";
 const META_BG = "#E8F0EC";
@@ -105,11 +109,13 @@ const headerRow = (labels: string[]): CellObject[] =>
     }),
   );
 
-const buildJournalSheet = (rows: DocumentsJournalExcelRow[], meta: string): SheetData => [
-  titleRow("Журнал документів", COLUMNS),
-  metaRow(meta, COLUMNS),
-  Array.from({ length: COLUMNS }, () => emptyCell({ height: 8 })),
-  headerRow([
+const buildJournalSheet = (
+  rows: DocumentsJournalExcelRow[],
+  meta: string,
+  includeUbdExitDate: boolean,
+): SheetData => {
+  const columns = journalColumnCount(includeUbdExitDate);
+  const headers = [
     "№",
     "Службовець",
     "ID",
@@ -119,45 +125,56 @@ const buildJournalSheet = (rows: DocumentsJournalExcelRow[], meta: string): Shee
     "Статус документа",
     "Коментар",
     "Файли",
+    ...(includeUbdExitDate ? ["Вихід від"] : []),
     "Створено",
     "Оновлено",
-  ]),
-  ...rows.map((row, index) => {
-    const zebra = index % 2 === 1 ? { backgroundColor: ZEBRA } : { backgroundColor: WHITE };
-    const created = dayjs(row.createdAt);
-    const updated = dayjs(row.updatedAt);
-    return [
-      cell(index + 1, { type: Number, align: "center", textColor: MUTED, ...zebra }),
-      cell(row.personName, { fontWeight: "bold", textColor: TEXT, wrap: true, ...zebra }),
-      cell(row.personId || "—", { align: "left", textColor: MUTED, wrap: true, ...zebra }),
-      cell(row.personStatus || "—", { wrap: true, ...zebra }),
-      cell(row.documentType, { wrap: true, ...zebra }),
-      cell(row.progressPercent / 100, {
-        type: Number,
-        format: "0%",
-        align: "center",
-        fontWeight: "bold",
-        ...progressFill(row.progressPercent),
-        ...border,
-      }),
-      cell(row.status, { wrap: true, ...zebra }),
-      cell(row.note || "—", { wrap: true, ...zebra }),
-      cell(row.files, { align: "center", ...zebra }),
-      cell(created.isValid() ? created.toDate() : row.createdAt, {
-        type: created.isValid() ? Date : String,
-        format: "DD.MM.YYYY HH:mm",
-        align: "center",
-        ...zebra,
-      }),
-      cell(updated.isValid() ? updated.toDate() : row.updatedAt, {
-        type: updated.isValid() ? Date : String,
-        format: "DD.MM.YYYY HH:mm",
-        align: "center",
-        ...zebra,
-      }),
-    ];
-  }),
-];
+  ];
+
+  return [
+    titleRow("Журнал документів", columns),
+    metaRow(meta, columns),
+    Array.from({ length: columns }, () => emptyCell({ height: 8 })),
+    headerRow(headers),
+    ...rows.map((row, index) => {
+      const zebra = index % 2 === 1 ? { backgroundColor: ZEBRA } : { backgroundColor: WHITE };
+      const created = dayjs(row.createdAt);
+      const updated = dayjs(row.updatedAt);
+      return [
+        cell(index + 1, { type: Number, align: "center", textColor: MUTED, ...zebra }),
+        cell(row.personName, { fontWeight: "bold", textColor: TEXT, wrap: true, ...zebra }),
+        cell(row.personId || "—", { align: "left", textColor: MUTED, wrap: true, ...zebra }),
+        cell(row.personStatus || "—", { wrap: true, ...zebra }),
+        cell(row.documentType, { wrap: true, ...zebra }),
+        cell(row.progressPercent / 100, {
+          type: Number,
+          format: "0%",
+          align: "center",
+          fontWeight: "bold",
+          ...progressFill(row.progressPercent),
+          ...border,
+        }),
+        cell(row.status, { wrap: true, ...zebra }),
+        cell(row.note || "—", { wrap: true, ...zebra }),
+        cell(row.files, { align: "center", ...zebra }),
+        ...(includeUbdExitDate
+          ? [cell(row.taskPeriodEnd || "—", { align: "center", ...zebra })]
+          : []),
+        cell(created.isValid() ? created.toDate() : row.createdAt, {
+          type: created.isValid() ? Date : String,
+          format: "DD.MM.YYYY HH:mm",
+          align: "center",
+          ...zebra,
+        }),
+        cell(updated.isValid() ? updated.toDate() : row.updatedAt, {
+          type: updated.isValid() ? Date : String,
+          format: "DD.MM.YYYY HH:mm",
+          align: "center",
+          ...zebra,
+        }),
+      ];
+    }),
+  ];
+};
 
 const buildSummaryBlock = (
   title: string,
@@ -210,12 +227,14 @@ export const exportDocumentsJournalExcel = async ({
   statusFilterLabel,
   periodFilterLabel,
   totalCount,
+  includeUbdExitDate = false,
 }: {
   rows: DocumentsJournalExcelRow[];
   typeFilterLabel: string;
   statusFilterLabel: string;
   periodFilterLabel: string;
   totalCount: number;
+  includeUbdExitDate?: boolean;
 }) => {
   const exportedAt = dayjs();
   const meta = [
@@ -226,30 +245,32 @@ export const exportDocumentsJournalExcel = async ({
   const periodSuffix =
     periodFilterLabel === "Усі місяці" ? "" : ` ${periodFilterLabel}`;
   const fileName = `Журнал документів${periodSuffix} ${exportedAt.format("DD.MM.YYYY")}.xlsx`;
+  const journalColumns = [
+    { width: 6 },
+    { width: 34 },
+    { width: 22 },
+    { width: 22 },
+    { width: 32 },
+    { width: 12 },
+    { width: 24 },
+    { width: 36 },
+    { width: 14 },
+    ...(includeUbdExitDate ? [{ width: 14 }] : []),
+    { width: 20 },
+    { width: 20 },
+  ];
 
   await writeXlsxFile(
     [
       {
         sheet: "Журнал",
-        data: buildJournalSheet(rows, meta),
+        data: buildJournalSheet(rows, meta, includeUbdExitDate),
         orientation: "landscape",
         stickyRowsCount: 4,
         stickyColumnsCount: 2,
         dateFormat: "DD.MM.YYYY HH:mm",
         showGridLines: false,
-        columns: [
-          { width: 6 },
-          { width: 34 },
-          { width: 22 },
-          { width: 22 },
-          { width: 32 },
-          { width: 12 },
-          { width: 24 },
-          { width: 36 },
-          { width: 14 },
-          { width: 20 },
-          { width: 20 },
-        ],
+        columns: journalColumns,
       },
       {
         sheet: "Зведення",

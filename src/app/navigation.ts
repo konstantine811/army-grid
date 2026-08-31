@@ -1,32 +1,76 @@
 export type AppPage =
   | "overview"
-  | "import"
   | "analytics"
   | "ejournal"
   | "bchs"
-  | "bchsLab"
   | "excelFill"
-  | "questionnaireParser"
+  | "anketaData"
   | "socPassport"
   | "personnel"
   | "documents"
-  | "documentSettings";
+  | "documentSettings"
+  | "usersAccess"
+  | "profile"
+  | "workTasks";
 export type BchsAnalyticsTab = "overview" | "comparison" | "combat" | "supplement";
+
+/** Pages available to non-admin users (USER). Admins see all pages. */
+export const USER_ALLOWED_PAGES: readonly AppPage[] = [
+  "overview",
+  "personnel",
+  "bchs",
+  "anketaData",
+  "documents",
+  "profile",
+  "workTasks",
+] as const;
+
+export const isUserAllowedPage = (page: AppPage) =>
+  (USER_ALLOWED_PAGES as readonly string[]).includes(page);
+
+/** Write permission required to mutate data on a page (null = no page-level writes). */
+export const writeAreaForPage = (
+  page: AppPage,
+): "personnel" | "bchs" | "anketaData" | "documents" | null => {
+  switch (page) {
+    case "personnel":
+      return "personnel";
+    case "bchs":
+      return "bchs";
+    case "anketaData":
+      return "anketaData";
+    case "documents":
+      return "documents";
+    default:
+      return null;
+  }
+};
 
 export const pagePaths: Record<AppPage, string> = {
   overview: "/overview",
-  import: "/import",
   analytics: "/analytics",
   ejournal: "/ejournal",
   bchs: "/bchs",
-  bchsLab: "/bchs-lab",
   excelFill: "/excel-fill",
-  questionnaireParser: "/questionnaire-parser",
+  anketaData: "/anketa-data",
   socPassport: "/soc-passport",
   personnel: "/personnel",
   documents: "/documents",
   documentSettings: "/document-settings",
+  usersAccess: "/users-access",
+  profile: "/profile",
+  workTasks: "/work-tasks",
 };
+
+/** Old app pages that now bounce to Огляд. */
+const RETIRED_PAGE_PATHS = new Set([
+  "/import",
+  "/bchs-lab",
+  "/questionnaire-parser",
+]);
+
+export const isRetiredPagePath = (pathname: string) =>
+  RETIRED_PAGE_PATHS.has(pathname);
 
 const pathPages = Object.fromEntries(
   Object.entries(pagePaths).map(([page, path]) => [path, page]),
@@ -61,6 +105,70 @@ export const getInitialBchsAnalyticsTab = (): BchsAnalyticsTab => {
     : "overview";
 };
 
+export type EjoosWorkspaceTab =
+  | "import"
+  | "pb"
+  | "changes"
+  | "history"
+  | "shpo"
+  | "oos"
+  | "excluded"
+  | "tempArrivals"
+  | "tempAbsents"
+  | "timesheet"
+  | "irrevocableLosses"
+  | "export";
+
+const EJOOS_WORKSPACE_TABS: readonly EjoosWorkspaceTab[] = [
+  "import",
+  "pb",
+  "changes",
+  "history",
+  "shpo",
+  "oos",
+  "excluded",
+  "tempArrivals",
+  "tempAbsents",
+  "timesheet",
+  "irrevocableLosses",
+  "export",
+] as const;
+
+export const isEjoosWorkspaceTab = (
+  value: string | null | undefined,
+): value is EjoosWorkspaceTab =>
+  !!value &&
+  (EJOOS_WORKSPACE_TABS as readonly string[]).includes(value);
+
+export const getInitialEjoosTab = (): EjoosWorkspaceTab => {
+  const tab = new URLSearchParams(window.location.search).get("ejoosTab");
+  return isEjoosWorkspaceTab(tab) ? tab : "import";
+};
+
+/** Persist ЕЖООС sub-tab in the URL so reload keeps the same screen. */
+export const replaceEjoosTabInUrl = (tab: EjoosWorkspaceTab) => {
+  if (typeof window === "undefined") return;
+  if (getPageFromPath(window.location.pathname) !== "ejournal") return;
+
+  const url = new URL(window.location.href);
+  if (tab === "import") {
+    url.searchParams.delete("ejoosTab");
+  } else {
+    url.searchParams.set("ejoosTab", tab);
+  }
+
+  const next = `${url.pathname}${url.search}${url.hash}`;
+  if (next === `${window.location.pathname}${window.location.search}${window.location.hash}`) {
+    return;
+  }
+
+  window.history.replaceState(
+    { ...(window.history.state as object | null), page: "ejournal" },
+    "",
+    next,
+  );
+};
+
 export const getCurrentRouteKey = () =>
   `${window.location.pathname}${window.location.search}`;
 
@@ -92,6 +200,7 @@ export const buildDocumentRoute = ({
     | "form6Report"
     | "form12Report"
     | "temporaryMilitaryId"
+    | "lostMilitaryId"
     | "default"
     | string;
 }) => {
@@ -103,8 +212,12 @@ export const buildDocumentRoute = ({
   if (type === "ubdRestoreReport") params.set("type", "ubd-restore-report");
   if (type === "form6Report") params.set("type", "form6-report");
   if (type === "form12Report") params.set("type", "form12-report");
+  if (type === "serviceCharacteristic")
+    params.set("type", "service-characteristic");
+  if (type === "zhbdCertificate") params.set("type", "zhbd-certificate");
   if (type === "temporaryMilitaryId")
     params.set("type", "temporary-military-id");
+  if (type === "lostMilitaryId") params.set("type", "lost-military-id");
 
   const path = `${pagePaths.documents}${
     personExternalId ? `/${encodeURIComponent(personExternalId)}` : ""
@@ -126,4 +239,15 @@ export const buildPersonnelRoute = ({
 
   const query = params.toString();
   return query ? `${pagePaths.personnel}?${query}` : pagePaths.personnel;
+};
+
+export const openPersonnelInNewTab = ({
+  rowId,
+  externalId,
+}: {
+  rowId?: string;
+  externalId?: string;
+}) => {
+  const url = buildPersonnelRoute({ rowId, externalId });
+  window.open(url, "_blank", "noopener,noreferrer");
 };

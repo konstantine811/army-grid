@@ -13,7 +13,14 @@ export type Sex = "male" | "female" | "unknown";
 
 export type MaritalStatus = "married" | "unmarried" | "civil" | "unknown";
 
-export type ArrivalSource = "tck" | "trainingCenter" | "recruiting" | "brez" | "other" | "unknown";
+export type ArrivalSource =
+  | "tck"
+  | "trainingCenter"
+  | "recruiting"
+  | "brez"
+  | "unitTransfer"
+  | "other"
+  | "unknown";
 
 export type NationalityKey =
   | "ukraine"
@@ -144,6 +151,7 @@ export type SocPerson = {
   name: string;
   normalizedName: string;
   shortName: string;
+  callsign: string;
   position: string;
   positionIndex: string;
   rank: string;
@@ -171,19 +179,35 @@ export type SocPerson = {
   calledBy: string;
   arrivalSource: ArrivalSource;
   hasUbd: boolean;
+  ubdNumber: string;
+  ubdRosterStatus: "submitted" | "notSubmitted" | null;
+  /** Вручну виключені з «Не виконували» → мін. 1 бойовий вихід у статистиці. */
+  staticCombatExitOverride: boolean;
+  oosDislocation: string;
+  combatDutyEvidence: string[];
   isIdp: boolean;
   morningStatus: string;
+  morningAbsenceNotes: string;
+  morningDestination: string;
+  isTransiter: boolean;
   bzvpStatus: string;
+  brezAssignment: string;
   onStaff: boolean;
   onList: boolean;
   present: boolean;
   inDisposition: boolean;
+  morningExitCount: number;
+  jbdExitCount: number;
   exitCount: number;
   exitBand: ExitBand;
   match: {
     oos: boolean;
     morning: boolean;
     exits: boolean;
+    jbdExits: boolean;
+    bplaExits: boolean;
+    ubdRoster: boolean;
+    tempArrival: boolean;
   };
   parseNotes: string[];
 };
@@ -204,6 +228,7 @@ export type SocPassportSummary = {
   oosMatched: number;
   morningMatched: number;
   exitsMatched: number;
+  combatDutyMatched: number;
   relativesParsed: number;
   unknownRegion: number;
   unknownAge: number;
@@ -220,5 +245,10 @@ export type SocPassportResult = {
     oos: string;
     morning?: string;
     fighterStatus?: string;
+    tempArrived?: string;
+    jbdExits?: string;
+    bplaExits?: string;
+    ubdRoster?: string;
+    housingIdp?: string;
   };
 };

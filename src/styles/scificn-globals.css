@@ -20,9 +20,9 @@
   --color-bone:           #E0D5BE;
 
   /* Neutral dark backgrounds */
-  --color-bg:             #050505;
-  --color-surface:        #0D0D0D;
-  --color-surface-raised: #141414;
+  --color-bg:             #030303;
+  --color-surface:        #0A0A0A;
+  --color-surface-raised: #121212;
 
   /* Typography */
   --font-mono: 'IBM Plex Mono', 'Space Mono', ui-monospace, 'Courier New', monospace;
@@ -36,18 +36,18 @@
    ============================================================ */
 :root {
   /* Backgrounds — neutral dark, no color tint */
-  --background:     #050505;
-  --surface:        #0D0D0D;
-  --surface-raised: #141414;
+  --background:     #030303;
+  --surface:        #0A0A0A;
+  --surface-raised: #121212;
 
-  /* Borders */
-  --border:        #252525;
+  /* Borders — soft gray HUD (CodePen pvbboZx) */
+  --border:        rgba(255, 255, 255, 0.1);
   --border-active: #00ed3f;
 
   /* Text */
   --text-primary:   #00ed3f;
-  --text-secondary: #E0D5BE;
-  --text-muted:     #4A4A40;
+  --text-secondary: #E0E0E0;
+  --text-muted:     rgba(255, 255, 255, 0.42);
   --text-warning:   #ff8800;
   --text-danger:    #cc2200;
 
@@ -136,6 +136,14 @@
   border-radius: 0 !important;
 }
 
+/* Circles / rings must opt out of the global square reset */
+.sci-radar-ping,
+.sci-particle,
+.status-dot {
+  border-radius: 50% !important;
+  -webkit-border-radius: 50% !important;
+}
+
 html {
   font-size: 14px;
   -webkit-text-size-adjust: 100%;
@@ -212,7 +220,7 @@ textarea::-webkit-scrollbar-track,
   background:
     linear-gradient(90deg, transparent, rgba(0, 237, 63, 0.08), transparent),
     var(--background);
-  border-left: 1px solid rgba(224, 213, 190, 0.14);
+  border-left: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 0 !important;
   -webkit-border-radius: 0 !important;
 }

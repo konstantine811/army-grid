@@ -14,6 +14,11 @@ type FloatingQuestionnairePreviewProps = {
   pendingFile: boolean;
   isUploading: boolean;
   placement?: FloatingPlacement;
+  defaultWidth?: number;
+  defaultHeight?: number;
+  minWidth?: number;
+  minHeight?: number;
+  className?: string;
   shareFileName?: string;
   sharePersonName?: string;
   shareSource?: QuestionnairePdfSource | null;
@@ -33,6 +38,11 @@ export function FloatingQuestionnairePreview({
   pendingFile,
   isUploading,
   placement = "left",
+  defaultWidth = 560,
+  defaultHeight = 720,
+  minWidth = 360,
+  minHeight = 420,
+  className = "",
   shareFileName = "",
   sharePersonName = "",
   shareSource = null,
@@ -50,11 +60,11 @@ export function FloatingQuestionnairePreview({
       title={title}
       onClose={onClose}
       placement={placement}
-      defaultWidth={560}
-      defaultHeight={720}
-      minWidth={360}
-      minHeight={420}
-      className="floating-questionnaire-preview"
+      defaultWidth={defaultWidth}
+      defaultHeight={defaultHeight}
+      minWidth={minWidth}
+      minHeight={minHeight}
+      className={["floating-questionnaire-preview", className].filter(Boolean).join(" ")}
       footer={
         <>
           {onCrop ? (

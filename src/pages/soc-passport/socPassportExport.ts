@@ -1,4 +1,16 @@
 import { exportBlankWorkbookWithMutations } from "../../excelRoundTrip";
+import { appendEjoosMovementSheets } from "./socPassportDeparturesExport";
+import type { DeparturesResult } from "./socPassportDepartures";
+import type { HousingIdpStatsResult } from "./housingIdpStats";
+import {
+  countsInExitMetrics,
+  countsInNoExitsList,
+  exitBandLabel,
+  hasMorningStatusExitRows,
+  isOfficerForLbExits,
+  isUkrainianBirthPlace,
+  morningStatusExitMatchLabel,
+} from "./socPassportFields";
 import type { PassportTableRow, SocPassportResult, SocPerson } from "./socPassportTypes";
 
 const HEADER_FILL = "D9E2F3";
@@ -122,11 +134,16 @@ const writePeopleSheet = (sheet: any, people: SocPerson[]) => {
     "Родичі за кордоном",
     "Родичі в рф/РБ",
     "УБД",
+    "№ УБД",
+    "УБД реєстр",
     "ВПО",
     "Звідки прибув",
     "Ким призваний",
     "Статус (ранок)",
+    "Виходів (ранок)",
+    "ЖБД (+)",
     "Виходів",
+    "Бойове (джерела)",
     "ООС",
     "Ранковий",
     "Примітки розбору",
@@ -158,11 +175,20 @@ const writePeopleSheet = (sheet: any, people: SocPerson[]) => {
       person.relativesAbroad ? "так" : "",
       person.relativesHostile ? "так" : "",
       person.hasUbd ? "так" : "",
+      person.ubdNumber,
+      person.ubdRosterStatus === "submitted"
+        ? "подавалися"
+        : person.ubdRosterStatus === "notSubmitted"
+          ? "не подавалися"
+          : "",
       person.isIdp ? "так" : "",
       person.arrivedFrom,
       person.calledBy,
       person.morningStatus,
+      person.morningExitCount,
+      person.jbdExitCount,
       person.exitCount,
+      person.combatDutyEvidence.join("; "),
       person.match.oos ? "так" : "ні",
       person.match.morning ? "так" : "ні",
       person.parseNotes.join("; "),
@@ -181,12 +207,450 @@ const writePeopleSheet = (sheet: any, people: SocPerson[]) => {
   });
 };
 
-export const exportSocPassportWorkbook = async (result: SocPassportResult) => {
+const writeStyledPeopleTable = (
+  sheet: any,
+  headers: string[],
+  rows: unknown[][],
+  columnWidths?: number[],
+) => {
+  headers.forEach((header, index) => {
+    sheet.cell(1, index + 1).value(header);
+    styleHeader(sheet.cell(1, index + 1));
+    const width = columnWidths?.[index] ?? (index === 0 ? 36 : 18);
+    sheet.column(index + 1).width(width);
+  });
+
+  rows.forEach((values, index) => {
+    const excelRow = index + 2;
+    const fill = index % 2 === 0 ? VALUE_FILL : ALT_ROW_FILL;
+    values.forEach((value, columnIndex) => {
+      sheet.cell(excelRow, columnIndex + 1).value(value).style({
+        fontColor: TEXT,
+        fill,
+        border: BORDER,
+        verticalAlignment: "center",
+      });
+    });
+  });
+};
+
+const SERVICE_TYPE_LABELS: Record<string, string> = {
+  mobilized: "Мобілізований",
+  contract: "Контракт",
+};
+
+const rankGroupLabel = (value: string) => {
+  if (value === "officer") return "Офіцер";
+  if (value === "sergeant") return "Сержант";
+  if (value === "soldier") return "Солдат";
+  return value;
+};
+
+const serviceTypeLabel = (value: string) =>
+  SERVICE_TYPE_LABELS[value] ?? value;
+
+const STATUS_FIGHTERS_HEADER =
+  "Є в «Статус бійців»";
+const JBD_HEADER = "Є в ЖБД";
+const BPLA_HEADER = "БПЛА";
+
+const filterNoExitsPeople = (people: SocPerson[]) =>
+  people
+    .filter(
+      (person) =>
+        person.exitBand === "none" &&
+        countsInNoExitsList(person) &&
+        !person.ubdRosterStatus &&
+        !person.staticCombatExitOverride,
+    )
+    .sort((left, right) => left.name.localeCompare(right.name, "uk"));
+
+/** Офіцери з ПІБ, без «ТРАНЗИТЕР» (кол. «В якому підрозділі»). */
+const filterOfficersForLbExits = (people: SocPerson[]) =>
+  people.filter(isOfficerForLbExits);
+
+/** Усі офіцери зі списку (нова + звання). */
+const writeOfficersSheet = (sheet: any, people: SocPerson[]) => {
+  sheet.name("Офіцери");
+  const officers = filterOfficersForLbExits(people).sort((left, right) =>
+    left.name.localeCompare(right.name, "uk"),
+  );
+
+  const headers = [
+    "№",
+    "ПІБ",
+    "Посада",
+    "Індекс посади",
+    "Звання",
+    "ШПК (факт)",
+    "Вид служби",
+    "Підрозділ (ранок)",
+    "Виходів",
+    "Група виходів",
+    "Статус (ранок)",
+    "В наявності",
+    STATUS_FIGHTERS_HEADER,
+  ];
+
+  const rows = officers.map((person, index) => [
+    index + 1,
+    person.name,
+    person.position,
+    person.positionIndex,
+    person.rank,
+    person.staffRank,
+    serviceTypeLabel(person.serviceType),
+    person.morningDestination,
+    person.exitCount,
+    exitBandLabel(person.exitBand),
+    person.morningStatus,
+    person.present ? "так" : "ні",
+    morningStatusExitMatchLabel(person),
+  ]);
+
+  writeStyledPeopleTable(sheet, headers, rows, [
+    6, 36, 28, 14, 16, 14, 14, 14, 10, 28, 18, 12, 16,
+  ]);
+
+  const withExits = officers.filter((person) => person.exitBand !== "none").length;
+  sheet.cell(officers.length + 3, 1).value(
+    `Всього офіцерів (ПІБ, без ТРАНЗИТЕР): ${officers.length} · з виходами: ${withExits} · «Не виконували»: ${officers.length - withExits}`,
+  ).style({ bold: true, fontColor: TEXT });
+};
+
+/** Хто має виходи на ЛБЗ (не потрапив у рядок «Не виконували»). */
+const writeExitsPeopleSheet = (sheet: any, people: SocPerson[]) => {
+  sheet.name("Виходи ЛБЗ");
+  const withExits = people
+    .filter((person) => person.exitBand !== "none" && countsInExitMetrics(person))
+    .sort((left, right) => right.exitCount - left.exitCount || left.name.localeCompare(right.name, "uk"));
+
+  const headers = [
+    "№",
+    "ПІБ",
+    "Посада",
+    "Індекс посади",
+    "Звання",
+    "Категорія",
+    "Вид служби",
+    "Виходів",
+    "Група (соц.портрет)",
+    "Статус (ранок)",
+    STATUS_FIGHTERS_HEADER,
+    JBD_HEADER,
+    BPLA_HEADER,
+  ];
+
+  const rows = withExits.map((person, index) => [
+    index + 1,
+    person.name,
+    person.position,
+    person.positionIndex,
+    person.rank,
+    rankGroupLabel(person.rankGroup),
+    serviceTypeLabel(person.serviceType),
+    person.exitCount,
+    exitBandLabel(person.exitBand),
+    person.morningStatus,
+    morningStatusExitMatchLabel(person),
+    person.match.jbdExits ? "так" : "ні",
+    person.match.bplaExits ? "так" : "ні",
+  ]);
+
+  writeStyledPeopleTable(sheet, headers, rows, [6, 36, 28, 14, 16, 12, 12, 10, 28, 18, 16, 10, 10]);
+  sheet.cell(withExits.length + 3, 1).value(`Всього: ${withExits.length}`).style({
+    bold: true,
+    fontColor: TEXT,
+  });
+};
+
+/** Хто в рядку «Не виконували» — для звірки. */
+const writeNoExitsPeopleSheet = (sheet: any, people: SocPerson[]) => {
+  sheet.name("Не виконували");
+  const withoutExits = filterNoExitsPeople(people);
+
+  const headers = [
+    "№",
+    "ПІБ",
+    "Позивний",
+    "Посада",
+    "Звання",
+    "Категорія",
+    "Вид служби",
+    "Статус (ранок)",
+    "Виходів (ранок)",
+    "ЖБД (+)",
+    "Всього виходів",
+    STATUS_FIGHTERS_HEADER,
+    JBD_HEADER,
+    BPLA_HEADER,
+    "Примітка",
+  ];
+
+  const noExitsRemark = (person: SocPerson) => {
+    if (person.morningExitCount > 0 || person.jbdExitCount > 0) {
+      return "перевірте підрахунок";
+    }
+    const parts: string[] = [];
+    if (!hasMorningStatusExitRows(person) && !person.match.jbdExits && !person.match.bplaExits) {
+      parts.push("немає в «Статус бійців», ЖБД і БПЛА");
+    } else if (!hasMorningStatusExitRows(person)) {
+      parts.push("немає в «Статус бійців»");
+    } else {
+      parts.push("0 унікальних дат виходу");
+    }
+    return parts.join("; ");
+  };
+
+  const rows = withoutExits.map((person, index) => [
+    index + 1,
+    person.name,
+    person.callsign,
+    person.position,
+    person.rank,
+    rankGroupLabel(person.rankGroup),
+    serviceTypeLabel(person.serviceType),
+    person.morningStatus,
+    person.morningExitCount,
+    person.jbdExitCount,
+    person.exitCount,
+    morningStatusExitMatchLabel(person),
+    person.match.jbdExits ? "так" : "ні",
+    person.match.bplaExits ? "так" : "ні",
+    noExitsRemark(person),
+  ]);
+
+  writeStyledPeopleTable(sheet, headers, rows, [
+    6, 36, 16, 28, 16, 12, 12, 18, 14, 10, 12, 16, 10, 10, 34,
+  ]);
+  sheet.cell(withoutExits.length + 3, 1).value(
+    `Всього (без ТРАНЗИТЕР): ${withoutExits.length}`,
+  ).style({
+    bold: true,
+    fontColor: TEXT,
+  });
+  sheet.cell(withoutExits.length + 4, 1).value(
+    `«${STATUS_FIGHTERS_HEADER}» — так, якщо на аркуші ранкового «Статус бійців» є ≥1 дата виходу для цього ПІБ.`,
+  ).style({ fontColor: "666666", wrapText: true });
+};
+
+/** Хто потрапив у рядок «Рф» (національність). */
+const writeRussiaNationalsSheet = (sheet: any, people: SocPerson[]) => {
+  sheet.name("Рф");
+  const russiaPeople = people
+    .filter((person) => person.nationality === "russia")
+    .sort((left, right) => left.name.localeCompare(right.name, "uk"));
+
+  const russiaReason = (person: SocPerson) => {
+    const fromNotes = person.parseNotes
+      .filter((note) => /національність/i.test(note))
+      .join("; ");
+    if (fromNotes) return fromNotes;
+    if (isUkrainianBirthPlace(person.birthPlace)) {
+      const snippet = [person.extraRaw, person.relativesRaw]
+        .map((value) => value.trim())
+        .filter(Boolean)
+        .join(" · ")
+        .slice(0, 240);
+      return snippet || "перевірте текст анкети (родичі / додаткова інформація)";
+    }
+    if (person.birthPlace.trim()) return `місце народження: ${person.birthPlace.trim()}`;
+    return "за текстом анкети (родичі / додаткова інформація)";
+  };
+
+  const headers = [
+    "№",
+    "ПІБ",
+    "Посада",
+    "Звання",
+    "Категорія",
+    "Вид служби",
+    "Місце народження",
+    "Підстава (Рф)",
+    "Статус (ранок)",
+  ];
+
+  const rows = russiaPeople.map((person, index) => [
+    index + 1,
+    person.name,
+    person.position,
+    person.rank,
+    rankGroupLabel(person.rankGroup),
+    serviceTypeLabel(person.serviceType),
+    person.birthPlace,
+    russiaReason(person),
+    person.morningStatus,
+  ]);
+
+  writeStyledPeopleTable(sheet, headers, rows, [
+    6, 36, 28, 16, 12, 14, 32, 40, 18,
+  ]);
+  sheet.cell(russiaPeople.length + 3, 1).value(`Всього (Рф): ${russiaPeople.length}`).style({
+    bold: true,
+    fontColor: TEXT,
+  });
+};
+
+const writeHousingIdpSheet = (
+  sheet: any,
+  housing: HousingIdpStatsResult,
+) => {
+  sheet.name("ВПО житло");
+  sheet.cell(1, 1).value(
+    `ВПО · додаток про житло · ${housing.fileName}`,
+  );
+  sheet.cell(1, 1).style({ bold: true, fontSize: 13, fontColor: TEXT });
+  sheet.range(1, 1, 1, 8).merged(true);
+  sheet.cell(2, 1).value(
+    `У файлі ${housing.totals.inFile}; лишилось у ранковому ${housing.totals.remaining} (оф. ${housing.totals.byRankRemaining.officer}, серж. ${housing.totals.byRankRemaining.sergeant}, солд. ${housing.totals.byRankRemaining.soldier}); у наявності ${housing.totals.remainingPresent}; немає в ранковому ${housing.totals.leftNotInMorning}.`,
+  );
+  sheet.range(2, 1, 2, 8).merged(true);
+
+  const headers = [
+    "№",
+    "ПІБ",
+    "Звання",
+    "Категорія",
+    "Адреса (ТОТ)",
+    "Примітка",
+    "У ранковому",
+    "Статус ранкового",
+    "Лишився",
+    "У наявності",
+  ];
+  headers.forEach((header, index) => {
+    sheet.cell(4, index + 1).value(header);
+    styleHeader(sheet.cell(4, index + 1));
+  });
+  sheet.column(1).width(6);
+  sheet.column(2).width(36);
+  sheet.column(3).width(16);
+  sheet.column(4).width(12);
+  sheet.column(5).width(42);
+  sheet.column(6).width(28);
+  sheet.column(7).width(12);
+  sheet.column(8).width(22);
+  sheet.column(9).width(12);
+  sheet.column(10).width(12);
+
+  const rankLabel = (group: string) =>
+    group === "officer"
+      ? "Офіцери"
+      : group === "sergeant"
+        ? "Сержанти"
+        : "Солдати";
+
+  housing.people.forEach((person, index) => {
+    const excelRow = 5 + index;
+    const values = [
+      index + 1,
+      person.fullName,
+      person.rank,
+      rankLabel(person.rankGroup),
+      person.address,
+      person.note,
+      person.inMorning ? "так" : "ні",
+      person.morningStatus || "—",
+      person.remaining ? "так" : "ні",
+      person.remainingPresent ? "так" : "ні",
+    ];
+    values.forEach((value, columnIndex) => {
+      sheet.cell(excelRow, columnIndex + 1).value(value);
+    });
+    sheet.range(excelRow, 1, excelRow, headers.length).style({
+      border: BORDER,
+      fill: index % 2 === 0 ? VALUE_FILL : ALT_ROW_FILL,
+      verticalAlignment: "center",
+      fontColor: TEXT,
+    });
+  });
+};
+
+export const exportSocPassportWorkbook = async (
+  result: SocPassportResult,
+  departures?: DeparturesResult | null,
+  housingIdp?: HousingIdpStatsResult | null,
+) => {
   const stamp = new Date().toISOString().slice(0, 10);
+  const exitsCount = result.people.filter(
+    (person) => person.exitBand !== "none" && countsInExitMetrics(person),
+  ).length;
+  const noExitsCount = result.people.filter(
+    (person) =>
+      person.exitBand === "none" &&
+      countsInNoExitsList(person) &&
+      !person.ubdRosterStatus &&
+      !person.staticCombatExitOverride,
+  ).length;
+  const officersCount = filterOfficersForLbExits(result.people).length;
+  const russiaCount = result.people.filter((person) => person.nationality === "russia").length;
   await exportBlankWorkbookWithMutations((workbook) => {
     const portrait = workbook.sheet(0);
     writePortraitSheet(portrait, result);
     const peopleSheet = workbook.addSheet("Розбір");
     writePeopleSheet(peopleSheet, result.people);
+    writeOfficersSheet(workbook.addSheet("Офіцери"), result.people);
+    writeRussiaNationalsSheet(workbook.addSheet("Рф"), result.people);
+    writeExitsPeopleSheet(workbook.addSheet("Виходи ЛБЗ"), result.people);
+    writeNoExitsPeopleSheet(workbook.addSheet("Не виконували"), result.people);
+    if (housingIdp) {
+      writeHousingIdpSheet(workbook.addSheet("ВПО житло"), housingIdp);
+    }
+    if (departures) {
+      appendEjoosMovementSheets(workbook, departures);
+    }
   }, `Соц.паспорт_${stamp}.xlsx`);
+  return {
+    exitsCount,
+    noExitsCount,
+    officersCount,
+    russiaCount,
+    hasEjoosTables: Boolean(departures),
+    arrivalsTotal: departures?.arrivalsAugust?.total ?? 0,
+    arrivalsMorningTotal: departures?.arrivalsFromMorning?.total ?? 0,
+    arrivalsPbTotal: departures?.arrivalsAugustPb?.total ?? 0,
+    departuresTotal: departures?.totals.all ?? 0,
+    housingIdpInFile: housingIdp?.totals.inFile ?? 0,
+    housingIdpRemaining: housingIdp?.totals.remaining ?? 0,
+  };
+};
+
+export const exportSocPassportExitsWorkbook = async (result: SocPassportResult) => {
+  const stamp = new Date().toISOString().slice(0, 10);
+  const withExits = result.people.filter(
+    (person) => person.exitBand !== "none" && countsInExitMetrics(person),
+  );
+  const noExits = filterNoExitsPeople(result.people);
+  const officers = filterOfficersForLbExits(result.people);
+  const russiaPeople = result.people.filter((person) => person.nationality === "russia");
+  await exportBlankWorkbookWithMutations((workbook) => {
+    writeExitsPeopleSheet(workbook.sheet(0), result.people);
+    writeNoExitsPeopleSheet(workbook.addSheet("Не виконували"), result.people);
+    writeOfficersSheet(workbook.addSheet("Офіцери"), result.people);
+    writeRussiaNationalsSheet(workbook.addSheet("Рф"), result.people);
+  }, `Соц.паспорт_виходи_ЛБЗ_${stamp}.xlsx`);
+  return {
+    exitsCount: withExits.length,
+    noExitsCount: noExits.length,
+    officersCount: officers.length,
+    russiaCount: russiaPeople.length,
+  };
+};
+
+export const exportSocPassportNoExitsWorkbook = async (result: SocPassportResult) => {
+  const stamp = new Date().toISOString().slice(0, 10);
+  const noExits = filterNoExitsPeople(result.people);
+  await exportBlankWorkbookWithMutations((workbook) => {
+    writeNoExitsPeopleSheet(workbook.sheet(0), result.people);
+  }, `Соц.паспорт_не_виконували_${stamp}.xlsx`);
+  return noExits.length;
+};
+
+export const exportSocPassportRussiaWorkbook = async (result: SocPassportResult) => {
+  const stamp = new Date().toISOString().slice(0, 10);
+  const russiaPeople = result.people.filter((person) => person.nationality === "russia");
+  await exportBlankWorkbookWithMutations((workbook) => {
+    writeRussiaNationalsSheet(workbook.sheet(0), result.people);
+  }, `Соц.паспорт_Рф_${stamp}.xlsx`);
+  return russiaPeople.length;
 };

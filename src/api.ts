@@ -1,4 +1,39 @@
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:4000'
+import {
+  CacheKeys,
+  invalidateDataCache,
+  invalidatePersonnelCaches,
+} from './data/idbDataCache'
+import {
+  clearAuthToken,
+  emitAuthLogout,
+  getAuthToken,
+  type AuthSession,
+  type AuthUser,
+  type RegisteredUser,
+} from './auth/authTypes'
+import { showAppToast, showBackendBlockedToast } from './shared/appToast'
+
+const resolveApiBaseUrl = () => {
+  const fromEnv = import.meta.env.VITE_API_BASE_URL
+  if (typeof fromEnv === 'string' && fromEnv.trim()) return fromEnv.trim()
+
+  // Through Vite proxy (/api → :4000): same origin, works on LAN / HTTPS
+  // without CORS or mixed-content blocks.
+  if (typeof window !== 'undefined') {
+    const host = window.location.hostname
+    if (
+      window.location.protocol === 'https:' ||
+      (host && host !== 'localhost' && host !== '127.0.0.1')
+    ) {
+      return '/api'
+    }
+  }
+
+  return 'http://127.0.0.1:4000'
+}
+
+/** Resolve per call — hostname differs on localhost vs phone/LAN. */
+const apiBaseUrl = () => resolveApiBaseUrl()
 
 type JsonRecord = Record<string, unknown>
 
@@ -40,6 +75,49 @@ export type BackendEjournalImportRow = {
   excelRowNumber?: number | null
   values: JsonRecord
   createdAt: string
+}
+
+export type BackendEjournalLiveVersion = {
+  id: string
+  unitLabel: string
+  version: number
+  sourceFileName?: string | null
+  asOfDate?: string | null
+  sha256: string
+  byteSize: number
+  baseVersionId?: string | null
+  changeProtocol?: JsonRecord | null
+  sourcePbFileName?: string | null
+  sourcePbSha256?: string | null
+  notes?: string | null
+  createdByEmail?: string | null
+  createdAt: string
+  fileBase64?: string
+}
+
+export type BackendEjournalLiveState = {
+  unitLabel: string
+  current: BackendEjournalLiveVersion | null
+  versions: BackendEjournalLiveVersion[]
+}
+
+export type BackendEjournalPbSource = {
+  id: string
+  unitLabel: string
+  sourceFileName?: string | null
+  asOfDate?: string | null
+  sha256: string
+  byteSize: number
+  notes?: string | null
+  createdByEmail?: string | null
+  createdAt: string
+  fileBase64?: string
+}
+
+export type BackendEjournalPbState = {
+  unitLabel: string
+  current: BackendEjournalPbSource | null
+  items: BackendEjournalPbSource[]
 }
 
 export type BackendEjournalSheetRows = {
@@ -105,11 +183,63 @@ export type BackendPersonDocument = {
   fields?: JsonRecord | null
   workflow?: JsonRecord | null
   files?: JsonRecord | null
+  createdByUserId?: string | null
+  createdByEmail?: string | null
+  createdByDisplayName?: string | null
   createdAt: string
   updatedAt: string
 }
 
 export type DocumentSignatoryBlockType = 'SIGNER' | 'APPROVAL'
+
+export type BackendAnketaCellEdit = {
+  id: string
+  sheetId: string
+  gid: string
+  rowNumber: number
+  columnId: string
+  value: string
+  externalId?: string | null
+  fullName?: string | null
+  updatedAt: string
+  createdAt: string
+}
+
+export type BackendAnketaSheetSnapshot = {
+  id: string
+  sheetId: string
+  gid: string
+  payload: JsonRecord
+  source: string
+  sourceLabel?: string | null
+  fetchedAt: string
+  updatedAt: string
+  createdAt: string
+}
+
+export type WorkTaskStatus = "open" | "done" | "irrelevant"
+export type WorkTaskCategory = "ubd_status" | "ubd_send" | "tvk" | "other"
+
+export type BackendWorkTaskComment = {
+  id: string
+  taskId: string
+  body: string
+  createdAt: string
+}
+
+export type BackendWorkTask = {
+  id: string
+  ownerUserId: string
+  ownerEmail: string
+  title: string
+  personName?: string | null
+  category: WorkTaskCategory | string
+  location?: string | null
+  status: WorkTaskStatus | string
+  comments: BackendWorkTaskComment[]
+  createdAt: string
+  updatedAt: string
+}
 
 export type BackendDocumentSignatoryPreset = {
   id: string
@@ -221,6 +351,7 @@ export type BackendPersonnelOverviewRow = {
   name: string
   rank: string
   unit: string
+  positionTitle?: string
   status: OverviewStatus | string
   statusLabel: string
   fighterDirection?: string
@@ -270,45 +401,191 @@ export type BackendPersonnelOverview = {
   todayUpdates: number
 }
 
-async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}${path}`, {
-    ...options,
+const authHeaders = (): HeadersInit => {
+  const token = getAuthToken()
+  return token ? { Authorization: `Bearer ${token}` } : {}
+}
+
+const parseApiError = async (response: Response) => {
+  const text = await response.text()
+  if (response.status === 401) {
+    clearAuthToken()
+    emitAuthLogout()
+  }
+  if (response.status === 413) {
+    return 'Файл або запит завеликий для API. Спробуйте менший PDF або перезапустіть backend з більшим REQUEST_BODY_LIMIT.'
+  }
+  try {
+    const json = JSON.parse(text) as { message?: string | string[] }
+    if (Array.isArray(json.message)) return json.message.join(', ')
+    if (typeof json.message === 'string' && json.message.trim()) return json.message
+  } catch {
+    // plain text
+  }
+  return text || `API request failed: ${response.status}`
+}
+
+type ApiRequestInit = RequestInit & { suppressErrorToast?: boolean }
+
+async function request<T>(path: string, options: ApiRequestInit = {}): Promise<T> {
+  const { suppressErrorToast, ...fetchOptions } = options
+  const response = await fetch(`${apiBaseUrl()}${path}`, {
+    ...fetchOptions,
     headers: {
       'Content-Type': 'application/json',
+      ...authHeaders(),
+      ...fetchOptions.headers,
+    },
+  })
+
+  if (!response.ok) {
+    const message = await parseApiError(response)
+    const method = (fetchOptions.method || 'GET').toUpperCase()
+    const isWrite = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)
+    if (response.status === 403) {
+      showBackendBlockedToast(message)
+    } else if (
+      isWrite &&
+      response.status >= 400 &&
+      response.status !== 401 &&
+      !suppressErrorToast
+    ) {
+      showAppToast({
+        title: 'Помилка запису',
+        description: message,
+        variant: response.status >= 500 ? 'CRITICAL' : 'WARNING',
+      })
+    }
+    throw new Error(message)
+  }
+
+  if (response.status === 204) return undefined as T
+  return response.json() as Promise<T>
+}
+
+/** GET that returns null on 404 instead of throwing (no error toast). */
+async function requestGetOptional<T>(path: string): Promise<T | null> {
+  const response = await fetch(`${apiBaseUrl()}${path}`, {
+    headers: {
+      'Content-Type': 'application/json',
+      ...authHeaders(),
+    },
+  })
+
+  if (response.status === 404) return null
+  if (!response.ok) {
+    const message = await parseApiError(response)
+    throw new Error(message)
+  }
+  if (response.status === 204) return null
+  return response.json() as Promise<T>
+}
+
+async function requestBinary<T>(path: string, body: Blob, options: RequestInit = {}): Promise<T> {
+  const response = await fetch(`${apiBaseUrl()}${path}`, {
+    ...options,
+    body,
+    headers: {
+      ...authHeaders(),
       ...options.headers,
     },
   })
 
   if (!response.ok) {
     const text = await response.text()
-    if (response.status === 413) {
-      throw new Error('Файл або запит завеликий для API. Спробуйте менший PDF або перезапустіть backend з більшим REQUEST_BODY_LIMIT.')
+    if (response.status === 401) {
+      clearAuthToken()
+      emitAuthLogout()
     }
-    throw new Error(text || `API request failed: ${response.status}`)
-  }
-
-  return response.json() as Promise<T>
-}
-
-async function requestBinary<T>(path: string, body: Blob, options: RequestInit = {}): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}${path}`, {
-    ...options,
-    body,
-  })
-
-  if (!response.ok) {
-    const text = await response.text()
+    let message = text || `API request failed: ${response.status}`
     if (response.status === 413) {
-      throw new Error('PDF завеликий для API. Спробуйте стиснути файл або збільшити QUESTIONNAIRE_BODY_LIMIT на backend.')
+      message =
+        'PDF завеликий для API. Спробуйте стиснути файл або збільшити QUESTIONNAIRE_BODY_LIMIT на backend.'
+    } else {
+      try {
+        const json = JSON.parse(text) as { message?: string | string[] }
+        if (Array.isArray(json.message)) message = json.message.join(', ')
+        else if (typeof json.message === 'string' && json.message.trim())
+          message = json.message
+      } catch {
+        /* plain text */
+      }
     }
-    throw new Error(text || `API request failed: ${response.status}`)
+    if (response.status === 403) {
+      showBackendBlockedToast(message)
+    } else if (response.status !== 401) {
+      showAppToast({
+        title: 'Помилка запису',
+        description: message,
+        variant: response.status >= 500 ? 'CRITICAL' : 'WARNING',
+      })
+    }
+    throw new Error(message)
   }
 
   return response.json() as Promise<T>
 }
 
 export const api = {
-  baseUrl: API_BASE_URL,
+  get baseUrl() {
+    return apiBaseUrl()
+  },
+
+  register(body: { email: string; password: string; displayName: string }) {
+    return request<AuthSession>('/auth/register', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    })
+  },
+
+  login(body: { email: string; password: string }) {
+    return request<AuthSession>('/auth/login', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    })
+  },
+
+  getAuthMe() {
+    return request<AuthUser>('/auth/me')
+  },
+
+  updateOwnProfile(payload: {
+    displayName?: string
+    nickname?: string
+    photoData?: string
+    linkedPersonExternalId?: string | null
+    linkedPersonFullName?: string | null
+  }) {
+    return request<AuthUser>('/auth/me/profile', {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    })
+  },
+
+  refreshAuth() {
+    return request<AuthSession>('/auth/refresh', { method: 'POST' })
+  },
+
+  listAuthUsers() {
+    return request<RegisteredUser[]>('/auth/users')
+  },
+
+  setUserAccess(userId: string, accessGranted: boolean) {
+    return request<RegisteredUser>(`/auth/users/${encodeURIComponent(userId)}/access`, {
+      method: 'PATCH',
+      body: JSON.stringify({ accessGranted }),
+    })
+  },
+
+  setUserPermissions(userId: string, writePermissions: string[]) {
+    return request<RegisteredUser>(
+      `/auth/users/${encodeURIComponent(userId)}/permissions`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify({ writePermissions }),
+      },
+    )
+  },
 
   getHealth() {
     return request<BackendHealth>('/health')
@@ -363,10 +640,22 @@ export const api = {
     })
   },
 
-  updateEjournalRowValues(rowId: string, values: JsonRecord) {
+  updateEjournalRowValues(
+    rowId: string,
+    values: JsonRecord,
+    options?: { suppressErrorToast?: boolean },
+  ) {
     return request<BackendEjournalImportRow>(`/ejournals/rows/${rowId}`, {
       method: 'PATCH',
       body: JSON.stringify({ values, actor: 'operator' }),
+      suppressErrorToast: options?.suppressErrorToast,
+    }).then(async (result) => {
+      await invalidateDataCache(
+        'ejournal:sheet-rows:',
+        CacheKeys.rosterLatest,
+        CacheKeys.overview,
+      )
+      return result
     })
   },
 
@@ -429,9 +718,48 @@ export const api = {
     if (fileName) params.set('fileName', fileName)
     if (download) params.set('download', '1')
     const query = params.toString()
-    return `${API_BASE_URL}/ejournals/personnel/questionnaires/${encodeURIComponent(personExternalId)}/file${
+    return `${apiBaseUrl()}/ejournals/personnel/questionnaires/${encodeURIComponent(personExternalId)}/file${
       query ? `?${query}` : ''
     }`
+  },
+
+  async createPersonQuestionnairePreviewUrl(
+    personExternalId: string,
+    fileName: string,
+  ) {
+    const query = new URLSearchParams({ fileName }).toString()
+    const result = await request<{
+      ticket: string
+      fileName: string
+      expiresAt: number
+    }>(
+      `/ejournals/personnel/questionnaires/${encodeURIComponent(personExternalId)}/file-ticket?${query}`,
+      { method: 'POST' },
+    )
+    return `${apiBaseUrl()}/ejournals/personnel/questionnaires/file-ticket/${encodeURIComponent(result.ticket)}/${encodeURIComponent(result.fileName)}`
+  },
+
+  async fetchPersonQuestionnaireFile(
+    personExternalId: string,
+    fileName?: string,
+    download = false,
+  ) {
+    const response = await fetch(
+      this.getPersonQuestionnaireFileUrl(personExternalId, fileName, download),
+      { headers: { ...authHeaders() } },
+    )
+    if (!response.ok) {
+      throw new Error(await parseApiError(response))
+    }
+    return response.blob()
+  },
+
+  async getPersonQuestionnaireObjectUrl(
+    personExternalId: string,
+    fileName?: string,
+  ) {
+    const blob = await this.fetchPersonQuestionnaireFile(personExternalId, fileName)
+    return URL.createObjectURL(blob)
   },
 
   listPersonQuestionnaires() {
@@ -459,14 +787,21 @@ export const api = {
 
   async getDiskQuestionnaireFile(relativePath: string) {
     const response = await fetch(
-      `${API_BASE_URL}/ejournals/personnel/questionnaire-disk/file`,
+      `${apiBaseUrl()}/ejournals/personnel/questionnaire-disk/file`,
       {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...authHeaders(),
+        },
         body: JSON.stringify({ relativePath }),
       },
     )
     if (!response.ok) {
+      if (response.status === 401) {
+        clearAuthToken()
+        emitAuthLogout()
+      }
       const text = await response.text()
       let message = text || `API request failed: ${response.status}`
       try {
@@ -478,6 +813,16 @@ export const api = {
       throw new Error(message)
     }
     return response.blob()
+  },
+
+  revealDiskQuestionnaireInFinder(relativePath: string) {
+    return request<{ revealed: boolean; fileName: string }>(
+      '/ejournals/personnel/questionnaire-disk/reveal',
+      {
+        method: 'POST',
+        body: JSON.stringify({ relativePath }),
+      },
+    )
   },
 
   confirmDiskQuestionnaire(
@@ -542,7 +887,7 @@ export const api = {
     const params = new URLSearchParams()
     if (fullName?.trim()) params.set('fullName', fullName.trim())
     const query = params.toString()
-    return request<BackendPersonnelProfile>(
+    return requestGetOptional<BackendPersonnelProfile>(
       `/ejournals/personnel/${encodeURIComponent(personExternalId)}/profile${query ? `?${query}` : ''}`,
     )
   },
@@ -551,44 +896,64 @@ export const api = {
     return request<BackendPersonDocument[]>('/ejournals/personnel/documents')
   },
 
-  createPersonDocument(personExternalId: string, payload: {
-    type: string
-    title: string
-    status?: string
-    fields?: JsonRecord
-    workflow?: JsonRecord
-    files?: JsonRecord
-  }) {
+  createPersonDocument(
+    personExternalId: string,
+    payload: {
+      type: string
+      title: string
+      status?: string
+      fields?: JsonRecord
+      workflow?: JsonRecord
+      files?: JsonRecord
+    },
+    options?: { suppressErrorToast?: boolean },
+  ) {
     return request<BackendPersonDocument>(
       `/ejournals/personnel/${encodeURIComponent(personExternalId)}/documents`,
       {
         method: 'POST',
         body: JSON.stringify(payload),
+        suppressErrorToast: options?.suppressErrorToast,
       },
-    )
+    ).then(async (result) => {
+      await invalidateDataCache(CacheKeys.documentsAll, CacheKeys.overview)
+      return result
+    })
   },
 
-  updatePersonDocument(personExternalId: string, documentId: string, payload: {
-    title?: string
-    status?: string
-    fields?: JsonRecord
-    workflow?: JsonRecord
-    files?: JsonRecord
-  }) {
+  updatePersonDocument(
+    personExternalId: string,
+    documentId: string,
+    payload: {
+      title?: string
+      status?: string
+      fields?: JsonRecord
+      workflow?: JsonRecord
+      files?: JsonRecord
+    },
+    options?: { suppressErrorToast?: boolean },
+  ) {
     return request<BackendPersonDocument>(
       `/ejournals/personnel/${encodeURIComponent(personExternalId)}/documents/${encodeURIComponent(documentId)}`,
       {
         method: 'PATCH',
         body: JSON.stringify(payload),
+        suppressErrorToast: options?.suppressErrorToast,
       },
-    )
+    ).then(async (result) => {
+      await invalidateDataCache(CacheKeys.documentsAll, CacheKeys.overview)
+      return result
+    })
   },
 
   deletePersonDocument(personExternalId: string, documentId: string) {
     return request<{ id: string; personExternalId: string; deleted: boolean }>(
       `/ejournals/personnel/${encodeURIComponent(personExternalId)}/documents/${encodeURIComponent(documentId)}`,
       { method: 'DELETE' },
-    )
+    ).then(async (result) => {
+      await invalidateDataCache(CacheKeys.documentsAll, CacheKeys.overview)
+      return result
+    })
   },
 
   listDocumentSignatories(documentType?: string) {
@@ -658,6 +1023,9 @@ export const api = {
     return request<BackendEjournalImport>('/ejournals/import-workbook', {
       method: 'POST',
       body: JSON.stringify(payload),
+    }).then(async (result) => {
+      await invalidatePersonnelCaches()
+      return result
     })
   },
 
@@ -675,10 +1043,314 @@ export const api = {
     return request<BackendEjournalImport>('/ejournals/personnel/roster/import', {
       method: 'POST',
       body: JSON.stringify(payload),
+    }).then(async (result) => {
+      await invalidateDataCache(
+        CacheKeys.rosterLatest,
+        CacheKeys.overview,
+        'ejournal:sheet-rows:',
+      )
+      return result
     })
   },
 
   getLatestPersonnelRoster() {
     return request<BackendPersonnelRosterLatest | null>('/ejournals/personnel/roster/latest')
+  },
+
+  getEjournalLive(unitLabel = '1ПБ') {
+    return requestGetOptional<BackendEjournalLiveState>(
+      `/ejournals/live?unitLabel=${encodeURIComponent(unitLabel)}`,
+    ).then(
+      (state) =>
+        state ?? {
+          unitLabel,
+          current: null,
+          versions: [],
+        },
+    )
+  },
+
+  getEjournalLiveFile(versionId?: string, unitLabel = '1ПБ') {
+    const params = new URLSearchParams()
+    params.set('unitLabel', unitLabel)
+    if (versionId) params.set('versionId', versionId)
+    return request<BackendEjournalLiveVersion>(`/ejournals/live/file?${params.toString()}`)
+  },
+
+  seedEjournalLive(payload: {
+    fileBase64: string
+    sourceFileName?: string
+    asOfDate?: string
+    unitLabel?: string
+    notes?: string
+  }) {
+    return request<BackendEjournalLiveVersion>('/ejournals/live/seed', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    })
+  },
+
+  applyEjournalLive(payload: {
+    baseVersionId: string
+    fileBase64: string
+    sourceFileName?: string
+    asOfDate?: string
+    unitLabel?: string
+    sourcePbFileName?: string
+    sourcePbSha256?: string
+    changeProtocol?: JsonRecord
+    notes?: string
+  }) {
+    return request<BackendEjournalLiveVersion>('/ejournals/live/apply', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    })
+  },
+
+  rollbackEjournalLive(payload: {
+    targetVersionId: string
+    unitLabel?: string
+    fileBase64?: string
+    notes?: string
+  }) {
+    return request<BackendEjournalLiveVersion>('/ejournals/live/rollback', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    })
+  },
+
+  getEjournalPbSources(unitLabel = '1ПБ') {
+    return requestGetOptional<BackendEjournalPbState>(
+      `/ejournals/pb?unitLabel=${encodeURIComponent(unitLabel)}`,
+    ).then(
+      (state) =>
+        state ?? {
+          unitLabel,
+          current: null,
+          items: [],
+        },
+    )
+  },
+
+  getEjournalPbFile(id?: string, unitLabel = '1ПБ') {
+    const params = new URLSearchParams()
+    params.set('unitLabel', unitLabel)
+    if (id) params.set('id', id)
+    return request<BackendEjournalPbSource>(`/ejournals/pb/file?${params.toString()}`)
+  },
+
+  uploadEjournalPb(payload: {
+    fileBase64: string
+    sourceFileName?: string
+    asOfDate?: string
+    unitLabel?: string
+    notes?: string
+  }) {
+    return request<BackendEjournalPbSource>('/ejournals/pb/upload', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    })
+  },
+
+  getEjournalOperatorSettings(unitLabel = '1ПБ') {
+    return request<{
+      unitLabel: string
+      settings: JsonRecord | null
+      updatedAt: string | null
+    }>(`/ejournals/operator-settings?unitLabel=${encodeURIComponent(unitLabel)}`)
+  },
+
+  putEjournalOperatorSettings(payload: {
+    unitLabel?: string
+    settings: JsonRecord
+  }) {
+    return request<{
+      unitLabel: string
+      settings: JsonRecord | null
+      updatedAt: string | null
+    }>('/ejournals/operator-settings', {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    })
+  },
+
+  getEjournalNormalized(unitLabel = '1ПБ') {
+    return request<{
+      unitLabel: string
+      versionId: string | null
+      asOfDate: string | null
+      syncedAt: string | null
+      counts: {
+        persons: number
+        absences: number
+        timesheet: number
+        arrivals?: number
+        irrevocableLosses?: number
+      }
+      persons: Array<{
+        personId: string
+        fullName: string
+        rank: string
+        positionIndex: string
+        dayCode: string
+        isVacant: boolean
+      }>
+    }>(`/ejournals/normalized?unitLabel=${encodeURIComponent(unitLabel)}`)
+  },
+
+  syncEjournalNormalized(payload: {
+    unitLabel?: string
+    versionId?: string
+    asOfDate?: string | null
+    persons: Array<Record<string, unknown>>
+    absences: Array<Record<string, unknown>>
+    timesheet: Array<Record<string, unknown>>
+    arrivals?: Array<Record<string, unknown>>
+    irrevocableLosses?: Array<Record<string, unknown>>
+  }) {
+    return request<{
+      unitLabel: string
+      counts: {
+        persons: number
+        absences: number
+        timesheet: number
+        arrivals?: number
+        irrevocableLosses?: number
+      }
+      syncedAt: string | null
+    }>('/ejournals/normalized/sync', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    })
+  },
+
+  listAnketaEdits(sheetId?: string, gid?: string) {
+    const params = new URLSearchParams()
+    if (sheetId?.trim()) params.set('sheetId', sheetId.trim())
+    if (gid?.trim()) params.set('gid', gid.trim())
+    const query = params.toString()
+    return request<BackendAnketaCellEdit[]>(
+      `/anketa/edits${query ? `?${query}` : ''}`,
+    )
+  },
+
+  upsertAnketaCellEdit(payload: {
+    rowNumber: number
+    columnId: string
+    value: string
+    externalId?: string
+    fullName?: string
+    sheetId?: string
+    gid?: string
+  }) {
+    return request<BackendAnketaCellEdit>('/anketa/edits', {
+      method: 'PATCH',
+      body: JSON.stringify({ ...payload, actor: 'operator' }),
+    })
+  },
+
+  bulkUpsertAnketaEdits(
+    items: Array<{
+      rowNumber: number
+      columnId: string
+      value: string
+      externalId?: string
+      fullName?: string
+      sheetId?: string
+      gid?: string
+    }>,
+  ) {
+    return request<{ count: number; items: BackendAnketaCellEdit[] }>(
+      '/anketa/edits/bulk',
+      {
+        method: 'POST',
+        body: JSON.stringify({ items, actor: 'operator' }),
+      },
+    )
+  },
+
+  async getAnketaSnapshot(sheetId?: string, gid?: string) {
+    const params = new URLSearchParams()
+    if (sheetId?.trim()) params.set('sheetId', sheetId.trim())
+    if (gid?.trim()) params.set('gid', gid.trim())
+    const query = params.toString()
+    try {
+      return await request<BackendAnketaSheetSnapshot>(
+        `/anketa/snapshot${query ? `?${query}` : ''}`,
+      )
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (/не знайдено|not found|404/i.test(message)) return null
+      throw error
+    }
+  },
+
+  putAnketaSnapshot(payload: {
+    payload: JsonRecord
+    source?: string
+    sourceLabel?: string
+    fetchedAt?: string
+    sheetId?: string
+    gid?: string
+  }) {
+    return request<BackendAnketaSheetSnapshot>('/anketa/snapshot', {
+      method: 'PUT',
+      body: JSON.stringify({ ...payload, actor: 'operator' }),
+    })
+  },
+
+  listWorkTasks(status?: string, q?: string) {
+    const params = new URLSearchParams()
+    if (status?.trim()) params.set('status', status.trim())
+    if (q?.trim()) params.set('q', q.trim())
+    const query = params.toString()
+    return request<BackendWorkTask[]>(
+      `/work-tasks${query ? `?${query}` : ''}`,
+    )
+  },
+
+  createWorkTask(payload: {
+    title: string
+    personName?: string
+    category?: string
+    location?: string
+    firstComment?: string
+  }) {
+    return request<BackendWorkTask>('/work-tasks', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    })
+  },
+
+  updateWorkTask(
+    id: string,
+    payload: {
+      title?: string
+      personName?: string
+      category?: string
+      location?: string
+      status?: string
+    },
+  ) {
+    return request<BackendWorkTask>(`/work-tasks/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    })
+  },
+
+  addWorkTaskComment(id: string, body: string) {
+    return request<BackendWorkTask>(
+      `/work-tasks/${encodeURIComponent(id)}/comments`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ body }),
+      },
+    )
+  },
+
+  deleteWorkTask(id: string) {
+    return request<{ ok: boolean }>(`/work-tasks/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    })
   },
 }

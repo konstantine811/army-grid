@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import writeXlsxFile, { type SheetData } from "write-excel-file/browser";
 import {
+  Alert,
   Box,
   Button,
   Chip,
@@ -12,7 +13,6 @@ import {
 } from "@/components/sci/SciPrimitives";
 import { BusinessCenterOutlinedIcon } from "@/components/sci/icons";
 import { CalendarMonthOutlinedIcon } from "@/components/sci/icons";
-import { FileUploadOutlinedIcon } from "@/components/sci/icons";
 import { LocalHospitalOutlinedIcon } from "@/components/sci/icons";
 import { BeachAccessOutlinedIcon } from "@/components/sci/icons";
 import { PersonOutlinedIcon } from "@/components/sci/icons";
@@ -23,7 +23,17 @@ import {
   type BackendPersonDocument,
   type BackendPersonnelOverview,
   type BackendPersonnelOverviewRow,
+  type BackendPersonnelRosterLatest,
 } from "../../api";
+import {
+  openPersonnelInNewTab,
+} from "../../app/navigation";
+import {
+  CacheKeys,
+  fetchWithCache,
+  jsonChanged,
+  readDataCache,
+} from "../../data/idbDataCache";
 import { valueToDisplay } from "../../excelRoundTrip";
 import {
   createStoredZipBlob,
@@ -37,10 +47,17 @@ import {
   buildPersonSummary,
   buildQuestionnaireExportFileName,
   getPersonExternalId,
+  getPersonFullPositionTitle,
   isUnstablePersonExternalId,
   resolvePersonIdentityKey,
   resolvePersonRankTitle,
 } from "../personnel/personnelUtils";
+import { questionnaireFileMatchesPerson } from "../personnel/personAttachments";
+import {
+  buildOverviewPhotoMap,
+  fillMissingOverviewPhotos,
+  resolveOverviewPhoto,
+} from "./overviewPhotos";
 import { PERSON_PHONES_DOCUMENT_TYPE } from "../personnel/personPhonesStore";
 import {
   getRosterFighterStatusOverviewFields,
@@ -50,6 +67,7 @@ import {
   OverviewVirtualTable,
   type OverviewPersonDocumentSummary,
   type OverviewPersonTarget,
+  type OverviewQuestionnaireTarget,
 } from "./OverviewVirtualTable";
 import type { SciDataTableExportContext } from "@/components/sci/SciDataTable";
 
@@ -72,6 +90,51 @@ const PERIOD_FILTERS = [
 
 const normalizeRosterText = normalizeRosterMatchText;
 
+/** Split pasted list: one name per line, or `;` / `,` separated. */
+const parseOverviewNameQueries = (raw: string) => {
+  const text = raw.replace(/\r/g, "").trim();
+  if (!text) return [] as string[];
+
+  const parts =
+    /[\n;]/.test(text) || (text.includes(",") && /\s/.test(text))
+      ? text.split(/[\n;]+/).flatMap((chunk) =>
+          chunk.includes(",") && chunk.trim().split(/\s+/).length >= 2
+            ? [chunk]
+            : chunk.split(","),
+        )
+      : [text];
+
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const part of parts) {
+    const cleaned = part.replace(/^[\s\-•·\d.)]+/u, "").trim();
+    if (!cleaned) continue;
+    const key = normalizeRosterText(cleaned);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    result.push(cleaned);
+  }
+  return result;
+};
+
+const overviewNameMatchesQuery = (personName: string, queryName: string) => {
+  const person = normalizeRosterText(personName);
+  const query = normalizeRosterText(queryName);
+  if (!person || !query) return false;
+  if (person.includes(query) || query.includes(person)) return true;
+
+  const personTokens = person.split(/\s+/).filter(Boolean);
+  const queryTokens = query.split(/\s+/).filter((token) => token.length >= 2);
+  if (!queryTokens.length) return false;
+
+  // All query tokens must appear in the person name (order-independent).
+  return queryTokens.every((token) =>
+    personTokens.some(
+      (part) => part === token || part.startsWith(token) || token.startsWith(part),
+    ),
+  );
+};
+
 const overviewDocumentTypeLabel = (type: string) =>
   type === "ubdReport"
     ? "Рапорт на УБД"
@@ -79,12 +142,18 @@ const overviewDocumentTypeLabel = (type: string) =>
       ? "Форма 6"
       : type === "form12Report"
         ? "Форма 12"
+        : type === "serviceCharacteristic"
+          ? "Службова характеристика"
+          : type === "zhbdCertificate"
+            ? "Довідка ЖБД"
       : type === "ubdRestoreReport"
         ? "Рапорт на відновлення УБД"
         : type === "salaryPowerAttorney"
         ? "Довіреність зарплати"
         : type === "temporaryMilitaryId"
           ? "Тимчасовий військовий квиток"
+          : type === "lostMilitaryId"
+            ? "Втрата військового квитка"
           : type;
 
 const buildDocumentsByExternalId = (documents: BackendPersonDocument[]) => {
@@ -161,6 +230,7 @@ const rosterRowToOverviewRow = (
       "—",
     status: mappedStatus.status,
     statusLabel: mappedStatus.statusLabel,
+    positionTitle: getPersonFullPositionTitle(rosterRow),
     validFrom: null,
     days: null,
     plannedReturn: null,
@@ -231,10 +301,17 @@ const mergeRosterRowsIntoOverview = (
     } catch {
       rosterRank = "";
     }
+    let positionTitle = "";
+    try {
+      positionTitle = getPersonFullPositionTitle(rosterRow);
+    } catch {
+      positionTitle = "";
+    }
     return {
       ...row,
       externalId,
       ...(rosterRank ? { rank: rosterRank } : {}),
+      ...(positionTitle ? { positionTitle } : {}),
       ...getRosterFighterStatusFields(rosterRow),
     };
   });
@@ -269,7 +346,11 @@ const mergeRosterRowsIntoOverview = (
 };
 
 const loadLatestPersonnelRosterRows = async () => {
-  const latest = await api.getLatestPersonnelRoster();
+  const latest = await fetchWithCache({
+    key: CacheKeys.rosterLatest,
+    fetcher: () => api.getLatestPersonnelRoster(),
+    isChanged: jsonChanged,
+  });
   if (!latest?.sheet) return [] as EjournalPreviewRow[];
 
   return latest.rows.map((row) => ({
@@ -293,10 +374,8 @@ const buildCallSignByExternalId = (rosterRows: EjournalPreviewRow[]) => {
 };
 
 export function OverviewPage({
-  onOpenImport,
   onOpenPersonnel,
 }: {
-  onOpenImport?: () => void;
   onOpenPersonnel?: (target: OverviewPersonTarget) => void;
 }) {
   const [data, setData] = useState<BackendPersonnelOverview | null>(null);
@@ -304,6 +383,10 @@ export function OverviewPage({
   const [questionnaireByExternalId, setQuestionnaireByExternalId] = useState<
     Record<string, true>
   >({});
+  const [
+    questionnaireSourceIdByExternalId,
+    setQuestionnaireSourceIdByExternalId,
+  ] = useState<Record<string, string>>({});
   const [documentsByExternalId, setDocumentsByExternalId] = useState<
     Record<string, OverviewPersonDocumentSummary>
   >({});
@@ -316,45 +399,117 @@ export function OverviewPage({
   const [period, setPeriod] = useState("30");
   const [isLoading, setIsLoading] = useState(false);
   const [message, setMessage] = useState(`API: ${api.baseUrl}`);
+  const rosterRowsRef = useRef<EjournalPreviewRow[]>([]);
+  const photosRef = useRef<Record<string, string>>({});
+  const requestedPhotoKeysRef = useRef(new Set<string>());
+  const [rosterEpoch, setRosterEpoch] = useState(0);
+  photosRef.current = photos;
 
   const load = async () => {
     setIsLoading(true);
     try {
-      const [overview, photoList, questionnaireList, rosterRows] = await Promise.all([
-        api.getPersonnelOverview(),
-        api.listPersonPhotos().catch(() => []),
-        api.listPersonQuestionnaires().catch(() => []),
-        loadLatestPersonnelRosterRows().catch(() => [] as EjournalPreviewRow[]),
+      const applyOverview = (
+        overview: BackendPersonnelOverview,
+        rosterRows: EjournalPreviewRow[],
+        fromCache = false,
+      ) => {
+        let mergedOverview = overview;
+        try {
+          mergedOverview = mergeRosterRowsIntoOverview(overview, rosterRows);
+        } catch {
+          mergedOverview = overview;
+        }
+        rosterRowsRef.current = rosterRows;
+        setRosterEpoch((value) => value + 1);
+        setData(mergedOverview);
+        try {
+          setCallSignByExternalId(buildCallSignByExternalId(rosterRows));
+        } catch {
+          setCallSignByExternalId({});
+        }
+        setMessage(
+          fromCache
+            ? `Кеш огляду · оновлюю з БД…`
+            : mergedOverview.importName
+              ? `Джерело: ${mergedOverview.importName} · ООС + Загальний список`
+              : "Немає імпорту ЕЖООС",
+        );
+        return mergedOverview;
+      };
+
+      const [cachedOverview, cachedRoster] = await Promise.all([
+        readDataCache<BackendPersonnelOverview>(CacheKeys.overview),
+        readDataCache<BackendPersonnelRosterLatest | null>(CacheKeys.rosterLatest),
       ]);
-      let mergedOverview = overview;
-      try {
-        mergedOverview = mergeRosterRowsIntoOverview(overview, rosterRows);
-      } catch {
-        mergedOverview = overview;
+      if (cachedOverview) {
+        const cachedRosterRows = cachedRoster?.sheet
+          ? ((cachedRoster.rows.map((row) => ({
+              __dbRowId: row.id,
+              __rowNumber: row.excelRowNumber,
+              ...(row.values &&
+              typeof row.values === "object" &&
+              !Array.isArray(row.values)
+                ? row.values
+                : {}),
+            })) as EjournalPreviewRow[]) ?? [])
+          : [];
+        applyOverview(cachedOverview, cachedRosterRows, true);
+        setIsLoading(false);
       }
-      setData(mergedOverview);
-      setPhotos(
-        Object.fromEntries(
-          photoList.map((item) => [item.personExternalId, item.photoData]),
-        ),
+
+      const [overview, photoList, questionnaireList, rosterRows] =
+        await Promise.all([
+          fetchWithCache({
+            key: CacheKeys.overview,
+            fetcher: () => api.getPersonnelOverview(),
+            isChanged: jsonChanged,
+          }),
+          api.listPersonPhotos().catch(() => []),
+          fetchWithCache({
+            key: CacheKeys.questionnairesMeta,
+            fetcher: () => api.listPersonQuestionnaires(),
+            isChanged: jsonChanged,
+          }).catch(() => []),
+          loadLatestPersonnelRosterRows().catch(
+            () => [] as EjournalPreviewRow[],
+          ),
+        ]);
+      const mergedOverview = applyOverview(overview, rosterRows);
+      const listedPhotos = buildOverviewPhotoMap(
+        photoList,
+        mergedOverview.rows,
+        rosterRows,
       );
-      setQuestionnaireByExternalId(
-        Object.fromEntries(
-          questionnaireList
-            .filter((item) => item.personExternalId)
-            .map((item) => [item.personExternalId, true as const]),
-        ),
-      );
-      try {
-        setCallSignByExternalId(buildCallSignByExternalId(rosterRows));
-      } catch {
-        setCallSignByExternalId({});
+      photosRef.current = listedPhotos.photos;
+      setPhotos(listedPhotos.photos);
+      const questionnairePresence: Record<string, true> = {};
+      const questionnaireSourceIds: Record<string, string> = {};
+      for (const item of questionnaireList) {
+        const sourceId = item.personExternalId?.trim();
+        if (!sourceId) continue;
+        questionnairePresence[sourceId] = true;
+        questionnaireSourceIds[sourceId] = sourceId;
       }
-      setMessage(
-        mergedOverview.importName
-          ? `Джерело: ${mergedOverview.importName} · ООС + Загальний список`
-          : "Немає імпорту ЕЖООС",
-      );
+      // Старі анкети могли бути збережені під іншим ID. Назва PDF містить ПІБ,
+      // тому зв’язуємо її з актуальним рядком огляду й пам’ятаємо реальний ID файла.
+      for (const row of mergedOverview.rows) {
+        const rowId = row.externalId?.trim();
+        if (!rowId || questionnairePresence[rowId]) continue;
+        const match = questionnaireList.find((item) => {
+          const fileName = item.fileName?.trim();
+          return (
+            Boolean(fileName) &&
+            !/^questionnaire\.pdf$/i.test(fileName ?? "") &&
+            questionnaireFileMatchesPerson(fileName, [row.name])
+          );
+        });
+        const sourceId = match?.personExternalId?.trim();
+        if (!sourceId) continue;
+        questionnairePresence[rowId] = true;
+        questionnaireSourceIds[rowId] = sourceId;
+      }
+      setQuestionnaireByExternalId(questionnairePresence);
+      setQuestionnaireSourceIdByExternalId(questionnaireSourceIds);
     } catch (error) {
       setMessage(
         error instanceof Error ? error.message : "Не вдалося завантажити огляд",
@@ -364,7 +519,11 @@ export function OverviewPage({
     }
 
     try {
-      const documentList = await api.listAllPersonDocuments();
+      const documentList = await fetchWithCache({
+        key: CacheKeys.documentsAll,
+        fetcher: () => api.listAllPersonDocuments(),
+        isChanged: jsonChanged,
+      });
       setDocumentsByExternalId(buildDocumentsByExternalId(documentList));
     } catch {
       setDocumentsByExternalId({});
@@ -375,9 +534,11 @@ export function OverviewPage({
     void load();
   }, []);
 
+  const nameQueries = useMemo(() => parseOverviewNameQueries(query), [query]);
+  const isNameListSearch = nameQueries.length > 1;
+
   const filteredRows = useMemo(() => {
     if (!data) return [] as BackendPersonnelOverviewRow[];
-    const normalizedQuery = normalizeRosterText(query);
     const maxDays = period === "ALL" ? null : Number(period);
 
     return data.rows.filter((row) => {
@@ -390,11 +551,23 @@ export function OverviewPage({
       ) {
         return false;
       }
+      if (!nameQueries.length) return true;
+
+      if (isNameListSearch) {
+        return nameQueries.some((nameQuery) =>
+          overviewNameMatchesQuery(row.name, nameQuery),
+        );
+      }
+
+      const normalizedQuery = normalizeRosterText(nameQueries[0] ?? "");
       if (!normalizedQuery) return true;
+      if (overviewNameMatchesQuery(row.name, nameQueries[0] ?? "")) return true;
+
       return [
         row.name,
         row.externalId,
         row.rank,
+        row.positionTitle,
         row.unit,
         row.statusLabel,
         row.fighterDirection,
@@ -412,9 +585,104 @@ export function OverviewPage({
         .join(" ")
         .includes(normalizedQuery);
     });
-  }, [data, documentsByExternalId, period, query, status, unit]);
+  }, [
+    data,
+    documentsByExternalId,
+    isNameListSearch,
+    nameQueries,
+    period,
+    status,
+    unit,
+  ]);
+
+  const nameListMatchStats = useMemo(() => {
+    if (!isNameListSearch || !data) return null;
+    const matched: string[] = [];
+    const missing: string[] = [];
+    for (const nameQuery of nameQueries) {
+      const hit = data.rows.some((row) =>
+        overviewNameMatchesQuery(row.name, nameQuery),
+      );
+      if (hit) matched.push(nameQuery);
+      else missing.push(nameQuery);
+    }
+    return { matched, missing, total: nameQueries.length };
+  }, [data, isNameListSearch, nameQueries]);
 
   const metrics = data?.metrics;
+
+  const openQuestionnaire = async (target: OverviewQuestionnaireTarget) => {
+    if (!target.externalId) return;
+    if (!target.hasQuestionnaire) {
+      openPersonnelInNewTab({
+        rowId: target.rowId,
+        externalId: target.externalId,
+      });
+      setMessage(`Відкрито картку ${target.name} — можна додати анкету.`);
+      return;
+    }
+
+    try {
+      setMessage(`Відкриваю анкету: ${target.name}…`);
+      const url = await api.createPersonQuestionnairePreviewUrl(
+        questionnaireSourceIdByExternalId[target.externalId] ??
+          target.externalId,
+        buildQuestionnaireExportFileName(target.name),
+      );
+      window.open(url, "_blank", "noopener,noreferrer");
+      setMessage(`Анкета відкрита: ${target.name}`);
+    } catch (error) {
+      setMessage(
+        error instanceof Error
+          ? `Не вдалося відкрити анкету: ${error.message}`
+          : "Не вдалося відкрити анкету.",
+      );
+    }
+  };
+
+  const onNeedPhoto = useCallback((row: BackendPersonnelOverviewRow) => {
+    if (resolveOverviewPhoto(row, photosRef.current)) return;
+    const requestKey = row.externalId || row.id || row.name;
+    if (!requestKey || requestedPhotoKeysRef.current.has(requestKey)) return;
+    requestedPhotoKeysRef.current.add(requestKey);
+    void fillMissingOverviewPhotos(
+      [row],
+      rosterRowsRef.current,
+      photosRef.current,
+    ).then((next) => {
+      photosRef.current = next;
+      setPhotos(next);
+      if (
+        !resolveOverviewPhoto(row, next) &&
+        !rosterRowsRef.current.length
+      ) {
+        requestedPhotoKeysRef.current.delete(requestKey);
+      }
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!filteredRows.length || filteredRows.length > 40) return;
+    const missing = filteredRows.filter((row) => {
+      const requestKey = row.externalId || row.id || row.name;
+      if (!requestKey || requestedPhotoKeysRef.current.has(requestKey)) {
+        return false;
+      }
+      return !resolveOverviewPhoto(row, photosRef.current);
+    });
+    if (!missing.length) return;
+    for (const row of missing) {
+      requestedPhotoKeysRef.current.add(row.externalId || row.id || row.name);
+    }
+    void fillMissingOverviewPhotos(
+      missing,
+      rosterRowsRef.current,
+      photosRef.current,
+    ).then((next) => {
+      photosRef.current = next;
+      setPhotos(next);
+    });
+  }, [filteredRows, rosterEpoch]);
 
   const exportOverviewTable = async (
     context: SciDataTableExportContext<BackendPersonnelOverviewRow>,
@@ -456,7 +724,9 @@ export function OverviewPage({
     const files: Array<{ name: string; data: Uint8Array }> = [];
 
     for (const row of questionnaireRows) {
-      const questionnaire = await api.getPersonQuestionnaire(row.externalId);
+      const questionnaire = await api.getPersonQuestionnaire(
+        questionnaireSourceIdByExternalId[row.externalId] ?? row.externalId,
+      );
       if (!questionnaire?.fileData) continue;
       const fileName = sanitizeFileName(
         buildQuestionnaireExportFileName(
@@ -498,14 +768,6 @@ export function OverviewPage({
           <Button variant="outlined" onClick={() => void load()}>
             Оновити
           </Button>
-          <Button
-            variant="contained"
-            startIcon={<FileUploadOutlinedIcon />}
-            onClick={onOpenImport}
-            sx={{ color: "#1a1a14" }}
-          >
-            Імпортувати
-          </Button>
         </Stack>
       </header>
 
@@ -545,13 +807,27 @@ export function OverviewPage({
       </section>
 
       <section className="overview-toolbar">
-        <label className="overview-search">
+        <label
+          className={`overview-search${isNameListSearch ? " is-multiline" : ""}`}
+        >
           <SearchOutlinedIcon fontSize="small" />
-          <input
+          <textarea
             value={query}
+            rows={isNameListSearch ? Math.min(6, nameQueries.length + 1) : 1}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="Пошук за ПІБ"
+            placeholder="ПІБ або список (по одному в рядок) — Ctrl+V"
+            spellCheck={false}
           />
+          {query.trim() ? (
+            <button
+              type="button"
+              className="overview-search-clear"
+              aria-label="Очистити пошук"
+              onClick={() => setQuery("")}
+            >
+              ✕
+            </button>
+          ) : null}
         </label>
         <TextField
           select
@@ -605,14 +881,29 @@ export function OverviewPage({
         </TextField>
       </section>
 
+      {nameListMatchStats ? (
+        <Alert
+          severity={nameListMatchStats.missing.length ? "warning" : "success"}
+          className="overview-name-list-alert"
+        >
+          Список: знайдено {nameListMatchStats.matched.length} з{" "}
+          {nameListMatchStats.total}
+          {nameListMatchStats.missing.length
+            ? ` · не знайдено: ${nameListMatchStats.missing.join("; ")}`
+            : ""}
+        </Alert>
+      ) : null}
+
       <section className="overview-layout">
         <div className="overview-table-panel">
           <OverviewVirtualTable
             rows={filteredRows}
             photos={photos}
+            onNeedPhoto={onNeedPhoto}
             questionnaireByExternalId={questionnaireByExternalId}
             documentsByExternalId={documentsByExternalId}
             onOpenPersonnel={onOpenPersonnel}
+            onOpenQuestionnaire={(target) => void openQuestionnaire(target)}
             emptyMessage={
               isLoading && !data
                 ? "Завантаження огляду..."

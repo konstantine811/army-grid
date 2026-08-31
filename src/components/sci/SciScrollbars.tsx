@@ -55,12 +55,15 @@ export function SciScrollbars() {
       parts.rail.style.display = visible ? "block" : "none";
       if (!visible) return;
 
-      const railWidth = 14;
-      const railInset = 2;
+      const railWidth = 10;
+      const railInset = 1;
       const usableHeight = Math.max(1, rect.height);
       const thumbHeight = Math.max(
-        34,
-        Math.round((element.clientHeight / element.scrollHeight) * usableHeight),
+        28,
+        Math.min(
+          usableHeight - 8,
+          Math.round((element.clientHeight / element.scrollHeight) * usableHeight),
+        ),
       );
       const maxThumbTop = Math.max(0, usableHeight - thumbHeight);
       const maxScrollTop = Math.max(1, element.scrollHeight - element.clientHeight);

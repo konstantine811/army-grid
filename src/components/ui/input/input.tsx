@@ -5,10 +5,11 @@ export interface InputProps extends React.InputHTMLAttributes<HTMLInputElement> 
   label?: string
   error?: string
   prefix?: string
+  suffix?: React.ReactNode
 }
 
 const Input = React.forwardRef<HTMLInputElement, InputProps>(
-  ({ className, label, error, prefix, id, style, ...props }, ref) => {
+  ({ className, label, error, prefix, suffix, id, style, ...props }, ref) => {
     const inputId = id ?? label?.toLowerCase().replace(/\s+/g, '-')
 
     return (
@@ -58,12 +59,28 @@ const Input = React.forwardRef<HTMLInputElement, InputProps>(
               className
             )}
             style={{
-              padding: prefix ? '0 0.75rem 0 1.75rem' : '0 0.75rem',
+              padding: prefix
+                ? (suffix ? '0 2.75rem 0 1.75rem' : '0 0.75rem 0 1.75rem')
+                : (suffix ? '0 2.75rem 0 0.75rem' : '0 0.75rem'),
               caretColor: 'var(--color-green)',
               ...style,
             }}
             {...props}
           />
+          {suffix ? (
+            <div
+              style={{
+                position: 'absolute',
+                right: '0.25rem',
+                top: '50%',
+                transform: 'translateY(-50%)',
+                display: 'flex',
+                alignItems: 'center',
+              }}
+            >
+              {suffix}
+            </div>
+          ) : null}
         </div>
 
         {error && (

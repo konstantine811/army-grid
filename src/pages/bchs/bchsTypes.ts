@@ -158,8 +158,8 @@ export type BchsDataIssue = {
   destination?: string;
   rankTitle?: string;
   rankCategory?: string;
-  /** status | destination | rank */
-  kind?: "status" | "destination" | "rank";
+  /** status | destination | rank | anomaly | brez */
+  kind?: "status" | "destination" | "rank" | "anomaly" | "brez";
   reason: string;
 };
 
@@ -173,10 +173,14 @@ export type BchsPersonnelAwayPerson = {
   rankCategory: string;
   rankTitle: string;
   fullName: string;
+  /** Excel O — позивний. */
+  callsign: string;
   status: string;
   roleType: string;
   combatReadiness: string;
   bzvpStatus: string;
+  /** Excel AA — «Відрядження (БРЕЗ)» («був БРЕЗ» тощо). */
+  brezAssignment: string;
   destination: string;
   /** Excel T — примітки для «Командування» (AB/AH поранення). */
   treatmentNote: string;

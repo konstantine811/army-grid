@@ -26,7 +26,10 @@ const documentTypes = [
   { value: "ubdRestoreReport", label: "Рапорт на відновлення УБД" },
   { value: "form6Report", label: "Форма 6" },
   { value: "form12Report", label: "Форма 12" },
+  { value: "serviceCharacteristic", label: "Службова характеристика" },
+  { value: "zhbdCertificate", label: "Довідка ЖБД" },
   { value: "salaryPowerAttorney", label: "Довіреність на зарплату" },
+  { value: "lostMilitaryId", label: "Втрата військового квитка" },
   { value: "default", label: "Звичайний рапорт" },
 ];
 

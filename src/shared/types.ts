@@ -1,6 +1,5 @@
 /** Cross-page type re-exports. */
 export type { AppPage, BchsAnalyticsTab } from "../app/navigation";
-export type { DataSourceFile } from "../pages/import/types";
 export type { AnalyticsMetric } from "../pages/analytics/analyticsData";
 export type {
   DbPreviewState,

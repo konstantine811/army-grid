@@ -823,10 +823,12 @@ export const extractBchsAwayPeopleFromSheet = (
   const rankCol = columnIndex(8);
   const rankTitleCol = columnIndex(12);
   const fullNameCol = columnIndex(13);
+  const callsignCol = columnIndex(14);
   const statusCol = columnIndex(20);
   const roleTypeCol = columnIndex(21);
   const combatReadinessCol = columnIndex(22);
   const bzvpStatusCol = columnIndex(23);
+  const brezAssignmentCol = columnIndex(26);
   const mobilizationCol = columnIndex(11);
   const treatmentNoteCol = columnIndex(19);
   const destinationCol = columnIndex(28);
@@ -853,10 +855,12 @@ export const extractBchsAwayPeopleFromSheet = (
       rankCategory: valueToDisplay(row[rankCol] as CellValue),
       rankTitle: valueToDisplay(row[rankTitleCol] as CellValue),
       fullName: valueToDisplay(row[fullNameCol] as CellValue),
+      callsign: valueToDisplay(row[callsignCol] as CellValue),
       status: valueToDisplay(row[statusCol] as CellValue),
       roleType: valueToDisplay(row[roleTypeCol] as CellValue),
       combatReadiness: valueToDisplay(row[combatReadinessCol] as CellValue),
       bzvpStatus: valueToDisplay(row[bzvpStatusCol] as CellValue),
+      brezAssignment: valueToDisplay(row[brezAssignmentCol] as CellValue),
       treatmentNote: valueToDisplay(row[treatmentNoteCol] as CellValue),
       mobilizationContract: valueToDisplay(row[mobilizationCol] as CellValue),
       destination: valueToDisplay(row[destinationCol] as CellValue),
@@ -875,6 +879,7 @@ export const extractBchsAwayPeopleFromSheet = (
         person.roleType ||
         person.combatReadiness ||
         person.bzvpStatus ||
+        person.brezAssignment ||
         person.destination ||
         person.treatmentNote ||
         person.medicalPlace ||
@@ -945,11 +950,13 @@ export const extractBchsAwayPeopleFromDbRows = (
   const keyI = resolveBchsDbColumnKeyByLetter(columns, "I");
   const keyM = resolveBchsDbColumnKeyByLetter(columns, "M");
   const keyN = resolveBchsDbColumnKeyByLetter(columns, "N");
+  const keyO = resolveBchsDbColumnKeyByLetter(columns, "O");
   const keyL = resolveBchsDbColumnKeyByLetter(columns, "L");
   const keyU = resolveBchsDbColumnKeyByLetter(columns, "U");
   const keyV = resolveBchsDbColumnKeyByLetter(columns, "V");
   const keyW = resolveBchsDbColumnKeyByLetter(columns, "W");
   const keyX = resolveBchsDbColumnKeyByLetter(columns, "X");
+  const keyAA = resolveBchsDbColumnKeyByLetter(columns, "AA");
   const keyT = resolveBchsDbColumnKeyByLetter(columns, "T");
   const keyAC = resolveBchsDbColumnKeyByLetter(columns, "AC");
   const keyAE = resolveBchsDbColumnKeyByLetter(columns, "AE");
@@ -1007,6 +1014,13 @@ export const extractBchsAwayPeopleFromDbRows = (
       "fullName",
       "column_14",
     ]),
+    callsign: pickBchsDbCellValue(row, [
+      keyO,
+      "O",
+      "позивн",
+      "callsign",
+      "column_15",
+    ]),
     status: pickBchsDbCellValue(row, [
       keyU,
       "U",
@@ -1034,6 +1048,13 @@ export const extractBchsAwayPeopleFromDbRows = (
       "бзвп_брез",
       "bzvpStatus",
       "column_24",
+    ]),
+    brezAssignment: pickBchsDbCellValue(row, [
+      keyAA,
+      "AA",
+      "відрядження_брез",
+      "brezAssignment",
+      "column_27",
     ]),
     treatmentNote: pickBchsDbCellValue(row, [
       keyT,
@@ -1433,9 +1454,21 @@ export const isBchsAttachedSoldierRankTitle = (rankTitle: string) =>
 export const isBchsBrezRoster = (rosterUnit: string) =>
   normalizeBchsText(rosterUnit) === "брез";
 
-/** Excel AP–AR для РРЕБ: X (БЗВП/БРЕЗ) містить «БРЕЗ», не колонка B. */
+/** Excel AP–AR для РРЕБ: лише X (БЗВП/БРЕЗ) містить «БРЕЗ» — не колонка AA. */
 export const isBchsBrezAttachedPerson = (person: BchsPersonnelAwayPerson) =>
   normalizeBchsText(person.bzvpStatus).includes("брез");
+
+/**
+ * AA «Відрядження (БРЕЗ)» часто містить «був БРЕЗ» (історія), це не поточна
+ * позначка для COUNTIFS Аркуш2!X. Раніше помилково потрапляло в AP–AR.
+ */
+export const hasBchsFormerBrezAssignmentOnly = (
+  person: BchsPersonnelAwayPerson,
+) => {
+  const assignment = normalizeBchsText(person.brezAssignment ?? "");
+  if (!assignment.includes("брез")) return false;
+  return !normalizeBchsText(person.bzvpStatus).includes("брез");
+};
 
 export const isBchsEngineerUnit = (unitName: string) =>
   /інженер|сапер/i.test(unitName);
@@ -1479,10 +1512,11 @@ export const normalizeBchsAttachedSourceLabel = (
   battalion: string,
   rosterUnit: string,
   bzvpStatus = "",
+  brezAssignment = "",
 ) => {
   if (
     isBchsBrezRoster(rosterUnit) ||
-    normalizeBchsText(bzvpStatus).includes("брез")
+    normalizeBchsText(`${bzvpStatus} ${brezAssignment}`).includes("брез")
   )
     return "БРЕЗ";
 
@@ -1525,6 +1559,7 @@ export const computeBchsUnitAttachedStats = (
       person.battalion,
       person.rosterUnit,
       person.bzvpStatus,
+      person.brezAssignment,
     );
     if (source) {
       stats.sources.set(source, (stats.sources.get(source) ?? 0) + 1);
@@ -1908,6 +1943,8 @@ export const applyBchsAttachedFromPersonnel = (
       attachedSoldiers: stats.soldiers,
       attachedFromOtherUnits: stats.total,
       attachedSourcesText: stats.sourcesText,
+      // Перерахувати BA від нових AP–AR, не лишати застарілі 1100% з Excel.
+      actualPercent: 0,
     });
   });
 
@@ -2006,7 +2043,16 @@ export const applyBchsPersonnelDerivedColumns = (
     const storedAway = bchsToNumber(analytics.total.awayInOtherUnits);
     if (novaDetachedCount === 0 && storedAway > 0) {
       // Status column not mapped yet — do not replace «в інших» with 0.
-      return applyBchsAttachedFromPersonnel(analytics, people);
+      const attachedOnly = applyBchsAttachedFromPersonnel(analytics, people);
+      return {
+        ...attachedOnly,
+        dataIssues: mergeBchsDataIssues(
+          buildBchsBrezMiscountIssues(people),
+          buildBchsComparisonAnomalyIssues(attachedOnly.comparisonRows),
+          attachedOnly.dataIssues,
+          analytics.dataIssues,
+        ),
+      };
     }
   }
 
@@ -2019,13 +2065,21 @@ export const applyBchsPersonnelDerivedColumns = (
   derived = applyBchsAttachedFromPersonnel(derived, people);
   derived = applyBchsNewcomersAndSearchFromPersonnel(derived, people);
   derived = applyBchsCombatComponentFromPersonnel(derived, people);
-  const dataIssues = buildBchsGeneralListDataIssues(
-    canApplyNovaDerived ? people : novaPeople.length > 0 ? novaPeople : people,
+  const peopleForIssues = canApplyNovaDerived
+    ? people
+    : novaPeople.length > 0
+      ? novaPeople
+      : people;
+  const dataIssues = mergeBchsDataIssues(
+    buildBchsGeneralListDataIssues(peopleForIssues),
+    buildBchsBrezMiscountIssues(people),
+    buildBchsComparisonAnomalyIssues(derived.comparisonRows),
+    derived.dataIssues,
   );
 
   return {
     ...derived,
-    dataIssues: dataIssues.length > 0 ? dataIssues : derived.dataIssues,
+    dataIssues,
   };
 };
 
@@ -2908,6 +2962,7 @@ export const buildBchsAnalytics = (
     detachedDestinations: buildBchsDetachedDestinationsFromSheet(sheet),
     attachedSources: [],
     absenceReasons: buildBchsAbsenceReasons(rows[0] ?? emptyBchsRow),
+    dataIssues: buildBchsComparisonAnomalyIssues(rows),
   } satisfies BchsAnalyticsSnapshot;
 };
 
@@ -3482,6 +3537,115 @@ const buildBchsGeneralListDataIssues = (
       return issues;
     })
     .filter((issue): issue is BchsDataIssue => Boolean(issue));
+
+const parseBrezCountFromSourcesText = (sourcesText: string) => {
+  const match = String(sourcesText ?? "").match(/брез\s*[-–—]?\s*(\d+)/i);
+  return match ? Number(match[1]) : 0;
+};
+
+/** Аномалії Аркуш1: роздутий БРЕЗ / абсурдний % фактичної наявності. */
+export const buildBchsComparisonAnomalyIssues = (
+  rows: BchsComparisonRow[],
+): BchsDataIssue[] =>
+  rows
+    .filter(
+      (row) =>
+        row.rowNumber > 11 &&
+        !isBchsTotalUnit(row.unit) &&
+        row.staff > 0 &&
+        row.unit.trim(),
+    )
+    .flatMap((row) => {
+      const issues: BchsDataIssue[] = [];
+      const actualPercent =
+        row.staff > 0 ? row.inRanksActually / row.staff : 0;
+      const storedPercent = bchsToNumber(row.actualPercent);
+      const percent = Math.max(actualPercent, storedPercent);
+      const brezAttached = parseBrezCountFromSourcesText(
+        row.attachedSourcesText,
+      );
+      const attached = row.attachedFromOtherUnits;
+      const inflatedBrez = brezAttached >= 40;
+      const absurdPercent = percent >= 5;
+      const inflatedAttached =
+        isBchsRebUnit(row.unit) && attached >= 40 && attached > row.staff * 2;
+
+      if (!inflatedBrez && !absurdPercent && !inflatedAttached) return issues;
+
+      const pctLabel = `${Math.round(percent * 100)}%`;
+      const parts: string[] = [];
+      if (absurdPercent || inflatedAttached) {
+        parts.push(
+          `факт. укомплектованість ${pctLabel} (= ${row.inRanksActually} факт / ${row.staff} штат)`,
+        );
+      }
+      if (brezAttached > 0) {
+        parts.push(`у «Звідки прикомандировані» — БРЕЗ-${brezAttached}`);
+      } else if (attached > 0) {
+        parts.push(`прикомандировані загалом ${attached}`);
+      }
+      parts.push(
+        "Ймовірна причина: у підрахунок БРЕЗ потрапили позначки «був БРЕЗ» з колонки AA (Відрядження), хоча Excel COUNTIFS для РРЕБ дивиться лише на X (БЗВП/БРЕЗ). Після виправлення мають лишитись лише актуальні позначки БРЕЗ у X (~20–30 осіб).",
+      );
+
+      issues.push({
+        fullName: row.unit,
+        rosterUnit: row.unit,
+        status: `штат ${row.staff} · факт ${row.inRanksActually} · приком. ${attached}`,
+        kind: "anomaly",
+        reason: parts.join(". "),
+      });
+
+      return issues;
+    });
+
+/** Люди з «був БРЕЗ» лише в AA — не мають рахуватись у AP–AR РРЕБ. */
+export const buildBchsBrezMiscountIssues = (
+  people: BchsPersonnelAwayPerson[],
+): BchsDataIssue[] => {
+  const formerOnly = people.filter(
+    (person) =>
+      isBchsAttachedPresentStatus(person.status) &&
+      hasBchsFormerBrezAssignmentOnly(person) &&
+      Boolean(classifyBchsAttachedRank(person.rankCategory, person.rankTitle)),
+  );
+  if (formerOnly.length === 0) return [];
+
+  const byRank = { officers: 0, sergeants: 0, soldiers: 0 };
+  for (const person of formerOnly) {
+    const rank = classifyBchsAttachedRank(
+      person.rankCategory,
+      person.rankTitle,
+    );
+    if (rank) byRank[rank] += 1;
+  }
+
+  return [
+    {
+      fullName: `БРЕЗ (хибний підрахунок AA)`,
+      rosterUnit: "Відділення РРЕБ / БРЕЗ",
+      status: "був БРЕЗ",
+      kind: "brez",
+      reason: `${formerOnly.length} осіб зі статусом «в строю/новоприбулий» мають «був БРЕЗ» у колонці AA, але без «БРЕЗ» у X (БЗВП/БРЕЗ). Excel AP–AR їх не рахує; раніше застосунок помилково додавав їх → БРЕЗ-${formerOnly.length} (оф.${byRank.officers} / серж.${byRank.sergeants} / солд.${byRank.soldiers}).`,
+    },
+    ...formerOnly.slice(0, 12).map((person) => ({
+      fullName: person.fullName.trim() || "(без ПІБ)",
+      rosterUnit: normalizeBchsRosterUnitLabel(person.rosterUnit),
+      status: person.status.trim() || "(порожньо)",
+      rankTitle: person.rankTitle.trim() || undefined,
+      rankCategory: person.rankCategory.trim() || undefined,
+      kind: "brez" as const,
+      reason: `AA: «${person.brezAssignment.trim()}» · X: «${person.bzvpStatus.trim() || "пусто"}» — не входить у прикомандировані РРЕБ`,
+    })),
+  ];
+};
+
+const mergeBchsDataIssues = (
+  ...groups: Array<BchsDataIssue[] | undefined>
+): BchsDataIssue[] | undefined => {
+  const merged = groups.flatMap((group) => group ?? []);
+  return merged.length > 0 ? merged : undefined;
+};
 
 const addBchsGeneralListTotals = (
   total: BchsGeneralListUnitAccumulator,
