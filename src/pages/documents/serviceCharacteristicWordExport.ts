@@ -1,6 +1,7 @@
 import JSZip from "jszip";
 import type { ServiceCharacteristicFields } from "./serviceCharacteristicReport";
 import { formatGivenSurname } from "./ubdRestoreReport";
+import { capitalizeReportPosition } from "./reportPosition";
 import { stripRedColorInWordZip } from "./wordXml";
 
 const TEMPLATE_URL = `${import.meta.env.BASE_URL}templates/service-characteristic.docx`;
@@ -131,7 +132,7 @@ const buildNameLine = (
   `Прізвище   ${withFallback(lastName)}    Ім’я  ${withFallback(firstName)}     По батькові   ${withFallback(patronymic)}`;
 
 const buildPositionLine = (staffPosition: string) =>
-  `Займає посаду ${withFallback(staffPosition)}`;
+  `Займає посаду ${withFallback(capitalizeReportPosition(staffPosition))}`;
 
 const buildConclusionLine = (conclusion: string) => {
   const text = conclusion.trim();

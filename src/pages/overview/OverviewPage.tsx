@@ -20,7 +20,6 @@ import { SearchOutlinedIcon } from "@/components/sci/icons";
 import { ShieldOutlinedIcon } from "@/components/sci/icons";
 import {
   api,
-  type BackendPersonDocument,
   type BackendPersonnelOverview,
   type BackendPersonnelOverviewRow,
   type BackendPersonnelRosterLatest,
@@ -34,7 +33,7 @@ import {
   jsonChanged,
   readDataCache,
 } from "../../data/idbDataCache";
-import { valueToDisplay } from "../../excelRoundTrip";
+import { loadSharedRosterLatest } from "../../data/sharedAppData";
 import {
   createStoredZipBlob,
   dataUrlToUint8Array,
@@ -43,32 +42,35 @@ import {
 } from "../../shared/browserExport";
 import type { EjournalPreviewRow } from "../ejournal/ejournalTypes";
 import {
-  buildPersonIdentityFingerprint,
   buildPersonSummary,
   buildQuestionnaireExportFileName,
-  getPersonExternalId,
-  getPersonFullPositionTitle,
-  isUnstablePersonExternalId,
-  resolvePersonIdentityKey,
-  resolvePersonRankTitle,
 } from "../personnel/personnelUtils";
-import { questionnaireFileMatchesPerson } from "../personnel/personAttachments";
+import { parseDbColumns } from "../ejournal/ejournalUtils";
 import {
-  buildOverviewPhotoMap,
   fillMissingOverviewPhotos,
   resolveOverviewPhoto,
 } from "./overviewPhotos";
-import { PERSON_PHONES_DOCUMENT_TYPE } from "../personnel/personPhonesStore";
 import {
-  getRosterFighterStatusOverviewFields,
-  normalizeRosterMatchText,
-} from "../personnel/fighterStatusImport";
+  applyPersonnelAssetsToOverview,
+  loadPersonnelRowsForOverview,
+} from "./overviewPersonnelAssets";
+import { normalizeRosterMatchText } from "../personnel/fighterStatusImport";
+import {
+  overviewNameMatchesQuery,
+  parseOverviewNameQueries,
+} from "./overviewNameSearch";
 import {
   OverviewVirtualTable,
   type OverviewPersonDocumentSummary,
-  type OverviewPersonTarget,
   type OverviewQuestionnaireTarget,
 } from "./OverviewVirtualTable";
+import { loadPersonnelOverviewInBatches } from "./overviewBatchLoad";
+import {
+  buildOverviewMetrics,
+  summarizeStaffFromRoster,
+} from "./overviewRosterMerge";
+import { runHeavyJob } from "../../workers/runHeavyJob";
+import { buildOverviewSideStats } from "./overviewSideStats";
 import type { SciDataTableExportContext } from "@/components/sci/SciDataTable";
 
 const STATUS_FILTERS = [
@@ -88,271 +90,37 @@ const PERIOD_FILTERS = [
   { value: "90", label: "Останні 90 днів" },
 ] as const;
 
+const SOURCE_FILTERS = [
+  { value: "staff", label: "Штатка" },
+  { value: "ejoos", label: "ЕЖООС" },
+  { value: "all", label: "Усі джерела" },
+] as const;
+
+type OverviewSourceFilter = (typeof SOURCE_FILTERS)[number]["value"];
+
 const normalizeRosterText = normalizeRosterMatchText;
 
-/** Split pasted list: one name per line, or `;` / `,` separated. */
-const parseOverviewNameQueries = (raw: string) => {
-  const text = raw.replace(/\r/g, "").trim();
-  if (!text) return [] as string[];
-
-  const parts =
-    /[\n;]/.test(text) || (text.includes(",") && /\s/.test(text))
-      ? text.split(/[\n;]+/).flatMap((chunk) =>
-          chunk.includes(",") && chunk.trim().split(/\s+/).length >= 2
-            ? [chunk]
-            : chunk.split(","),
-        )
-      : [text];
-
-  const seen = new Set<string>();
-  const result: string[] = [];
-  for (const part of parts) {
-    const cleaned = part.replace(/^[\s\-•·\d.)]+/u, "").trim();
-    if (!cleaned) continue;
-    const key = normalizeRosterText(cleaned);
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
-    result.push(cleaned);
+const rosterLabelsFromLatest = (latest: BackendPersonnelRosterLatest | null) => {
+  const labels: Record<string, string> = {};
+  for (const column of parseDbColumns(latest?.sheet?.columns)) {
+    if (column.key) labels[column.key] = column.label;
   }
-  return result;
+  return labels;
 };
 
-const overviewNameMatchesQuery = (personName: string, queryName: string) => {
-  const person = normalizeRosterText(personName);
-  const query = normalizeRosterText(queryName);
-  if (!person || !query) return false;
-  if (person.includes(query) || query.includes(person)) return true;
-
-  const personTokens = person.split(/\s+/).filter(Boolean);
-  const queryTokens = query.split(/\s+/).filter((token) => token.length >= 2);
-  if (!queryTokens.length) return false;
-
-  // All query tokens must appear in the person name (order-independent).
-  return queryTokens.every((token) =>
-    personTokens.some(
-      (part) => part === token || part.startsWith(token) || token.startsWith(part),
-    ),
-  );
-};
-
-const overviewDocumentTypeLabel = (type: string) =>
-  type === "ubdReport"
-    ? "Рапорт на УБД"
-    : type === "form6Report"
-      ? "Форма 6"
-      : type === "form12Report"
-        ? "Форма 12"
-        : type === "serviceCharacteristic"
-          ? "Службова характеристика"
-          : type === "zhbdCertificate"
-            ? "Довідка ЖБД"
-      : type === "ubdRestoreReport"
-        ? "Рапорт на відновлення УБД"
-        : type === "salaryPowerAttorney"
-        ? "Довіреність зарплати"
-        : type === "temporaryMilitaryId"
-          ? "Тимчасовий військовий квиток"
-          : type === "lostMilitaryId"
-            ? "Втрата військового квитка"
-          : type;
-
-const buildDocumentsByExternalId = (documents: BackendPersonDocument[]) => {
-  const map: Record<string, OverviewPersonDocumentSummary> = {};
-
-  for (const document of documents) {
-    if (document.type === PERSON_PHONES_DOCUMENT_TYPE) continue;
-    const externalId = document.personExternalId?.trim();
-    if (!externalId) continue;
-
-    const current = map[externalId] ?? { count: 0, labels: [] };
-    current.count += 1;
-    const label =
-      document.title?.trim() || overviewDocumentTypeLabel(document.type);
-    if (label && !current.labels.includes(label)) current.labels.push(label);
-    map[externalId] = current;
-  }
-
-  return map;
-};
-
-const getRosterValue = (row: EjournalPreviewRow, keyParts: string[]) => {
-  const key = Object.keys(row).find((item) =>
-    keyParts.every((part) => item.toLocaleLowerCase("uk-UA").includes(part)),
-  );
-  return key ? valueToDisplay(row[key] as Parameters<typeof valueToDisplay>[0]).trim() : "";
-};
-
-const getRosterFighterStatusFields = getRosterFighterStatusOverviewFields;
-
-const mapRosterStatus = (status: string) => {
-  const normalized = normalizeRosterText(status);
-  if (normalized.includes("відряд")) {
-    return { status: "BUSINESS_TRIP", statusLabel: "Відрядження" };
-  }
-  if (normalized.includes("відпуст")) {
-    return { status: "LEAVE", statusLabel: "Відпустка" };
-  }
-  if (normalized.includes("ліку") || normalized.includes("шпит")) {
-    return { status: "MEDICAL", statusLabel: "Лікування" };
-  }
-  if (normalized.includes("сзч")) {
-    return { status: "AWOL", statusLabel: "СЗЧ" };
-  }
-  if (normalized.includes("безв") || normalized.includes("зник")) {
-    return { status: "MISSING", statusLabel: "Безвісти" };
-  }
-  return { status: "ON_DUTY", statusLabel: "На службі" };
-};
-
-const rosterRowToOverviewRow = (
-  rosterRow: EjournalPreviewRow,
-): BackendPersonnelOverviewRow | null => {
-  const name =
-    getRosterValue(rosterRow, ["піб"]) ||
-    getRosterValue(rosterRow, ["прізвище"]);
-  const identityKey = resolvePersonIdentityKey({
-    ...rosterRow,
-    прізвище: name,
-    ПІБ: name,
-  });
-  const rowKey = identityKey || normalizeRosterText(name);
-  if (!rowKey || !name) return null;
-
-  const mappedStatus = mapRosterStatus(getRosterValue(rosterRow, ["статус"]));
+const withStaffOverviewStatus = (
+  row: BackendPersonnelOverviewRow,
+): BackendPersonnelOverviewRow => {
+  if (!row.staffStatus) return row;
   return {
-    id: `roster:${rowKey}`,
-    externalId: identityKey,
-    name,
-    rank: resolvePersonRankTitle(rosterRow) || getRosterValue(rosterRow, ["звання"]),
-    unit:
-      getRosterValue(rosterRow, ["перебування"]) ||
-      getRosterValue(rosterRow, ["підрозділ"]) ||
-      "—",
-    status: mappedStatus.status,
-    statusLabel: mappedStatus.statusLabel,
-    positionTitle: getPersonFullPositionTitle(rosterRow),
-    validFrom: null,
-    days: null,
-    plannedReturn: null,
-    place: "",
-    updatedAt: "",
-    ...getRosterFighterStatusFields(rosterRow),
+    ...row,
+    status: row.staffStatus,
+    statusLabel: row.staffStatusLabel || row.statusLabel,
   };
 };
 
-const buildOverviewMetrics = (rows: BackendPersonnelOverviewRow[]) => ({
-  total: rows.length,
-  onDuty: rows.filter((row) => row.status === "ON_DUTY").length,
-  businessTrip: rows.filter((row) => row.status === "BUSINESS_TRIP").length,
-  leave: rows.filter((row) => row.status === "LEAVE").length,
-  medical: rows.filter((row) => row.status === "MEDICAL").length,
-  awol: rows.filter((row) => row.status === "AWOL").length,
-  other: rows.filter(
-    (row) =>
-      !["ON_DUTY", "BUSINESS_TRIP", "LEAVE", "MEDICAL", "AWOL"].includes(
-        String(row.status),
-      ),
-  ).length,
-});
-
-const mergeRosterRowsIntoOverview = (
-  overview: BackendPersonnelOverview,
-  rosterRows: EjournalPreviewRow[],
-): BackendPersonnelOverview => {
-  if (!rosterRows.length) return overview;
-
-  const rosterById = new Map<string, EjournalPreviewRow>();
-  const rosterByName = new Map<string, EjournalPreviewRow>();
-  const usedRosterRows = new Set<EjournalPreviewRow>();
-  rosterRows.forEach((row) => {
-    const id = getPersonExternalId(row);
-    const name =
-      getRosterValue(row, ["піб"]) ||
-      getRosterValue(row, ["прізвище"]);
-    if (id) rosterById.set(id, row);
-    if (name) rosterByName.set(normalizeRosterText(name), row);
-  });
-
-  const mergedRows = overview.rows.map((row) => {
-    const rosterRow =
-      (row.externalId &&
-        !isUnstablePersonExternalId(row.externalId) &&
-        rosterById.get(row.externalId)) ||
-      rosterByName.get(normalizeRosterText(row.name));
-    const stableFromRoster = rosterRow
-      ? resolvePersonIdentityKey(rosterRow)
-      : "";
-    const stableFromOverview =
-      row.externalId && !isUnstablePersonExternalId(row.externalId)
-        ? row.externalId
-        : "";
-    const fingerprint = buildPersonIdentityFingerprint(row.name);
-    const externalId =
-      stableFromRoster || stableFromOverview || fingerprint || row.externalId;
-
-    if (!rosterRow) {
-      return externalId === row.externalId ? row : { ...row, externalId };
-    }
-
-    usedRosterRows.add(rosterRow);
-    let rosterRank = "";
-    try {
-      rosterRank = resolvePersonRankTitle(rosterRow);
-    } catch {
-      rosterRank = "";
-    }
-    let positionTitle = "";
-    try {
-      positionTitle = getPersonFullPositionTitle(rosterRow);
-    } catch {
-      positionTitle = "";
-    }
-    return {
-      ...row,
-      externalId,
-      ...(rosterRank ? { rank: rosterRank } : {}),
-      ...(positionTitle ? { positionTitle } : {}),
-      ...getRosterFighterStatusFields(rosterRow),
-    };
-  });
-
-  const rosterOnlyRows = rosterRows
-    .filter((row) => !usedRosterRows.has(row))
-    .filter((row) => {
-      const name =
-        getRosterValue(row, ["піб"]) ||
-        getRosterValue(row, ["прізвище"]);
-      return Boolean(name);
-    })
-    .map(rosterRowToOverviewRow)
-    .filter((row): row is BackendPersonnelOverviewRow => Boolean(row));
-
-  if (!rosterOnlyRows.length) {
-    return {
-      ...overview,
-      rows: mergedRows,
-    };
-  }
-
-  const rows = [...mergedRows, ...rosterOnlyRows];
-  return {
-    ...overview,
-    rows,
-    metrics: buildOverviewMetrics(rows),
-    units: [...new Set(rows.map((row) => row.unit).filter(Boolean))].sort((a, b) =>
-      a.localeCompare(b, "uk", { numeric: true, sensitivity: "base" }),
-    ),
-  };
-};
-
-const loadLatestPersonnelRosterRows = async () => {
-  const latest = await fetchWithCache({
-    key: CacheKeys.rosterLatest,
-    fetcher: () => api.getLatestPersonnelRoster(),
-    isChanged: jsonChanged,
-  });
+const rosterRowsFromLatest = (latest: BackendPersonnelRosterLatest | null) => {
   if (!latest?.sheet) return [] as EjournalPreviewRow[];
-
   return latest.rows.map((row) => ({
     __dbRowId: row.id,
     __rowNumber: row.excelRowNumber,
@@ -360,6 +128,22 @@ const loadLatestPersonnelRosterRows = async () => {
       ? row.values
       : {}),
   })) as EjournalPreviewRow[];
+};
+
+const rosterSourceLabel = (latest: BackendPersonnelRosterLatest | null) =>
+  latest?.sourceFileName?.trim() || latest?.importName?.trim() || "Штатка";
+
+const rosterColumnsFromLatest = (latest: BackendPersonnelRosterLatest | null) =>
+  parseDbColumns(latest?.sheet?.columns);
+
+const loadLatestPersonnelRosterRows = async (force = false) => {
+  const latest = await loadSharedRosterLatest({ force });
+  return {
+    rows: rosterRowsFromLatest(latest),
+    labels: rosterLabelsFromLatest(latest),
+    columns: rosterColumnsFromLatest(latest),
+    label: rosterSourceLabel(latest),
+  };
 };
 
 const buildCallSignByExternalId = (rosterRows: EjournalPreviewRow[]) => {
@@ -373,11 +157,7 @@ const buildCallSignByExternalId = (rosterRows: EjournalPreviewRow[]) => {
   return map;
 };
 
-export function OverviewPage({
-  onOpenPersonnel,
-}: {
-  onOpenPersonnel?: (target: OverviewPersonTarget) => void;
-}) {
+export function OverviewPage() {
   const [data, setData] = useState<BackendPersonnelOverview | null>(null);
   const [photos, setPhotos] = useState<Record<string, string>>({});
   const [questionnaireByExternalId, setQuestionnaireByExternalId] = useState<
@@ -394,32 +174,61 @@ export function OverviewPage({
     Record<string, string>
   >({});
   const [query, setQuery] = useState("");
+  const [source, setSource] = useState<OverviewSourceFilter>("staff");
+  const [battalion, setBattalion] = useState("ALL");
+  const [rosterLabel, setRosterLabel] = useState("Штатка");
   const [unit, setUnit] = useState("ALL");
   const [status, setStatus] = useState("ALL");
   const [period, setPeriod] = useState("30");
   const [isLoading, setIsLoading] = useState(false);
   const [message, setMessage] = useState(`API: ${api.baseUrl}`);
   const rosterRowsRef = useRef<EjournalPreviewRow[]>([]);
+  const personnelRowsRef = useRef<EjournalPreviewRow[]>([]);
+  const rosterColumnsRef = useRef<
+    Array<{ key: string; letter?: string; originalIndex?: number }>
+  >([]);
   const photosRef = useRef<Record<string, string>>({});
   const requestedPhotoKeysRef = useRef(new Set<string>());
   const [rosterEpoch, setRosterEpoch] = useState(0);
   photosRef.current = photos;
 
-  const load = async () => {
+  const load = async (
+    signal?: { cancelled: boolean },
+    options?: { force?: boolean },
+  ) => {
+    const alive = () => !signal?.cancelled;
+    const force = Boolean(options?.force);
     setIsLoading(true);
     try {
-      const applyOverview = (
+      const applyOverview = async (
         overview: BackendPersonnelOverview,
         rosterRows: EjournalPreviewRow[],
+        rosterLabels: Record<string, string> = {},
+        rosterColumns: Array<{
+          key: string;
+          letter?: string;
+          originalIndex?: number;
+        }> = [],
         fromCache = false,
       ) => {
         let mergedOverview = overview;
         try {
-          mergedOverview = mergeRosterRowsIntoOverview(overview, rosterRows);
+          mergedOverview = await runHeavyJob({
+            type: "mergeOverview",
+            overview,
+            rosterRows,
+            rosterLabels,
+            columns: rosterColumns,
+          });
         } catch {
           mergedOverview = overview;
         }
+        if (!alive()) return mergedOverview;
         rosterRowsRef.current = rosterRows;
+        if (!personnelRowsRef.current.length) {
+          personnelRowsRef.current = rosterRows;
+        }
+        rosterColumnsRef.current = rosterColumns;
         setRosterEpoch((value) => value + 1);
         setData(mergedOverview);
         try {
@@ -431,120 +240,214 @@ export function OverviewPage({
           fromCache
             ? `Кеш огляду · оновлюю з БД…`
             : mergedOverview.importName
-              ? `Джерело: ${mergedOverview.importName} · ООС + Загальний список`
-              : "Немає імпорту ЕЖООС",
+              ? `ЕЖООС: ${mergedOverview.importName} · Штатка: ${rosterRows.length ? "є" : "немає"} · ${mergedOverview.rows.length} записів`
+              : rosterRows.length
+                ? `Штатка: ${rosterRows.length} осіб · імпорту ЕЖООС немає`
+                : "Немає імпорту ЕЖООС і Штатки",
         );
         return mergedOverview;
+      };
+
+      let assetsSeq = 0;
+      const applyPersonnelAssets = async (
+        overviewRows: BackendPersonnelOverviewRow[],
+        nextRosterRows: EjournalPreviewRow[],
+      ) => {
+        const seq = ++assetsSeq;
+        const [photoList, questionnaireList, documentList] = await Promise.all([
+          api.listPersonPhotos().catch(() => []),
+          fetchWithCache({
+            key: CacheKeys.questionnairesMeta,
+            force,
+            fetcher: () => api.listPersonQuestionnaires(),
+            isChanged: jsonChanged,
+          }).catch(() => []),
+          fetchWithCache({
+            key: CacheKeys.documentsAll,
+            force,
+            fetcher: () => api.listAllPersonDocuments(),
+            isChanged: jsonChanged,
+          }).catch(() => []),
+        ]);
+        if (!alive() || seq !== assetsSeq) return;
+
+        const paintAssets = (people: EjournalPreviewRow[]) => {
+          try {
+            const assets = applyPersonnelAssetsToOverview(
+              overviewRows,
+              people,
+              Array.isArray(questionnaireList) ? questionnaireList : [],
+              Array.isArray(photoList) ? photoList : [],
+              Array.isArray(documentList) ? documentList : [],
+            );
+            photosRef.current = { ...photosRef.current, ...assets.photos };
+            setPhotos(photosRef.current);
+            setQuestionnaireByExternalId(assets.questionnairePresence);
+            setQuestionnaireSourceIdByExternalId(assets.questionnaireSourceIds);
+            setDocumentsByExternalId(assets.documents);
+          } catch (error) {
+            console.warn("[Огляд] Не вдалося підставити дані з Особового складу", error);
+          }
+        };
+
+        personnelRowsRef.current = nextRosterRows;
+        paintAssets(nextRosterRows);
+
+        const personnelRows = await loadPersonnelRowsForOverview(nextRosterRows);
+        if (!alive() || seq !== assetsSeq) return;
+        personnelRowsRef.current = personnelRows.length
+          ? personnelRows
+          : nextRosterRows;
+        paintAssets(personnelRowsRef.current);
       };
 
       const [cachedOverview, cachedRoster] = await Promise.all([
         readDataCache<BackendPersonnelOverview>(CacheKeys.overview),
         readDataCache<BackendPersonnelRosterLatest | null>(CacheKeys.rosterLatest),
       ]);
+      let rosterRows: EjournalPreviewRow[] = [];
+      let rosterLabels: Record<string, string> = {};
+      let rosterColumns: Array<{
+        key: string;
+        letter?: string;
+        originalIndex?: number;
+      }> = [];
       if (cachedOverview) {
-        const cachedRosterRows = cachedRoster?.sheet
-          ? ((cachedRoster.rows.map((row) => ({
-              __dbRowId: row.id,
-              __rowNumber: row.excelRowNumber,
-              ...(row.values &&
-              typeof row.values === "object" &&
-              !Array.isArray(row.values)
-                ? row.values
-                : {}),
-            })) as EjournalPreviewRow[]) ?? [])
-          : [];
-        applyOverview(cachedOverview, cachedRosterRows, true);
+        rosterRows = rosterRowsFromLatest(cachedRoster);
+        rosterLabels = rosterLabelsFromLatest(cachedRoster);
+        rosterColumns = rosterColumnsFromLatest(cachedRoster);
+        if (cachedRoster) setRosterLabel(rosterSourceLabel(cachedRoster));
+        const painted = await applyOverview(
+          cachedOverview,
+          rosterRows,
+          rosterLabels,
+          rosterColumns,
+          true,
+        );
         setIsLoading(false);
+        void applyPersonnelAssets(painted.rows, rosterRows);
       }
+      const paintedFromCache = Boolean(cachedOverview);
 
-      const [overview, photoList, questionnaireList, rosterRows] =
-        await Promise.all([
-          fetchWithCache({
-            key: CacheKeys.overview,
-            fetcher: () => api.getPersonnelOverview(),
-            isChanged: jsonChanged,
+      const rosterPromise = loadLatestPersonnelRosterRows(force)
+        .then((result) => {
+          rosterRows = result.rows;
+          rosterLabels = result.labels;
+          rosterColumns = result.columns;
+          setRosterLabel(result.label);
+          return result.rows;
+        })
+        .catch(() => rosterRows);
+
+      const overview = await fetchWithCache({
+        key: CacheKeys.overview,
+        force,
+        fetcher: () =>
+          loadPersonnelOverviewInBatches({
+            onPage: paintedFromCache
+              ? undefined
+              : async (partial, meta) => {
+                  await applyOverview(
+                    partial,
+                    rosterRows,
+                    rosterLabels,
+                    rosterColumns,
+                    !meta.complete,
+                  );
+                  if (meta.complete) return;
+                  setMessage(
+                    partial.importName
+                      ? `Джерело: ${partial.importName} · ${meta.done} з ${meta.total}. Довантажую…`
+                      : `Огляд: ${meta.done} з ${meta.total}. Довантажую…`,
+                  );
+                },
           }),
-          api.listPersonPhotos().catch(() => []),
-          fetchWithCache({
-            key: CacheKeys.questionnairesMeta,
-            fetcher: () => api.listPersonQuestionnaires(),
-            isChanged: jsonChanged,
-          }).catch(() => []),
-          loadLatestPersonnelRosterRows().catch(
-            () => [] as EjournalPreviewRow[],
-          ),
-        ]);
-      const mergedOverview = applyOverview(overview, rosterRows);
-      const listedPhotos = buildOverviewPhotoMap(
-        photoList,
-        mergedOverview.rows,
+        isChanged: jsonChanged,
+      });
+      rosterRows = await rosterPromise;
+      if (!alive()) return;
+      const mergedOverview = await applyOverview(
+        overview,
         rosterRows,
+        rosterLabels,
+        rosterColumns,
       );
-      photosRef.current = listedPhotos.photos;
-      setPhotos(listedPhotos.photos);
-      const questionnairePresence: Record<string, true> = {};
-      const questionnaireSourceIds: Record<string, string> = {};
-      for (const item of questionnaireList) {
-        const sourceId = item.personExternalId?.trim();
-        if (!sourceId) continue;
-        questionnairePresence[sourceId] = true;
-        questionnaireSourceIds[sourceId] = sourceId;
-      }
-      // Старі анкети могли бути збережені під іншим ID. Назва PDF містить ПІБ,
-      // тому зв’язуємо її з актуальним рядком огляду й пам’ятаємо реальний ID файла.
-      for (const row of mergedOverview.rows) {
-        const rowId = row.externalId?.trim();
-        if (!rowId || questionnairePresence[rowId]) continue;
-        const match = questionnaireList.find((item) => {
-          const fileName = item.fileName?.trim();
-          return (
-            Boolean(fileName) &&
-            !/^questionnaire\.pdf$/i.test(fileName ?? "") &&
-            questionnaireFileMatchesPerson(fileName, [row.name])
-          );
-        });
-        const sourceId = match?.personExternalId?.trim();
-        if (!sourceId) continue;
-        questionnairePresence[rowId] = true;
-        questionnaireSourceIds[rowId] = sourceId;
-      }
-      setQuestionnaireByExternalId(questionnairePresence);
-      setQuestionnaireSourceIdByExternalId(questionnaireSourceIds);
+
+      void applyPersonnelAssets(mergedOverview.rows, rosterRows);
     } catch (error) {
+      if (!alive()) return;
       setMessage(
         error instanceof Error ? error.message : "Не вдалося завантажити огляд",
       );
     } finally {
-      setIsLoading(false);
-    }
-
-    try {
-      const documentList = await fetchWithCache({
-        key: CacheKeys.documentsAll,
-        fetcher: () => api.listAllPersonDocuments(),
-        isChanged: jsonChanged,
-      });
-      setDocumentsByExternalId(buildDocumentsByExternalId(documentList));
-    } catch {
-      setDocumentsByExternalId({});
+      if (alive()) setIsLoading(false);
     }
   };
 
   useEffect(() => {
-    void load();
+    const signal = { cancelled: false };
+    void load(signal);
+    return () => {
+      signal.cancelled = true;
+    };
   }, []);
 
   const nameQueries = useMemo(() => parseOverviewNameQueries(query), [query]);
   const isNameListSearch = nameQueries.length > 1;
 
-  const filteredRows = useMemo(() => {
+  const sourceRows = useMemo(() => {
     if (!data) return [] as BackendPersonnelOverviewRow[];
+    const rows =
+      source === "staff"
+        ? data.rows.filter((row) => {
+            if (!row.inStaff) return false;
+            if (battalion === "ALL") return true;
+            return (row.battalion || "") === battalion;
+          })
+        : source === "ejoos"
+          ? data.rows.filter((row) => row.fromEjoos)
+          : data.rows;
+    return source === "staff" ? rows.map(withStaffOverviewStatus) : rows;
+  }, [battalion, data, source]);
+
+  const staffSummary = useMemo(
+    () =>
+      summarizeStaffFromRoster(
+        rosterRowsRef.current,
+        rosterColumnsRef.current,
+        battalion,
+      ),
+    [battalion, rosterEpoch],
+  );
+
+  /** Pasted FIO list looks through every loaded person, not only the current source. */
+  const nameSearchRows = useMemo(() => {
+    if (!isNameListSearch) return sourceRows;
+    if (!data) return sourceRows;
+    return data.rows.map((row) =>
+      row.inNovaStaff ? withStaffOverviewStatus(row) : row,
+    );
+  }, [data, isNameListSearch, sourceRows]);
+
+  const sourceUnits = useMemo(
+    () =>
+      [...new Set(sourceRows.map((row) => row.unit).filter(Boolean))].sort((a, b) =>
+        a.localeCompare(b, "uk", { numeric: true, sensitivity: "base" }),
+      ),
+    [sourceRows],
+  );
+
+  const metrics = useMemo(() => buildOverviewMetrics(sourceRows), [sourceRows]);
+
+  const filteredRows = useMemo(() => {
     const maxDays = period === "ALL" ? null : Number(period);
 
-    return data.rows.filter((row) => {
+    return nameSearchRows.filter((row) => {
       if (unit !== "ALL" && row.unit !== unit) return false;
       if (status !== "ALL" && row.status !== status) return false;
       if (
+        !isNameListSearch &&
+        source !== "staff" &&
         maxDays != null &&
         row.status !== "ON_DUTY" &&
         (row.days == null || row.days > maxDays)
@@ -586,30 +489,34 @@ export function OverviewPage({
         .includes(normalizedQuery);
     });
   }, [
-    data,
     documentsByExternalId,
     isNameListSearch,
     nameQueries,
     period,
+    source,
+    nameSearchRows,
     status,
     unit,
   ]);
+
+  const sideStats = useMemo(
+    () => buildOverviewSideStats(filteredRows, data),
+    [data, filteredRows],
+  );
 
   const nameListMatchStats = useMemo(() => {
     if (!isNameListSearch || !data) return null;
     const matched: string[] = [];
     const missing: string[] = [];
     for (const nameQuery of nameQueries) {
-      const hit = data.rows.some((row) =>
+      const hit = nameSearchRows.some((row) =>
         overviewNameMatchesQuery(row.name, nameQuery),
       );
       if (hit) matched.push(nameQuery);
       else missing.push(nameQuery);
     }
     return { matched, missing, total: nameQueries.length };
-  }, [data, isNameListSearch, nameQueries]);
-
-  const metrics = data?.metrics;
+  }, [isNameListSearch, nameQueries, nameSearchRows]);
 
   const openQuestionnaire = async (target: OverviewQuestionnaireTarget) => {
     if (!target.externalId) return;
@@ -647,13 +554,16 @@ export function OverviewPage({
     requestedPhotoKeysRef.current.add(requestKey);
     void fillMissingOverviewPhotos(
       [row],
-      rosterRowsRef.current,
+      personnelRowsRef.current.length
+        ? personnelRowsRef.current
+        : rosterRowsRef.current,
       photosRef.current,
     ).then((next) => {
       photosRef.current = next;
       setPhotos(next);
       if (
         !resolveOverviewPhoto(row, next) &&
+        !personnelRowsRef.current.length &&
         !rosterRowsRef.current.length
       ) {
         requestedPhotoKeysRef.current.delete(requestKey);
@@ -676,7 +586,9 @@ export function OverviewPage({
     }
     void fillMissingOverviewPhotos(
       missing,
-      rosterRowsRef.current,
+      personnelRowsRef.current.length
+        ? personnelRowsRef.current
+        : rosterRowsRef.current,
       photosRef.current,
     ).then((next) => {
       photosRef.current = next;
@@ -755,6 +667,7 @@ export function OverviewPage({
 
   return (
     <main className="main-panel overview-page">
+      <div className="overview-screen">
       <header className="topbar analytics-topbar">
         <Box>
           <Typography component="h1" variant="h4">
@@ -765,7 +678,7 @@ export function OverviewPage({
           </Typography>
         </Box>
         <Stack direction="row" spacing={1}>
-          <Button variant="outlined" onClick={() => void load()}>
+          <Button variant="outlined" onClick={() => void load(undefined, { force: true })}>
             Оновити
           </Button>
         </Stack>
@@ -776,9 +689,18 @@ export function OverviewPage({
       <section className="overview-metrics">
         <article className="overview-metric-card">
           <span>
-            <PersonOutlinedIcon fontSize="small" /> Усього
+            <PersonOutlinedIcon fontSize="small" />
+            {source === "staff" ? "У штаті" : "Усього"}
           </span>
           <strong>{metrics?.total ?? "—"}</strong>
+          {source === "staff" && staffSummary.positions > 0 ? (
+            <em className="overview-metric-note">
+              штат {staffSummary.positions}
+              {staffSummary.vacant > 0
+                ? ` · вакант ${staffSummary.vacant}`
+                : ""}
+            </em>
+          ) : null}
         </article>
         <article className="overview-metric-card tone-ok">
           <span>
@@ -832,12 +754,61 @@ export function OverviewPage({
         <TextField
           select
           size="small"
+          className="overview-filter"
+          label="Джерело"
+          value={source}
+          onChange={(event) => {
+            const next = event.target.value as OverviewSourceFilter;
+            setSource(next);
+            setUnit("ALL");
+            setBattalion("ALL");
+          }}
+        >
+          {SOURCE_FILTERS.map((item) => (
+            <MenuItem key={item.value} value={item.value}>
+              {item.value === "staff"
+                ? rosterLabel === "Штатка"
+                  ? "Штатка"
+                  : `Штатка · ${rosterLabel}`
+                : item.value === "ejoos"
+                  ? data?.importName
+                    ? `ЕЖООС · ${data.importName}`
+                    : "ЕЖООС"
+                  : item.label}
+            </MenuItem>
+          ))}
+        </TextField>
+        {source === "staff" ? (
+          <TextField
+            select
+            size="small"
+            className="overview-filter"
+            label="Батальйон"
+            value={
+              battalion === "ALL" || staffSummary.battalions.includes(battalion)
+                ? battalion
+                : "ALL"
+            }
+            onChange={(event) => setBattalion(event.target.value)}
+          >
+            <MenuItem value="ALL">Усі</MenuItem>
+            {staffSummary.battalions.map((item) => (
+              <MenuItem key={item} value={item}>
+                {item}
+              </MenuItem>
+            ))}
+          </TextField>
+        ) : null}
+        <TextField
+          select
+          size="small"
+          className="overview-filter"
           label="Підрозділ"
           value={unit}
           onChange={(event) => setUnit(event.target.value)}
         >
           <MenuItem value="ALL">Усі підрозділи</MenuItem>
-          {(data?.units ?? []).map((item) => (
+          {sourceUnits.map((item) => (
             <MenuItem key={item} value={item}>
               {item}
             </MenuItem>
@@ -846,6 +817,7 @@ export function OverviewPage({
         <TextField
           select
           size="small"
+          className="overview-filter"
           label="Статус"
           value={status}
           onChange={(event) => setStatus(event.target.value)}
@@ -859,6 +831,7 @@ export function OverviewPage({
         <TextField
           select
           size="small"
+          className="overview-filter"
           label="Період"
           value={period}
           onChange={(event) => setPeriod(event.target.value)}
@@ -894,81 +867,88 @@ export function OverviewPage({
         </Alert>
       ) : null}
 
-      <section className="overview-layout">
-        <div className="overview-table-panel">
-          <OverviewVirtualTable
-            rows={filteredRows}
-            photos={photos}
-            onNeedPhoto={onNeedPhoto}
-            questionnaireByExternalId={questionnaireByExternalId}
-            documentsByExternalId={documentsByExternalId}
-            onOpenPersonnel={onOpenPersonnel}
+      <div className="overview-table-panel">
+        <OverviewVirtualTable
+          rows={filteredRows}
+          photos={photos}
+          onNeedPhoto={onNeedPhoto}
+          questionnaireByExternalId={questionnaireByExternalId}
+          documentsByExternalId={documentsByExternalId}
             onOpenQuestionnaire={(target) => void openQuestionnaire(target)}
-            emptyMessage={
-              isLoading && !data
-                ? "Завантаження огляду..."
-                : "Немає записів за поточними фільтрами."
-            }
-            onExport={(context) => void exportOverviewTable(context)}
-          />
-          <footer className="overview-table-footer">
-            <span>
-              Показано всі {filteredRows.length} з {data?.rows.length ?? 0}
-            </span>
-          </footer>
-        </div>
+          emptyMessage={
+            isLoading && !data
+              ? "Завантаження огляду..."
+              : "Немає записів за поточними фільтрами."
+          }
+          onExport={(context) => void exportOverviewTable(context)}
+        />
+        <footer className="overview-table-footer">
+          <span>
+            Показано всі {filteredRows.length} з {sourceRows.length}
+          </span>
+        </footer>
+      </div>
+      </div>
 
-        <aside className="overview-side">
-          <section className="overview-side-card overview-critical-card">
-            <div className="panel-heading">Критичні терміни</div>
-            <ul className="overview-critical-list">
-              {(data?.critical ?? []).map((item) => (
+      <aside className="overview-side">
+        <section className="overview-side-card overview-critical-card">
+          <div className="panel-heading">Критичні терміни</div>
+          <ul className="overview-critical-list">
+            {sideStats.critical.map((item) => {
+              const splitAt = item.text.indexOf(":");
+              const name =
+                splitAt >= 0 ? item.text.slice(0, splitAt).trim() : item.text;
+              const meta = splitAt >= 0 ? item.text.slice(splitAt + 1).trim() : "";
+              return (
                 <li key={item.id} className={`tone-${item.severity}`}>
-                  {item.text}
+                  <span className="overview-critical-name">{name}</span>
+                  {meta ? (
+                    <span className="overview-critical-meta">{meta}</span>
+                  ) : null}
                 </li>
-              ))}
-              {(data?.critical?.length ?? 0) === 0 && (
-                <li className="tone-info">Критичних термінів немає</li>
-              )}
-            </ul>
-          </section>
+              );
+            })}
+            {sideStats.critical.length === 0 && (
+              <li className="tone-info">Критичних термінів немає</li>
+            )}
+          </ul>
+        </section>
 
-          <section className="overview-side-card">
-            <div className="panel-heading">Зміни сьогодні</div>
-            <div className="overview-today-changes">
-              <Chip
-                className="overview-status-chip tone-ok"
-                label={`+${data?.todayChanges.onDuty ?? 0}`}
-                size="small"
-              />
-              <Chip
-                className="overview-status-chip tone-trip"
-                label={`+${data?.todayChanges.businessTrip ?? 0}`}
-                size="small"
-              />
-              <Chip
-                className="overview-status-chip tone-leave"
-                label={`+${data?.todayChanges.leave ?? 0}`}
-                size="small"
-              />
-              <Chip
-                className="overview-status-chip tone-medical"
-                label={`+${data?.todayChanges.medical ?? 0}`}
-                size="small"
-              />
-            </div>
-            <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-              Усього змін: {data?.todayChanges.total ?? 0}
-            </Typography>
-          </section>
+        <section className="overview-side-card">
+          <div className="panel-heading">Зміни сьогодні</div>
+          <div className="overview-today-changes">
+            <Chip
+              className="overview-status-chip tone-ok"
+              label={`+${sideStats.todayChanges.onDuty}`}
+              size="small"
+            />
+            <Chip
+              className="overview-status-chip tone-trip"
+              label={`+${sideStats.todayChanges.businessTrip}`}
+              size="small"
+            />
+            <Chip
+              className="overview-status-chip tone-leave"
+              label={`+${sideStats.todayChanges.leave}`}
+              size="small"
+            />
+            <Chip
+              className="overview-status-chip tone-medical"
+              label={`+${sideStats.todayChanges.medical}`}
+              size="small"
+            />
+          </div>
+          <Typography variant="body2" color="text.secondary">
+            Усього змін: {sideStats.todayChanges.total}
+          </Typography>
+        </section>
 
-          <section className="overview-side-card overview-updates-card">
-            <div className="panel-heading">Оновлення сьогодні</div>
-            <strong>{String(data?.todayUpdates ?? 0).padStart(2, "0")}</strong>
-            <span>записів оновлено</span>
-          </section>
-        </aside>
-      </section>
+        <section className="overview-side-card overview-updates-card">
+          <div className="panel-heading">Оновлення сьогодні</div>
+          <strong>{String(sideStats.todayUpdates).padStart(2, "0")}</strong>
+          <span>записів оновлено</span>
+        </section>
+      </aside>
     </main>
   );
 }

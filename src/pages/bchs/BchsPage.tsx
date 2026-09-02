@@ -21,19 +21,27 @@ import { FullscreenExitOutlinedIcon } from "@/components/sci/icons";
 import { FullscreenOutlinedIcon } from "@/components/sci/icons";
 import { GroupsOutlinedIcon } from "@/components/sci/icons";
 import { HelpOutlineOutlinedIcon } from "@/components/sci/icons";
+import { LogoutOutlinedIcon } from "@/components/sci/icons";
 import { MilitaryTechOutlinedIcon } from "@/components/sci/icons";
+import { PushPinOutlinedIcon } from "@/components/sci/icons";
 import { SearchOutlinedIcon } from "@/components/sci/icons";
 import { ShieldOutlinedIcon } from "@/components/sci/icons";
 import { SyncAltOutlinedIcon } from "@/components/sci/icons";
-import { UploadFileOutlinedIcon } from "@/components/sci/icons";
 import { WarningAmberOutlinedIcon } from "@/components/sci/icons";
 import type { MRT_ColumnDef } from "@/components/sci/SciDataTable";
 import {
   MaterialReactTable,
   useMaterialReactTable,
 } from "@/components/sci/SciDataTable";
-import { api, type BackendEjournalImport } from "../../api";
+import {
+  api,
+  type BackendEjournalImport,
+  type BackendPersonnelRosterLatest,
+} from "../../api";
 import { useAuth } from "../../auth/AuthProvider";
+import { CacheKeys, peekDataCache, subscribeDataCache } from "../../data/idbDataCache";
+import { loadSharedRosterLatest } from "../../data/sharedAppData";
+import { runHeavyJob } from "../../workers/runHeavyJob";
 import { Button as SciButton } from "../../components/ui/button/button";
 import {
   type ExcelWorkbookSnapshot,
@@ -84,11 +92,11 @@ import {
   createBchsComparisonRow,
   enrichBchsAnalyticsForExport,
   BCHS_PIB_FILL_VALUE_KEY,
-  extractBchsAwayPeopleFromDbRows,
   extractBchsAwayPeopleFromSheet,
   extractBchsNovaPeopleFromSheet,
   filterBchsNovaPeople,
   formatRatioPercent,
+  summarizeBchsPersonnelStay,
   isBchsAppendixSheet,
   isBchsDetachedStatus,
   isBchsPersonnelGeneralListSheet,
@@ -344,7 +352,7 @@ const writeMainBchsCalculationSheet = (
   );
 };
 
-export function BchsPage() {
+export function BchsPage({ active = true }: { active?: boolean }) {
   const { canEditArea } = useAuth();
   const canEdit = canEditArea("bchs");
   const [snapshot, setSnapshot] = useState<ExcelWorkbookSnapshot | null>(null);
@@ -390,13 +398,22 @@ export function BchsPage() {
       ? buildBchsAnalyticsFromWorkbook(snapshot, analyticsSheet)
       : (analyticsFromDb ?? buildBchsAnalytics(undefined));
 
-    const people = resolveBchsFullRosterPeople(
-      dataSheet ? extractBchsAwayPeopleFromSheet(dataSheet) : undefined,
-      personnelAwayPeople,
-    );
+    const people = personnelAwayPeople.length
+      ? personnelAwayPeople
+      : resolveBchsFullRosterPeople(
+          dataSheet ? extractBchsAwayPeopleFromSheet(dataSheet) : undefined,
+        );
 
     return applyBchsPersonnelDerivedColumns(base, people);
   }, [analyticsFromDb, analyticsSheet, dataSheet, personnelAwayPeople, snapshot]);
+  const personnelStayStats = useMemo(() => {
+    const people = personnelAwayPeople.length
+      ? personnelAwayPeople
+      : resolveBchsFullRosterPeople(
+          dataSheet ? extractBchsAwayPeopleFromSheet(dataSheet) : undefined,
+        );
+    return summarizeBchsPersonnelStay(people);
+  }, [dataSheet, personnelAwayPeople]);
   const dataIssues = (analytics.dataIssues ?? []) as BchsDataIssue[];
   const detachedDestinationIssues = dataIssues.filter(
     (issue) =>
@@ -843,6 +860,11 @@ export function BchsPage() {
   }, []);
 
   useEffect(() => {
+    if (active) return;
+    setCombatFullscreen(false);
+  }, [active]);
+
+  useEffect(() => {
     if (!combatFullscreen) return;
 
     const onKeyDown = (event: KeyboardEvent) => {
@@ -870,61 +892,58 @@ export function BchsPage() {
   useEffect(() => {
     let cancelled = false;
 
-    const loadPersonnelAwayPeople = async () => {
-      if (snapshot) {
-        // Live Excel snapshot already has Аркуш2/список у пам'яті.
+    const applyRoster = async (latest: BackendPersonnelRosterLatest | null) => {
+      if (!latest?.sheet) {
         setPersonnelAwayPeople([]);
         return;
       }
 
-      const personnelSheet =
-        selectedImport?.sheets.find((sheet) =>
-          /аркуш\s*2|особов|загальн.*спис|1\.?\s*ос/i.test(sheet.name),
-        ) ?? selectedImport?.sheets[0];
-      if (!personnelSheet) {
-        setPersonnelAwayPeople([]);
-        return;
-      }
+      const rows = latest.rows.map((row) =>
+        row.values &&
+        typeof row.values === "object" &&
+        !Array.isArray(row.values)
+          ? row.values
+          : {},
+      );
+      const { people, novaCount } = await runHeavyJob({
+        type: "bchsExtractPeople",
+        rows,
+        columns: parseDbColumns(latest.sheet.columns),
+      });
+      if (cancelled) return;
+      const label =
+        latest.sourceFileName?.trim() || latest.importName?.trim() || "Штатка";
+      setPersonnelAwayPeople(people);
+      setMessage(
+        `БЧС зі Штатки «${label}»: ${people.length} осіб (нова: ${novaCount}). Аркуш1 — шаблон з БД.`,
+      );
+      console.info(
+        `[BCHS] Люди зі Штатки: ${people.length} (нова: ${novaCount}) · ${label}`,
+      );
+    };
 
+    const loadStaffRosterPeople = async () => {
       try {
-        const allRows: Array<Record<string, unknown>> = [];
-        let columns: ReturnType<typeof parseDbColumns> = [];
-        let offset = 0;
-        const limit = 500;
-
-        while (true) {
-          const response = await api.listBchsSheetRows(personnelSheet.id, {
-            limit,
-            offset,
-          });
-          if (columns.length === 0) {
-            columns = parseDbColumns(response.columns);
-          }
-          allRows.push(...response.items.map((item) => item.values));
-          offset += response.limit;
-          if (offset >= response.total || response.items.length === 0) break;
-        }
-
-        if (!cancelled) {
-          const allPeople = extractBchsAwayPeopleFromDbRows(allRows, columns);
-          const novaPeople = filterBchsNovaPeople(allPeople);
-          console.info(
-            `[BCHS] З БД підвантажено людей: ${allPeople.length} (нова: ${novaPeople.length}) · аркуш «${personnelSheet.name}»`,
-          );
-          setPersonnelAwayPeople(allPeople);
-        }
+        const latest = await loadSharedRosterLatest();
+        if (cancelled) return;
+        await applyRoster(latest);
       } catch (error) {
-        console.warn("[BCHS] Не вдалося підвантажити людей з БД", error);
+        console.warn("[BCHS] Не вдалося підвантажити Штатку", error);
         if (!cancelled) setPersonnelAwayPeople([]);
       }
     };
 
-    void loadPersonnelAwayPeople();
+    void loadStaffRosterPeople();
+    const unsubscribe = subscribeDataCache(CacheKeys.rosterLatest, () => {
+      if (cancelled) return;
+      void applyRoster(peekDataCache<BackendPersonnelRosterLatest | null>(CacheKeys.rosterLatest));
+    });
 
     return () => {
       cancelled = true;
+      unsubscribe();
     };
-  }, [selectedImport, snapshot]);
+  }, []);
 
   const loadFile = async (file: File | undefined) => {
     if (!file) return;
@@ -1088,10 +1107,11 @@ export function BchsPage() {
       );
 
       if (dataSheet) {
-        const peopleForExport = resolveBchsFullRosterPeople(
-          dataSheet ? extractBchsAwayPeopleFromSheet(dataSheet) : undefined,
-          personnelAwayPeople,
-        );
+        const peopleForExport = personnelAwayPeople.length
+          ? personnelAwayPeople
+          : resolveBchsFullRosterPeople(
+              dataSheet ? extractBchsAwayPeopleFromSheet(dataSheet) : undefined,
+            );
         console.info(
           "[BCHS] Резерв командира полку",
           summarizeBchsCommanderReserve(peopleForExport),
@@ -1120,16 +1140,17 @@ export function BchsPage() {
           );
         }
       } else if (snapshot && hasLegacyCalculationSheet) {
-        const legacyPeople = resolveBchsFullRosterPeople(
-          dataSheet
-            ? extractBchsAwayPeopleFromSheet(dataSheet)
-            : snapshot?.sheets.find(isBchsPersonnelGeneralListSheet)
-              ? extractBchsAwayPeopleFromSheet(
-                  snapshot.sheets.find(isBchsPersonnelGeneralListSheet),
-                )
-              : undefined,
-          personnelAwayPeople,
-        );
+        const legacyPeople = personnelAwayPeople.length
+          ? personnelAwayPeople
+          : resolveBchsFullRosterPeople(
+              dataSheet
+                ? extractBchsAwayPeopleFromSheet(dataSheet)
+                : snapshot?.sheets.find(isBchsPersonnelGeneralListSheet)
+                  ? extractBchsAwayPeopleFromSheet(
+                      snapshot.sheets.find(isBchsPersonnelGeneralListSheet),
+                    )
+                  : undefined,
+            );
         await exportWorkbookWithMutations(
           snapshot,
           (workbook) => {
@@ -1226,8 +1247,8 @@ export function BchsPage() {
       }
       await waitForNextBchsDownload();
       const peopleForPersonnelExport = resolveBchsRosterPeople(
-        extractBchsNovaPeopleFromSheet(dataSheet),
         personnelAwayPeople,
+        extractBchsNovaPeopleFromSheet(dataSheet),
       );
       await exportTemplateWorkbookWithMutations(
         "/templates/bchs-personnel-bzvp-template.xlsx",
@@ -1278,27 +1299,11 @@ export function BchsPage() {
             БЧС
           </Typography>
           <Typography variant="body2" color="text.secondary">
-            Боєвий чисельний склад · Аркуш2 у БД · Аркуш1 як розрахункова
-            аналітика
+            Бойовий чисельний склад · люди зі Штатки (Особовий склад) · Аркуш1 як
+            розрахунковий шаблон
           </Typography>
         </Box>
         <Stack direction="row" spacing={1}>
-          <SciButton asChild variant="OUTLINE" disabled={!canEdit}>
-            <label>
-              <UploadFileOutlinedIcon fontSize="small" />
-              Завантажити Excel
-              <input
-                hidden
-                type="file"
-                accept=".xlsx,.xls"
-                disabled={!canEdit}
-                onChange={(event) => void loadFile(event.target.files?.[0])}
-              />
-            </label>
-          </SciButton>
-          <SciButton variant="GHOST" onClick={() => void loadImports()}>
-            Оновити імпорти
-          </SciButton>
           <SciButton
             disabled={!snapshot && !analyticsFromDb}
             variant="OUTLINE"
@@ -1306,13 +1311,6 @@ export function BchsPage() {
           >
             <FileDownloadOutlinedIcon fontSize="small" />
             Експорт Excel
-          </SciButton>
-          <SciButton
-            variant="EXEC"
-            disabled={!workbookPayload || !canEdit}
-            onClick={() => void saveImport()}
-          >
-            Записати в БД
           </SciButton>
         </Stack>
       </header>
@@ -1332,12 +1330,13 @@ export function BchsPage() {
           {
             label: "За штатом",
             value: analytics.total.staff,
+            suffix: "посад",
             icon: <GroupsOutlinedIcon />,
           },
           {
             label: "За списком",
             value: analytics.total.listed,
-            suffix: toPercent(analytics.total.staffedPercent),
+            suffix: `осіб · ${toPercent(analytics.total.staffedPercent)}`,
             icon: <FormatListBulletedOutlinedIcon />,
           },
           {
@@ -1403,6 +1402,108 @@ export function BchsPage() {
 
       {activeBchsAnalyticsTab === "overview" && (
         <section className="bchs-overview">
+          <section className="bchs-stay-stats-grid" aria-label="Перебування зі Штатки">
+            <div className="bchs-stay-panel bchs-stay-panel--places">
+              <div className="panel-heading">
+                <span>
+                  <PushPinOutlinedIcon fontSize="small" />
+                  Місце перебування
+                </span>
+                <em>{personnelStayStats.total}</em>
+              </div>
+              {personnelStayStats.stayPlaces.length > 0 ? (
+                <BarList items={personnelStayStats.stayPlaces} />
+              ) : (
+                <Typography variant="body2" color="text.secondary">
+                  Немає людей зі Штатки, щоб порахувати місця.
+                </Typography>
+              )}
+            </div>
+
+            <div className="bchs-stay-stack">
+              <div className="bchs-stay-panel bchs-stay-panel--exit">
+                <div className="panel-heading">
+                  <span>
+                    <LogoutOutlinedIcon fontSize="small" />
+                    На виході
+                  </span>
+                  <em>{personnelStayStats.onExit.length}</em>
+                </div>
+                {personnelStayStats.onExit.length > 0 ? (
+                  <ul className="bchs-exit-list">
+                    {personnelStayStats.onExit.map((person, index) => (
+                      <li
+                        key={`${person.fullName}-${person.rosterUnit}-${index}`}
+                      >
+                        <strong>{person.fullName || "Без ПІБ"}</strong>
+                        <span>
+                          {[
+                            person.rosterUnit,
+                            person.medicalPlace,
+                            person.fighterExitDate
+                              ? `вихід ${person.fighterExitDate}`
+                              : "",
+                          ]
+                            .filter(Boolean)
+                            .join(" · ")}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <Typography variant="body2" color="text.secondary">
+                    Нікого на виході за Штаткою.
+                  </Typography>
+                )}
+              </div>
+
+              <div className="bchs-stay-panel bchs-stay-panel--bg">
+                <div className="panel-heading">
+                  <span>
+                    <ShieldOutlinedIcon fontSize="small" />
+                    Статус БГ
+                  </span>
+                  <em>{personnelStayStats.total}</em>
+                </div>
+                <div className="bchs-bg-split">
+                  <div className="bchs-bg-item ready">
+                    <strong>{personnelStayStats.battleReady}</strong>
+                    <span>БГ</span>
+                    <em>
+                      {formatRatioPercent(
+                        personnelStayStats.battleReady,
+                        personnelStayStats.total,
+                      )}
+                    </em>
+                  </div>
+                  <div className="bchs-bg-item">
+                    <strong>{personnelStayStats.notBattleReady}</strong>
+                    <span>не БГ</span>
+                    <em>
+                      {formatRatioPercent(
+                        personnelStayStats.notBattleReady,
+                        personnelStayStats.total,
+                      )}
+                    </em>
+                  </div>
+                </div>
+                <div
+                  className="bchs-bg-track"
+                  aria-hidden={personnelStayStats.total === 0}
+                >
+                  <i
+                    style={{
+                      width: formatRatioPercent(
+                        personnelStayStats.battleReady,
+                        personnelStayStats.total,
+                      ),
+                    }}
+                  />
+                </div>
+              </div>
+            </div>
+          </section>
+
           <div className="bchs-overview-title">
             <Typography component="h2" variant="h3">
               Аналітика БЧС

@@ -5,6 +5,7 @@ import {
   splitForm12Signatory,
   type Form12ReportFields,
 } from "./form12Report";
+import { capitalizeReportPosition } from "./reportPosition";
 import { stripRedColorInWordZip } from "./wordXml";
 
 const FORM12_TEMPLATE_URL = `${import.meta.env.BASE_URL}templates/form12-report.docx`;
@@ -73,7 +74,7 @@ const shortDate = (value: string) => {
 };
 
 const positionWithUnit = (position: string) => {
-  const text = position.trim() || "______";
+  const text = capitalizeReportPosition(position) || "______";
   if (/військової частини/i.test(text)) return text;
   return `${text} військової частини А4862`;
 };

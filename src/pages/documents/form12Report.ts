@@ -4,6 +4,7 @@ import {
   getPersonFullPositionTitle,
 } from "../personnel/personnelUtils";
 import { toUkrainianGenitiveFullName } from "./form6Report";
+import { capitalizeReportPosition } from "./reportPosition";
 import {
   formatGivenSurname,
   formatPositionTitleBlock,
@@ -25,6 +26,8 @@ export type Form12ReportFields = {
   date: string;
   signatureData: string;
   signatureFileName: string;
+  /** Навіщо роблять цю форму — колонка в Excel-експорті журналу. */
+  formPurpose: string;
   folderName: string;
   signatories: Form12Signatory[];
   statusNote: string;
@@ -252,7 +255,7 @@ export const toUkrainianDativePosition = (position: string) => {
   else if (key.endsWith("ий") || key.endsWith("ій")) {
     dativeFirst = `${key.slice(0, -2)}ому`;
   } else if (!/(у|ю|і|ї)$/u.test(key)) dativeFirst = `${key}у`;
-  return [dativeFirst, ...rest].join(" ");
+  return capitalizeReportPosition([dativeFirst, ...rest].join(" "));
 };
 
 export const form12PleaText = (fields: Form12ReportFields) => {
@@ -279,10 +282,11 @@ export const createForm12Fields = (
     commander: DEFAULT_FORM12_COMMANDER,
     fullName,
     rank: summary.rank || "",
-    staffPosition,
+    staffPosition: capitalizeReportPosition(staffPosition),
     date: formatForm12Date(new Date()),
     signatureData: "",
     signatureFileName: "",
+    formPurpose: "",
     folderName: buildForm12FolderName(fullName),
     signatories,
     statusNote: "",
@@ -329,6 +333,8 @@ export const mergeForm12Fields = (
   return {
     ...merged,
     fullName: fullName || merged.fullName,
+    staffPosition: capitalizeReportPosition(String(merged.staffPosition ?? "")),
+    formPurpose: String(merged.formPurpose ?? ""),
     folderName,
   };
 };

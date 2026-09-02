@@ -1,10 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Button, Typography } from "@/components/sci/SciPrimitives";
 import { MenuOutlinedIcon } from "@/components/sci/icons";
 import "./App.css";
 import {
   buildDocumentRoute,
-  buildPersonnelRoute,
   getCurrentRouteKey,
   getPageFromPath,
   isRetiredPagePath,
@@ -43,6 +42,32 @@ import { useAuthScrollLock } from "./auth/useAuthScrollLock";
 import { UsersAccessPage } from "./pages/users/UsersAccessPage";
 import { ProfilePage } from "./pages/profile/ProfilePage";
 import { WorkTasksPage } from "./pages/work-tasks/WorkTasksPage";
+import { rememberMountedPage } from "./app/pageKeepAlive";
+
+function AppPageSlot({
+  page,
+  activePage,
+  mountedPages,
+  children,
+}: {
+  page: AppPage;
+  activePage: AppPage;
+  mountedPages: ReadonlySet<AppPage>;
+  children: ReactNode;
+}) {
+  if (!mountedPages.has(page)) return null;
+  const active = page === activePage;
+  return (
+    <div
+      className={active ? "app-page-slot is-active" : "app-page-slot"}
+      hidden={!active}
+      inert={!active}
+      aria-hidden={!active}
+    >
+      {children}
+    </div>
+  );
+}
 
 function App() {
   const { loading, user, canView, canEdit, canEditArea, isAdmin } = useAuth();
@@ -50,8 +75,21 @@ function App() {
   const [activePage, setActivePage] = useState<AppPage>(() =>
     getPageFromPath(window.location.pathname),
   );
+  const [mountedPages, setMountedPages] = useState<Set<AppPage>>(
+    () => new Set([getPageFromPath(window.location.pathname)]),
+  );
+  const mountedPagesRef = useRef(mountedPages);
+  mountedPagesRef.current = mountedPages;
   const [routeKey, setRouteKey] = useState(getCurrentRouteKey);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+
+  useEffect(() => {
+    const delay = mountedPagesRef.current.has(activePage) ? 0 : 80;
+    const timer = window.setTimeout(() => {
+      setMountedPages((current) => rememberMountedPage(current, activePage));
+    }, delay);
+    return () => window.clearTimeout(timer);
+  }, [activePage]);
 
   useEffect(() => {
     const handlePopState = () => {
@@ -118,21 +156,6 @@ function App() {
     }
   }, [loading, user, isAdmin, activePage]);
 
-  const openPersonnelForPerson = (target: {
-    rowId: string;
-    externalId: string;
-  }) => {
-    window.localStorage.setItem(
-      "army-grid:focus-personnel",
-      JSON.stringify(target),
-    );
-    applyRoute(
-      pushAppRoute(
-        buildPersonnelRoute(target),
-        "personnel",
-      ),
-    );
-  };
   const openDocumentsForPerson = (
     row: EjournalPreviewRow,
     mode:
@@ -246,38 +269,113 @@ function App() {
         onMobileClose={() => setMobileNavOpen(false)}
       />
 
-      {activePage === "overview" ? (
-        <OverviewPage onOpenPersonnel={openPersonnelForPerson} />
-      ) : activePage === "analytics" ? (
-        <AnalyticsPage />
-      ) : activePage === "bchs" ? (
-        <BchsPage />
-      ) : activePage === "excelFill" ? (
-        <ExcelFillPage />
-      ) : activePage === "anketaData" ? (
-        <AnketaDataPage />
-      ) : activePage === "socPassport" ? (
-        <SocPassportPage />
-      ) : activePage === "ejournal" ? (
-        <EjournalPage />
-      ) : activePage === "personnel" ? (
-        <PersonnelPage onOpenDocuments={openDocumentsForPerson} />
-      ) : activePage === "documents" ? (
-        <DocumentsPage
-          key={routeKey}
-          onNavigate={(path) => {
-            applyRoute(pushAppRoute(path, getPageFromPath(path)));
-          }}
-        />
-      ) : activePage === "documentSettings" ? (
-        <DocumentSignatoriesSettingsPage />
-      ) : activePage === "usersAccess" ? (
-        isAdmin ? <UsersAccessPage /> : null
-      ) : activePage === "profile" ? (
-        <ProfilePage />
-      ) : (
-        <WorkTasksPage />
-      )}
+      <div className="app-page-host">
+        {activePage && !mountedPages.has(activePage) ? (
+          <div className="app-page-slot is-active app-page-slot--pending">
+            <Typography variant="body2" color="text.secondary">
+              Завантаження…
+            </Typography>
+          </div>
+        ) : null}
+        <AppPageSlot
+          page="overview"
+          activePage={activePage}
+          mountedPages={mountedPages}
+        >
+          <OverviewPage />
+        </AppPageSlot>
+        <AppPageSlot
+          page="analytics"
+          activePage={activePage}
+          mountedPages={mountedPages}
+        >
+          <AnalyticsPage />
+        </AppPageSlot>
+        <AppPageSlot
+          page="bchs"
+          activePage={activePage}
+          mountedPages={mountedPages}
+        >
+          <BchsPage active={activePage === "bchs"} />
+        </AppPageSlot>
+        <AppPageSlot
+          page="excelFill"
+          activePage={activePage}
+          mountedPages={mountedPages}
+        >
+          <ExcelFillPage />
+        </AppPageSlot>
+        <AppPageSlot
+          page="anketaData"
+          activePage={activePage}
+          mountedPages={mountedPages}
+        >
+          <AnketaDataPage />
+        </AppPageSlot>
+        <AppPageSlot
+          page="socPassport"
+          activePage={activePage}
+          mountedPages={mountedPages}
+        >
+          <SocPassportPage />
+        </AppPageSlot>
+        <AppPageSlot
+          page="ejournal"
+          activePage={activePage}
+          mountedPages={mountedPages}
+        >
+          <EjournalPage />
+        </AppPageSlot>
+        <AppPageSlot
+          page="personnel"
+          activePage={activePage}
+          mountedPages={mountedPages}
+        >
+          <PersonnelPage onOpenDocuments={openDocumentsForPerson} />
+        </AppPageSlot>
+        <AppPageSlot
+          page="documents"
+          activePage={activePage}
+          mountedPages={mountedPages}
+        >
+          <DocumentsPage
+            key={routeKey}
+            onNavigate={(path) => {
+              applyRoute(pushAppRoute(path, getPageFromPath(path)));
+            }}
+          />
+        </AppPageSlot>
+        <AppPageSlot
+          page="documentSettings"
+          activePage={activePage}
+          mountedPages={mountedPages}
+        >
+          <DocumentSignatoriesSettingsPage />
+        </AppPageSlot>
+        {isAdmin ? (
+          <AppPageSlot
+            page="usersAccess"
+            activePage={activePage}
+            mountedPages={mountedPages}
+          >
+            <UsersAccessPage />
+          </AppPageSlot>
+        ) : null}
+        <AppPageSlot
+          page="profile"
+          activePage={activePage}
+          mountedPages={mountedPages}
+        >
+          <ProfilePage />
+        </AppPageSlot>
+        <AppPageSlot
+          page="workTasks"
+          activePage={activePage}
+          mountedPages={mountedPages}
+        >
+          <WorkTasksPage />
+        </AppPageSlot>
+      </div>
     </div>
     <SciLiveFeedback />
     <AppToastHost />

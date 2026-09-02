@@ -13,6 +13,7 @@ import type {
   BchsComparisonRow,
   BchsDataIssue,
   BchsPersonnelAwayPerson,
+  BchsPersonnelStayStats,
   BchsSupplementRow,
   BchsSupplementSnapshot,
   BchsUnitAbsenceCategoryStats,
@@ -190,11 +191,21 @@ export const BCHS_COMMAND_ROSTER_ALIASES = [
   "командування",
 ] as const;
 
-/** Перший фільтр у всьому pipeline БЧС: battalion A = «нова». */
+/** Є реальний ПІБ — вакантні / порожні рядки штатки не рахуємо як людей. */
+export const hasBchsFullName = (person: { fullName?: unknown }) => {
+  const name = normalizeBchsText(person.fullName);
+  return Boolean(name) && name !== "-" && name !== "без піб" && name !== "(без піб)";
+};
+
+/** Перший фільтр у всьому pipeline БЧС: battalion A = «нова» і є ПІБ. */
 export const filterBchsNovaPeople = <T extends { battalion: string }>(
   people: T[],
 ) =>
-  people.filter((person) => normalizeBchsText(person.battalion) === "нова");
+  people.filter((person) => {
+    if (normalizeBchsText(person.battalion) !== "нова") return false;
+    if (!("fullName" in person)) return true;
+    return hasBchsFullName(person);
+  });
 
 /** Взяти roster з джерел і одразу застосувати фільтр «нова» (перший крок перед розрахунками). */
 export const resolveBchsRosterPeople = (
@@ -824,6 +835,7 @@ export const extractBchsAwayPeopleFromSheet = (
   const rankTitleCol = columnIndex(12);
   const fullNameCol = columnIndex(13);
   const callsignCol = columnIndex(14);
+  const birthDateCol = columnIndex(15);
   const statusCol = columnIndex(20);
   const roleTypeCol = columnIndex(21);
   const combatReadinessCol = columnIndex(22);
@@ -834,6 +846,9 @@ export const extractBchsAwayPeopleFromSheet = (
   const destinationCol = columnIndex(28);
   const medicalPlaceCol = columnIndex(30);
   const medicalNoteCol = columnIndex(31);
+  const directionCol = columnIndex(32);
+  const medicalPlaceAltCol = columnIndex(39);
+  const combatReadinessAltCol = columnIndex(41);
 
   const sourceRows =
     sheet.rows.length > 0
@@ -856,16 +871,22 @@ export const extractBchsAwayPeopleFromSheet = (
       rankTitle: valueToDisplay(row[rankTitleCol] as CellValue),
       fullName: valueToDisplay(row[fullNameCol] as CellValue),
       callsign: valueToDisplay(row[callsignCol] as CellValue),
+      birthDate: valueToDisplay(row[birthDateCol] as CellValue),
       status: valueToDisplay(row[statusCol] as CellValue),
       roleType: valueToDisplay(row[roleTypeCol] as CellValue),
-      combatReadiness: valueToDisplay(row[combatReadinessCol] as CellValue),
+      combatReadiness:
+        valueToDisplay(row[combatReadinessCol] as CellValue) ||
+        valueToDisplay(row[combatReadinessAltCol] as CellValue),
       bzvpStatus: valueToDisplay(row[bzvpStatusCol] as CellValue),
       brezAssignment: valueToDisplay(row[brezAssignmentCol] as CellValue),
       treatmentNote: valueToDisplay(row[treatmentNoteCol] as CellValue),
       mobilizationContract: valueToDisplay(row[mobilizationCol] as CellValue),
       destination: valueToDisplay(row[destinationCol] as CellValue),
-      medicalPlace: valueToDisplay(row[medicalPlaceCol] as CellValue),
+      medicalPlace:
+        valueToDisplay(row[medicalPlaceCol] as CellValue) ||
+        valueToDisplay(row[medicalPlaceAltCol] as CellValue),
       medicalNote: valueToDisplay(row[medicalNoteCol] as CellValue),
+      direction: valueToDisplay(row[directionCol] as CellValue),
       pibHighlightRgb: sheet.pibFillByExcelRow?.[excelRowNumber] ?? null,
     }))
     .filter(
@@ -883,8 +904,24 @@ export const extractBchsAwayPeopleFromSheet = (
         person.destination ||
         person.treatmentNote ||
         person.medicalPlace ||
-        person.medicalNote,
+        person.medicalNote ||
+        person.direction,
     );
+};
+
+const pickBchsDbFirstNonEmpty = (
+  row: Record<string, unknown>,
+  candidates: Array<string | undefined>,
+) => {
+  const keys = candidates.filter((key): key is string => Boolean(key?.trim()));
+  const withRosterPrefix = keys.flatMap((key) =>
+    key.startsWith("roster__") ? [key] : [key, `roster__${key}`],
+  );
+  for (const key of withRosterPrefix) {
+    const value = pickBchsDbCellValue(row, [key]).trim();
+    if (value) return value;
+  }
+  return "";
 };
 
 type BchsDbColumnMeta = {
@@ -951,6 +988,7 @@ export const extractBchsAwayPeopleFromDbRows = (
   const keyM = resolveBchsDbColumnKeyByLetter(columns, "M");
   const keyN = resolveBchsDbColumnKeyByLetter(columns, "N");
   const keyO = resolveBchsDbColumnKeyByLetter(columns, "O");
+  const keyP = resolveBchsDbColumnKeyByLetter(columns, "P");
   const keyL = resolveBchsDbColumnKeyByLetter(columns, "L");
   const keyU = resolveBchsDbColumnKeyByLetter(columns, "U");
   const keyV = resolveBchsDbColumnKeyByLetter(columns, "V");
@@ -1021,6 +1059,14 @@ export const extractBchsAwayPeopleFromDbRows = (
       "callsign",
       "column_15",
     ]),
+    birthDate: pickBchsDbCellValue(row, [
+      keyP,
+      "P",
+      "дата народження",
+      "народжен",
+      "birthDate",
+      "column_16",
+    ]),
     status: pickBchsDbCellValue(row, [
       keyU,
       "U",
@@ -1035,12 +1081,13 @@ export const extractBchsAwayPeopleFromDbRows = (
       "roleType",
       "column_22",
     ]),
-    combatReadiness: pickBchsDbCellValue(row, [
+    combatReadiness: pickBchsDbFirstNonEmpty(row, [
       keyW,
       "W",
       "статус_бг",
       "combatReadiness",
       "column_23",
+      "column_42",
     ]),
     bzvpStatus: pickBchsDbCellValue(row, [
       keyX,
@@ -1077,12 +1124,13 @@ export const extractBchsAwayPeopleFromDbRows = (
       "externalUnit",
       "column_29",
     ]),
-    medicalPlace: pickBchsDbCellValue(row, [
+    medicalPlace: pickBchsDbFirstNonEmpty(row, [
       keyAE,
       "AE",
       "місце_перебування",
       "medicalPlace",
       "column_31",
+      "column_40",
     ]),
     medicalNote: pickBchsDbCellValue(row, [
       keyAF,
@@ -1090,6 +1138,19 @@ export const extractBchsAwayPeopleFromDbRows = (
       "примітки",
       "medicalNote",
       "column_32",
+    ]),
+    direction: pickBchsDbFirstNonEmpty(row, [
+      "напрямок",
+      "direction",
+      "column_33",
+    ]),
+    fighterExitDate: pickBchsDbFirstNonEmpty(row, [
+      "fighter_status_exit_date",
+      "дата_виходу",
+    ]),
+    fighterReturnDate: pickBchsDbFirstNonEmpty(row, [
+      "fighter_status_return_date",
+      "дата_повернення",
     ]),
     pibHighlightRgb:
       pickBchsDbCellValue(row, [
@@ -1109,6 +1170,78 @@ export const extractBchsNovaPeopleFromDbRows = (
   rows: Array<Record<string, unknown>>,
   columns?: BchsDbColumnMeta[],
 ) => filterBchsNovaPeople(extractBchsAwayPeopleFromDbRows(rows, columns));
+
+export const BCHS_EMPTY_STAY_PLACE_LABEL = "Не вказано";
+
+export const isBchsBattleReadyPerson = (person: BchsPersonnelAwayPerson) =>
+  normalizeBchsText(person.combatReadiness) === "бг";
+
+const hasActiveFighterExit = (person: BchsPersonnelAwayPerson) => {
+  const exitDate = String(person.fighterExitDate ?? "").trim();
+  const returnDate = String(person.fighterReturnDate ?? "").trim();
+  return Boolean(exitDate && !returnDate);
+};
+
+/** «на виході» / «на виконанні» / активний вихід у «Статус бійців». */
+export const isBchsOnCombatExit = (person: BchsPersonnelAwayPerson) => {
+  if (hasActiveFighterExit(person)) return true;
+
+  const blob = [
+    person.medicalPlace,
+    person.status,
+    person.medicalNote,
+    person.direction,
+    person.destination,
+  ]
+    .map((value) => normalizeBchsText(value))
+    .join(" ");
+  return /(?:на\s+)?виход[іи](?!н)|на\s+виконанн/.test(blob);
+};
+
+export const formatBchsStayPlaceLabel = (value: string) => {
+  const trimmed = String(value ?? "").replace(/\s+/g, " ").trim();
+  return trimmed || BCHS_EMPTY_STAY_PLACE_LABEL;
+};
+
+export const buildBchsStayPlaceStats = (
+  people: BchsPersonnelAwayPerson[],
+): AnalyticsMetric[] => {
+  const counts = new Map<string, { label: string; value: number }>();
+  for (const person of people) {
+    const raw = String(person.medicalPlace ?? "").replace(/\s+/g, " ").trim();
+    const key = raw ? normalizeBchsText(raw) : "";
+    const label = raw || BCHS_EMPTY_STAY_PLACE_LABEL;
+    const current = counts.get(key);
+    if (current) current.value += 1;
+    else counts.set(key, { label, value: 1 });
+  }
+
+  return Array.from(counts.values()).sort((left, right) => {
+    const leftEmpty = left.label === BCHS_EMPTY_STAY_PLACE_LABEL;
+    const rightEmpty = right.label === BCHS_EMPTY_STAY_PLACE_LABEL;
+    if (leftEmpty !== rightEmpty) return leftEmpty ? 1 : -1;
+    return right.value - left.value || left.label.localeCompare(right.label, "uk");
+  });
+};
+
+export const summarizeBchsPersonnelStay = (
+  people: BchsPersonnelAwayPerson[],
+): BchsPersonnelStayStats => {
+  const roster = filterBchsNovaPeople(people);
+  return {
+    total: roster.length,
+    stayPlaces: buildBchsStayPlaceStats(roster),
+    battleReady: roster.filter(isBchsBattleReadyPerson).length,
+    notBattleReady: roster.filter((person) => !isBchsBattleReadyPerson(person))
+      .length,
+    onExit: roster
+      .filter(isBchsOnCombatExit)
+      .slice()
+      .sort((left, right) =>
+        left.fullName.localeCompare(right.fullName, "uk"),
+      ),
+  };
+};
 
 export const applyBchsAwayFromPersonnel = (
   analytics: BchsAnalyticsSnapshot,

@@ -1,11 +1,15 @@
 /**
- * IndexedDB cache for heavy API payloads.
- * Pattern: show cached data immediately, then refresh from network.
+ * Shared memory + IndexedDB cache for heavy API payloads.
+ * Pages read the same in-memory copy; network refresh is TTL-gated
+ * and de-duplicated across concurrent callers.
  */
 
 const DB_NAME = "army-grid-data-cache";
 const DB_VERSION = 1;
 const STORE_NAME = "entries";
+
+/** Skip a network refresh if the shared copy is newer than this. */
+export const SHARED_DATA_TTL_MS = 5 * 60 * 1000;
 
 type CacheEntry<T = unknown> = {
   key: string;
@@ -14,6 +18,32 @@ type CacheEntry<T = unknown> = {
 };
 
 const memoryCache = new Map<string, CacheEntry>();
+const inFlight = new Map<string, Promise<unknown>>();
+const listeners = new Map<string, Set<() => void>>();
+
+const notifyDataCache = (key: string) => {
+  listeners.get(key)?.forEach((listener) => listener());
+};
+
+export const subscribeDataCache = (key: string, listener: () => void) => {
+  const set = listeners.get(key) ?? new Set<() => void>();
+  set.add(listener);
+  listeners.set(key, set);
+  return () => {
+    set.delete(listener);
+    if (set.size === 0) listeners.delete(key);
+  };
+};
+
+export const peekDataCache = <T>(key: string): T | null => {
+  const entry = memoryCache.get(key);
+  return entry ? (entry.value as T) : null;
+};
+
+export const getDataCacheAgeMs = (key: string): number | null => {
+  const entry = memoryCache.get(key);
+  return entry ? Date.now() - entry.savedAt : null;
+};
 
 const openDb = () =>
   new Promise<IDBDatabase>((resolve, reject) => {
@@ -50,6 +80,7 @@ export const CacheKeys = {
   sheetRows: (sheetId: string, stamp: string) =>
     `ejournal:sheet-rows:${sheetId}:${stamp}`,
   rosterLatest: "personnel:roster:latest",
+  anketaCreatedPersonnel: "personnel:anketa-created:v1",
   staffSheetImport: "anketa:staff-sheet-import",
   overview: "personnel:overview",
   documentsAll: "personnel:documents:all",
@@ -66,6 +97,7 @@ export const readDataCache = async <T>(key: string): Promise<T | null> => {
     );
     if (!entry || entry.value === undefined) return null;
     memoryCache.set(key, entry);
+    notifyDataCache(key);
     return entry.value;
   } catch {
     return null;
@@ -75,6 +107,7 @@ export const readDataCache = async <T>(key: string): Promise<T | null> => {
 export const writeDataCache = async <T>(key: string, value: T): Promise<void> => {
   const entry: CacheEntry<T> = { key, value, savedAt: Date.now() };
   memoryCache.set(key, entry);
+  notifyDataCache(key);
   try {
     await withStore("readwrite", (store) => store.put(entry));
   } catch {
@@ -82,8 +115,15 @@ export const writeDataCache = async <T>(key: string, value: T): Promise<void> =>
   }
 };
 
+export const touchDataCache = (key: string) => {
+  const entry = memoryCache.get(key);
+  if (!entry) return;
+  entry.savedAt = Date.now();
+};
+
 export const deleteDataCache = async (key: string): Promise<void> => {
   memoryCache.delete(key);
+  notifyDataCache(key);
   try {
     await withStore("readwrite", (store) => store.delete(key));
   } catch {
@@ -97,12 +137,18 @@ export const invalidateDataCache = async (
 ): Promise<void> => {
   if (keysOrPrefixes.length === 0) return;
 
+  const notified = new Set<string>();
   for (const token of keysOrPrefixes) {
     memoryCache.delete(token);
+    notified.add(token);
     for (const key of [...memoryCache.keys()]) {
-      if (key.startsWith(token)) memoryCache.delete(key);
+      if (key.startsWith(token)) {
+        memoryCache.delete(key);
+        notified.add(key);
+      }
     }
   }
+  notified.forEach((key) => notifyDataCache(key));
 
   try {
     const db = await openDb();
@@ -159,32 +205,59 @@ export const fetchWithCache = async <T>(options: {
   fetcher: () => Promise<T>;
   onCached?: (data: T) => void | Promise<void>;
   isChanged?: (cached: T, fresh: T) => boolean;
+  /** Fresh shared copy younger than this skips the network. */
+  ttlMs?: number;
+  /** Ignore TTL and refetch (кнопка «Оновити»). */
+  force?: boolean;
 }): Promise<T> => {
-  const cached = await readDataCache<T>(options.key);
-  if (cached != null) {
-    await options.onCached?.(cached);
-  }
+  const pending = inFlight.get(options.key);
+  if (pending) return pending as Promise<T>;
 
-  try {
-    const fresh = await options.fetcher();
-    const changed =
-      cached == null ||
-      (options.isChanged ? options.isChanged(cached, fresh) : true);
-    if (changed) {
-      await writeDataCache(options.key, fresh);
+  const run = async () => {
+    const cached = await readDataCache<T>(options.key);
+    if (cached != null) {
+      await options.onCached?.(cached);
     }
-    return fresh;
-  } catch (error) {
-    if (cached != null) return cached;
-    throw error;
-  }
+
+    const ttl = options.ttlMs ?? SHARED_DATA_TTL_MS;
+    const age = getDataCacheAgeMs(options.key);
+    if (
+      cached != null &&
+      !options.force &&
+      age != null &&
+      age < ttl
+    ) {
+      return cached;
+    }
+
+    try {
+      const fresh = await options.fetcher();
+      const changed =
+        cached == null ||
+        (options.isChanged ? options.isChanged(cached, fresh) : true);
+      if (changed) {
+        await writeDataCache(options.key, fresh);
+      } else {
+        touchDataCache(options.key);
+      }
+      return fresh;
+    } catch (error) {
+      if (cached != null) return cached;
+      throw error;
+    }
+  };
+
+  const promise = run().finally(() => {
+    if (inFlight.get(options.key) === promise) inFlight.delete(options.key);
+  });
+  inFlight.set(options.key, promise);
+  return promise as Promise<T>;
 };
 
-/** Stable JSON compare for deciding whether to rewrite UI / disk. */
-export const jsonChanged = (a: unknown, b: unknown) => {
-  try {
-    return JSON.stringify(a) !== JSON.stringify(b);
-  } catch {
-    return true;
-  }
+/** Test helper: drop in-memory copies between cases. */
+export const resetDataCacheMemory = () => {
+  memoryCache.clear();
+  inFlight.clear();
 };
+
+export { payloadChanged as jsonChanged } from "./payloadFingerprint";

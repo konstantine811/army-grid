@@ -41,7 +41,7 @@ export type EjoosWorkspaceContextValue = {
   savePbToDb: () => Promise<BackendEjournalPbSource | null>;
   loadPbFromDb: (id?: string) => Promise<void>;
   analyzePb: (file: File) => Promise<void>;
-  rebuildOperations: () => Promise<void>;
+  rebuildOperations: (sourceAsOfDate?: string) => Promise<void>;
   setDecision: (
     personChangeId: string,
     decision: PersonChangeDecision,
@@ -57,7 +57,7 @@ export type EjoosWorkspaceContextValue = {
     payloadPatch: Record<string, string>,
   ) => void;
   acceptReady: () => void;
-  applyAccepted: () => Promise<void>;
+  applyAccepted: (personIds?: string[]) => Promise<void>;
   acceptAndApplyPerson: (personChangeId: string) => Promise<void>;
   downloadCurrentEjoos: () => Promise<void>;
   downloadVersion: (versionId: string, fileName?: string) => Promise<void>;

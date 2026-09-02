@@ -48,6 +48,7 @@ describe("timesheet occupied styles", () => {
     const zip = await JSZip.loadAsync(await next.arrayBuffer());
     const sheetXml = await zip.file("xl/worksheets/sheet1.xml")?.async("string");
     expect(sheetXml).toBeTruthy();
+    expect(sheetXml?.match(/<dimension\b/gi)?.length ?? 0).toBeLessThan(2);
     const occupied = cellStyleId(sheetXml || "", "G7");
     const history = cellStyleId(sheetXml || "", "G8");
     expect(occupied).toBeTruthy();

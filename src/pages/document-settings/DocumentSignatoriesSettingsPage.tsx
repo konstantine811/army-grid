@@ -19,6 +19,7 @@ import {
   type SaveDocumentSignatoryPreset,
 } from "@/api";
 import { processSignatureTransparentBackground } from "../documents/ubdSignatureImage";
+import { BasisOrdersSettings } from "./BasisOrdersSettings";
 import { UbdTemplateSettings } from "./UbdTemplateSettings";
 
 const documentTypes = [
@@ -211,6 +212,7 @@ export function DocumentSignatoriesSettingsPage() {
       </Alert>
 
       <UbdTemplateSettings />
+      <BasisOrdersSettings />
 
       <section className="document-signatories-settings-layout">
         <aside className="analytics-panel document-signatories-list">

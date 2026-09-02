@@ -12,6 +12,7 @@ import {
 } from "../anketaEdits";
 import { readAnketaAppsScriptUrl } from "../anketaGaps";
 import { loadAnketaMissingNameKeys } from "../anketaMissingList";
+import { expandAnketaNameKeySet } from "../anketaPersonMatch";
 import {
   addMissingEjoosPeopleToCachedAnketa,
   formatAddMissingEjoosPeopleReport,
@@ -176,6 +177,7 @@ export function useAnketaSheetLoader() {
           lastProgressAt = now;
           setMessage(`Злиття з особовим складом… ${done}/${total}`);
         },
+        onStatus: setMessage,
       });
       setMessage(
         `Злиття з особовим складом завершено · ${formatAnketaBulkMergeReport(report)}.`,
@@ -325,7 +327,7 @@ export function useAnketaSheetLoader() {
     });
     void loadAnketaMissingNameKeys()
       .then(({ keys }) => {
-        setMissingQuestionnaireNames(keys);
+        setMissingQuestionnaireNames(expandAnketaNameKeySet(keys));
       })
       .catch(() => {
         /* пошук працює без списку відсутніх анкет */
@@ -346,6 +348,8 @@ export function useAnketaSheetLoader() {
     appsScriptUrl,
     setAppsScriptUrl,
     missingQuestionnaireNames,
+    setMissingQuestionnaireNames,
+    setMissingQuestionnaireNames,
     isMergingPersonnel,
     isAddingFromEjoos,
     isPushingStaffSheet,

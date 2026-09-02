@@ -82,11 +82,23 @@ import {
   formatUbdBasisOrderLabel,
   findUbdBasisOrderByKey,
   pickUbdBasisOrderForTaskPeriod,
+  resolveUbdBasisForTask,
   ubdBasisDateMatchesTaskPeriod,
   ubdBasisOrderOptionKey,
   ubdHasExactBasisForTaskPeriod,
-  UBD_BASIS_ORDER_OPTIONS,
 } from "./ubdBasisOrders";
+import { allBasisOrderOptions } from "./ubdBasisOrdersDirectory";
+import {
+  documentBasisFieldHighlightClass,
+  documentFieldLabelClass,
+  documentHasBasisDateMismatch,
+  documentHasEmptyInputs,
+  documentRequiredFieldIsBlank,
+  isBlankForm6IdDocument,
+  isBlankUbdRnokpp,
+  readDocumentSkippedDueToSzch,
+  resolveUbdFieldsForGapCheck,
+} from "./documentFieldReadiness";
 import {
   buildFighterTaskPeriodText,
   formatUbdTaskPeriodStartDate,
@@ -117,11 +129,15 @@ import {
 } from "./ubdProgressBackup";
 import {
   createForm6Fields,
+  extractForm6BasisParts,
+  formatForm6BasisText,
   form6WorkflowSteps,
   mergeForm6Fields,
+  stripForm6BasisLabel,
   type Form6ReportFields,
   type Form6Signatory,
 } from "./form6Report";
+import { capitalizeReportPosition } from "./reportPosition";
 import { createForm6WordBlob } from "./form6WordExport";
 import {
   createForm12Fields,
@@ -171,11 +187,13 @@ import {
   lostMilitaryIdWorkflowSteps,
   buildLostMilitaryIdReportText,
   buildLostMilitaryIdOrderText,
+  investigatorFromPersonnelRow,
   reportSignerOf,
   reporterFooterBlock,
   type LostMilitaryIdFields,
   type LostMilitaryIdSignatory,
 } from "./lostMilitaryIdReport";
+import { PersonnelNamePicker } from "./PersonnelNamePicker";
 import {
   createLostMilitaryIdReportWordBlob,
   createLostMilitaryIdKitZip,
@@ -692,22 +710,27 @@ const createUbdFields = (
     "";
 
   const taskPeriod = buildFighterTaskPeriodText(row);
-  const basis =
-    pickUbdBasisOrderForTaskPeriod(taskPeriod) ?? FALLBACK_UBD_BASIS;
+  const taskPlace = getFighterTaskPlace(row);
+  const resolved = resolveUbdBasisForTask(taskPeriod, taskPlace);
+  const basis = resolved ?? FALLBACK_UBD_BASIS;
 
   return {
     commander: "Командиру військової частини A4862",
     fullName,
     rank: summary.rank || "",
-    staffPosition,
+    staffPosition: capitalizeReportPosition(staffPosition),
     birthDate: summary.birthDate || "",
     rnokpp: summary.rnokpp || "",
     taskPeriod,
-    taskPlace: getFighterTaskPlace(row),
+    taskPlace,
     basisNumber: basis.number,
     basisDate: basis.date,
     basis: formatUbdBasisText(basis.number, basis.date),
-    basisNotReady: !ubdBasisDateMatchesTaskPeriod(taskPeriod, basis.date),
+    basisNotReady: !ubdBasisDateMatchesTaskPeriod(
+      taskPeriod,
+      basis.date,
+      taskPlace,
+    ),
     battalionCommander:
       "Командир 1 піхотного батальйону\nвійськової частини A4862\nстарший лейтенант",
     approvalOfficer:
@@ -865,16 +888,32 @@ const mergeUbdFields = (
   const pick = (personnel: string, document: string) =>
     String(personnel ?? "").trim() || String(document ?? "").trim();
   const taskPeriod = pick(defaults.taskPeriod, merged.taskPeriod);
-  const picked = pickUbdBasisOrderForTaskPeriod(taskPeriod);
+  const taskPlace = pick(defaults.taskPlace, merged.taskPlace);
+  const resolved = resolveUbdBasisForTask(taskPeriod, taskPlace);
+  const picked = resolved
+    ? { number: resolved.number, date: resolved.date }
+    : pickUbdBasisOrderForTaskPeriod(taskPeriod, undefined, taskPlace);
 
-  // № БР має збігатися з датою «з» періоду (або найближчою ранішою).
-  // Якщо на ту дату вже збережено один з варіантів — лишаємо його.
+  // № БР: локація + період, якщо є в довіднику; інакше дата «з».
+  // Збережений вручну номер лишаємо, якщо він серед відповідних.
   let basisNumber = savedBasisNumber;
   let basisDate = savedBasisDate;
-  if (picked) {
+  if (resolved?.matches.length) {
+    const savedIsMatch =
+      Boolean(savedBasisNumber) &&
+      (resolved.number === savedBasisNumber ||
+        resolved.matches.some((item) => item.number === savedBasisNumber));
+    if (savedIsMatch) {
+      basisNumber = savedBasisNumber;
+      basisDate = savedBasisDate || resolved.date;
+    } else {
+      basisNumber = resolved.number;
+      basisDate = resolved.date;
+    }
+  } else if (picked) {
     const savedMatchesPickedDate =
       savedBasisDate.replaceAll("/", ".").replaceAll("-", ".") === picked.date;
-    const savedIsKnownForDate = UBD_BASIS_ORDER_OPTIONS.some(
+    const savedIsKnownForDate = allBasisOrderOptions().some(
       (item) =>
         item.date === picked.date && item.number === savedBasisNumber,
     );
@@ -891,7 +930,9 @@ const mergeUbdFields = (
     ...merged,
     fullName: pick(defaults.fullName, merged.fullName),
     rank: pick(defaults.rank, merged.rank),
-    staffPosition: pick(defaults.staffPosition, merged.staffPosition),
+    staffPosition: capitalizeReportPosition(
+      pick(defaults.staffPosition, merged.staffPosition),
+    ),
     birthDate: pick(defaults.birthDate, merged.birthDate),
     rnokpp: pick(defaults.rnokpp, merged.rnokpp),
     basisNumber,
@@ -902,7 +943,7 @@ const mergeUbdFields = (
       saved.basisNotReady === true || saved.basisNotReady === "true",
     // Always prefer fresh personnel/roster values when document field is empty.
     taskPeriod,
-    taskPlace: pick(defaults.taskPlace, merged.taskPlace),
+    taskPlace,
     signatories:
       Array.isArray(saved.signatories) && saved.signatories.length
         ? saved.signatories
@@ -1497,6 +1538,16 @@ const readDocumentUbdTaskPeriod = (document: BackendPersonDocument) => {
   return typeof value === "string" ? value.trim() : "";
 };
 
+const readDocumentFormPurpose = (
+  document: BackendPersonDocument,
+  fields?: Record<string, unknown>,
+) => {
+  if (document.type !== "form6Report" && document.type !== "form12Report") {
+    return "";
+  }
+  return readDocumentFieldText(fields || (document.fields || {}), "formPurpose");
+};
+
 const readDocumentUbdTaskPeriodStartLabel = (document: BackendPersonDocument) =>
   formatUbdTaskPeriodStartDate(readDocumentUbdTaskPeriod(document));
 
@@ -1517,7 +1568,8 @@ type JournalReadinessFilter =
   | "ALL"
   | "INCOMPLETE"
   | "READY_TO_SEND"
-  | "COMPLETE";
+  | "COMPLETE"
+  | "SKIPPED_SZCH";
 
 const cloneSalaryWorkflow = (workflow: SalaryWorkflowState): SalaryWorkflowState =>
   mergeSalaryWorkflow(JSON.parse(JSON.stringify(workflow)));
@@ -1556,81 +1608,9 @@ const readDocumentStatusNote = (document: BackendPersonDocument) => {
   return typeof value === "string" ? value.trim() : "";
 };
 
-/** Основні input-поля рапорту УБД — порожні = червоний рядок у журналі.
- *  Коментар (`statusNote`) навмисно не входить: порожній коментар нічого не змінює. */
-const UBD_REQUIRED_INPUT_KEYS = [
-  "fullName",
-  "rank",
-  "staffPosition",
-  "birthDate",
-  "rnokpp",
-  "taskPeriod",
-  "taskPlace",
-  "basisNumber",
-  "basisDate",
-] as const;
-
-const DOCUMENT_PLACEHOLDER_VALUES = new Set([
-  "-",
-  "—",
-  "не вказав",
-  "не вказано",
-  "немає",
-  "не має",
-  "н/д",
-  "відсутній",
-  "відсутнє",
-  "невідомо",
-]);
-
-const isBlankDocumentInput = (value: unknown) => {
-  const text = String(value ?? "").trim();
-  if (!text) return true;
-  return DOCUMENT_PLACEHOLDER_VALUES.has(text.toLocaleLowerCase("uk-UA"));
-};
-
-/** РНОКПП: рівно 10 цифр; «не вказав» / коротший номер = порожньо. */
-const isBlankUbdRnokpp = (value: unknown) => {
-  if (isBlankDocumentInput(value)) return true;
-  const digits = String(value ?? "").replace(/\D/g, "");
-  return digits.length !== 10;
-};
-
-const resolveUbdFieldsForGapCheck = (
-  fields: Record<string, unknown> | null | undefined,
-) => {
-  const record: Record<string, unknown> = { ...(fields || {}) };
-  // Старі записи могли мати лише рядок `basis` без окремих номер/дата.
-  if (
-    isBlankDocumentInput(record.basisNumber) ||
-    isBlankDocumentInput(record.basisDate)
-  ) {
-    const parsed = parseUbdBasisParts(String(record.basis ?? ""));
-    if (isBlankDocumentInput(record.basisNumber) && parsed.basisNumber) {
-      record.basisNumber = parsed.basisNumber;
-    }
-    if (isBlankDocumentInput(record.basisDate) && parsed.basisDate) {
-      record.basisDate = parsed.basisDate;
-    }
-  }
-  return record;
-};
-
 const ubdDocumentHasEmptyInputs = (
   fields: Record<string, unknown> | null | undefined,
-) => {
-  const resolved = resolveUbdFieldsForGapCheck(fields);
-  if (
-    UBD_REQUIRED_INPUT_KEYS.some((key) =>
-      key === "rnokpp"
-        ? isBlankUbdRnokpp(resolved[key])
-        : isBlankDocumentInput(resolved[key]),
-    )
-  ) {
-    return true;
-  }
-  return false;
-};
+) => documentHasEmptyInputs("ubdReport", fields);
 
 const ubdLiveDocument = (
   document: BackendPersonDocument,
@@ -1672,18 +1652,9 @@ const ubdHighestCompletedStepKey = (
   return last;
 };
 
-/** Дата БР не збігається з «з» періоду завдань — жовтий рядок у журналі. */
 const ubdDocumentHasBasisDateMismatch = (
   fields: Record<string, unknown> | null | undefined,
-) => {
-  const resolved = resolveUbdFieldsForGapCheck(fields);
-  const flag = resolved.basisNotReady;
-  if (flag === true || flag === "true") return true;
-  const taskPeriod = String(resolved.taskPeriod ?? "").trim();
-  const basisDate = String(resolved.basisDate ?? "").trim();
-  if (!taskPeriod || isBlankDocumentInput(basisDate)) return false;
-  return !ubdBasisDateMatchesTaskPeriod(taskPeriod, basisDate);
-};
+) => documentHasBasisDateMismatch("ubdReport", fields);
 
 /** Можна відправляти рапорт: крок «Готово до відправки», без червоного/жовтого, ще не відправлений. */
 const ubdDocumentIsReadyToSend = (
@@ -1962,6 +1933,8 @@ export function DocumentsPage(_props: {
   const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingFieldSaveRef = useRef<(() => void) | null>(null);
   const [selectedDocumentId, setSelectedDocumentId] = useState("");
+  const [skippedDueToSzch, setSkippedDueToSzch] = useState(false);
+  const skippedDueToSzchRef = useRef(false);
   const [documentMessage, setDocumentMessage] = useState("");
   const [isSavingDocument, setIsSavingDocument] = useState(false);
   const [allPersonDocuments, setAllPersonDocuments] = useState<
@@ -2001,6 +1974,9 @@ export function DocumentsPage(_props: {
   const refreshUbdProgressBackups = () =>
     setUbdProgressBackups(loadUbdProgressBackups());
   const showUbdExitDateColumn = journalTypeFilter === "ubdReport";
+  const showFormPurposeColumn =
+    journalTypeFilter === "form6Report" ||
+    journalTypeFilter === "form12Report";
   const [journalSortField, setJournalSortField] = useState<JournalSortField>(
     "createdAt",
   );
@@ -2106,6 +2082,51 @@ export function DocumentsPage(_props: {
     return [...months].sort((left, right) => right.localeCompare(left));
   }, [journalDocuments]);
 
+  const liveJournalFields = (
+    document: BackendPersonDocument,
+  ): Record<string, unknown> => {
+    const stored = (document.fields || {}) as Record<string, unknown>;
+    if (document.id !== selectedDocumentId) return stored;
+    let live = stored;
+    if (mode === document.type) {
+      switch (document.type) {
+        case "salaryPowerAttorney":
+          live = salaryFields as unknown as Record<string, unknown>;
+          break;
+        case "ubdReport":
+          live = ubdFields as unknown as Record<string, unknown>;
+          break;
+        case "form6Report":
+          live = form6Fields as unknown as Record<string, unknown>;
+          break;
+        case "form12Report":
+          live = form12Fields as unknown as Record<string, unknown>;
+          break;
+        case "serviceCharacteristic":
+          live = serviceCharacteristicFields as unknown as Record<
+            string,
+            unknown
+          >;
+          break;
+        case "zhbdCertificate":
+          live = zhbdCertificateFields as unknown as Record<string, unknown>;
+          break;
+        case "ubdRestoreReport":
+          live = ubdRestoreFields as unknown as Record<string, unknown>;
+          break;
+        case "temporaryMilitaryId":
+          live = ticketFields as unknown as Record<string, unknown>;
+          break;
+        case "lostMilitaryId":
+          live = lostMilitaryIdFields as unknown as Record<string, unknown>;
+          break;
+        default:
+          break;
+      }
+    }
+    return { ...live, skippedDueToSzch };
+  };
+
   const filteredJournalDocuments = useMemo(() => {
     const filtered = journalDocuments.filter((document) => {
       if (!documentMatchesJournalNameQuery(document, journalNameQuery)) {
@@ -2141,24 +2162,38 @@ export function DocumentsPage(_props: {
         return false;
       }
       if (journalReadinessFilter !== "ALL") {
-        if (document.type !== "ubdReport") return false;
-        const liveFields =
-          document.id === selectedDocumentId && mode === "ubdReport"
-            ? (ubdFields as unknown as Record<string, unknown>)
-            : ((document.fields || {}) as Record<string, unknown>);
-        const readyToSend = ubdDocumentIsReadyToSend(
-          document,
-          liveFields,
-          liveWorkflow,
-        );
-        const complete = ubdDocumentIsComplete(document, liveWorkflow);
-        if (journalReadinessFilter === "READY_TO_SEND" && !readyToSend) {
-          return false;
+        const liveFields = liveJournalFields(document);
+        const skippedSzch = readDocumentSkippedDueToSzch(liveFields);
+        if (journalReadinessFilter === "SKIPPED_SZCH") {
+          return skippedSzch;
         }
-        if (journalReadinessFilter === "INCOMPLETE" && readyToSend) {
-          return false;
-        }
+        if (skippedSzch) return false;
+        const complete =
+          getDocumentProgressPercent(
+            ubdLiveDocument(document, liveWorkflow),
+          ) >= 100;
         if (journalReadinessFilter === "COMPLETE" && !complete) return false;
+        if (document.type === "ubdReport") {
+          const readyToSend = ubdDocumentIsReadyToSend(
+            document,
+            liveFields,
+            liveWorkflow,
+          );
+          if (journalReadinessFilter === "READY_TO_SEND" && !readyToSend) {
+            return false;
+          }
+          if (journalReadinessFilter === "INCOMPLETE" && readyToSend) {
+            return false;
+          }
+        } else {
+          if (journalReadinessFilter === "READY_TO_SEND") return false;
+          if (journalReadinessFilter === "INCOMPLETE") {
+            const incomplete =
+              documentHasEmptyInputs(document.type, liveFields) ||
+              documentHasBasisDateMismatch(document.type, liveFields);
+            if (!incomplete) return false;
+          }
+        }
       }
       return true;
     });
@@ -2196,15 +2231,29 @@ export function DocumentsPage(_props: {
     journalSortField,
     journalStatusFilters,
     journalTypeFilter,
+    lostMilitaryIdFields,
     mode,
     selectedDocumentId,
+    skippedDueToSzch,
+    salaryFields,
+    serviceCharacteristicFields,
+    ticketFields,
     ubdFields,
+    ubdRestoreFields,
+    form6Fields,
+    form12Fields,
+    zhbdCertificateFields,
     workflow,
   ]);
 
   const journalUbdExportBlockedIds = useMemo(() => {
     const blocked = new Set<string>();
     for (const document of filteredJournalDocuments) {
+      const liveFields = liveJournalFields(document);
+      if (readDocumentSkippedDueToSzch(liveFields)) {
+        blocked.add(document.id);
+        continue;
+      }
       if (document.type !== "ubdReport") continue;
       const liveWorkflow =
         document.id === selectedDocumentId
@@ -2220,7 +2269,22 @@ export function DocumentsPage(_props: {
       }
     }
     return blocked;
-  }, [filteredJournalDocuments, selectedDocumentId, workflow]);
+  }, [
+    filteredJournalDocuments,
+    form12Fields,
+    form6Fields,
+    lostMilitaryIdFields,
+    mode,
+    selectedDocumentId,
+    salaryFields,
+    serviceCharacteristicFields,
+    skippedDueToSzch,
+    ticketFields,
+    ubdFields,
+    ubdRestoreFields,
+    zhbdCertificateFields,
+    workflow,
+  ]);
 
   const journalExportDocuments = useMemo(
     () =>
@@ -2422,10 +2486,25 @@ export function DocumentsPage(_props: {
           rows,
           periodFilterLabel,
         });
-        const skipped = journalUbdExportBlockedIds.size;
+        const skippedComplete = [...journalUbdExportBlockedIds].filter(
+          (id) => {
+            const document = filteredJournalDocuments.find(
+              (item) => item.id === id,
+            );
+            if (!document) return false;
+            return !readDocumentSkippedDueToSzch(liveJournalFields(document));
+          },
+        ).length;
+        const skippedSzch = journalUbdExportBlockedIds.size - skippedComplete;
+        const skipParts = [
+          skippedComplete
+            ? `з повним прогресом: ${skippedComplete}`
+            : "",
+          skippedSzch ? `СЗЧ: ${skippedSzch}` : "",
+        ].filter(Boolean);
         setDocumentMessage(
-          skipped
-            ? `Експортовано УБД «Не подавалися»: ${rowCount} рядків · ${fileName}. Пропущено з повним прогресом: ${skipped}.`
+          skipParts.length
+            ? `Експортовано УБД «Не подавалися»: ${rowCount} рядків · ${fileName}. Пропущено ${skipParts.join(" · ")}.`
             : `Експортовано УБД «Не подавалися»: ${rowCount} рядків · ${fileName}`,
         );
         return;
@@ -2459,12 +2538,26 @@ export function DocumentsPage(_props: {
             status: documentWorkflowStatusLabel(journalDocument),
             note: liveDocumentStatusNote(journalDocument),
             files: getDocumentFileSummary(journalDocument),
+            formPurpose: readDocumentFormPurpose(
+              journalDocument,
+              liveJournalFields(journalDocument),
+            ),
             createdAt: journalDocument.createdAt,
             updatedAt: journalDocument.updatedAt,
             taskPeriodEnd: readDocumentUbdTaskPeriodStartLabel(journalDocument),
           };
         }),
         includeUbdExitDate: showUbdExitDateColumn,
+        includeFormPurpose: journalExportDocuments.some(
+          (document) =>
+            document.type === "form6Report" ||
+            document.type === "form12Report",
+        ),
+        compactFormExport: journalExportDocuments.every(
+          (document) =>
+            document.type === "form6Report" ||
+            document.type === "form12Report",
+        ),
         typeFilterLabel:
           JOURNAL_DOCUMENT_TYPE_FILTERS.find(
             (item) => item.value === journalTypeFilter,
@@ -2527,7 +2620,9 @@ export function DocumentsPage(_props: {
         return {
           rank: String(resolved.rank ?? "").trim(),
           fullName,
-          staffPosition: String(resolved.staffPosition ?? "").trim(),
+          staffPosition: capitalizeReportPosition(
+            String(resolved.staffPosition ?? ""),
+          ),
           birthDate: String(resolved.birthDate ?? "").trim(),
           rnokpp: String(resolved.rnokpp ?? "").trim(),
           taskPeriod: String(resolved.taskPeriod ?? "").trim(),
@@ -2853,6 +2948,14 @@ export function DocumentsPage(_props: {
       null,
     [allPersonDocuments, personDocuments, selectedDocumentId],
   );
+
+  useEffect(() => {
+    const skipped = readDocumentSkippedDueToSzch(
+      (selectedDocument?.fields || {}) as Record<string, unknown>,
+    );
+    skippedDueToSzchRef.current = skipped;
+    setSkippedDueToSzch(skipped);
+  }, [selectedDocument?.fields?.skippedDueToSzch, selectedDocumentId]);
   const personExternalId = String(
     summary.externalId ||
       (requestedPersonId && !isUnstablePersonExternalId(requestedPersonId)
@@ -2888,7 +2991,9 @@ export function DocumentsPage(_props: {
         const next = {
           ...current,
           actualFullPosition: text,
-          staffPosition: staffLooksGeneric ? nextStaff : current.staffPosition,
+          staffPosition: capitalizeReportPosition(
+            staffLooksGeneric ? nextStaff : current.staffPosition,
+          ),
         };
         if (staffLooksGeneric || current.actualFullPosition !== text) {
           next.bodyParagraph = buildZhbdBodyParagraph(next);
@@ -3043,7 +3148,7 @@ export function DocumentsPage(_props: {
             changed = true;
           }
           if (!current.staffPosition.trim() && enriched.staffPosition.trim()) {
-            next.staffPosition = enriched.staffPosition;
+            next.staffPosition = capitalizeReportPosition(enriched.staffPosition);
             changed = true;
           }
           if (!current.rnokpp.trim() && enriched.rnokpp.trim()) {
@@ -4367,6 +4472,12 @@ export function DocumentsPage(_props: {
     return existing || snapshot;
   };
 
+  const withPersistedDocumentFlags = <T extends object>(fields: T) => ({
+    ...fields,
+    personStatus: nextPersonStatusLabel(),
+    skippedDueToSzch: skippedDueToSzchRef.current,
+  });
+
   const applyUpdatedDocument = (updated: BackendPersonDocument) => {
     setPersonDocuments((current) =>
       current.some((document) => document.id === updated.id)
@@ -4603,10 +4714,7 @@ export function DocumentsPage(_props: {
 
     setIsSavingDocument(true);
     try {
-      const fieldPayload = {
-        ...nextFields,
-        personStatus: nextPersonStatusLabel(),
-      };
+      const fieldPayload = withPersistedDocumentFlags(nextFields);
       const updated = await api.updatePersonDocument(
         documentSavePersonId,
         selectedDocumentId,
@@ -4666,10 +4774,7 @@ export function DocumentsPage(_props: {
 
     setIsSavingDocument(true);
     try {
-      const fieldPayload = {
-        ...nextFields,
-        personStatus: nextPersonStatusLabel(),
-      };
+      const fieldPayload = withPersistedDocumentFlags(nextFields);
       const updated = await api.updatePersonDocument(
         documentSavePersonId,
         selectedDocumentId,
@@ -4729,10 +4834,7 @@ export function DocumentsPage(_props: {
 
     setIsSavingDocument(true);
     try {
-      const fieldPayload = {
-        ...nextFields,
-        personStatus: nextPersonStatusLabel(),
-      };
+      const fieldPayload = withPersistedDocumentFlags(nextFields);
       const updated = await api.updatePersonDocument(
         documentSavePersonId,
         selectedDocumentId,
@@ -4809,10 +4911,7 @@ export function DocumentsPage(_props: {
 
     setIsSavingDocument(true);
     try {
-      const fieldPayload = {
-        ...nextFields,
-        personStatus: nextPersonStatusLabel(),
-      };
+      const fieldPayload = withPersistedDocumentFlags(nextFields);
       const updated = await api.updatePersonDocument(
         documentSavePersonId,
         selectedDocumentId,
@@ -4848,10 +4947,7 @@ export function DocumentsPage(_props: {
 
     setIsSavingDocument(true);
     try {
-      const fieldPayload = {
-        ...nextFields,
-        personStatus: nextPersonStatusLabel(),
-      };
+      const fieldPayload = withPersistedDocumentFlags(nextFields);
       const updated = await api.updatePersonDocument(
         documentSavePersonId,
         selectedDocumentId,
@@ -4887,10 +4983,7 @@ export function DocumentsPage(_props: {
 
     setIsSavingDocument(true);
     try {
-      const fieldPayload = {
-        ...nextFields,
-        personStatus: nextPersonStatusLabel(),
-      };
+      const fieldPayload = withPersistedDocumentFlags(nextFields);
       const updated = await api.updatePersonDocument(
         documentSavePersonId,
         selectedDocumentId,
@@ -4929,10 +5022,7 @@ export function DocumentsPage(_props: {
 
     setIsSavingDocument(true);
     try {
-      const fieldPayload = {
-        ...nextFields,
-        personStatus: nextPersonStatusLabel(),
-      };
+      const fieldPayload = withPersistedDocumentFlags(nextFields);
       const updated = await api.updatePersonDocument(
         documentSavePersonId,
         selectedDocumentId,
@@ -4968,10 +5058,7 @@ export function DocumentsPage(_props: {
 
     setIsSavingDocument(true);
     try {
-      const fieldPayload = {
-        ...nextFields,
-        personStatus: nextPersonStatusLabel(),
-      };
+      const fieldPayload = withPersistedDocumentFlags(nextFields);
       const updated = await api.updatePersonDocument(
         documentSavePersonId,
         selectedDocumentId,
@@ -5007,10 +5094,7 @@ export function DocumentsPage(_props: {
 
     setIsSavingDocument(true);
     try {
-      const fieldPayload = {
-        ...nextFields,
-        personStatus: nextPersonStatusLabel(),
-      };
+      const fieldPayload = withPersistedDocumentFlags(nextFields);
       const updated = await api.updatePersonDocument(
         documentSavePersonId,
         selectedDocumentId,
@@ -5066,17 +5150,21 @@ export function DocumentsPage(_props: {
 
   const updateUbdField = (key: keyof UbdReportFields, value: string) => {
     setUbdFields((current) => {
-      const next = { ...current, [key]: value } as UbdReportFields;
-      if (key === "taskPeriod") {
-        const picked = pickUbdBasisOrderForTaskPeriod(value);
-        if (picked) {
-          next.basisNumber = picked.number;
-          next.basisDate = picked.date;
-          next.basis = formatUbdBasisText(picked.number, picked.date);
+      const next = {
+        ...current,
+        [key]: key === "staffPosition" ? capitalizeReportPosition(value) : value,
+      } as UbdReportFields;
+      if (key === "taskPeriod" || key === "taskPlace") {
+        const resolved = resolveUbdBasisForTask(next.taskPeriod, next.taskPlace);
+        if (resolved) {
+          next.basisNumber = resolved.number;
+          next.basisDate = resolved.date;
+          next.basis = formatUbdBasisText(resolved.number, resolved.date);
         }
         next.basisNotReady = !ubdBasisDateMatchesTaskPeriod(
-          value,
+          next.taskPeriod,
           next.basisDate,
+          next.taskPlace,
         );
       }
       scheduleDocumentFieldSave(() => {
@@ -5102,6 +5190,7 @@ export function DocumentsPage(_props: {
         basisNotReady: !ubdBasisDateMatchesTaskPeriod(
           current.taskPeriod,
           basisDate,
+          current.taskPlace,
         ),
       };
       scheduleDocumentFieldSave(() => {
@@ -5123,6 +5212,7 @@ export function DocumentsPage(_props: {
         basisNotReady: !ubdBasisDateMatchesTaskPeriod(
           current.taskPeriod,
           option.date,
+          current.taskPlace,
         ),
       };
       scheduleDocumentFieldSave(() => {
@@ -5143,11 +5233,84 @@ export function DocumentsPage(_props: {
   };
 
   const updateForm6Field = (
-    key: Exclude<keyof Form6ReportFields, "signatories">,
+    key: Exclude<keyof Form6ReportFields, "signatories" | "basisManual">,
     value: string,
   ) => {
     setForm6Fields((current) => {
-      const next = { ...current, [key]: value };
+      const next = {
+        ...current,
+        [key]: key === "staffPosition" ? capitalizeReportPosition(value) : value,
+      };
+      if (
+        (key === "taskPeriod" || key === "taskPlace") &&
+        !current.basisManual
+      ) {
+        const resolved = resolveUbdBasisForTask(next.taskPeriod, next.taskPlace);
+        if (resolved) {
+          next.basisNumber = resolved.number;
+          next.basisDate = resolved.date;
+          next.basis = formatForm6BasisText(resolved.number, resolved.date);
+        }
+      }
+      if (key === "basis") {
+        next.basis = /^\s*Підстава:/i.test(value)
+          ? stripForm6BasisLabel(value)
+          : value;
+        const extracted = extractForm6BasisParts(next.basis);
+        if (extracted.basisNumber) next.basisNumber = extracted.basisNumber;
+        if (extracted.basisDate) next.basisDate = extracted.basisDate;
+      } else if (
+        (key === "basisNumber" || key === "basisDate") &&
+        !current.basisManual
+      ) {
+        next.basis = formatForm6BasisText(next.basisNumber, next.basisDate);
+      } else if (key === "basisNumber" && current.basisManual) {
+        const typed = stripForm6BasisLabel(value);
+        if (/розпорядження/i.test(typed)) {
+          next.basis = typed;
+          const extracted = extractForm6BasisParts(typed);
+          if (extracted.basisNumber) next.basisNumber = extracted.basisNumber;
+          if (extracted.basisDate) next.basisDate = extracted.basisDate;
+        }
+      }
+      scheduleDocumentFieldSave(() => {
+        void saveForm6Document(next);
+      });
+      return next;
+    });
+  };
+
+  const updateForm6BasisManual = (manual: boolean) => {
+    setForm6Fields((current) => {
+      const next = { ...current, basisManual: manual };
+      if (!manual) {
+        const resolved = resolveUbdBasisForTask(
+          current.taskPeriod,
+          current.taskPlace,
+        );
+        if (resolved) {
+          next.basisNumber = resolved.number;
+          next.basisDate = resolved.date;
+          next.basis = formatForm6BasisText(resolved.number, resolved.date);
+        }
+      }
+      scheduleDocumentFieldSave(() => {
+        void saveForm6Document(next);
+      });
+      return next;
+    });
+  };
+
+  const updateForm6BasisOrder = (optionKey: string) => {
+    const option = findUbdBasisOrderByKey(optionKey);
+    if (!option) return;
+    setForm6Fields((current) => {
+      const next = {
+        ...current,
+        basisNumber: option.number,
+        basisDate: option.date,
+        basis: formatForm6BasisText(option.number, option.date),
+      };
       scheduleDocumentFieldSave(() => {
         void saveForm6Document(next);
       });
@@ -5161,7 +5324,10 @@ export function DocumentsPage(_props: {
     value: string,
   ) => {
     setServiceCharacteristicFields((current) => {
-      const next = { ...current, [key]: value };
+      const next = {
+        ...current,
+        [key]: key === "staffPosition" ? capitalizeReportPosition(value) : value,
+      };
       scheduleDocumentFieldSave(() => {
         void saveServiceCharacteristicDocument(next);
       });
@@ -5174,7 +5340,10 @@ export function DocumentsPage(_props: {
     value: string,
   ) => {
     setZhbdCertificateFields((current) => {
-      const next = { ...current, [key]: value };
+      const next = {
+        ...current,
+        [key]: key === "staffPosition" ? capitalizeReportPosition(value) : value,
+      };
       if (key === "rank") {
         next.staffPosition = resolveZhbdCombatStaffPosition(
           value,
@@ -5203,7 +5372,10 @@ export function DocumentsPage(_props: {
     value: string,
   ) => {
     setForm12Fields((current) => {
-      const next = { ...current, [key]: value };
+      const next = {
+        ...current,
+        [key]: key === "staffPosition" ? capitalizeReportPosition(value) : value,
+      };
       scheduleDocumentFieldSave(() => {
         void saveForm12Document(next);
       });
@@ -5326,7 +5498,10 @@ export function DocumentsPage(_props: {
     value: string,
   ) => {
     setUbdRestoreFields((current) => {
-      const next = { ...current, [key]: value };
+      const next = {
+        ...current,
+        [key]: key === "staffPosition" ? capitalizeReportPosition(value) : value,
+      };
       scheduleDocumentFieldSave(() => {
         void saveUbdRestoreDocument(next);
       });
@@ -5399,7 +5574,36 @@ export function DocumentsPage(_props: {
     value: LostMilitaryIdFields[K],
   ) => {
     setLostMilitaryIdFields((current) => {
-      const next = { ...current, [key]: value };
+      const next = {
+        ...current,
+        [key]:
+          (key === "staffPosition" || key === "investigatorPosition") &&
+          typeof value === "string"
+            ? capitalizeReportPosition(value)
+            : value,
+      };
+      scheduleDocumentFieldSave(() => {
+        void saveLostMilitaryIdDocument(next);
+      });
+      return next;
+    });
+  };
+
+  const applyLostMilitaryIdPatch = (
+    patch: Partial<LostMilitaryIdFields>,
+  ) => {
+    setLostMilitaryIdFields((current) => {
+      const next = {
+        ...current,
+        ...patch,
+        ...(typeof patch.investigatorPosition === "string"
+          ? {
+              investigatorPosition: capitalizeReportPosition(
+                patch.investigatorPosition,
+              ),
+            }
+          : {}),
+      };
       scheduleDocumentFieldSave(() => {
         void saveLostMilitaryIdDocument(next);
       });
@@ -6094,12 +6298,79 @@ export function DocumentsPage(_props: {
     </article>
   );
 
+  const updateSkippedDueToSzch = (next: boolean) => {
+    skippedDueToSzchRef.current = next;
+    setSkippedDueToSzch(next);
+    if (selectedDocumentId) {
+      const patchDocument = (document: BackendPersonDocument) =>
+        document.id !== selectedDocumentId
+          ? document
+          : {
+              ...document,
+              fields: {
+                ...(document.fields && typeof document.fields === "object"
+                  ? document.fields
+                  : {}),
+                skippedDueToSzch: next,
+              },
+            };
+      setPersonDocuments((current) => current.map(patchDocument));
+      setAllPersonDocuments((current) => current.map(patchDocument));
+    }
+    const activeFields =
+      mode === "ubdReport"
+        ? ubdFields
+        : mode === "form6Report"
+          ? form6Fields
+          : mode === "form12Report"
+            ? form12Fields
+            : mode === "serviceCharacteristic"
+              ? serviceCharacteristicFields
+              : mode === "zhbdCertificate"
+                ? zhbdCertificateFields
+                : mode === "ubdRestoreReport"
+                  ? ubdRestoreFields
+                  : mode === "temporaryMilitaryId"
+                    ? ticketFields
+                    : mode === "lostMilitaryId"
+                      ? lostMilitaryIdFields
+                      : salaryFields;
+    scheduleDocumentFieldSave(() => {
+      saveActiveDocumentWorkflow(activeFields, workflow);
+    });
+  };
+
+  const personStatusLooksSzch = /СЗЧ|САМОВІЛ/i.test(
+    selectedDocument
+      ? readDocumentPersonStatus(selectedDocument, personStatusById)
+      : "",
+  );
+
   const documentStatusNotePanel = (
     value: string,
     onChange: (value: string) => void,
   ) => (
     <div className="document-status-note-panel">
       <div className="panel-heading">Коментар до статусу</div>
+      <div className="document-szch-skip">
+        <Checkbox
+          checked={skippedDueToSzch}
+          onCheckedChange={(checked) =>
+            updateSkippedDueToSzch(checked === true)
+          }
+          label="Не потрібно робити: СЗЧ"
+        />
+      </div>
+      {personStatusLooksSzch && !skippedDueToSzch ? (
+        <span className="document-field-hint">
+          У статусі службовця є СЗЧ — можна зняти документ з роботи.
+        </span>
+      ) : null}
+      {skippedDueToSzch ? (
+        <span className="document-field-hint">
+          Документ сірий у журналі і не входить в експорт.
+        </span>
+      ) : null}
       <TextField
         size="small"
         fullWidth
@@ -6131,14 +6402,31 @@ export function DocumentsPage(_props: {
   };
 
   const documentListStatusNote = (document: BackendPersonDocument) => {
+    const skipped = readDocumentSkippedDueToSzch(liveJournalFields(document));
     const note = liveDocumentStatusNote(document);
-    if (!note) return null;
+    if (!skipped && !note) return null;
+    const text = skipped
+      ? note
+        ? `СЗЧ · ${note}`
+        : "Не потрібно: СЗЧ"
+      : note;
     return (
-      <small className="document-status-note-preview" title={note}>
-        {note}
+      <small className="document-status-note-preview" title={text}>
+        {text}
       </small>
     );
   };
+
+  const personDocumentShellClass = (document: BackendPersonDocument) =>
+    [
+      "salary-person-document-shell",
+      document.id === selectedDocumentId ? "active" : "",
+      readDocumentSkippedDueToSzch(liveJournalFields(document))
+        ? "is-skipped-szch"
+        : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
 
   const questionnairePreviewDialog = (
     <FloatingQuestionnairePreview
@@ -6204,6 +6492,11 @@ export function DocumentsPage(_props: {
                 ].map(([key, label]) => {
                   const isRnokppInvalid =
                     key === "rnokpp" && isBlankUbdRnokpp(ubdFields.rnokpp);
+                  const isInvalid = documentRequiredFieldIsBlank(
+                    "ubdReport",
+                    key,
+                    ubdFields as unknown as Record<string, unknown>,
+                  );
                   const field = (
                     <TextField
                       size="small"
@@ -6222,9 +6515,9 @@ export function DocumentsPage(_props: {
                   return (
                     <label
                       key={key}
-                      className={
-                        isRnokppInvalid ? "document-field-invalid" : undefined
-                      }
+                      className={documentFieldLabelClass(
+                        isInvalid && "document-field-invalid",
+                      )}
                     >
                       <code>{label}</code>
                       {isRnokppInvalid ? (
@@ -6244,7 +6537,13 @@ export function DocumentsPage(_props: {
                     </label>
                   );
                 })}
-                <label>
+                <label
+                  className={documentBasisFieldHighlightClass(
+                    "ubdReport",
+                    ubdFields as unknown as Record<string, unknown>,
+                    "basisNumber",
+                  )}
+                >
                   <code>№ розпорядження</code>
                   <TextField
                     select
@@ -6258,7 +6557,7 @@ export function DocumentsPage(_props: {
                       updateUbdBasisOrder(event.target.value)
                     }
                   >
-                    {!UBD_BASIS_ORDER_OPTIONS.some(
+                    {!allBasisOrderOptions().some(
                       (item) =>
                         item.number === ubdFields.basisNumber &&
                         item.date === ubdFields.basisDate,
@@ -6276,7 +6575,7 @@ export function DocumentsPage(_props: {
                         · збережене
                       </MenuItem>
                     ) : null}
-                    {UBD_BASIS_ORDER_OPTIONS.map((option) => (
+                    {allBasisOrderOptions().map((option) => (
                       <MenuItem
                         key={ubdBasisOrderOptionKey(option)}
                         value={ubdBasisOrderOptionKey(option)}
@@ -6286,7 +6585,13 @@ export function DocumentsPage(_props: {
                     ))}
                   </TextField>
                 </label>
-                <label>
+                <label
+                  className={documentBasisFieldHighlightClass(
+                    "ubdReport",
+                    ubdFields as unknown as Record<string, unknown>,
+                    "basisDate",
+                  )}
+                >
                   <code>Дата розпорядження</code>
                   <TextField
                     size="small"
@@ -6307,12 +6612,16 @@ export function DocumentsPage(_props: {
                   !ubdBasisDateMatchesTaskPeriod(
                     ubdFields.taskPeriod,
                     ubdFields.basisDate,
+                    ubdFields.taskPlace,
                   ) ? (
                     <Alert severity="warning" className="ubd-basis-not-ready-alert">
                       {ubdFields.basisNotReady
                         ? "Рапорт позначено як незавершений: Word і PDF заблоковані, доки не оберете потрібне розпорядження або не знімете позначку."
                         : `Дата БР (${ubdFields.basisDate || "—"}) не збігається з початком періоду завдань${
-                            ubdHasExactBasisForTaskPeriod(ubdFields.taskPeriod)
+                            ubdHasExactBasisForTaskPeriod(
+                              ubdFields.taskPeriod,
+                              ubdFields.taskPlace,
+                            )
                               ? ""
                               : " — у списках ще немає БР на цю дату"
                           }. Поставте «БР ще не підходить», якщо рапорт поки не можна сформувати.`}
@@ -6433,32 +6742,232 @@ export function DocumentsPage(_props: {
                 ["phone", "Телефон"],
                 ["taskPeriod", "Період завдань"],
                 ["taskPlace", "Місце завдань"],
-                ["basis", "Підстава"],
-                ["date", "Дата"],
-                ["folderName", "Папка"],
               ] as Array<
-                [Exclude<keyof Form6ReportFields, "signatories">, string]
+                [
+                  Exclude<
+                    keyof Form6ReportFields,
+                    "signatories" | "basisManual"
+                  >,
+                  string,
+                ]
               >
             ).map(([key, label]) => (
-              <label key={key} className={key === "staffPosition" || key === "address" || key === "basis" || key === "commander" ? "wide" : undefined}>
+              <label
+                key={key}
+                className={documentFieldLabelClass(
+                  (key === "staffPosition" ||
+                    key === "address" ||
+                    key === "commander") &&
+                    "wide",
+                  documentRequiredFieldIsBlank(
+                    "form6Report",
+                    key,
+                    form6Fields as unknown as Record<string, unknown>,
+                  ) && "document-field-invalid",
+                )}
+              >
+                <code>{label}</code>
+                <div className="document-field-with-hint">
+                  <TextField
+                    size="small"
+                    fullWidth
+                    multiline={
+                      key === "staffPosition" ||
+                      key === "address" ||
+                      key === "commander"
+                    }
+                    rows={
+                      key === "staffPosition" ||
+                      key === "address" ||
+                      key === "commander"
+                        ? 2
+                        : undefined
+                    }
+                    value={form6Fields[key]}
+                    onChange={(event) =>
+                      updateForm6Field(key, event.target.value)
+                    }
+                  />
+                  {key === "idDocument" &&
+                  isBlankForm6IdDocument(form6Fields.idDocument) ? (
+                    <span className="document-field-hint document-field-hint-error">
+                      Потрібно серію та номер паспорта, не лише назву документа
+                    </span>
+                  ) : null}
+                  {key === "rnokpp" && isBlankUbdRnokpp(form6Fields.rnokpp) ? (
+                    <span className="document-field-hint document-field-hint-error">
+                      Потрібно рівно 10 цифр РНОКПП
+                      {String(form6Fields.rnokpp ?? "").replace(/\D/g, "")
+                        .length
+                        ? ` · зараз ${String(form6Fields.rnokpp ?? "").replace(/\D/g, "").length}`
+                        : ""}
+                    </span>
+                  ) : null}
+                </div>
+              </label>
+            ))}
+            <div className="wide ubd-basis-not-ready">
+              <Checkbox
+                checked={form6Fields.basisManual}
+                onCheckedChange={(checked) =>
+                  updateForm6BasisManual(checked === true)
+                }
+                label="Ввести БР вручну"
+              />
+            </div>
+            <label
+              className={documentBasisFieldHighlightClass(
+                "form6Report",
+                form6Fields as unknown as Record<string, unknown>,
+                "basisNumber",
+              )}
+            >
+              <code>№ розпорядження</code>
+              {form6Fields.basisManual ? (
+                <TextField
+                  size="small"
+                  fullWidth
+                  value={form6Fields.basisNumber}
+                  onChange={(event) =>
+                    updateForm6Field("basisNumber", event.target.value)
+                  }
+                  placeholder="4862/ОКП/…/дск"
+                />
+              ) : (
+                <TextField
+                  select
+                  size="small"
+                  fullWidth
+                  value={ubdBasisOrderOptionKey({
+                    number: form6Fields.basisNumber || FALLBACK_UBD_BASIS.number,
+                    date: form6Fields.basisDate || FALLBACK_UBD_BASIS.date,
+                  })}
+                  onChange={(event) =>
+                    updateForm6BasisOrder(event.target.value)
+                  }
+                >
+                  {!allBasisOrderOptions().some(
+                    (item) =>
+                      item.number === form6Fields.basisNumber &&
+                      item.date === form6Fields.basisDate,
+                  ) && form6Fields.basisNumber ? (
+                    <MenuItem
+                      value={ubdBasisOrderOptionKey({
+                        number: form6Fields.basisNumber,
+                        date: form6Fields.basisDate,
+                      })}
+                    >
+                      {formatUbdBasisOrderLabel({
+                        number: form6Fields.basisNumber,
+                        date: form6Fields.basisDate,
+                      })}{" "}
+                      · збережене
+                    </MenuItem>
+                  ) : null}
+                  {allBasisOrderOptions().map((option) => (
+                    <MenuItem
+                      key={`form6-${ubdBasisOrderOptionKey(option)}`}
+                      value={ubdBasisOrderOptionKey(option)}
+                    >
+                      {formatUbdBasisOrderLabel(option)}
+                    </MenuItem>
+                  ))}
+                </TextField>
+              )}
+            </label>
+            <label
+              className={documentBasisFieldHighlightClass(
+                "form6Report",
+                form6Fields as unknown as Record<string, unknown>,
+                "basisDate",
+              )}
+            >
+              <code>Дата розпорядження</code>
+              <TextField
+                size="small"
+                fullWidth
+                value={form6Fields.basisDate}
+                readOnly={!form6Fields.basisManual}
+                onChange={
+                  form6Fields.basisManual
+                    ? (event) =>
+                        updateForm6Field("basisDate", event.target.value)
+                    : undefined
+                }
+                placeholder="дд.мм.рррр"
+              />
+            </label>
+            {!ubdBasisDateMatchesTaskPeriod(
+              form6Fields.taskPeriod,
+              form6Fields.basisDate,
+              form6Fields.taskPlace,
+            ) ? (
+              <Alert severity="warning" className="ubd-basis-not-ready-alert">
+                {form6Fields.basisManual
+                  ? `Дата БР (${form6Fields.basisDate || "—"}) не збігається з початком періоду завдань.`
+                  : `Дата БР (${form6Fields.basisDate || "—"}) не збігається з початком періоду завдань${
+                      ubdHasExactBasisForTaskPeriod(
+                        form6Fields.taskPeriod,
+                        form6Fields.taskPlace,
+                      )
+                        ? ""
+                        : " — у списках ще немає БР на цю дату"
+                    }. Поставте «Ввести БР вручну», якщо потрібне інше розпорядження.`}
+              </Alert>
+            ) : null}
+            <label className="wide">
+              <code>Підстава</code>
+              <div className="document-field-with-hint">
+                <TextField
+                  size="small"
+                  fullWidth
+                  multiline
+                  rows={2}
+                  value={form6Fields.basis}
+                  readOnly={!form6Fields.basisManual}
+                  onChange={
+                    form6Fields.basisManual
+                      ? (event) =>
+                          updateForm6Field("basis", event.target.value)
+                      : undefined
+                  }
+                  placeholder="Бойове розпорядження командира … №… від …"
+                />
+                {form6Fields.basisManual ? (
+                  <span className="document-field-hint">
+                    У Word вже є «Підстава:» — введіть лише текст БР після
+                    цього слова.
+                  </span>
+                ) : null}
+              </div>
+            </label>
+            {(
+              [
+                ["date", "Дата"],
+                ["formPurpose", "Для чого форма"],
+                ["folderName", "Папка"],
+              ] as Array<
+                [
+                  Exclude<
+                    keyof Form6ReportFields,
+                    "signatories" | "basisManual"
+                  >,
+                  string,
+                ]
+              >
+            ).map(([key, label]) => (
+              <label
+                key={key}
+                className={documentFieldLabelClass(
+                  key === "formPurpose" && "wide",
+                )}
+              >
                 <code>{label}</code>
                 <TextField
                   size="small"
                   fullWidth
-                  multiline={
-                    key === "staffPosition" ||
-                    key === "address" ||
-                    key === "basis" ||
-                    key === "commander"
-                  }
-                  rows={
-                    key === "staffPosition" ||
-                    key === "address" ||
-                    key === "basis" ||
-                    key === "commander"
-                      ? 2
-                      : undefined
-                  }
+                  multiline={key === "formPurpose"}
+                  rows={key === "formPurpose" ? 2 : undefined}
                   value={form6Fields[key]}
                   onChange={(event) =>
                     updateForm6Field(key, event.target.value)
@@ -6542,6 +7051,7 @@ export function DocumentsPage(_props: {
                 ["rank", "Звання"],
                 ["fullName", "ПІБ"],
                 ["staffPosition", "Посада згідно штату"],
+                ["formPurpose", "Для чого форма"],
                 ["date", "Дата"],
                 ["folderName", "Папка"],
               ] as Array<
@@ -6550,16 +7060,33 @@ export function DocumentsPage(_props: {
             ).map(([key, label]) => (
               <label
                 key={key}
-                className={
-                  key === "staffPosition" || key === "commander" ? "wide" : undefined
-                }
+                className={documentFieldLabelClass(
+                  (key === "staffPosition" ||
+                    key === "commander" ||
+                    key === "formPurpose") && "wide",
+                  documentRequiredFieldIsBlank(
+                    "form12Report",
+                    key,
+                    form12Fields as unknown as Record<string, unknown>,
+                  ) && "document-field-invalid",
+                )}
               >
                 <code>{label}</code>
                 <TextField
                   size="small"
                   fullWidth
-                  multiline={key === "staffPosition" || key === "commander"}
-                  rows={key === "staffPosition" || key === "commander" ? 2 : undefined}
+                  multiline={
+                    key === "staffPosition" ||
+                    key === "commander" ||
+                    key === "formPurpose"
+                  }
+                  rows={
+                    key === "staffPosition" ||
+                    key === "commander" ||
+                    key === "formPurpose"
+                      ? 2
+                      : undefined
+                  }
                   value={form12Fields[key]}
                   onChange={(event) =>
                     updateForm12Field(key, event.target.value)
@@ -6708,13 +7235,20 @@ export function DocumentsPage(_props: {
             ).map(([key, label]) => (
               <label
                 key={key}
-                className={
-                  key === "staffPosition" ||
-                  key.endsWith("Paragraph") ||
-                  key === "conclusion"
-                    ? "wide"
-                    : undefined
-                }
+                className={documentFieldLabelClass(
+                  (key === "staffPosition" ||
+                    key.endsWith("Paragraph") ||
+                    key === "conclusion") &&
+                    "wide",
+                  documentRequiredFieldIsBlank(
+                    "serviceCharacteristic",
+                    key,
+                    serviceCharacteristicFields as unknown as Record<
+                      string,
+                      unknown
+                    >,
+                  ) && "document-field-invalid",
+                )}
               >
                 <code>{label}</code>
                 <TextField
@@ -6794,15 +7328,19 @@ export function DocumentsPage(_props: {
             ).map(([key, label]) => (
               <label
                 key={key}
-                className={
-                  key === "staffPosition" ||
-                  key === "bodyParagraph" ||
-                  key === "basisOrders" ||
-                  key === "basisJournal" ||
-                  key === "periodNote"
-                    ? "wide"
-                    : undefined
-                }
+                className={documentFieldLabelClass(
+                  (key === "staffPosition" ||
+                    key === "bodyParagraph" ||
+                    key === "basisOrders" ||
+                    key === "basisJournal" ||
+                    key === "periodNote") &&
+                    "wide",
+                  documentRequiredFieldIsBlank(
+                    "zhbdCertificate",
+                    key,
+                    zhbdCertificateFields as unknown as Record<string, unknown>,
+                  ) && "document-field-invalid",
+                )}
               >
                 <code>{label}</code>
                 <div className="document-field-with-hint">
@@ -6906,16 +7444,20 @@ export function DocumentsPage(_props: {
             ).map(([key, label]) => (
               <label
                 key={key}
-                className={
-                  key === "staffPosition" ||
-                  key === "signerTitle" ||
-                  key === "circumstances" ||
-                  key === "requestText" ||
-                  key === "commander" ||
-                  key === "coveringCommander"
-                    ? "wide"
-                    : undefined
-                }
+                className={documentFieldLabelClass(
+                  (key === "staffPosition" ||
+                    key === "signerTitle" ||
+                    key === "circumstances" ||
+                    key === "requestText" ||
+                    key === "commander" ||
+                    key === "coveringCommander") &&
+                    "wide",
+                  documentRequiredFieldIsBlank(
+                    "ubdRestoreReport",
+                    key,
+                    ubdRestoreFields as unknown as Record<string, unknown>,
+                  ) && "document-field-invalid",
+                )}
               >
                 <code>{label}</code>
                 <TextField
@@ -7076,7 +7618,15 @@ export function DocumentsPage(_props: {
             </IconButton>
           </div>
           <div className="document-placeholder-map salary-document-map">
-            <label>
+            <label
+              className={documentFieldLabelClass(
+                documentRequiredFieldIsBlank(
+                  "temporaryMilitaryId",
+                  "rank",
+                  ticketFields as unknown as Record<string, unknown>,
+                ) && "document-field-invalid",
+              )}
+            >
               <span>Звання</span>
               <TextField
                 size="small"
@@ -7087,7 +7637,15 @@ export function DocumentsPage(_props: {
                 }
               />
             </label>
-            <label>
+            <label
+              className={documentFieldLabelClass(
+                documentRequiredFieldIsBlank(
+                  "temporaryMilitaryId",
+                  "fullName",
+                  ticketFields as unknown as Record<string, unknown>,
+                ) && "document-field-invalid",
+              )}
+            >
               <span>ПІБ</span>
               <TextField
                 size="small"
@@ -7109,7 +7667,15 @@ export function DocumentsPage(_props: {
                 }
               />
             </label>
-            <label>
+            <label
+              className={documentFieldLabelClass(
+                documentRequiredFieldIsBlank(
+                  "temporaryMilitaryId",
+                  "birthDate",
+                  ticketFields as unknown as Record<string, unknown>,
+                ) && "document-field-invalid",
+              )}
+            >
               <span>Дата народження</span>
               <TextField
                 size="small"
@@ -7283,26 +7849,23 @@ export function DocumentsPage(_props: {
                       ["reporterRank", "Звання того, хто подає"],
                       ["reporterTitle", "Посада того, хто подає"],
                     ] as Array<[keyof LostMilitaryIdFields, string]>)),
-                ["investigatorFullName", "Хто проводить розслідування"],
-                ["investigatorRank", "Звання розслідувача"],
-                ["investigatorPosition", "Посада розслідувача"],
-                ["reportDate", "Дата рапорту"],
-                ["orderNumber", "Номер наказу"],
-                ["orderDate", "Дата наказу"],
-                ["folderName", "Папка"],
               ] as Array<[keyof LostMilitaryIdFields, string]>
             ).map(([key, label]) => (
               <label
                 key={key}
-                className={
-                  key === "staffPosition" ||
-                  key === "addressee" ||
-                  key === "reporterTitle" ||
-                  key === "investigatorPosition" ||
-                  key === "customCircumstances"
-                    ? "wide"
-                    : undefined
-                }
+                className={documentFieldLabelClass(
+                  (key === "staffPosition" ||
+                    key === "addressee" ||
+                    key === "reporterTitle" ||
+                    key === "investigatorPosition" ||
+                    key === "customCircumstances") &&
+                    "wide",
+                  documentRequiredFieldIsBlank(
+                    "lostMilitaryId",
+                    key,
+                    lostMilitaryIdFields as unknown as Record<string, unknown>,
+                  ) && "document-field-invalid",
+                )}
               >
                 <code>{label}</code>
                 <TextField
@@ -7322,6 +7885,94 @@ export function DocumentsPage(_props: {
                       ? 2
                       : undefined
                   }
+                  value={String(lostMilitaryIdFields[key] ?? "")}
+                  onChange={(event) =>
+                    updateLostMilitaryIdField(
+                      key,
+                      event.target.value as LostMilitaryIdFields[typeof key],
+                    )
+                  }
+                />
+              </label>
+            ))}
+            <div className="wide document-investigator-manual">
+              <Checkbox
+                checked={lostMilitaryIdFields.investigatorManual}
+                onCheckedChange={(checked) =>
+                  applyLostMilitaryIdPatch({
+                    investigatorManual: Boolean(checked),
+                  })
+                }
+                label="Ввести розслідувача вручну"
+              />
+            </div>
+            <label className="wide">
+              <code>Хто проводить розслідування</code>
+              {lostMilitaryIdFields.investigatorManual ? (
+                <TextField
+                  size="small"
+                  fullWidth
+                  value={lostMilitaryIdFields.investigatorFullName}
+                  onChange={(event) =>
+                    applyLostMilitaryIdPatch({
+                      investigatorFullName: event.target.value,
+                      investigatorPersonId: "",
+                    })
+                  }
+                />
+              ) : (
+                <PersonnelNamePicker
+                  value={lostMilitaryIdFields.investigatorFullName}
+                  onPick={(row) =>
+                    applyLostMilitaryIdPatch(investigatorFromPersonnelRow(row))
+                  }
+                />
+              )}
+            </label>
+            <label>
+              <code>Звання розслідувача</code>
+              <TextField
+                size="small"
+                fullWidth
+                disabled={!lostMilitaryIdFields.investigatorManual}
+                value={lostMilitaryIdFields.investigatorRank}
+                onChange={(event) =>
+                  updateLostMilitaryIdField("investigatorRank", event.target.value)
+                }
+              />
+            </label>
+            <label className="wide">
+              <code>Посада розслідувача</code>
+              <TextField
+                size="small"
+                fullWidth
+                multiline
+                rows={2}
+                disabled={!lostMilitaryIdFields.investigatorManual}
+                value={capitalizeReportPosition(
+                  lostMilitaryIdFields.investigatorPosition,
+                )}
+                onChange={(event) =>
+                  updateLostMilitaryIdField(
+                    "investigatorPosition",
+                    event.target.value,
+                  )
+                }
+              />
+            </label>
+            {(
+              [
+                ["reportDate", "Дата рапорту"],
+                ["orderNumber", "Номер наказу"],
+                ["orderDate", "Дата наказу"],
+                ["folderName", "Папка"],
+              ] as Array<[keyof LostMilitaryIdFields, string]>
+            ).map(([key, label]) => (
+              <label key={key}>
+                <code>{label}</code>
+                <TextField
+                  size="small"
+                  fullWidth
                   value={String(lostMilitaryIdFields[key] ?? "")}
                   onChange={(event) =>
                     updateLostMilitaryIdField(
@@ -7501,7 +8152,15 @@ export function DocumentsPage(_props: {
         <section className="analytics-panel document-fields">
           <div className="panel-heading">Дані для рапорта</div>
           <div className="document-placeholder-map salary-document-map">
-            <label>
+            <label
+              className={documentFieldLabelClass(
+                documentRequiredFieldIsBlank(
+                  "salaryPowerAttorney",
+                  "fullName",
+                  salaryFields as unknown as Record<string, unknown>,
+                ) && "document-field-invalid",
+              )}
+            >
               <code>ФИО</code>
               <TextField
                 size="small"
@@ -7513,7 +8172,15 @@ export function DocumentsPage(_props: {
                 placeholder="ПРІЗВИЩЕ Ім'я По батькові"
               />
             </label>
-            <label>
+            <label
+              className={documentFieldLabelClass(
+                documentRequiredFieldIsBlank(
+                  "salaryPowerAttorney",
+                  "rnokpp",
+                  salaryFields as unknown as Record<string, unknown>,
+                ) && "document-field-invalid",
+              )}
+            >
               <code>ІНН</code>
               <TextField
                 size="small"
@@ -7525,7 +8192,15 @@ export function DocumentsPage(_props: {
                 placeholder="РНОКПП"
               />
             </label>
-            <label>
+            <label
+              className={documentFieldLabelClass(
+                documentRequiredFieldIsBlank(
+                  "salaryPowerAttorney",
+                  "iban",
+                  salaryFields as unknown as Record<string, unknown>,
+                ) && "document-field-invalid",
+              )}
+            >
               <code>IBAN</code>
               <TextField
                 size="small"
@@ -7557,7 +8232,15 @@ export function DocumentsPage(_props: {
                 ))}
               </TextField>
             </label>
-            <label>
+            <label
+              className={documentFieldLabelClass(
+                documentRequiredFieldIsBlank(
+                  "salaryPowerAttorney",
+                  "bankName",
+                  salaryFields as unknown as Record<string, unknown>,
+                ) && "document-field-invalid",
+              )}
+            >
               <code>Назва банку</code>
               <TextField
                 size="small"
@@ -7862,6 +8545,7 @@ export function DocumentsPage(_props: {
               <MenuItem value="READY_TO_SEND">Готово до відправки</MenuItem>
               <MenuItem value="INCOMPLETE">Не готові до відправки</MenuItem>
               <MenuItem value="COMPLETE">Повний прогрес</MenuItem>
+              <MenuItem value="SKIPPED_SZCH">Не потрібні: СЗЧ</MenuItem>
             </TextField>
           </div>
           {journalTypeFilter === "ubdReport" ? (
@@ -8015,6 +8699,9 @@ export function DocumentsPage(_props: {
             className={[
               "documents-journal-table",
               showUbdExitDateColumn ? "documents-journal-table-with-exit-date" : "",
+              showFormPurposeColumn
+                ? "documents-journal-table-with-form-purpose"
+                : "",
             ]
               .filter(Boolean)
               .join(" ")}
@@ -8024,6 +8711,9 @@ export function DocumentsPage(_props: {
                 "documents-journal-row",
                 "header",
                 showUbdExitDateColumn ? "documents-journal-row-with-exit-date" : "",
+                showFormPurposeColumn
+                  ? "documents-journal-row-with-form-purpose"
+                  : "",
               ]
                 .filter(Boolean)
                 .join(" ")}
@@ -8072,6 +8762,7 @@ export function DocumentsPage(_props: {
               <span>Статус</span>
               <span>Коментар</span>
               <span>Файли</span>
+              {showFormPurposeColumn ? <span>Для чого форма</span> : null}
               {showUbdExitDateColumn ? (
                 <button
                   type="button"
@@ -8155,31 +8846,30 @@ export function DocumentsPage(_props: {
                       }
                     : document;
                 const progress = getDocumentProgressPercent(journalDocument);
-                const statusNote = liveDocumentStatusNote(journalDocument);
-                const liveFields =
-                  document.id === selectedDocumentId && mode === "ubdReport"
-                    ? (ubdFields as unknown as Record<string, unknown>)
-                    : ((journalDocument.fields || {}) as Record<string, unknown>);
-                const liveWorkflow =
-                  document.id === selectedDocumentId
-                    ? mergeSalaryWorkflow(journalDocument.workflow)
-                    : undefined;
-                const isComplete = ubdDocumentIsComplete(
-                  journalDocument,
-                  liveWorkflow,
-                );
+                const liveFields = liveJournalFields(journalDocument);
+                const skippedSzch = readDocumentSkippedDueToSzch(liveFields);
+                const statusNote = [
+                  skippedSzch ? "Не потрібно: СЗЧ" : "",
+                  liveDocumentStatusNote(journalDocument),
+                ]
+                  .filter(Boolean)
+                  .join(" · ");
+                const isComplete = !skippedSzch && progress >= 100;
                 const exportBlocked = journalUbdExportBlockedIds.has(
                   document.id,
                 );
                 const hasMissingFields =
-                  journalDocument.type === "ubdReport" &&
+                  !skippedSzch &&
                   !isComplete &&
-                  ubdDocumentHasEmptyInputs(liveFields);
+                  documentHasEmptyInputs(journalDocument.type, liveFields);
                 const hasBasisDateMismatch =
-                  journalDocument.type === "ubdReport" &&
+                  !skippedSzch &&
                   !isComplete &&
                   !hasMissingFields &&
-                  ubdDocumentHasBasisDateMismatch(liveFields);
+                  documentHasBasisDateMismatch(
+                    journalDocument.type,
+                    liveFields,
+                  );
                 const openDocument = () => {
                   void openPersonDocument(journalDocument).then(() => {
                     window.requestAnimationFrame(() => {
@@ -8199,10 +8889,14 @@ export function DocumentsPage(_props: {
                       showUbdExitDateColumn
                         ? "documents-journal-row-with-exit-date"
                         : "",
+                      showFormPurposeColumn
+                        ? "documents-journal-row-with-form-purpose"
+                        : "",
                       document.id === selectedDocumentId ? "active" : "",
                       isComplete ? "is-complete" : "",
                       hasMissingFields ? "is-incomplete" : "",
                       hasBasisDateMismatch ? "is-basis-mismatch" : "",
+                      skippedSzch ? "is-skipped-szch" : "",
                     ]
                       .filter(Boolean)
                       .join(" ")}
@@ -8210,10 +8904,14 @@ export function DocumentsPage(_props: {
                     role="button"
                     tabIndex={0}
                     title={
-                      isComplete
-                        ? "Весь прогрес заповнений — готовий, в експорт «Не подавалися» не входить"
+                      skippedSzch
+                        ? "Не потрібно робити: СЗЧ — не входить в експорт"
+                        : isComplete
+                        ? journalDocument.type === "ubdReport"
+                          ? "Весь прогрес заповнений — готовий, в експорт «Не подавалися» не входить"
+                          : "Весь прогрес заповнений"
                         : hasMissingFields
-                          ? "Не заповнені обов’язкові поля рапорту УБД"
+                          ? "Не заповнені обов’язкові поля"
                           : hasBasisDateMismatch
                             ? "Дата БР не збігається з початком періоду завдань"
                             : undefined
@@ -8228,9 +8926,11 @@ export function DocumentsPage(_props: {
                     <span
                       className="documents-journal-export-check"
                       title={
-                        exportBlocked
-                          ? "Не входить в експорт «Не подавалися»: прогрес заповнений повністю"
-                          : undefined
+                        skippedSzch
+                          ? "Не входить в експорт: документ не потрібен через СЗЧ"
+                          : exportBlocked
+                            ? "Не входить в експорт «Не подавалися»: прогрес заповнений повністю"
+                            : undefined
                       }
                       onClick={(event) => event.stopPropagation()}
                       onKeyDown={(event) => event.stopPropagation()}
@@ -8279,6 +8979,17 @@ export function DocumentsPage(_props: {
                       {statusNote || "—"}
                     </span>
                     <span>{getDocumentFileSummary(document)}</span>
+                    {showFormPurposeColumn ? (
+                      <span
+                        className="documents-journal-note"
+                        title={
+                          readDocumentFormPurpose(document, liveFields) ||
+                          undefined
+                        }
+                      >
+                        {readDocumentFormPurpose(document, liveFields) || "—"}
+                      </span>
+                    ) : null}
                     {showUbdExitDateColumn ? (
                       <span title={readDocumentUbdTaskPeriod(document) || undefined}>
                         {readDocumentUbdTaskPeriodStartLabel(document) || "—"}
@@ -8694,11 +9405,7 @@ export function DocumentsPage(_props: {
               {visiblePersonDocuments.length ? (
                 visiblePersonDocuments.map((document) => (
                   <article
-                    className={
-                      document.id === selectedDocumentId
-                        ? "salary-person-document-shell active"
-                        : "salary-person-document-shell"
-                    }
+                    className={personDocumentShellClass(document)}
                     key={document.id}
                   >
                     <button
@@ -8807,11 +9514,7 @@ export function DocumentsPage(_props: {
               {visiblePersonDocuments.length ? (
                 visiblePersonDocuments.map((document) => (
                   <article
-                    className={
-                      document.id === selectedDocumentId
-                        ? "salary-person-document-shell active"
-                        : "salary-person-document-shell"
-                    }
+                    className={personDocumentShellClass(document)}
                     key={document.id}
                   >
                     <button
@@ -8920,11 +9623,7 @@ export function DocumentsPage(_props: {
               {visiblePersonDocuments.length ? (
                 visiblePersonDocuments.map((document) => (
                   <article
-                    className={
-                      document.id === selectedDocumentId
-                        ? "salary-person-document-shell active"
-                        : "salary-person-document-shell"
-                    }
+                    className={personDocumentShellClass(document)}
                     key={document.id}
                   >
                     <button
@@ -9023,11 +9722,7 @@ export function DocumentsPage(_props: {
               {visiblePersonDocuments.length ? (
                 visiblePersonDocuments.map((document) => (
                   <article
-                    className={
-                      document.id === selectedDocumentId
-                        ? "salary-person-document-shell active"
-                        : "salary-person-document-shell"
-                    }
+                    className={personDocumentShellClass(document)}
                     key={document.id}
                   >
                     <button
@@ -9126,11 +9821,7 @@ export function DocumentsPage(_props: {
               {visiblePersonDocuments.length ? (
                 visiblePersonDocuments.map((document) => (
                   <article
-                    className={
-                      document.id === selectedDocumentId
-                        ? "salary-person-document-shell active"
-                        : "salary-person-document-shell"
-                    }
+                    className={personDocumentShellClass(document)}
                     key={document.id}
                   >
                     <button
@@ -9231,11 +9922,7 @@ export function DocumentsPage(_props: {
               {visiblePersonDocuments.length ? (
                 visiblePersonDocuments.map((document) => (
                   <article
-                    className={
-                      document.id === selectedDocumentId
-                        ? "salary-person-document-shell active"
-                        : "salary-person-document-shell"
-                    }
+                    className={personDocumentShellClass(document)}
                     key={document.id}
                   >
                     <button
@@ -9336,11 +10023,7 @@ export function DocumentsPage(_props: {
               {visiblePersonDocuments.length ? (
                 visiblePersonDocuments.map((document) => (
                   <article
-                    className={
-                      document.id === selectedDocumentId
-                        ? "salary-person-document-shell active"
-                        : "salary-person-document-shell"
-                    }
+                    className={personDocumentShellClass(document)}
                     key={document.id}
                   >
                     <button
@@ -9439,11 +10122,7 @@ export function DocumentsPage(_props: {
               {visiblePersonDocuments.length ? (
                 visiblePersonDocuments.map((document) => (
                   <article
-                    className={
-                      document.id === selectedDocumentId
-                        ? "salary-person-document-shell active"
-                        : "salary-person-document-shell"
-                    }
+                    className={personDocumentShellClass(document)}
                     key={document.id}
                   >
                     <button
@@ -9550,11 +10229,7 @@ export function DocumentsPage(_props: {
               {visiblePersonDocuments.length ? (
                 visiblePersonDocuments.map((document) => (
                   <article
-                    className={
-                      document.id === selectedDocumentId
-                        ? "salary-person-document-shell active"
-                        : "salary-person-document-shell"
-                    }
+                    className={personDocumentShellClass(document)}
                     key={document.id}
                   >
                     <button

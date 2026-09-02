@@ -2,6 +2,7 @@ import JSZip from "jszip";
 import { loadUbdTemplate } from "./ubdTemplateStore";
 import { injectUbdApprovalTwoColumnBlock } from "./ubdWordExport";
 import { stripRedColorInWordZip } from "./wordXml";
+import { capitalizeReportPosition } from "./reportPosition";
 
 type WordSignatory = {
   blockType: "SIGNER" | "APPROVAL";
@@ -264,7 +265,7 @@ const fillPersonRow = (rowTemplate: string, person: UbdBulkPersonRow, index: num
     RANK: person.rank.trim(),
     FULL_NAME_1: surname,
     FULL_NAME_2: givenNames,
-    POSITION: person.staffPosition.trim(),
+    POSITION: capitalizeReportPosition(person.staffPosition),
     BIRTH_DATE: person.birthDate.trim(),
     RNOKPP: person.rnokpp.trim(),
     TASK_PERIOD: formatUbdBulkTaskPeriod(person.taskPeriod),

@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import {
   Alert,
   Box,
@@ -8,18 +8,14 @@ import {
 } from "@/components/sci/SciPrimitives";
 import {
   ArrowRightOutlinedIcon,
-  FileDownloadOutlinedIcon,
-  FileUploadOutlinedIcon,
   SkipNextOutlinedIcon,
-  SyncAltOutlinedIcon,
 } from "@/components/sci/icons";
 import type { SciDataTableExportContext } from "@/components/sci/SciDataTable";
 import {
   MaterialReactTable,
   useMaterialReactTable,
 } from "@/components/sci/SciDataTable";
-import { anketaSheetEditUrl, type AnketaRow } from "./anketaSheet";
-import { anketaGoogleCellUrl } from "./anketaGaps";
+import { type AnketaRow } from "./anketaSheet";
 import { AnketaPersonSidePanel } from "./AnketaPersonSidePanel";
 import { exportAnketaSheetExcel } from "./anketaExcelExport";
 import {
@@ -28,17 +24,14 @@ import {
   buildAnketaTdProps,
 } from "./buildAnketaTableColumns";
 import { AnketaGapColumnsMenu } from "./components/AnketaGapColumnsMenu";
-import { AnketaSyncPanel } from "./components/AnketaSyncPanel";
 import { useAnketaGapColumnsMenu } from "./hooks/useAnketaGapColumnsMenu";
 import { useAnketaGapSearch } from "./hooks/useAnketaGapSearch";
 import { useAnketaSheetLoader } from "./hooks/useAnketaSheetLoader";
 import { useAuth } from "../../auth/AuthProvider";
 
 export function AnketaDataPage() {
-  const { canEditArea, isAdmin } = useAuth();
+  const { canEditArea } = useAuth();
   const canEdit = canEditArea("anketaData");
-  const [showSyncHelp, setShowSyncHelp] = useState(false);
-  const [syncExpanded, setSyncExpanded] = useState(false);
 
   const sheet = useAnketaSheetLoader();
   const gapColumns = useAnketaGapColumnsMenu();
@@ -46,6 +39,7 @@ export function AnketaDataPage() {
     rows: sheet.rows,
     gapColumnKeys: gapColumns.gapColumnKeys,
     missingQuestionnaireNames: sheet.missingQuestionnaireNames,
+    setMissingQuestionnaireNames: sheet.setMissingQuestionnaireNames,
     appsScriptUrl: sheet.appsScriptUrl,
     persistSnapshot: sheet.persistSnapshot,
     setMessage: sheet.setMessage,
@@ -55,16 +49,6 @@ export function AnketaDataPage() {
     setGapColumnsOpen: gapColumns.setGapColumnsOpen,
     gapColumnsOpen: gapColumns.gapColumnsOpen,
   });
-
-  const handleLoadFromGoogle = async () => {
-    const result = await sheet.loadFromGoogle();
-    if (result?.clearSearch) gap.clearGapFocus();
-  };
-
-  const handleLoadFromCsv = async (file: File | undefined) => {
-    const result = await sheet.loadFromCsvFile(file);
-    if (result?.clearSearch) gap.clearGapFocus();
-  };
 
   const exportTable = async (
     context: SciDataTableExportContext<AnketaRow>,
@@ -141,13 +125,6 @@ export function AnketaDataPage() {
           <Typography component="h1" variant="h4">
             Анкетні дані
           </Typography>
-          <Typography
-            variant="body2"
-            color="text.secondary"
-            className="anketa-topbar-subtitle"
-          >
-            Заповнення пропусків · локальне редагування · експорт / Google sync
-          </Typography>
         </Box>
 
         <div className="anketa-toolbar">
@@ -211,190 +188,24 @@ export function AnketaDataPage() {
             >
               Стоп
             </Button>
-          </div>
-
-          <div className="anketa-toolbar-group" aria-label="Дані">
             <Button
               variant="outlined"
-              startIcon={<SyncAltOutlinedIcon />}
               disabled={
+                !canEdit ||
                 sheet.isLoading ||
-                sheet.isAddingFromEjoos ||
-                sheet.isMergingPersonnel ||
-                sheet.isPushingStaffSheet ||
-                !canEdit
+                gap.isFillingAbsent ||
+                !sheet.rows.length
               }
-              onClick={() => void sheet.addMissingFromEjoos()}
-              title="Додати в анкети лише тих, кого ще немає: з ООС і Виключених збереженого ЕЖООС. Існуючі анкети не змінюються."
+              onClick={() => void gap.fillAbsentQuestionnaireCells()}
+              title="Для осіб без анкет записати «дані відсутні» у порожні вибрані колонки. Якщо анкета вже з’явилась — зняти «дані відсутні», щоб пошук міг заповнити."
             >
               <span className="anketa-label-full">
-                {sheet.isAddingFromEjoos ? "З ЕЖООС…" : "З ЕЖООС"}
+                {gap.isFillingAbsent
+                  ? "Пишу…"
+                  : "Без анкет → дані відсутні"}
               </span>
               <span className="anketa-label-short" aria-hidden="true">
-                {sheet.isAddingFromEjoos ? "ЕЖ…" : "+ ЕЖ"}
-              </span>
-            </Button>
-            <Button
-              variant="outlined"
-              startIcon={<SyncAltOutlinedIcon />}
-              disabled={
-                sheet.isLoading ||
-                sheet.isMergingPersonnel ||
-                sheet.isAddingFromEjoos ||
-                sheet.isPushingStaffSheet ||
-                !sheet.rows.length ||
-                !canEdit
-              }
-              onClick={() => void sheet.mergeToPersonnel()}
-              title="Оновити особовий склад"
-            >
-              <span className="anketa-label-full">
-                {sheet.isMergingPersonnel
-                  ? "Злиття…"
-                  : "Оновити особовий склад"}
-              </span>
-              <span className="anketa-label-short" aria-hidden="true">
-                {sheet.isMergingPersonnel ? "Злиття…" : "→ ООС"}
-              </span>
-            </Button>
-            <Button
-              component="label"
-              variant="contained"
-              startIcon={<FileUploadOutlinedIcon />}
-              disabled={
-                sheet.isLoading ||
-                sheet.isImportingStaffSheet ||
-                sheet.isPushingStaffSheet ||
-                sheet.isDownloadingStaffSheet ||
-                !canEdit
-              }
-              title="Єдиний імпорт «Штатки» (.xlsx) — для анкет, ранкового звіту та БД персоналу"
-              sx={{ color: "#1a1a14" }}
-            >
-              <span className="anketa-label-full">
-                {sheet.isImportingStaffSheet ? "Імпорт…" : "Імпорт Штатки"}
-              </span>
-              <span className="anketa-label-short" aria-hidden="true">
-                {sheet.isImportingStaffSheet ? "…" : "↑ Штатка"}
-              </span>
-              <input
-                hidden
-                type="file"
-                accept=".xlsx,.xlsm,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel.sheet.macroEnabled.12"
-                disabled={!canEdit}
-                onChange={(event) => {
-                  void sheet.importStaffSheetFile(event.target.files?.[0]);
-                  event.currentTarget.value = "";
-                }}
-              />
-            </Button>
-            <Button
-              variant="outlined"
-              startIcon={<FileDownloadOutlinedIcon />}
-              disabled={
-                sheet.isLoading ||
-                sheet.isMergingPersonnel ||
-                sheet.isAddingFromEjoos ||
-                sheet.isPushingStaffSheet ||
-                sheet.isDownloadingStaffSheet ||
-                sheet.isImportingStaffSheet ||
-                !sheet.staffSheetImportName ||
-                !canEdit
-              }
-              onClick={() => void sheet.downloadStaffSheetExcel()}
-              title="Скачати «Штатку» з колонками: анкета (так), ІПН, дата, рік, повних років"
-            >
-              <span className="anketa-label-full">
-                {sheet.isDownloadingStaffSheet ? "Штатка…" : "Скачати Штатку"}
-              </span>
-              <span className="anketa-label-short" aria-hidden="true">
-                {sheet.isDownloadingStaffSheet ? "…" : "↓ Штатка"}
-              </span>
-            </Button>
-            <Button
-              variant="outlined"
-              startIcon={<SyncAltOutlinedIcon />}
-              disabled={
-                sheet.isLoading ||
-                sheet.isMergingPersonnel ||
-                sheet.isAddingFromEjoos ||
-                sheet.isPushingStaffSheet ||
-                sheet.isDownloadingStaffSheet ||
-                sheet.isImportingStaffSheet ||
-                !sheet.staffSheetImportName ||
-                !canEdit
-              }
-              onClick={() => void sheet.pushStaffSheetEnrichment()}
-              title="Записати в Google Sheet «Штатка»: анкета (так або порожньо), ІПН, дата/рік/вік"
-            >
-              <span className="anketa-label-full">
-                {sheet.isPushingStaffSheet ? "Штатка…" : "→ Google Штатка"}
-              </span>
-              <span className="anketa-label-short" aria-hidden="true">
-                {sheet.isPushingStaffSheet ? "Штатка…" : "→ Штатка"}
-              </span>
-            </Button>
-            <Button
-              variant="outlined"
-              startIcon={<SyncAltOutlinedIcon />}
-              disabled={sheet.isLoading || sheet.isImportingStaffSheet}
-              onClick={() => void handleLoadFromGoogle()}
-              title="Оновити таблицю анкет з Google (не Штатку)"
-            >
-              <span className="anketa-label-full">Оновити анкети</span>
-              <span className="anketa-label-short" aria-hidden="true">
-                Анкети
-              </span>
-            </Button>
-            <Button
-              component="label"
-              variant="outlined"
-              startIcon={<FileUploadOutlinedIcon />}
-              disabled={sheet.isLoading || !canEdit}
-              title="Імпорт CSV"
-            >
-              <span className="anketa-label-full">CSV файл</span>
-              <span className="anketa-label-short" aria-hidden="true">
-                CSV
-              </span>
-              <input
-                hidden
-                type="file"
-                accept=".csv,text/csv"
-                disabled={!canEdit}
-                onChange={(event) => {
-                  void handleLoadFromCsv(event.target.files?.[0]);
-                  event.currentTarget.value = "";
-                }}
-              />
-            </Button>
-            <Button
-              variant="outlined"
-              startIcon={<FileDownloadOutlinedIcon />}
-              component="a"
-              href={
-                gap.focusedEmpty
-                  ? anketaGoogleCellUrl(
-                      gap.focusedEmpty.rowNumber,
-                      gap.focusedEmpty.columnIndex,
-                    )
-                  : anketaSheetEditUrl()
-              }
-              target="_blank"
-              rel="noreferrer"
-              title={
-                gap.focusedEmpty
-                  ? `Google · ${gap.focusedEmpty.a1}`
-                  : "Відкрити таблицю"
-              }
-            >
-              <span className="anketa-label-full">
-                {gap.focusedEmpty
-                  ? `Google · ${gap.focusedEmpty.a1}`
-                  : "Відкрити таблицю"}
-              </span>
-              <span className="anketa-label-short" aria-hidden="true">
-                {gap.focusedEmpty ? gap.focusedEmpty.a1 : "Таблиця"}
+                {gap.isFillingAbsent ? "…" : "∅ → н/д"}
               </span>
             </Button>
           </div>
@@ -422,8 +233,14 @@ export function AnketaDataPage() {
               <span title="Порожніх ячійок">
                 ∅ {gap.gapStats.emptyCells}
               </span>
-              <span title="Осіб з пропусками">
+              <span title="Осіб з пропусками (пошук порожніх, без «дані відсутні»)">
                 осіб {gap.gapStats.personsWithGaps}
+              </span>
+              <span title="Службовці, у яких хоча б одне вибране поле ще зовсім порожнє">
+                ще пусті {gap.gapStats.personsWithBlankFields}
+              </span>
+              <span title="Службовці, у яких усі вибрані поля ще зовсім порожні">
+                усі пусті {gap.gapStats.personsFullyBlank}
               </span>
               <span title="Усього рядків">
                 рядків {gap.gapStats.totalRows}
@@ -464,17 +281,6 @@ export function AnketaDataPage() {
           ) : null}
         </div>
       </Alert>
-
-      {isAdmin ? (
-        <AnketaSyncPanel
-          appsScriptUrl={sheet.appsScriptUrl}
-          onAppsScriptUrlChange={sheet.setAppsScriptUrl}
-          expanded={syncExpanded}
-          onToggleExpanded={() => setSyncExpanded((value) => !value)}
-          showSyncHelp={showSyncHelp}
-          onToggleSyncHelp={() => setShowSyncHelp((value) => !value)}
-        />
-      ) : null}
 
       <div
         className={[

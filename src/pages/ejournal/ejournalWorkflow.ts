@@ -217,7 +217,6 @@ export async function exportEjournalTemplateWithProtocol(
       const sheet = workbook.addSheet(protocolName);
 
       writeProtocolSheet(sheet, analysis, exportedAt);
-      writeHistorySheet(workbook, analysis, exportedAt, exportId);
     },
     buildExportName(),
   );
@@ -579,23 +578,6 @@ function writeProtocolSheet(sheet: any, analysis: EjournalWorkflowAnalysis, expo
   [1, 2, 4, 6, 7, 8, 9, 10, 11].forEach((columnIndex) => sheet.column(columnIndex).width(18));
   sheet.column(5).width(10);
   sheet.column(6).width(36);
-}
-
-function writeHistorySheet(workbook: any, analysis: EjournalWorkflowAnalysis, exportedAt: string, exportId: string) {
-  const sheet = workbook.sheet("10. Історія змін") ?? workbook.addSheet("10. Історія змін");
-  const used = sheet.usedRange();
-  const startRow = used ? used.endCell().rowNumber() + 2 : 1;
-  const rows = [
-    ["export_id", exportId],
-    ["processed_at", exportedAt],
-    ["source", analysis.sourceName],
-    ["pending_movements", analysis.pending.length],
-    ["conflicts", analysis.conflicts.length],
-  ];
-  rows.forEach((row, index) => {
-    sheet.cell(startRow + index, 1).value(row[0]);
-    sheet.cell(startRow + index, 2).value(row[1]);
-  });
 }
 
 function markPendingMovementsProcessed(

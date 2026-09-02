@@ -29,6 +29,11 @@ import {
   type AnketaPersonnelMatch,
 } from "./anketaPersonMatch";
 import {
+  appendAnketaPeopleToPersonnelRoster,
+  loadVisiblePersonnelRows,
+  selectAnketaRowsMissingFromPersonnel,
+} from "./anketaPersonnelRosterCreate";
+import {
   isAnketaColumnReadonly,
   loadAnketaSheetPreferCache,
   type AnketaColumnKey,
@@ -201,6 +206,7 @@ export type AnketaBulkMergeReport = {
   processed: number;
   matched: number;
   updated: number;
+  created: number;
   skippedNoMatch: number;
   skippedNoRowId: number;
   skippedNoUpdates: number;
@@ -213,6 +219,8 @@ export const mergeAnketaRowsToPersonnel = async (options: {
   rows: AnketaRow[];
   edits?: AnketaEditsMap;
   onProgress?: (done: number, total: number) => void;
+  onStatus?: (text: string) => void;
+  onCreated?: () => void | Promise<void>;
 }): Promise<AnketaBulkMergeReport> => {
   const mergedRows =
     options.edits && Object.keys(options.edits).length
@@ -224,6 +232,7 @@ export const mergeAnketaRowsToPersonnel = async (options: {
     processed: 0,
     matched: 0,
     updated: 0,
+    created: 0,
     skippedNoMatch: 0,
     skippedNoRowId: 0,
     skippedNoUpdates: 0,
@@ -231,6 +240,34 @@ export const mergeAnketaRowsToPersonnel = async (options: {
     phonesAdded: 0,
     errors: [],
   };
+  const visible = await loadVisiblePersonnelRows();
+  const toCreate = selectAnketaRowsMissingFromPersonnel(mergedRows, visible);
+
+  if (toCreate.length) {
+    options.onStatus?.(
+      `Додаю з анкет осіб, яких немає в складі… ${toCreate.length}`,
+    );
+    try {
+      const appended = await appendAnketaPeopleToPersonnelRoster(
+        toCreate,
+        visible,
+      );
+      report.created = appended.created;
+      report.skippedNoMatch = appended.skipped;
+      if (appended.created > 0) {
+        await options.onCreated?.();
+      }
+    } catch (error) {
+      report.skippedNoMatch = toCreate.length;
+      report.errors.push({
+        name: "Додавання з анкет",
+        message:
+          error instanceof Error
+            ? error.message
+            : "Не вдалося додати осіб з анкет до особового складу",
+      });
+    }
+  }
 
   for (let indexOffset = 0; indexOffset < mergedRows.length; indexOffset += 1) {
     const anketaRow = mergedRows[indexOffset]!;
@@ -239,7 +276,6 @@ export const mergeAnketaRowsToPersonnel = async (options: {
 
     const match = matchAnketaRowToPersonnel(anketaRow, index);
     if (!match) {
-      report.skippedNoMatch += 1;
       continue;
     }
     report.matched += 1;
@@ -270,7 +306,7 @@ export const mergeAnketaRowsToPersonnel = async (options: {
     }
   }
 
-  if (report.updated > 0 || report.phonesAdded > 0) {
+  if (report.updated > 0 || report.phonesAdded > 0 || report.created > 0) {
     await invalidatePersonnelCaches();
   }
 
@@ -281,6 +317,7 @@ export const formatAnketaBulkMergeReport = (report: AnketaBulkMergeReport) => {
   const parts = [
     `оновлено осіб: ${report.updated}`,
     `полів: ${report.fieldCount}`,
+    report.created ? `додано: ${report.created}` : "",
     report.phonesAdded ? `телефонів: ${report.phonesAdded}` : "",
     report.skippedNoMatch ? `без збігу: ${report.skippedNoMatch}` : "",
     report.skippedNoUpdates ? `без нових даних: ${report.skippedNoUpdates}` : "",
@@ -290,9 +327,11 @@ export const formatAnketaBulkMergeReport = (report: AnketaBulkMergeReport) => {
   return parts.join(" · ");
 };
 
-/** Завантажує кеш/Google «Анкети» + локальні правки й доповнює порожні поля в ООС. */
+/** Завантажує кеш/Google «Анкети»: доповнює порожні поля в ООС і додає осіб, яких немає в складі. */
 export const mergeCachedAnketaToPersonnel = async (options?: {
   onProgress?: (done: number, total: number) => void;
+  onStatus?: (text: string) => void;
+  onCreated?: () => void | Promise<void>;
 }): Promise<AnketaBulkMergeReport> => {
   const snapshot = await loadAnketaSheetPreferCache();
   if (!snapshot.rows.length) {
@@ -305,6 +344,8 @@ export const mergeCachedAnketaToPersonnel = async (options?: {
     rows: snapshot.rows,
     edits,
     onProgress: options?.onProgress,
+    onStatus: options?.onStatus,
+    onCreated: options?.onCreated,
   });
 };
 

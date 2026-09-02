@@ -1,6 +1,7 @@
 import JSZip from "jszip";
 import { loadUbdTemplate } from "./ubdTemplateStore";
 import { stripRedColorInWordZip } from "./wordXml";
+import { capitalizeReportPosition } from "./reportPosition";
 
 type WordSignatory = {
   blockType: "SIGNER" | "APPROVAL";
@@ -362,7 +363,7 @@ const valuesFromFields = (fields: UbdWordFields) => {
     RANK: fields.rank.trim(),
     FULL_NAME_1: surname,
     FULL_NAME_2: givenNames,
-    POSITION: fields.staffPosition.trim(),
+    POSITION: capitalizeReportPosition(fields.staffPosition),
     BIRTH_DATE: fields.birthDate.trim(),
     RNOKPP: fields.rnokpp.trim(),
     TASK_PERIOD: fields.taskPeriod.trim(),

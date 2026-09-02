@@ -20,6 +20,11 @@ import {
   PersonChangeRow,
 } from "./EjoosPersonChangeCard";
 import { useEjoosWorkspace } from "./ejoosWorkspaceState";
+import { canonicalName, normKey } from "./ejoosIdentity";
+import {
+  planBlocksWorkbookApply,
+  SOURCE_DATE_UNKNOWN_MESSAGE,
+} from "./ejoosSyncPlan";
 
 type ChangeFilter =
   | "ALL"
@@ -30,6 +35,26 @@ type ChangeFilter =
   | "error";
 
 type ChangesView = "list" | "queue";
+
+/** Рядки / крапка з комою — список ПІБ або ID для пошуку в операціях. */
+export const parsePastedPersonList = (raw: string) =>
+  raw
+    .split(/[\n;]+/)
+    .map((line) => line.replace(/^[-•–—\d.)\s]+/, "").trim())
+    .filter(Boolean);
+
+const personMatchesToken = (
+  person: { fullName: string; personId: string; positionIndex: string },
+  token: string,
+) => {
+  const needle = canonicalName(token) || normKey(token);
+  if (!needle) return false;
+  if (normKey(person.personId) === needle) return true;
+  if (normKey(person.positionIndex) === needle) return true;
+  const name = canonicalName(person.fullName);
+  if (!name) return false;
+  return name === needle || name.includes(needle) || needle.includes(name);
+};
 
 const FILTERS: { id: ChangeFilter; label: string }[] = [
   { id: "ALL", label: "Усі" },
@@ -59,6 +84,7 @@ export function EjoosChangesPanel() {
   const [view, setView] = useState<ChangesView>("list");
   const [filter, setFilter] = useState<ChangeFilter>("ALL");
   const [query, setQuery] = useState("");
+  const [listQuery, setListQuery] = useState("");
   const [applyConfirm, setApplyConfirm] = useState<{
     id: string;
     name: string;
@@ -71,6 +97,22 @@ export function EjoosChangesPanel() {
     () => people.filter((person) => person.decision === "accepted"),
     [people],
   );
+  const pastedNames = useMemo(
+    () => parsePastedPersonList(listQuery),
+    [listQuery],
+  );
+  const listHits = useMemo(() => {
+    if (!pastedNames.length) return [];
+    return people.filter((person) =>
+      pastedNames.some((token) => personMatchesToken(person, token)),
+    );
+  }, [pastedNames, people]);
+  const listMissing = useMemo(() => {
+    if (!pastedNames.length) return [];
+    return pastedNames.filter(
+      (token) => !people.some((person) => personMatchesToken(person, token)),
+    );
+  }, [pastedNames, people]);
   const filtered = useMemo(() => {
     const source = view === "queue" ? queuedPeople : people;
     const q = query.trim().toLowerCase();
@@ -112,6 +154,11 @@ export function EjoosChangesPanel() {
           return false;
         }
       }
+      if (pastedNames.length) {
+        if (!pastedNames.some((token) => personMatchesToken(person, token))) {
+          return false;
+        }
+      }
       if (!q) return true;
       return (
         person.fullName.toLowerCase().includes(q) ||
@@ -119,7 +166,7 @@ export function EjoosChangesPanel() {
         person.positionIndex.toLowerCase().includes(q)
       );
     });
-  }, [filter, people, query, queuedPeople, view]);
+  }, [filter, pastedNames, people, query, queuedPeople, view]);
 
   const queueableVisible = useMemo(
     () => filtered.filter(personCanEnterApplyQueue),
@@ -138,7 +185,7 @@ export function EjoosChangesPanel() {
     people.find((p) => p.id === selectedPersonId) ?? null;
 
   const writableQueuedCount = queuedPeople.filter(
-    (person) => !personIsInformationalOnly(person.ops),
+    (person) => personCanEnterApplyQueue(person),
   ).length;
 
   const toggleQueue = (personId: string, next: boolean) => {
@@ -189,14 +236,29 @@ export function EjoosChangesPanel() {
             {session.counters.autoReady} авто · {session.counters.needsReview}{" "}
             перевірити · у черзі {queuedPeople.length}
           </Typography>
-          {session.plan.monthRolloverRequired ? (
+          {session.plan.sourceDateUnknown ? (
             <Typography variant="body2" sx={{ mt: 0.5, color: "#f5c16c" }}>
-              MONTH_ROLLOVER_REQUIRED: Табель зараз «
-              {session.plan.ejoosTimesheetMonthLabel || "інший місяць"}», 1ПБ —
-              {session.plan.timesheetDayLabel}. Apply заблоковано. Заголовок не
-              перейменовуємо, щоб серпневі клітинки не стали вересневими. Потрібен
-              окремий файл ЕЖООС на новий місяць.
+              {SOURCE_DATE_UNKNOWN_MESSAGE}
             </Typography>
+          ) : null}
+          {session.plan.sourceDateUnknown ? (
+            <Stack
+              direction="row"
+              spacing={1}
+              sx={{ mt: 1 }}
+              style={{ flexWrap: "wrap", alignItems: "center" }}
+            >
+              <Typography variant="body2">Станом на</Typography>
+              <input
+                type="date"
+                className="ejoos-search"
+                onChange={(event) => {
+                  const value = event.target.value;
+                  if (!value) return;
+                  void rebuildOperations(value);
+                }}
+              />
+            </Stack>
           ) : null}
         </Box>
         <Stack direction="row" spacing={1} style={{ flexWrap: "wrap" }}>
@@ -218,21 +280,27 @@ export function EjoosChangesPanel() {
           >
             Перебудувати
           </Button>
-          {view === "queue" ? (
-            <Button
-              size="small"
-              variant="contained"
-              disabled={
-                !writableQueuedCount ||
-                isLoading ||
-                Boolean(session.plan.monthRolloverRequired)
+          <Button
+            size="small"
+            variant="contained"
+            disabled={
+              isLoading ||
+              planBlocksWorkbookApply(session.plan) ||
+              !(writableQueuedCount || queueableVisible.length)
+            }
+            onClick={() => {
+              if (!writableQueuedCount && queueableVisible.length) {
+                toggleVisibleQueue(true);
               }
-              onClick={() => setBulkApplyOpen(true)}
-              sx={{ color: "#1a1a14" }}
-            >
-              Застосувати всі ({writableQueuedCount || queuedPeople.length})
-            </Button>
-          ) : null}
+              setBulkApplyOpen(true);
+            }}
+            sx={{ color: "#1a1a14" }}
+          >
+            Застосувати{" "}
+            {writableQueuedCount || queueableVisible.length
+              ? `(${writableQueuedCount || queueableVisible.length})`
+              : ""}
+          </Button>
         </Stack>
       </Stack>
 
@@ -277,14 +345,41 @@ export function EjoosChangesPanel() {
           onChange={(event) => setQuery(event.target.value)}
           placeholder="Пошук ПІБ / ID / індекс"
         />
-        {view === "list" && query.trim() && queueableVisible.length > 0 ? (
+        {view === "list" &&
+        (query.trim() || pastedNames.length) &&
+        queueableVisible.length > 0 ? (
           <Button
             size="small"
-            variant="outlined"
-            onClick={() => toggleVisibleQueue(true)}
+            variant="contained"
+            disabled={isLoading || planBlocksWorkbookApply(session.plan)}
+            onClick={() => {
+              toggleVisibleQueue(true);
+              setBulkApplyOpen(true);
+            }}
+            sx={{ color: "#1a1a14" }}
           >
-            Знайдені в чергу ({queueableVisible.length})
+            Застосувати знайдених ({queueableVisible.length})
           </Button>
+        ) : null}
+      </Stack>
+
+      <Stack spacing={0.5}>
+        <textarea
+          className="ejoos-search ejoos-name-list"
+          value={listQuery}
+          onChange={(event) => setListQuery(event.target.value)}
+          rows={5}
+          placeholder={
+            "Вставте список ПІБ — кожного з нового рядка\nБАСОВСЬКИЙ Юрій Михайлович\nВІТКОВ Віталій Анатолійович"
+          }
+        />
+        {pastedNames.length ? (
+          <Typography variant="body2" className="ejoos-muted">
+            Знайдено {listHits.length} з {pastedNames.length} у операціях
+            {listMissing.length
+              ? `. Немає: ${listMissing.join(", ")}`
+              : "."}
+          </Typography>
         ) : null}
       </Stack>
 
@@ -341,9 +436,9 @@ export function EjoosChangesPanel() {
               timesheetDay={session?.plan.timesheetDay ?? 31}
               canQueue={
                 personCanEnterApplyQueue(selectedPerson) &&
-                !session.plan.monthRolloverRequired
+                !planBlocksWorkbookApply(session.plan)
               }
-              applyBlocked={Boolean(session.plan.monthRolloverRequired)}
+              applyBlocked={planBlocksWorkbookApply(session.plan)}
               onAccept={() => {
                 if (selectedPerson.decision === "accepted") {
                   setDecision(selectedPerson.id, "pending");
@@ -442,8 +537,10 @@ export function EjoosChangesPanel() {
           <Typography variant="body1">
             Застосувати зміни для{" "}
             <strong>
-              {writableQueuedCount || queuedPeople.length}{" "}
-              {writableQueuedCount === 1 ? "особи" : "осіб"}
+              {writableQueuedCount || queueableVisible.length}{" "}
+              {(writableQueuedCount || queueableVisible.length) === 1
+                ? "особи"
+                : "осіб"}
             </strong>{" "}
             одним кроком?
           </Typography>
@@ -462,10 +559,19 @@ export function EjoosChangesPanel() {
           </Button>
           <Button
             variant="contained"
-            disabled={isLoading || !writableQueuedCount}
+            disabled={
+              isLoading ||
+              !(writableQueuedCount || queueableVisible.length)
+            }
             onClick={() => {
+              const ids = (
+                writableQueuedCount ? queuedPeople : queueableVisible
+              )
+                .filter(personCanEnterApplyQueue)
+                .map((person) => person.id);
+              setDecisions(ids, "accepted");
               setBulkApplyOpen(false);
-              void applyAccepted();
+              void applyAccepted(ids);
             }}
             sx={{ color: "#1a1a14" }}
           >

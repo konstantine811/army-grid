@@ -12,6 +12,7 @@ import {
   type RegisteredUser,
 } from './auth/authTypes'
 import { showAppToast, showBackendBlockedToast } from './shared/appToast'
+import { dataUrlToUint8Array } from './shared/browserExport'
 
 const resolveApiBaseUrl = () => {
   const fromEnv = import.meta.env.VITE_API_BASE_URL
@@ -365,6 +366,17 @@ export type BackendPersonnelOverviewRow = {
   plannedReturn: string | null
   place: string
   updatedAt: string
+  /** Є в останній Штатці / ранковому «Загальному списку». */
+  inStaff?: boolean
+  /** Батальйон «нова» в останній Штатці — той самий набір, що БЧС. */
+  inNovaStaff?: boolean
+  /** Колонка A Штатки: нова / стара / інші пункти. */
+  battalion?: string
+  /** Є в останньому імпорті ЕЖООС. */
+  fromEjoos?: boolean
+  /** Статус з колонки «Статус» у Штатці (не ЕЖООС). */
+  staffStatus?: OverviewStatus | string
+  staffStatusLabel?: string
 }
 
 export type BackendPersonnelOverview = {
@@ -674,8 +686,14 @@ export const api = {
     return request<BackendPersonPhoto | null>(`/ejournals/personnel/photos/${encodeURIComponent(personExternalId)}`)
   },
 
-  getPersonnelOverview() {
-    return request<BackendPersonnelOverview>('/ejournals/personnel/overview')
+  getPersonnelOverview(options: { limit?: number; offset?: number } = {}) {
+    const searchParams = new URLSearchParams()
+    if (options.limit != null) searchParams.set('limit', String(options.limit))
+    if (options.offset != null) searchParams.set('offset', String(options.offset))
+    const query = searchParams.toString()
+    return request<BackendPersonnelOverview>(
+      `/ejournals/personnel/overview${query ? `?${query}` : ''}`,
+    )
   },
 
   listPersonPhotos() {
@@ -727,16 +745,23 @@ export const api = {
     personExternalId: string,
     fileName: string,
   ) {
-    const query = new URLSearchParams({ fileName }).toString()
-    const result = await request<{
-      ticket: string
-      fileName: string
-      expiresAt: number
-    }>(
-      `/ejournals/personnel/questionnaires/${encodeURIComponent(personExternalId)}/file-ticket?${query}`,
-      { method: 'POST' },
-    )
-    return `${apiBaseUrl()}/ejournals/personnel/questionnaires/file-ticket/${encodeURIComponent(result.ticket)}/${encodeURIComponent(result.fileName)}`
+    try {
+      return await this.getPersonQuestionnaireObjectUrl(
+        personExternalId,
+        fileName,
+      )
+    } catch {
+      const questionnaire = await this.getPersonQuestionnaire(personExternalId)
+      if (!questionnaire?.fileData) {
+        throw new Error('Немає PDF анкети для перегляду.')
+      }
+      const bytes = dataUrlToUint8Array(questionnaire.fileData)
+      return URL.createObjectURL(
+        new Blob([bytes], {
+          type: questionnaire.mimeType || 'application/pdf',
+        }),
+      )
+    }
   },
 
   async fetchPersonQuestionnaireFile(

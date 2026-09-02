@@ -16,15 +16,27 @@ const isAudioEnabled = () => {
   }
 };
 
+let clickAudioContext: AudioContext | null = null;
+
+const getClickAudioContext = () => {
+  const AudioCtx =
+    window.AudioContext ||
+    (window as unknown as { webkitAudioContext: typeof AudioContext })
+      .webkitAudioContext;
+  if (!clickAudioContext || clickAudioContext.state === "closed") {
+    clickAudioContext = new AudioCtx();
+  }
+  if (clickAudioContext.state === "suspended") {
+    void clickAudioContext.resume();
+  }
+  return clickAudioContext;
+};
+
 /** Soft terminal tick via Web Audio (no asset files). */
 const playClickTick = (kind: "tap" | "action" = "tap") => {
   if (prefersReducedMotion() || !isAudioEnabled()) return;
   try {
-    const AudioCtx =
-      window.AudioContext ||
-      (window as unknown as { webkitAudioContext: typeof AudioContext })
-        .webkitAudioContext;
-    const ctx = new AudioCtx();
+    const ctx = getClickAudioContext();
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.type = "sine";
@@ -37,7 +49,8 @@ const playClickTick = (kind: "tap" | "action" = "tap") => {
     window.setTimeout(() => {
       try {
         osc.stop();
-        void ctx.close();
+        osc.disconnect();
+        gain.disconnect();
       } catch {
         /* ignore */
       }

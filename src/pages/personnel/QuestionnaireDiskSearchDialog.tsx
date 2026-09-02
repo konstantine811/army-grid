@@ -19,6 +19,11 @@ import { extractPassportPhotoFromPdf } from "./autoPassportPhoto";
 import { FloatingWindow } from "./FloatingWindow";
 import { dataUrlToFile, buildQuestionnaireExportFileName } from "./personnelUtils";
 import { sanitizeFileName } from "../../shared/browserExport";
+import {
+  isExactFioFileNameMatch,
+  isPlausibleDiskQuestionnaireMatch,
+  isUniqueSurnameFirstFileNameMatch,
+} from "./questionnaireDiskMatch";
 
 type SearchPersonInput = {
   rowId: string;
@@ -45,67 +50,49 @@ const MATCH_LABEL: Record<DiskQuestionnaireMatchLevel, string> = {
   callsign: "Позивний",
 };
 
-const normalizeNamePart = (value: string) =>
-  String(value ?? "")
-    .normalize("NFC")
-    .toLowerCase()
-    .replace(/ё/g, "е")
-    .replace(/[''`ʼ´]/g, "")
-    .replace(/[^a-zа-яіїєґ0-9\s-]/gi, " ")
-    .replace(/-/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-
-const getNormalizedNameTokens = (value: string) => {
-  const withoutExtension = String(value ?? "").replace(/\.pdf$/i, "");
-  const withoutCallsign = withoutExtension.replace(/\([^)]*\)/g, " ");
-  return normalizeNamePart(withoutCallsign).split(" ").filter(Boolean);
-};
-
-const parseStrictFio = (value: string) => {
-  const tokens = getNormalizedNameTokens(value);
-  return {
-    surname: tokens[0] ?? "",
-    firstName: tokens[1] ?? "",
-    patronymic: tokens[2] ?? "",
-  };
-};
-
-const isExactFioFileNameMatch = (fullName: string, fileName: string) => {
-  const person = parseStrictFio(fullName);
-  if (!person.surname || !person.firstName || !person.patronymic) return false;
-
-  const fileTokens = getNormalizedNameTokens(fileName);
-  const personKey = [person.surname, person.firstName, person.patronymic].join("|");
-  for (let index = 0; index <= fileTokens.length - 3; index += 1) {
-    const fileKey = fileTokens.slice(index, index + 3).join("|");
-    if (fileKey === personKey) return true;
-  }
-
-  return false;
-};
-
 const normalizeDuplicateFileName = (fileName: string) =>
   String(fileName ?? "")
     .normalize("NFC")
     .trim()
     .toLocaleLowerCase("uk-UA");
 
-const getAutoMatch = (row: RowState) => {
+const getAutoMatch = (row: RowState, allRows: RowState[] = []) => {
   if (!row.matches.length) return null;
   const fioMatches = row.matches.filter(
     (match) =>
       match.matchLevel === "fio" &&
       isExactFioFileNameMatch(row.fullName, match.fileName),
   );
-  if (fioMatches.length === 1) return fioMatches[0];
-  if (fioMatches.length <= 1) return null;
+  const pickUnique = (
+    matches: DiskQuestionnaireSearchPersonResult["matches"],
+  ) => {
+    if (matches.length === 1) return matches[0];
+    if (matches.length <= 1) return null;
+    const firstName = normalizeDuplicateFileName(matches[0]?.fileName ?? "");
+    const allSameName = matches.every(
+      (match) => normalizeDuplicateFileName(match.fileName) === firstName,
+    );
+    return allSameName ? matches[0] : null;
+  };
 
-  const firstName = normalizeDuplicateFileName(fioMatches[0]?.fileName ?? "");
-  const allSameName = fioMatches.every(
-    (match) => normalizeDuplicateFileName(match.fileName) === firstName,
+  const exact = pickUnique(fioMatches);
+  const shortMatches = row.matches.filter(
+    (match) =>
+      (match.matchLevel === "fio" || match.matchLevel === "fi") &&
+      isUniqueSurnameFirstFileNameMatch(row.fullName, match.fileName),
   );
-  return allSameName ? fioMatches[0] : null;
+  const short = exact ?? pickUnique(shortMatches);
+  if (!short) return null;
+
+  const claimedByOther = allRows.some((other) => {
+    if (other.rowId === row.rowId) return false;
+    return other.matches.some(
+      (match) =>
+        match.relativePath === short.relativePath &&
+        isUniqueSurnameFirstFileNameMatch(other.fullName, match.fileName),
+    );
+  });
+  return claimedByOther ? null : short;
 };
 
 export function QuestionnaireDiskSearchDialog({
@@ -172,12 +159,12 @@ export function QuestionnaireDiskSearchDialog({
     });
   };
 
-  const shouldAutoConfirm = (row: RowState) =>
-    row.missingQuestionnaire && Boolean(getAutoMatch(row));
+  const shouldAutoConfirm = (row: RowState, allRows: RowState[] = rows) =>
+    row.missingQuestionnaire && Boolean(getAutoMatch(row, allRows));
 
-  const shouldAutoExtractPhoto = (row: RowState) =>
+  const shouldAutoExtractPhoto = (row: RowState, allRows: RowState[] = rows) =>
     row.missingPhoto &&
-    (!row.missingQuestionnaire || Boolean(getAutoMatch(row)));
+    (!row.missingQuestionnaire || Boolean(getAutoMatch(row, allRows)));
 
   const loadAutoPhotoFile = async (row: RowState) => {
     if (!row.missingQuestionnaire) {
@@ -187,7 +174,7 @@ export function QuestionnaireDiskSearchDialog({
       }
       if (
         questionnaire.fileName &&
-        !isExactFioFileNameMatch(row.fullName, questionnaire.fileName)
+        !isUniqueSurnameFirstFileNameMatch(row.fullName, questionnaire.fileName)
       ) {
         throw new Error(
           "Автофото пропущено: ПІБ у назві збереженої анкети не збігається з карткою.",
@@ -199,14 +186,16 @@ export function QuestionnaireDiskSearchDialog({
       );
     }
 
-    const match = getAutoMatch(row);
+    const match = getAutoMatch(row, rows);
     if (!match) throw new Error("Немає PDF для автообробки фото.");
     return loadMatchFile(match.relativePath, match.fileName);
   };
 
   const autoProcessExactMatches = async (nextRows: RowState[]) => {
     const exactRows = nextRows.filter(
-      (row) => shouldAutoConfirm(row) || shouldAutoExtractPhoto(row),
+      (row) =>
+        shouldAutoConfirm(row, nextRows) ||
+        shouldAutoExtractPhoto(row, nextRows),
     );
     if (!exactRows.length) return;
 
@@ -214,17 +203,17 @@ export function QuestionnaireDiskSearchDialog({
     let savedPhotos = 0;
 
     for (const row of exactRows) {
-      const match = getAutoMatch(row);
+      const match = getAutoMatch(row, nextRows);
       if (!match) continue;
       patchRow(row.rowId, {
-        confirming: shouldAutoConfirm(row),
-        autoStatus: shouldAutoConfirm(row)
+        confirming: shouldAutoConfirm(row, nextRows),
+        autoStatus: shouldAutoConfirm(row, nextRows)
           ? "Автозбереження анкети…"
           : "Анкета вже є. Автообробка фото…",
         autoPhotoStatus: row.missingPhoto ? "Пошук обличчя в PDF…" : undefined,
       });
 
-      if (shouldAutoConfirm(row)) {
+      if (shouldAutoConfirm(row, nextRows)) {
         try {
           await api.confirmDiskQuestionnaire(
             row.externalId,
@@ -324,16 +313,28 @@ export function QuestionnaireDiskSearchDialog({
           refreshIndex: true,
         });
         if (cancelled) return;
-        setSummary(
-          `Проскановано ${result.scannedFiles} PDF · збіги у ${result.matchedPeople} з ${result.people.length} осіб`,
-        );
-        const nextRows = result.people.map((person, index) => ({
+        const nextRows = result.people.map((person, index) => {
+          const matches = person.matches.filter((match) =>
+            isPlausibleDiskQuestionnaireMatch(
+              person.fullName,
+              match.fileName,
+              person.callSign,
+            ),
+          );
+          return {
             ...person,
+            matches,
             rowId: snapshot[index]?.rowId || `${person.externalId}-${index}`,
-            selectedPath: person.matches[0]?.relativePath ?? "",
+            selectedPath: matches[0]?.relativePath ?? "",
             confirmed: false,
             confirming: false,
-          }));
+          };
+        });
+        const matchedPeople = nextRows.filter((row) => row.matches.length > 0)
+          .length;
+        setSummary(
+          `Проскановано ${result.scannedFiles} PDF · збіги у ${matchedPeople} з ${result.people.length} осіб`,
+        );
         setRows(nextRows);
         void autoProcessExactMatches(nextRows);
       } catch (err) {

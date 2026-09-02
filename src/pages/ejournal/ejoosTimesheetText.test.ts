@@ -5,13 +5,20 @@ import {
   buildTimesheetAbsenceSpans,
   currentStatusConfirmsOpenAbsence,
   historyAbsenceSpansForClosedEpisode,
+  timesheetHorizonFillDays,
   timesheetMarkBeforeDeparture,
   timesheetMarkFromArchive,
+  isTimesheetAbsenceCode,
   extractTimesheetDestinationFromPosition,
   formatTimesheetDeparture,
   archiveReturnContradictsCurrentSh,
+  findTimesheetMonthHeaderCell,
+  isInternalStaffTimesheetDeparture,
 } from "./ejoosTimesheetText";
-import { formatTimesheetTransferMark } from "./ejoosExcludedColumns";
+import {
+  formatExcludedDestination,
+  formatTimesheetTransferMark,
+} from "./ejoosExcludedColumns";
 import { buildSheetRowPreviews } from "./ejoosSheetRowPreview";
 import type { EjoosSyncOp } from "./ejoosSyncPlan";
 
@@ -92,6 +99,29 @@ describe("buildTimesheetAbsenceSpans / carry-in", () => {
     expect(spans).toEqual([{ fromDay: 1, toDay: 31, code: "СЗЧ" }]);
   });
 
+  it("caps an open absence at the 1PB report day, not the calendar month end", () => {
+    const spans = buildTimesheetAbsenceSpans(
+      [
+        {
+          departDate: "01.08.2026",
+          returnDate: "",
+          absenceType: "СЗЧ",
+          departMs: Date.UTC(2026, 7, 1),
+          returnMs: null,
+        },
+      ],
+      {
+        timesheetDay: 25,
+        monthStartMs: AUG_2026_START,
+        monthEndMs: AUG_2026_END,
+        mapCode,
+        hasReturn: () => false,
+        confirmOpenCarry: () => true,
+      },
+    );
+    expect(spans).toEqual([{ fromDay: 1, toDay: 25, code: "СЗЧ" }]);
+  });
+
   it("does not paint August from stale 2025 open archive when sh is on duty", () => {
     const spans = buildTimesheetAbsenceSpans(
       [
@@ -114,6 +144,121 @@ describe("buildTimesheetAbsenceSpans / carry-in", () => {
     );
     expect(spans).toEqual([]);
   });
+
+  const vacationThenMedrota = [
+    {
+      excelRow: 436,
+      departDate: "23.10.2025",
+      returnDate: "",
+      absenceType: "МЕДРОТА",
+      departMs: Date.UTC(2025, 9, 23),
+      returnMs: null,
+    },
+    {
+      excelRow: 2650,
+      departDate: "30.07.2026",
+      returnDate: "09.08.2026",
+      absenceType: "ВІДПУСТКА",
+      departMs: Date.UTC(2026, 6, 30),
+      returnMs: Date.UTC(2026, 7, 9),
+    },
+  ];
+  const mapLeaveOrMed = (absenceType: string) =>
+    /медрот|лік/i.test(absenceType)
+      ? "лік"
+      : /відпуст/i.test(absenceType)
+        ? "від"
+        : "";
+
+  it("Сіряченко: stale 2025 МЕДРОТА does not paint лік after a later vacation", () => {
+    const spans = buildTimesheetAbsenceSpans(vacationThenMedrota, {
+      timesheetDay: 25,
+      monthStartMs: AUG_2026_START,
+      monthEndMs: AUG_2026_END,
+      mapCode: mapLeaveOrMed,
+      hasReturn: (value) => Boolean(value),
+      confirmOpenCarry: () => true,
+    });
+    expect(spans).toEqual([{ fromDay: 1, toDay: 8, code: "від" }]);
+    const days = Array.from({ length: 25 }, (_, index) =>
+      timesheetMarkFromArchive(index + 1, {
+        activeFromDay: 1,
+        lastDay: 25,
+        spans,
+      }),
+    );
+    expect(days.slice(0, 8)).toEqual(Array(8).fill("від"));
+    expect(days.slice(8)).toEqual(Array(17).fill("+"));
+  });
+
+  it("open 2025 МЕДРОТА still paints August when sh confirms and nothing later exists", () => {
+    const spans = buildTimesheetAbsenceSpans(
+      [vacationThenMedrota[0]],
+      {
+        timesheetDay: 25,
+        monthStartMs: AUG_2026_START,
+        monthEndMs: AUG_2026_END,
+        mapCode: mapLeaveOrMed,
+        hasReturn: () => false,
+        confirmOpenCarry: () => true,
+      },
+    );
+    expect(spans).toEqual([{ fromDay: 1, toDay: 25, code: "лік" }]);
+  });
+
+  it("vacation then real August treatment keeps both від and лік", () => {
+    const spans = buildTimesheetAbsenceSpans(
+      [
+        {
+          departDate: "30.07.2026",
+          returnDate: "09.08.2026",
+          absenceType: "ВІДПУСТКА",
+          departMs: Date.UTC(2026, 6, 30),
+          returnMs: Date.UTC(2026, 7, 9),
+        },
+        {
+          departDate: "15.08.2026",
+          returnDate: "20.08.2026",
+          absenceType: "ЛІКУВАННЯ",
+          departMs: Date.UTC(2026, 7, 15),
+          returnMs: Date.UTC(2026, 7, 20),
+        },
+      ],
+      {
+        timesheetDay: 25,
+        monthStartMs: AUG_2026_START,
+        monthEndMs: AUG_2026_END,
+        mapCode: mapLeaveOrMed,
+        hasReturn: (value) => Boolean(value),
+        confirmOpenCarry: () => false,
+      },
+    );
+    expect(spans).toEqual([
+      { fromDay: 1, toDay: 8, code: "від" },
+      { fromDay: 15, toDay: 19, code: "лік" },
+    ]);
+    expect(
+      timesheetMarkFromArchive(14, {
+        activeFromDay: 1,
+        lastDay: 25,
+        spans,
+      }),
+    ).toBe("+");
+    expect(
+      timesheetMarkFromArchive(15, {
+        activeFromDay: 1,
+        lastDay: 25,
+        spans,
+      }),
+    ).toBe("лік");
+    expect(
+      timesheetMarkFromArchive(20, {
+        activeFromDay: 1,
+        lastDay: 25,
+        spans,
+      }),
+    ).toBe("+");
+  });
 });
 
 describe("archivePeriodTouchesJournalMonth", () => {
@@ -135,6 +280,24 @@ describe("archivePeriodTouchesJournalMonth", () => {
         { carryOpen: true },
       ),
     ).toBe(true);
+  });
+});
+
+describe("isInternalStaffTimesheetDeparture", () => {
+  it("treats вибув to a 1ПБ platoon/squad as an internal hop", () => {
+    expect(
+      isInternalStaffTimesheetDeparture(
+        "вибув до 3 піхотного відділення 2 піхотного взводу",
+      ),
+    ).toBe(true);
+  });
+
+  it("keeps вибув to another battalion as real history", () => {
+    expect(
+      isInternalStaffTimesheetDeparture(
+        "вибув у 2 піхотного батальйону від 05.08.2026",
+      ),
+    ).toBe(false);
   });
 });
 
@@ -169,11 +332,144 @@ describe("disposition archive before order day", () => {
   });
 });
 
+describe("timesheetHorizonFillDays", () => {
+  const codes = (pairs: Array<[number, string]>) => {
+    const days: string[] = [];
+    for (const [day, mark] of pairs) days[day] = mark;
+    return days;
+  };
+
+  it("fills empty 21–24 with + when 20 and the report day are +", () => {
+    expect(
+      timesheetHorizonFillDays({
+        dayCodes: codes([
+          [20, "+"],
+          [25, "+"],
+        ]),
+        horizon: 25,
+        reportCode: "+",
+      }),
+    ).toEqual([
+      { day: 21, mark: "+" },
+      { day: 22, mark: "+" },
+      { day: 23, mark: "+" },
+      { day: 24, mark: "+" },
+    ]);
+  });
+
+  it("fills empty 21–25 with + when the last mark is + on 20", () => {
+    expect(
+      timesheetHorizonFillDays({
+        dayCodes: codes([[20, "+"]]),
+        horizon: 25,
+        reportCode: "+",
+      }),
+    ).toEqual([
+      { day: 21, mark: "+" },
+      { day: 22, mark: "+" },
+      { day: 23, mark: "+" },
+      { day: 24, mark: "+" },
+      { day: 25, mark: "+" },
+    ]);
+  });
+
+  it("КАН: 01–20 + and empty 21–25 still fills through 25 even with an old archive return", () => {
+    expect(
+      timesheetHorizonFillDays({
+        dayCodes: codes(
+          Array.from({ length: 20 }, (_, index) => [index + 1, "+"] as [number, string]),
+        ),
+        horizon: 25,
+        reportCode: "+",
+        confirmedReturn: true,
+      }),
+    ).toEqual([
+      { day: 21, mark: "+" },
+      { day: 22, mark: "+" },
+      { day: 23, mark: "+" },
+      { day: 24, mark: "+" },
+      { day: 25, mark: "+" },
+    ]);
+  });
+
+  it("keeps open СЗЧ through 25 instead of a trailing + when there is no return", () => {
+    expect(
+      timesheetHorizonFillDays({
+        dayCodes: codes([
+          [24, "СЗЧ"],
+          [25, "+"],
+        ]),
+        horizon: 25,
+        reportCode: "+",
+      }),
+    ).toEqual([{ day: 25, mark: "СЗЧ" }]);
+  });
+
+  it("keeps open ЛК through empty 21–24 and overwrites + on 25", () => {
+    expect(
+      timesheetHorizonFillDays({
+        dayCodes: codes([
+          [20, "ЛК"],
+          [25, "+"],
+        ]),
+        horizon: 25,
+        reportCode: "+",
+      }),
+    ).toEqual([
+      { day: 21, mark: "ЛК" },
+      { day: 22, mark: "ЛК" },
+      { day: 23, mark: "ЛК" },
+      { day: 24, mark: "ЛК" },
+      { day: 25, mark: "ЛК" },
+    ]);
+  });
+
+  it("does not overwrite + on 25 when archive has a real return", () => {
+    expect(
+      timesheetHorizonFillDays({
+        dayCodes: codes([
+          [24, "СЗЧ"],
+          [25, "+"],
+        ]),
+        horizon: 25,
+        reportCode: "+",
+        confirmedReturn: true,
+      }),
+    ).toEqual([]);
+  });
+
+  it("does not invent + on days 1–24 when the row is empty", () => {
+    expect(
+      timesheetHorizonFillDays({
+        dayCodes: [],
+        horizon: 25,
+        reportCode: "+",
+      }),
+    ).toEqual([{ day: 25, mark: "+" }]);
+  });
+
+  it("overwrites a leaked presentDays count on the horizon day with +", () => {
+    expect(isTimesheetAbsenceCode("19")).toBe(false);
+    expect(
+      timesheetHorizonFillDays({
+        dayCodes: codes([
+          ...Array.from({ length: 24 }, (_, index) => [index + 1, "+"] as [number, string]),
+          [25, "19"],
+        ]),
+        horizon: 25,
+        reportCode: "+",
+      }),
+    ).toEqual([{ day: 25, mark: "+" }]);
+  });
+});
+
 describe("currentStatusConfirmsOpenAbsence", () => {
   it("matches СЗЧ/СЗЧ and rejects on-duty leftover", () => {
     expect(currentStatusConfirmsOpenAbsence("СЗЧ", "СЗЧ")).toBe(true);
     expect(currentStatusConfirmsOpenAbsence("+", "СЗЧ")).toBe(false);
     expect(currentStatusConfirmsOpenAbsence("ЗБ", "СЗЧ")).toBe(false);
+    expect(currentStatusConfirmsOpenAbsence("+", "лік")).toBe(false);
+    expect(currentStatusConfirmsOpenAbsence("лік", "лік")).toBe(true);
   });
 });
 
@@ -201,6 +497,17 @@ describe("timesheet departure phrase strips position and picks до/у", () => {
     );
   });
 
+  it("uses у в/ч for a bare military unit code", () => {
+    expect(formatTimesheetDeparture("А7379")).toBe("вибув у в/ч А7379");
+    expect(formatTimesheetDeparture("в/ч А7379")).toBe("вибув у в/ч А7379");
+    expect(
+      formatTimesheetTransferMark({
+        timesheetDestination: "А7379",
+        destination: "А7379",
+      }),
+    ).toBe("вибув у в/ч А7379");
+  });
+
   it("uses у for розпорядження", () => {
     expect(formatTimesheetDeparture("розпорядження командира")).toBe(
       "вибув у розпорядження командира",
@@ -215,7 +522,7 @@ describe("timesheet departure phrase strips position and picks до/у", () => {
     expect(
       formatTimesheetTransferMark({
         timesheetDestination: BASOVSKYI_UNIT_NOTE,
-        documentsDest: BASOVSKYI_UNIT_NOTE,
+        documentsDest: BASOVSKYI_POSITION,
         destination: BASOVSKYI_UNIT_NOTE,
         changeText: BASOVSKYI_POSITION,
       }),
@@ -254,7 +561,7 @@ describe("buildSheetRowPreviews", () => {
         fromName: "БАСОВСЬКИЙ Юрій Михайлович",
         fromPersonId: "12521",
         fromPositionIndex: "2103200",
-        documentsDest: BASOVSKYI_UNIT_NOTE,
+        documentsDest: BASOVSKYI_POSITION,
         destination: BASOVSKYI_UNIT_NOTE,
         timesheetDestination: BASOVSKYI_UNIT_NOTE,
         changeText: BASOVSKYI_POSITION,
@@ -272,8 +579,8 @@ describe("buildSheetRowPreviews", () => {
     const excluded = previews.find((row) => row.sheetKey === "excluded");
     const timesheet = previews.find((row) => row.sheetKey === "timesheet-history");
     const shpo = previews.find((row) => row.sheetKey === "shpo");
-    expect(excluded?.cells.find((cell) => cell.letter === "AE")?.value).toContain(
-      "а4784",
+    expect(excluded?.cells.find((cell) => cell.letter === "AE")?.value).toBe(
+      formatExcludedDestination(BASOVSKYI_POSITION),
     );
     expect(
       timesheet?.cells.some((cell) =>
@@ -285,3 +592,40 @@ describe("buildSheetRowPreviews", () => {
   });
 });
 
+describe("formatExcludedDestination", () => {
+  it("writes Виключені AE in lowercase", () => {
+    expect(formatExcludedDestination(BASOVSKYI_POSITION)).toBe(
+      BASOVSKYI_POSITION.toLocaleLowerCase("uk-UA"),
+    );
+    expect(
+      formatExcludedDestination("  3 МЕХАНІЗОВАНИЙ БАТАЛЬЙОН  "),
+    ).toBe("3 механізований батальйон");
+  });
+});
+
+describe("findTimesheetMonthHeaderCell", () => {
+  it("prefers I2 over a leftover Січень in column A", () => {
+    const row2 = Array.from({ length: 12 }, () => "");
+    row2[0] = "Січень 2026 р.";
+    row2[8] = "Серпень 2026 р.";
+    const found = findTimesheetMonthHeaderCell([[], row2]);
+    expect(found?.matched).toMatch(/серпень/i);
+    expect(found?.column).toBe(9);
+  });
+
+  it("reads an Excel date in I2 as the timesheet month", () => {
+    const row2 = Array.from({ length: 12 }, () => "" as string | Date);
+    row2[0] = "Січень 2026 р.";
+    row2[8] = new Date(2026, 7, 1);
+    const found = findTimesheetMonthHeaderCell([[], row2]);
+    expect(found?.month).toBe(8);
+    expect(found?.year).toBe(2026);
+    expect(found?.column).toBe(9);
+  });
+
+  it("ignores leftover Січень in column A when I2 has no month", () => {
+    const row2 = Array.from({ length: 12 }, () => "");
+    row2[0] = "Січень 2026 р.";
+    expect(findTimesheetMonthHeaderCell([[], row2])).toBeNull();
+  });
+});

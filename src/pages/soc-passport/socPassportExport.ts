@@ -11,6 +11,7 @@ import {
   isUkrainianBirthPlace,
   morningStatusExitMatchLabel,
 } from "./socPassportFields";
+import type { BirthdayPersonRow } from "./socPassportBirthdays";
 import type { PassportTableRow, SocPassportResult, SocPerson } from "./socPassportTypes";
 
 const HEADER_FILL = "D9E2F3";
@@ -653,4 +654,76 @@ export const exportSocPassportRussiaWorkbook = async (result: SocPassportResult)
     writeRussiaNationalsSheet(workbook.sheet(0), result.people);
   }, `Соц.паспорт_Рф_${stamp}.xlsx`);
   return russiaPeople.length;
+};
+
+const writeBirthdayListSheet = (
+  sheet: any,
+  title: string,
+  caption: string,
+  rows: BirthdayPersonRow[],
+  extraHeader?: string,
+) => {
+  sheet.name(title);
+  const headers = extraHeader
+    ? ["№", "ПІБ", "Позивний", "Дата народження", "Місце перебування", extraHeader]
+    : ["№", "ПІБ", "Позивний", "Дата народження", "Місце перебування"];
+  headers.forEach((header, index) => {
+    sheet.cell(1, index + 1).value(header);
+    styleHeader(sheet.cell(1, index + 1));
+  });
+  sheet.cell(2, 1).value(caption);
+  sheet.range(2, 1, 2, headers.length).merged(true).style({
+    fontColor: "666666",
+    wrapText: true,
+  });
+  sheet.column(1).width(6);
+  sheet.column(2).width(36);
+  sheet.column(3).width(18);
+  sheet.column(4).width(18);
+  sheet.column(5).width(28);
+  if (extraHeader) sheet.column(6).width(24);
+  rows.forEach((row, index) => {
+    const excelRow = index + 3;
+    const values = [
+      index + 1,
+      row.name,
+      row.callsign,
+      row.birthDate,
+      row.location,
+      ...(extraHeader ? [row.note ?? ""] : []),
+    ];
+    values.forEach((value, column) => {
+      sheet.cell(excelRow, column + 1).value(value);
+    });
+    sheet.range(excelRow, 1, excelRow, headers.length).style({
+      border: BORDER,
+      fill: index % 2 === 0 ? VALUE_FILL : ALT_ROW_FILL,
+      verticalAlignment: "center",
+      fontColor: TEXT,
+    });
+  });
+};
+
+export const exportSocPassportBirthdaysWorkbook = async (
+  rows: BirthdayPersonRow[],
+  monthLabel: string,
+  missingRows: BirthdayPersonRow[] = [],
+) => {
+  const stamp = new Date().toISOString().slice(0, 10);
+  await exportBlankWorkbookWithMutations((workbook) => {
+    writeBirthdayListSheet(
+      workbook.sheet(0),
+      "Дні народження",
+      `В строю, без транзитерів · ${monthLabel} · ${rows.length} осіб`,
+      rows,
+    );
+    writeBirthdayListSheet(
+      workbook.addSheet("Без дати"),
+      "Без дати",
+      `Штатка, в строю, без транзитерів · дати немає в ЕЖООС · ${missingRows.length} осіб`,
+      missingRows,
+      "Примітка",
+    );
+  }, `Соц.паспорт_дні_народження_${stamp}.xlsx`);
+  return { birthdays: rows.length, missing: missingRows.length };
 };

@@ -241,6 +241,11 @@ const fillCanonicalSheets = async () => {
   timesheet.cell(7, 8).value("111");
   timesheet.cell(7, 9).value("+");
 
+  shpo.cell(9, 1).value("2103232");
+  timesheet.cell(9, 2).value("2103232");
+  timesheet.cell(9, 3).value("Водій-радіотелефоніст");
+  timesheet.cell(9, 6).value("солдат");
+
   const blob = (await workbook.outputAsync("blob")) as Blob;
   return readWorkbookSnapshot(
     new File([blob], "ejoos.xlsx", { type: XLSX_MIME }),
@@ -249,8 +254,64 @@ const fillCanonicalSheets = async () => {
 };
 
 describe("bulk apply re-reads workbook between batches", () => {
+  it("applies multiple disposition families in one bulk queue", async () => {
+    const ejoos = await fillCanonicalSheets();
+    const dispositionOne = op({
+      id: "disp-1",
+      kind: "move_to_disposition",
+      personId: "111",
+      fullName: "ХУБАЄВ Іван",
+      positionIndex: "2103764",
+      rank: "солдат",
+      payload: {
+        destination: "у розпорядження командира",
+        skipShpoDisposition: "1",
+        orderDate: "05.08.2026",
+        orderNumber: "100",
+      },
+    });
+    const closeOne = op({
+      id: "absent-close-1",
+      kind: "absent_close",
+      personId: "111",
+      fullName: "ХУБАЄВ Іван",
+      payload: {},
+    });
+    const dispositionTwo = op({
+      id: "disp-2",
+      kind: "move_to_disposition",
+      personId: "222",
+      fullName: "АТРАХОВ Петро",
+      positionIndex: "2103764",
+      rank: "солдат",
+      payload: {
+        destination: "у розпорядження командира",
+        skipShpoDisposition: "1",
+        orderDate: "06.08.2026",
+        orderNumber: "101",
+      },
+    });
+    const closeTwo = op({
+      id: "absent-close-2",
+      kind: "absent_close",
+      personId: "222",
+      fullName: "АТРАХОВ Петро",
+      payload: {},
+    });
+
+    await expect(
+      applyConfirmedEjoosOps({
+        ejoos,
+        plan: dummyPlan([dispositionOne, closeOne, dispositionTwo, closeTwo]),
+        ops: [dispositionOne, closeOne, dispositionTwo, closeTwo],
+      }),
+    ).resolves.toMatchObject({ directXml: true });
+  }, 30_000);
+
   it("ХУБАЄВ outbound + АТРАХОВ occupant on 2103764 keeps Атрахова in SHPO", async () => {
     const ejoos = await fillCanonicalSheets();
+    const hubayevChangeText =
+      "радіотелефоніст 2 штурмового взводу 2 штурмової роти";
     const hubayev = op({
       id: "excl-hubayev",
       kind: "exclude_transfer",
@@ -264,8 +325,9 @@ describe("bulk apply re-reads workbook between batches", () => {
         fromPersonId: "111",
         fromPositionIndex: "2103764",
         destination: "А4784",
-        documentsDest: "А4784",
+        documentsDest: hubayevChangeText,
         timesheetDestination: "А4784",
+        changeText: hubayevChangeText,
         excludeDate: "05.08.2026",
         orderDate: "05.08.2026",
         orderNumber: "100",
@@ -310,11 +372,210 @@ describe("bulk apply re-reads workbook between batches", () => {
     const excluded = parseExcluded(
       after.sheets.find((sheet) => /виключ/i.test(sheet.sheetName)),
     );
+    const excludedSheet = after.sheets.find((sheet) =>
+      /виключ/i.test(sheet.sheetName),
+    );
+    const excludedHubayevRow = excludedSheet?.rawRows.find((row) =>
+      String(row[1] || "").includes("ХУБАЄВ"),
+    );
     const slot = shpo.find((row) => row.positionIndex === "2103764");
     expect(slot?.fullName).toMatch(/АТРАХОВ/i);
     expect(slot?.personId).toBe("222");
     expect(oos.some((row) => /АТРАХОВ/i.test(row.fullName))).toBe(true);
     expect(oos.some((row) => /ХУБАЄВ/i.test(row.fullName))).toBe(false);
     expect(excluded.some((row) => /ХУБАЄВ/i.test(row.fullName))).toBe(true);
+    expect(excludedHubayevRow?.[30]).toBe(hubayevChangeText);
+  }, 30_000);
+});
+
+describe("position_change from СЗЧ does not clone the timesheet row", () => {
+  it("paints the staff row in place and does not add a named copy below", async () => {
+    const ejoos = await fillCanonicalSheets();
+    const place = op({
+      id: "pos-arushanyan",
+      kind: "position_change",
+      personId: "21692",
+      fullName: "АРУШАНЯН Норайр Рубенович",
+      positionIndex: "2103232",
+      rank: "солдат",
+      payload: {
+        nextIndex: "2103232",
+        nextName: "АРУШАНЯН Норайр Рубенович",
+        nextPersonId: "21692",
+        nextRank: "солдат",
+        orderDate: "10.08.2026",
+        orderNumber: "231",
+        shpoExcelRow: "9",
+        timesheetExcelRow: "9",
+        timesheetActiveFrom: "10.08.2026",
+        timesheetPreserveHistory: "1",
+        returningFromDisposition: "1",
+        timesheetSkipHistory: "1",
+      },
+    });
+    const { blob } = await applyConfirmedEjoosOps({
+      ejoos,
+      plan: dummyPlan([place]),
+      ops: [place],
+    });
+    const after = await readWorkbookSnapshot(
+      new File([blob], "ЄЖООС_станом_на_25-08-2026.xlsx", { type: XLSX_MIME }),
+      EJOOS_SYNC_READ_OPTIONS,
+    );
+    const ts = after.sheets.find((sheet) => /табель/i.test(sheet.sheetName));
+    const named = (ts?.rawRows ?? [])
+      .map((row, index) => ({
+        row: index + 1,
+        name: String(row[6] ?? ""),
+        id: String(row[7] ?? ""),
+      }))
+      .filter(
+        (item) => /арушанян/i.test(item.name) || item.id === "21692",
+      );
+    expect(named.map((item) => item.row)).toEqual([9]);
+    expect(String(ts?.rawRows[8]?.[8] ?? "").trim()).toBe("-");
+    expect(String(ts?.rawRows[8]?.[17] ?? "").trim()).toBe("+");
+  }, 30_000);
+});
+
+describe("СЗЧ → РОЗПОРЯДЖ then final sh occupant", () => {
+  it("vacates DIDENKO then MAXIMENKO keeps 2103520; timesheet is one СЗЧ row", async () => {
+    const module = await import(
+      "xlsx-populate/browser/xlsx-populate-no-encryption"
+    );
+    const workbook = await module.default.fromBlankAsync();
+    const shpo = workbook.sheet(0);
+    shpo.name("1. ШПО");
+    const oos = workbook.addSheet("2. ООС");
+    const excluded = workbook.addSheet("3. Виключені");
+    const arrivals = workbook.addSheet("4. Тимчасово прибулі");
+    const absents = workbook.addSheet("5. Тимчасово відсутні");
+    const timesheet = workbook.addSheet("6. Табель");
+
+    shpo.cell(1, 1).value("1. ШПО");
+    oos.cell(1, 1).value("2. ООС");
+    excluded.cell(1, 1).value("3. Виключені");
+    arrivals.cell(1, 1).value("4. Тимчасово прибулі");
+    absents.cell(1, 1).value("5. Тимчасово відсутні");
+    timesheet.cell(1, 1).value("6. Табель");
+    timesheet.cell(2, 9).value("Серпень 2026 р.");
+
+    shpo.cell(4, 1).value("індекс");
+    shpo.cell(4, 6).value("звання");
+    shpo.cell(4, 7).value("ПІБ");
+    shpo.cell(4, 8).value("ID");
+    shpo.cell(7, 1).value("2103520");
+    shpo.cell(7, 6).value("солдат");
+    shpo.cell(7, 7).value("ДІДЕНКО Ілля Андрійович");
+    shpo.cell(7, 8).value("11040");
+    shpo.cell(20, 2).value(", який знаходиться у розпорядженні командира");
+
+    oos.cell(4, 1).value("звання");
+    oos.cell(4, 2).value("ПІБ");
+    oos.cell(4, 3).value("ID");
+    oos.cell(6, 1).value("солдат");
+    oos.cell(6, 2).value("ДІДЕНКО Ілля Андрійович");
+    oos.cell(6, 3).value("11040");
+    oos.cell(6, 4).value("2103520");
+
+    absents.cell(6, 2).value("ДІДЕНКО Ілля Андрійович");
+    absents.cell(6, 5).value("СЗЧ");
+    absents.cell(6, 7).value("13.07.2026");
+
+    timesheet.cell(4, 2).value("індекс");
+    timesheet.cell(4, 7).value("ПІБ");
+    timesheet.cell(7, 2).value("2103520");
+    timesheet.cell(7, 6).value("солдат");
+    timesheet.cell(7, 7).value("ДІДЕНКО Ілля Андрійович");
+    timesheet.cell(7, 8).value("22898");
+    timesheet.cell(7, 9).value("СЗЧ");
+    timesheet.cell(7, 18).value("СЗЧ");
+
+    const blobIn = (await workbook.outputAsync("blob")) as Blob;
+    const ejoos = await readWorkbookSnapshot(
+      new File([blobIn], "ejoos.xlsx", { type: XLSX_MIME }),
+      EJOOS_SYNC_READ_OPTIONS,
+    );
+
+    const didenko = op({
+      id: "disp-didenko",
+      kind: "move_to_disposition",
+      personId: "11040",
+      fullName: "ДІДЕНКО Ілля Андрійович",
+      positionIndex: "2103520",
+      rank: "солдат",
+      payload: {
+        previousIndex: "2103520",
+        destination: "у розпорядження командира",
+        orderDate: "10.08.2026",
+        orderNumber: "231",
+        shpoExcelRow: "7",
+        timesheetExcelRow: "7",
+        absenceExcelRow: "6",
+        absenceCode: "СЗЧ",
+        absenceType: "СЗЧ",
+        remainsInOos: "true",
+        timesheetFound: "true",
+        keepOpenSzchTimesheet: "1",
+        vacateTimesheetStaffSlot: "1",
+      },
+    });
+    const maximenko = op({
+      id: "pos-maximenko",
+      kind: "position_change",
+      personId: "9905",
+      fullName: "МАКСИМЕНКО Олексій Євгенійович",
+      positionIndex: "2103520",
+      rank: "солдат",
+      payload: {
+        nextIndex: "2103520",
+        nextName: "МАКСИМЕНКО Олексій Євгенійович",
+        nextPersonId: "9905",
+        nextRank: "солдат",
+        orderDate: "11.08.2026",
+        shpoExcelRow: "7",
+        timesheetExcelRow: "7",
+        timesheetActiveFrom: "11.08.2026",
+      },
+    });
+
+    const { blob } = await applyConfirmedEjoosOps({
+      ejoos,
+      plan: dummyPlan([didenko, maximenko]),
+      ops: [didenko, maximenko],
+    });
+    const after = await readWorkbookSnapshot(
+      new File([blob], "ЄЖООС_станом_на_25-08-2026.xlsx", { type: XLSX_MIME }),
+      EJOOS_SYNC_READ_OPTIONS,
+    );
+    const shpoRows = parseEjoosShpo(
+      after.sheets.find((sheet) => /шпо/i.test(sheet.sheetName)),
+    );
+    const oosRows = parseEjoosOos(
+      after.sheets.find((sheet) => /оос/i.test(sheet.sheetName)),
+    );
+    const staff = shpoRows.find((row) => row.positionIndex === "2103520");
+    expect(staff?.fullName).toMatch(/МАКСИМЕНКО/i);
+    expect(staff?.personId).toBe("9905");
+    expect(oosRows.some((row) => row.personId === "11040")).toBe(true);
+
+    const ts = after.sheets.find((sheet) => /табель/i.test(sheet.sheetName));
+    const didenkoRows = (ts?.rawRows ?? [])
+      .map((row, index) => ({
+        row: index + 1,
+        name: String(row[6] ?? ""),
+        id: String(row[7] ?? ""),
+        days: Array.from({ length: 25 }, (_, day) =>
+          String(row[8 + day] ?? "").trim(),
+        ),
+      }))
+      .filter((item) => /діденко/i.test(item.name) || item.id === "11040");
+    expect(didenkoRows).toHaveLength(1);
+    expect(didenkoRows[0].id).toBe("11040");
+    expect(didenkoRows[0].days.every((mark) => mark === "СЗЧ")).toBe(true);
+    expect(didenkoRows[0].days[9]).not.toMatch(/вибув/i);
+
+    const abs = after.sheets.find((sheet) => /відсут/i.test(sheet.sheetName));
+    expect(String(abs?.rawRows[5]?.[2] ?? "").trim()).toBe("11040");
   }, 30_000);
 });

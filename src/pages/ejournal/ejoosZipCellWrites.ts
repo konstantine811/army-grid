@@ -811,34 +811,6 @@ const withRegularFont = (xfXml: string, stylesXml: string) => {
   return xf;
 };
 
-const withWrapAlignment = (xfXml: string) => {
-  let xf = xfXml;
-  if (/applyAlignment=/i.test(xf)) {
-    xf = xf.replace(/applyAlignment="[^"]*"/i, `applyAlignment="1"`);
-  } else {
-    xf = xf.replace(/<xf\b/, `<xf applyAlignment="1"`);
-  }
-  if (/<alignment\b/i.test(xf)) {
-    return xf.replace(
-      /<alignment\b([^>]*)(?:\/>|><\/alignment>|>)/i,
-      (_all, attrs: string) => {
-        const cleaned = String(attrs)
-          .replace(/\s+wrapText="[^"]*"/gi, "")
-          .replace(/\s+vertical="[^"]*"/gi, "")
-          .replace(/\s+horizontal="[^"]*"/gi, "")
-          .replace(/\/\s*$/, "")
-          .trimEnd();
-        return `<alignment${cleaned} wrapText="1" vertical="center" horizontal="center"/>`;
-      },
-    );
-  }
-  const alignment = `<alignment wrapText="1" vertical="center" horizontal="center"/>`;
-  if (/\/\s*>\s*$/.test(xf.trim())) {
-    return xf.replace(/\/\s*>\s*$/, `>${alignment}</xf>`);
-  }
-  return xf.replace(/<xf\b([^>]*)>/, `<xf$1>${alignment}`);
-};
-
 const withCenterAlignment = (xfXml: string) => {
   let xf = xfXml;
   if (/applyAlignment=/i.test(xf)) {
@@ -978,50 +950,6 @@ const ensureWrapOnStyle = (
     `${nextOpen}${block[2]}${wrapped}${close}`,
   );
   return { xml, styleId: String(xfs.length) };
-};
-
-const setRowHeightValue = (
-  sheetXml: string,
-  rowNumber: number,
-  ht: number,
-) => {
-  const height = String(Math.min(220, Math.max(15, ht)));
-  const re = new RegExp(`<row\\b([^>]*\\br="${rowNumber}"(?![0-9])[^>]*)`, "i");
-  return sheetXml.replace(re, (_open, attrs) => {
-    const without = String(attrs)
-      .replace(/\s+ht="[^"]*"/i, "")
-      .replace(/\s+customHeight="[^"]*"/i, "");
-    return `<row${without} ht="${height}" customHeight="1"`;
-  });
-};
-
-const setRowHeightForLines = (
-  sheetXml: string,
-  rowNumber: number,
-  lines: number,
-) => setRowHeightValue(sheetXml, rowNumber, lines * 16);
-
-const copyRowHeightFrom = (
-  sheetXml: string,
-  fromRow: number,
-  toRow: number,
-  minLines: number,
-) => {
-  const computed = Math.min(220, Math.max(18, minLines * 16));
-  if (fromRow === toRow) {
-    return setRowHeightValue(sheetXml, toRow, computed);
-  }
-  const source = sheetXml.match(
-    new RegExp(`<row\\b([^>]*\\br="${fromRow}"(?![0-9])[^>]*)`, "i"),
-  );
-  const sourceHt = source ? Number(parseAttr(source[1], "ht")) : NaN;
-  const ht =
-    Number.isFinite(sourceHt) && sourceHt > 0
-      ? minLines <= 3
-        ? sourceHt
-        : Math.max(sourceHt, computed)
-      : computed;
-  return setRowHeightValue(sheetXml, toRow, ht);
 };
 
 const yieldToUi = () =>
@@ -1328,6 +1256,8 @@ export async function applyInlineStringWritesToWorkbook(
   }
   sheetXml = stripOrphanSharedFormulas(sheetXml);
   sheetXml = repairBrokenCellOpenTags(sheetXml);
+  // Не чіпати <dimension>: вставка перед <sheetData> ламає порядок OOXML
+  // (має бути до sheetViews) — Excel тоді заміняє весь аркуш.
   if (stylesXml && stylesXml !== originalStylesXml) {
     zip.file("xl/styles.xml", stylesXml);
   }

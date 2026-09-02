@@ -1,4 +1,5 @@
 import JSZip from "jszip";
+import { formatExcludedDestination } from "./ejoosExcludedColumns";
 
 /**
  * Точковий патч колонки AE («Куди вибув») на аркуші «Виключені»:
@@ -25,9 +26,6 @@ const decodeXml = (value: string) =>
     .replace(/&#10;/g, "\n")
     .replace(/&#xA;/gi, "\n")
     .replace(/&amp;/g, "&");
-
-const formatDestination = (value: string) =>
-  value.replace(/\s+/g, " ").trim().toLocaleLowerCase("uk-UA");
 
 const looksAllCaps = (value: string) => {
   const letters = value.replace(/[^\p{L}]/gu, "");
@@ -176,7 +174,7 @@ export async function patchExcludedDestinationInEjoosFile(
   let nextXml = sheetXml;
   let changed = 0;
   for (const cell of cells) {
-    const lowered = formatDestination(cell.text);
+    const lowered = formatExcludedDestination(cell.text);
     const needsCase = lowered !== cell.text.trim() || looksAllCaps(cell.text);
     const styleId =
       looksAllCaps(cell.text) && styleRef ? styleRef : cell.styleId;

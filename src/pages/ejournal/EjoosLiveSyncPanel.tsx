@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Box,
@@ -18,11 +18,13 @@ import {
   type BackendEjournalLiveState,
   type BackendEjournalLiveVersion,
 } from "../../api";
+import { formatApiDateTime } from "../../shared/format";
 import {
   type ExcelWorkbookSnapshot,
   EJOOS_SYNC_READ_OPTIONS,
   readWorkbookSnapshot,
 } from "../../excelRoundTrip";
+import { readEjoosWorkbookSnapshot } from "./ejoosTimesheetPersonRows";
 import {
   applyConfirmedEjoosOps,
   base64ToFile,
@@ -30,12 +32,13 @@ import {
   downloadBlobFile,
   downloadTextFile,
 } from "./ejoosSyncApply";
-import { appendEjoosChangeHistoryOnExport } from "./ejoosChangeHistorySheet";
 import {
   buildConfirmSummary,
-  buildEjoosSyncPlan,
   buildProtocolText,
   collectProcessedMovementKeys,
+  planBlocksWorkbookApply,
+  SOURCE_DATE_UNKNOWN_MESSAGE,
+  workbookApplyBlockMessage,
   type EjoosSyncOp,
   type EjoosSyncPlan,
 } from "./ejoosSyncPlan";
@@ -49,10 +52,11 @@ import {
 import {
   assertEjoosWorkbook,
   assertPbWorkbook,
-  detectWorkbookKind,
   detectWorkbookKindFromFile,
   ejoosDownloadFileName,
 } from "./ejoosWorkbookKind";
+import { readOperatorSettings } from "./ejoosStatusMap";
+import { runHeavyJob } from "../../workers/runHeavyJob";
 
 type FilterClass = "ALL" | "ready" | "needs_input" | "conflict";
 
@@ -70,6 +74,7 @@ export function EjoosLiveSyncPanel() {
     null,
   );
   const [plan, setPlan] = useState<EjoosSyncPlan | null>(null);
+  const [sourceAsOf, setSourceAsOf] = useState("");
   const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
   const [manualCodes, setManualCodes] = useState<Record<string, string>>({});
   const [manualFields, setManualFields] = useState<
@@ -83,6 +88,7 @@ export function EjoosLiveSyncPanel() {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const planGenRef = useRef(0);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [lastProtocol, setLastProtocol] = useState("");
   const [lastResultFiles, setLastResultFiles] = useState<{
@@ -90,6 +96,22 @@ export function EjoosLiveSyncPanel() {
     protocolText: string;
     version: number;
   } | null>(null);
+  const buildPlanOffThread = (
+    ejoos: ExcelWorkbookSnapshot,
+    pb: ExcelWorkbookSnapshot,
+    sourceAsOfDate?: string,
+  ) =>
+    runHeavyJob({
+      type: "ejoosSyncPlan",
+      ejoos,
+      pb,
+      processedMovementKeys: [
+        ...collectProcessedMovementKeys(live?.versions),
+      ],
+      sourceAsOfDate: sourceAsOfDate || undefined,
+      statusRules: readOperatorSettings().statusRules,
+    });
+
   const refreshLive = async () => {
     const state = await api.getEjournalLive("1ПБ");
     setLive(state);
@@ -111,7 +133,7 @@ export function EjoosLiveSyncPanel() {
       full.fileBase64,
       full.sourceFileName || `ЕЖООС_v${full.version}.xlsx`,
     );
-    const snapshot = await readWorkbookSnapshot(file, EJOOS_SYNC_READ_OPTIONS);
+    const snapshot = await readEjoosWorkbookSnapshot(file);
     setEjoosSnapshot(snapshot);
     return snapshot;
   };
@@ -121,7 +143,7 @@ export function EjoosLiveSyncPanel() {
     setIsLoading(true);
     setError("");
     try {
-      const snapshot = await readWorkbookSnapshot(file, EJOOS_SYNC_READ_OPTIONS);
+      const snapshot = await readEjoosWorkbookSnapshot(file);
       assertEjoosWorkbook(snapshot);
       const fileBase64 = await blobToBase64(file);
       const created = await api.seedEjournalLive({
@@ -156,11 +178,7 @@ export function EjoosLiveSyncPanel() {
       const pb = await readWorkbookSnapshot(file, EJOOS_SYNC_READ_OPTIONS);
       assertPbWorkbook(pb);
       setPbSnapshot(pb);
-      // Yield so loading spinner paints before heavy plan build.
-      await new Promise((resolve) => window.setTimeout(resolve, 0));
-      const nextPlan = buildEjoosSyncPlan(ejoos, pb, {
-        processedMovementKeys: collectProcessedMovementKeys(live?.versions),
-      });
+      const nextPlan = await buildPlanOffThread(ejoos, pb, sourceAsOf);
       setPlan(nextPlan);
       setPage(0);
       setCheckedIds(
@@ -322,10 +340,8 @@ export function EjoosLiveSyncPanel() {
 
   const applySelected = async () => {
     if (!plan || !ejoosSnapshot || !live?.current) return;
-    if (plan.monthRolloverRequired) {
-      setError(
-        "MONTH_ROLLOVER_REQUIRED: місяць Табеля ЕЖООС не збігається з місяцем 1ПБ. Застосування заблоковано.",
-      );
+    if (planBlocksWorkbookApply(plan)) {
+      setError(workbookApplyBlockMessage(plan));
       return;
     }
     if (!selectedOps.length) {
@@ -347,10 +363,6 @@ export function EjoosLiveSyncPanel() {
         ejoos: ejoosSnapshot,
         plan,
         ops: selectedOps,
-        history: {
-          version: (live.current.version || 0) + 1,
-          appliedAt: new Date().toISOString(),
-        },
       });
       const resultBlob = result.blob;
       const protocolWithVersion = buildProtocolText(plan, selectedOps, {
@@ -362,21 +374,7 @@ export function EjoosLiveSyncPanel() {
         ...result.changeProtocol,
         protocolText: protocolWithVersion,
       };
-      const pendingVersion: BackendEjournalLiveVersion = {
-        ...live.current,
-        version: (live.current.version || 0) + 1,
-        createdAt: new Date().toISOString(),
-        asOfDate: plan.timesheetDayLabel,
-        sourcePbFileName: pbSnapshot?.fileName,
-        changeProtocol,
-        notes: `Застосовано ${selectedOps.length} змін з ${plan.pbName}`,
-      };
-      const withHistory = await appendEjoosChangeHistoryOnExport(
-        resultBlob,
-        [...(live.versions ?? []), pendingVersion],
-        pendingVersion.version,
-      );
-      const fileBase64 = await blobToBase64(withHistory);
+      const fileBase64 = await blobToBase64(resultBlob);
       const saved = await api.applyEjournalLive({
         baseVersionId: live.current.id,
         fileBase64,
@@ -387,7 +385,7 @@ export function EjoosLiveSyncPanel() {
         changeProtocol,
         notes: `Застосовано ${selectedOps.length} змін з ${plan.pbName}`,
       });
-      downloadBlobFile(result.fileName, withHistory);
+      downloadBlobFile(result.fileName, resultBlob);
       downloadTextFile(
         `протокол_ЕЖООС_v${saved.version}.txt`,
         protocolWithVersion,
@@ -476,13 +474,7 @@ export function EjoosLiveSyncPanel() {
         targetFile.fileBase64,
         targetFile.sourceFileName || `ЕЖООС_v${targetMeta.version}.xlsx`,
       );
-      const withHistory = await appendEjoosChangeHistoryOnExport(
-        targetBlob,
-        live?.versions ?? [],
-        targetMeta.version,
-        { mode: "rebuild" },
-      );
-      const fileBase64 = await blobToBase64(withHistory);
+      const fileBase64 = await blobToBase64(targetBlob);
 
       const saved = await api.rollbackEjournalLive({
         targetVersionId: versionId,
@@ -565,7 +557,7 @@ export function EjoosLiveSyncPanel() {
                             }
                           />
                           <Typography variant="caption">
-                            {new Date(version.createdAt).toLocaleString("uk-UA")}
+                            {formatApiDateTime(version.createdAt)}
                             {version.sourcePbFileName
                               ? ` · ${version.sourcePbFileName}`
                               : ""}
@@ -654,8 +646,11 @@ export function EjoosLiveSyncPanel() {
               justifyContent="space-between"
             >
               <Typography variant="subtitle2">
-                3. Огляд змін · джерело 1ПБ станом на {plan.timesheetDayLabel}{" "}
-                (табель лише по цей день) · всього {plan.ops.length}
+                3. Огляд змін ·{" "}
+                {plan.sourceDateUnknown
+                  ? "дата 1ПБ невідома"
+                  : `джерело 1ПБ станом на ${plan.timesheetDayLabel} (табель лише по цей день)`}{" "}
+                · всього {plan.ops.length}
               </Typography>
               <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
                 <Select
@@ -789,6 +784,48 @@ export function EjoosLiveSyncPanel() {
               </Button>
             </Stack>
 
+            {plan.sourceDateUnknown ? (
+              <Alert severity="warning" variant="outlined">
+                {SOURCE_DATE_UNKNOWN_MESSAGE}
+                <Stack direction="row" spacing={1} sx={{ mt: 1 }} alignItems="center">
+                  <input
+                    type="date"
+                    value={sourceAsOf}
+                    onChange={(event) => {
+                      const value = event.target.value;
+                      setSourceAsOf(value);
+                      if (!value || !ejoosSnapshot || !pbSnapshot) return;
+                      const gen = (planGenRef.current += 1);
+                      setIsLoading(true);
+                      void buildPlanOffThread(ejoosSnapshot, pbSnapshot, value)
+                        .then((nextPlan) => {
+                          if (gen !== planGenRef.current) return;
+                          setPlan(nextPlan);
+                        })
+                        .catch((err) => {
+                          if (gen !== planGenRef.current) return;
+                          setError(
+                            err instanceof Error
+                              ? err.message
+                              : "Не вдалося перерахувати план",
+                          );
+                        })
+                        .finally(() => {
+                          if (gen === planGenRef.current) setIsLoading(false);
+                        });
+                    }}
+                  />
+                </Stack>
+              </Alert>
+            ) : null}
+            {plan.timesheetMonthHeaderUnknown &&
+            !plan.monthRolloverRequired ? (
+              <Typography variant="body2" className="ejoos-muted">
+                Заголовок місяця в I2 не прочитано — місяць беремо з дати 1ПБ (
+                {plan.timesheetDayLabel}).
+              </Typography>
+            ) : null}
+
             {plan.limitsNote ? (
               <Typography variant="caption" color="text.secondary">
                 {plan.limitsNote}
@@ -802,7 +839,7 @@ export function EjoosLiveSyncPanel() {
                 disabled={
                   !selectedOps.length ||
                   isLoading ||
-                  Boolean(plan.monthRolloverRequired)
+                  planBlocksWorkbookApply(plan)
                 }
                 onClick={() => setConfirmOpen(true)}
               >

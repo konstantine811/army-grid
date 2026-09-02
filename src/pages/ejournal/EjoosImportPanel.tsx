@@ -1,5 +1,6 @@
 import { Box, Button, Stack, Typography } from "@/components/sci/SciPrimitives";
 import { CloudUploadOutlinedIcon } from "@/components/sci/icons";
+import { formatApiDateTime } from "../../shared/format";
 import { useEjoosWorkspace } from "./ejoosWorkspaceState";
 
 export function EjoosImportPanel() {
@@ -75,7 +76,7 @@ export function EjoosImportPanel() {
         {pbCurrent ? (
           <Typography variant="body2" sx={{ mb: 1.5 }}>
             У БД: <strong>{pbCurrent.sourceFileName || "без імені"}</strong> ·{" "}
-            {new Date(pbCurrent.createdAt).toLocaleString("uk-UA")} · sha{" "}
+            {formatApiDateTime(pbCurrent.createdAt)} · sha{" "}
             {pbCurrent.sha256.slice(0, 10)}…
           </Typography>
         ) : (

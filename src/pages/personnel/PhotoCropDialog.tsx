@@ -1,4 +1,11 @@
-import { useEffect, useRef, useState, type PointerEvent } from "react";
+import {
+  forwardRef,
+  useEffect,
+  useImperativeHandle,
+  useRef,
+  useState,
+  type PointerEvent,
+} from "react";
 import {
   Button,
   Dialog,
@@ -84,14 +91,24 @@ export const renderPdfFileToImageDataUrls = async (
   return pages;
 };
 
-export function PhotoCropDialog({
-  file,
-  open,
-  onClose,
-  onSave,
-  onMessage,
-  floating = false,
-}: PhotoCropDialogProps) {
+export type PhotoCropStageHandle = {
+  save: () => void;
+};
+
+export const PhotoCropStage = forwardRef<
+  PhotoCropStageHandle,
+  {
+    file: File | null;
+    active: boolean;
+    compact?: boolean;
+    onSave: (dataUrl: string, crop: CropRect) => void;
+    onMessage: (message: string) => void;
+    onReadyChange?: (ready: boolean) => void;
+  }
+>(function PhotoCropStage(
+  { file, active, compact = false, onSave, onMessage, onReadyChange },
+  ref,
+) {
   const previewRef = useRef<HTMLDivElement | null>(null);
   const imageRefs = useRef<Array<HTMLImageElement | null>>([]);
   const [previewPages, setPreviewPages] = useState<PreviewPage[]>([]);
@@ -100,9 +117,14 @@ export function PhotoCropDialog({
   const [isDrawing, setIsDrawing] = useState(false);
   const [drawStart, setDrawStart] = useState({ x: 0, y: 0 });
   const isPdf = file?.type === "application/pdf";
+  const ready = Boolean(previewPages.length) && !isPreparingPreview;
 
   useEffect(() => {
-    if (!file || !open) {
+    onReadyChange?.(ready);
+  }, [onReadyChange, ready]);
+
+  useEffect(() => {
+    if (!file || !active) {
       setPreviewPages([]);
       setIsPreparingPreview(false);
       return;
@@ -152,7 +174,7 @@ export function PhotoCropDialog({
     return () => {
       cancelled = true;
     };
-  }, [file, onMessage, open]);
+  }, [file, onMessage, active]);
 
   const getPointerPosition = (event: PointerEvent<HTMLDivElement>) => {
     const innerRect = event.currentTarget.getBoundingClientRect();
@@ -214,7 +236,12 @@ export function PhotoCropDialog({
         const rect = item.getBoundingClientRect();
         const left = rect.left - innerRect.left;
         const top = rect.top - innerRect.top;
-        return centerX >= left && centerX <= left + rect.width && centerY >= top && centerY <= top + rect.height;
+        return (
+          centerX >= left &&
+          centerX <= left + rect.width &&
+          centerY >= top &&
+          centerY <= top + rect.height
+        );
       }) ?? imageRefs.current.find((item) => item?.naturalWidth && item.naturalHeight);
 
     if (!image || !image.naturalWidth || !image.naturalHeight) {
@@ -271,14 +298,19 @@ export function PhotoCropDialog({
       canvas.height,
     );
     onSave(canvas.toDataURL("image/jpeg", 0.92), stageCrop);
-    onClose();
   };
 
-  const cropBody = (
-    <>
+  useImperativeHandle(ref, () => ({ save: saveCrop }), [
+    cropRect,
+    file,
+    previewPages.length,
+  ]);
+
+  return (
+    <div className={`photo-crop-embed${compact ? " is-compact" : ""}`}>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
         {isPdf
-          ? "PDF рендериться посторінково. Протягніть прямокутник навколо фото, потім «Зберегти фото»."
+          ? "Протягніть прямокутник навколо фото на сторінці, потім «Зберегти фото»."
           : "Можна одразу натиснути «Зберегти фото» або протягнути прямокутник для обрізки."}
       </Typography>
       {isPreparingPreview && <LinearProgress color="primary" sx={{ mb: 1 }} />}
@@ -340,8 +372,25 @@ export function PhotoCropDialog({
           />
         </div>
       </div>
-    </>
+    </div>
   );
+});
+
+export function PhotoCropDialog({
+  file,
+  open,
+  onClose,
+  onSave,
+  onMessage,
+  floating = false,
+}: PhotoCropDialogProps) {
+  const stageRef = useRef<PhotoCropStageHandle>(null);
+  const [ready, setReady] = useState(false);
+
+  const handleSave = (dataUrl: string, crop: CropRect) => {
+    onSave(dataUrl, crop);
+    onClose();
+  };
 
   const cropActions = (
     <>
@@ -349,14 +398,25 @@ export function PhotoCropDialog({
         Скасувати
       </Button>
       <Button
-        disabled={!previewPages.length || isPreparingPreview}
+        disabled={!ready}
         variant="contained"
-        onClick={saveCrop}
+        onClick={() => stageRef.current?.save()}
         sx={{ color: "#1a1a14" }}
       >
         Зберегти фото
       </Button>
     </>
+  );
+
+  const cropBody = (
+    <PhotoCropStage
+      ref={stageRef}
+      file={file}
+      active={open}
+      onSave={handleSave}
+      onMessage={onMessage}
+      onReadyChange={setReady}
+    />
   );
 
   if (floating) {

@@ -51,6 +51,7 @@ import {
   type UbdRosterMatchRecord,
   type UbdRosterStatus,
 } from "./socPassportFields";
+import { pickUsableBirthDate } from "./socPassportBirthdays";
 import {
   findStaticCombatExitOverride,
   isStaticCombatExitOverride,
@@ -1005,6 +1006,7 @@ export const parseSocPassportSources = ({
       matchedOosUbdKeys.add(normalizePersonName(oos.name));
     }
     const years = pickMatch(name, yearIndex)?.years ?? "";
+    const birthDate = pickUsableBirthDate(oos?.birthDate, roster.birthDate);
     const relatives = parseRelatives(oos?.relatives ?? "", asOf);
     const region = classifyRegion(oos?.birthPlace ?? "", oos?.calledBy ?? "");
     const nationality = classifyNationality(
@@ -1012,7 +1014,7 @@ export const parseSocPassportSources = ({
       oos?.extra ?? "",
       oos?.birthPlace ?? "",
     );
-    const age = parseAgeYears(oos?.birthDate ?? "", years, asOf);
+    const age = parseAgeYears(birthDate, years, asOf);
     const present = isBchsAvailableForAbsentFormula(roster.status);
     const morningBrez = combineMorningBrezFields(
       roster.bzvpStatus,
@@ -1068,7 +1070,10 @@ export const parseSocPassportSources = ({
         ) === index,
     );
     const oosDislocation = oos?.location ?? "";
-    const isTransiter = isTransiterDestination(roster.destination);
+    const isTransiter =
+      isTransiterDestination(roster.destination) ||
+      isTransiterDestination(roster.medicalNote) ||
+      isTransiterDestination(roster.treatmentNote);
     const bplaMatch = findBplaPerformer(
       bplaPerformers,
       name,
@@ -1115,7 +1120,11 @@ export const parseSocPassportSources = ({
     );
     if (isTransiter) {
       parseNotes.push(
-        `транзитер (${roster.destination.trim() || "ТРАНЗИТЕР"}): не входить у «Не виконували» / виходи`,
+        `транзитер (${
+          roster.destination.trim() ||
+          roster.medicalNote.trim() ||
+          "ТРАНЗИТЕР"
+        }): не входить у «Не виконували» / виходи`,
       );
     } else if (jbdExitCount > 0) {
       parseNotes.push(
@@ -1153,7 +1162,7 @@ export const parseSocPassportSources = ({
       rankGroup,
       serviceType: oos?.serviceType ?? "mobilized",
       sex: oos?.sex && oos.sex !== "unknown" ? oos.sex : "male",
-      birthDate: oos?.birthDate ?? "",
+      birthDate,
       age,
       ageBand: ageBandOf(age),
       birthPlace: oos?.birthPlace ?? "",
@@ -1189,6 +1198,7 @@ export const parseSocPassportSources = ({
         .filter(Boolean)
         .join(" "),
       morningDestination: roster.destination ?? "",
+      morningLocation: roster.medicalPlace ?? "",
       isTransiter,
       bzvpStatus: roster.bzvpStatus ?? "",
       brezAssignment: roster.brezAssignment ?? "",

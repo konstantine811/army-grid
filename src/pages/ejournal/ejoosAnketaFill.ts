@@ -31,6 +31,7 @@ import {
 import {
   EJOOS_PERSON_DATA_START_ROW,
   EXCLUDED_ANKETA_FIXED_COLUMNS,
+  formatExcludedPositionDates,
 } from "./ejoosExcludedColumns";
 import {
   applyInlineStringWritesToWorkbook,
@@ -526,6 +527,9 @@ const normalizeFillValue = (anketaKey: AnketaColumnKey, raw: string) => {
       .map((part) => part.trim())
       .filter(Boolean)
       .join("\n");
+  }
+  if (anketaKey === "positionDates") {
+    return formatExcludedPositionDates(trimmed) || trimmed;
   }
   return trimmed;
 };
@@ -1058,6 +1062,8 @@ export async function fillEjoosSheetFromAnketa(input: {
             row: write.excelRow,
             column: write.column,
             value,
+            wrapText:
+              typeof value === "string" && value.includes("\n"),
           };
         }),
         {

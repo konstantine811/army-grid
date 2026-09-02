@@ -188,21 +188,52 @@ export const isFirstPbPositionChange = (
 
 export const classifyStaffMove = (event: StaffMoveEvent): StaffMoveScope => {
   if (event.type !== "ПОСАДА" && event.type !== "ПЕРЕВ") return "other";
+  const blob = [event.note, event.destination, event.changeText].join(" ");
   // ПЕРЕВ + в/ч А#### у «Куди» / примітці / «Яка зміна» — вибуття з 1ПБ,
   // навіть коли «Куди» ще 1ПБ, а статус лишився «В СТРОЮ».
-  if (
-    event.type === "ПЕРЕВ" &&
-    mentionsExternalMilitaryUnit(
-      [event.note, event.destination, event.changeText].join(" "),
-    )
-  ) {
+  if (event.type === "ПЕРЕВ" && mentionsExternalMilitaryUnit(blob)) {
     return "outbound";
+  }
+  // «Куди» = БЕЗВІСТИ / СЗЧ — тимчасова відсутність, не вибуття до іншої частини.
+  if (
+    isDispositionAbsenceStatus(event.destination) &&
+    !mentionsExternalMilitaryUnit(blob) &&
+    !mentionsForeignUnit(blob)
+  ) {
+    return "other";
   }
   return isFirstPbPositionChange(event) ? "own" : "outbound";
 };
 
 export const isOwnUnitStaffMove = (event: StaffMoveEvent) =>
   classifyStaffMove(event) === "own";
+
+/**
+ * 2103225 → 2103157 у межах 1ПБ. Це не нова постановка в частину:
+ * Табель лишається один рядок з початку місяця.
+ */
+export const isInternalStaffIndexHop = (
+  event: Pick<
+    MovementRuleEvent,
+    "type" | "destination" | "changeText" | "previousIndex" | "nextIndex" | "note"
+  >,
+) => {
+  if (
+    !isStaffIndexToken(event.previousIndex) ||
+    !isStaffIndexToken(event.nextIndex) ||
+    normText(event.previousIndex) === normText(event.nextIndex) ||
+    /розпорядж/iu.test(`${event.previousIndex} ${event.changeText}`)
+  ) {
+    return false;
+  }
+  const blob = [event.note, event.destination, event.changeText].join(" ");
+  if (mentionsExternalMilitaryUnit(blob) || mentionsForeignUnit(blob)) {
+    return false;
+  }
+  if (isOwnUnitStaffMove(event)) return true;
+  // «Куди» інколи = назва нової посади 1ПБ, не код `_5 1ПБ`.
+  return /1\s*(?:ПБ|піхотн)/iu.test(blob);
+};
 
 export const isOutboundStaffMove = (event: StaffMoveEvent) =>
   classifyStaffMove(event) === "outbound";
@@ -328,6 +359,36 @@ export const isSzchCancellation = (
 
 export const isDispositionAbsenceStatus = (value: string) =>
   /СЗЧ|САМОВІЛ|БЕЗВІСТ|(?:^|[^А-ЯІЇЄҐ])ЗБ(?:$|[^А-ЯІЇЄҐ])/iu.test(value);
+
+const CADRE_EVENT_TYPES = new Set([
+  "ПЕРЕВ",
+  "ПОСАДА",
+  "ЗВІЛЬН",
+  "РОЗПОРЯДЖ",
+  "ПРИБУВ",
+  "ЗВАННЯ",
+]);
+
+/**
+ * БЕЗВІСТИ / СЗЧ — фактична відсутність, не виключення зі списків.
+ * Окремий ПЕРЕВ / ЗВІЛЬН / РОЗПОРЯДЖ після цього обробляється окремо.
+ */
+export const isAbsenceOnlyMovement = (
+  event: Pick<
+    MovementRuleEvent,
+    "type" | "status" | "destination" | "changeText" | "note"
+  >,
+) => {
+  const type = normText(event.type).toUpperCase();
+  if (/БЕЗВІСТ|(?:^|[^А-ЯІЇЄҐ])ЗБ(?:$|[^А-ЯІЇЄҐ])/.test(type)) return true;
+  if (/СЗЧ|САМОВІЛ/.test(type) && !/СКАС/.test(type)) return true;
+  if (CADRE_EVENT_TYPES.has(event.type)) return false;
+  return isDispositionAbsenceStatus(
+    [event.type, event.status, event.note, event.changeText, event.destination].join(
+      " ",
+    ),
+  );
+};
 
 export const isCurrentUnitStatusMarker = (value: string) =>
   /^_?\s*\d+\s+\d+\s*ПБ$/iu.test(value.replace(/\s+/g, " ").trim());

@@ -1,3 +1,4 @@
+import { dateMs } from "./ejoosIdentity";
 import {
   extractTimesheetDestinationFromPosition,
   formatTimesheetDeparture,
@@ -117,9 +118,93 @@ export const EXCLUDED_ANKETA_FIXED_COLUMNS: Array<{
 /** Типовий перший рядок даних на Виключені / ООС (після заголовків і нумерації). */
 export const EJOOS_PERSON_DATA_START_ROW = 6;
 
-/** Z «Дані про родичів» і AF «Підстава виключення» — багаторядковий текст. */
+/** E «Дати прийняття посади», Z «Дані про родичів» і AF «Підстава виключення». */
 export const isExcludedWrapColumn = (column: number) =>
-  column === 26 || column === 32;
+  column === 5 || column === 26 || column === 32;
+
+const POSITION_DATE_RE = /\d{1,2}\.\d{1,2}\.\d{4}/g;
+const EXCEL_EPOCH_UTC = Date.UTC(1899, 11, 30);
+
+const padUaDate = (day: number, month: number, year: number) =>
+  `${String(day).padStart(2, "0")}.${String(month).padStart(2, "0")}.${year}`;
+
+const excelSerialToUaDate = (value: number) => {
+  if (!Number.isFinite(value) || value <= 20000 || value >= 80000) return "";
+  const date = new Date(EXCEL_EPOCH_UTC + Math.floor(value) * 86_400_000);
+  return padUaDate(
+    date.getUTCDate(),
+    date.getUTCMonth() + 1,
+    date.getUTCFullYear(),
+  );
+};
+
+const asPositionDateText = (value: unknown): string => {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return padUaDate(value.getDate(), value.getMonth() + 1, value.getFullYear());
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return excelSerialToUaDate(value) || String(value);
+  }
+  return String(value ?? "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\u00a0/g, " ");
+};
+
+/** Виключені col E: кожна дата на новому рядку, від ранньої до пізньої. */
+export const formatExcludedPositionDates = (raw: unknown): string => {
+  const text = asPositionDateText(raw).trim();
+  if (!text) return "";
+  const dates = [...text.matchAll(POSITION_DATE_RE)].map((match) => {
+    const [day, month, year] = match[0].split(".");
+    return padUaDate(Number(day), Number(month), Number(year));
+  });
+  if (dates.length === 0) return text;
+  const unique: string[] = [];
+  const seen = new Set<string>();
+  for (const date of dates) {
+    if (seen.has(date)) continue;
+    seen.add(date);
+    unique.push(date);
+  }
+  unique.sort((left, right) => {
+    const a = dateMs(left);
+    const b = dateMs(right);
+    if (a && b && a !== b) return a - b;
+    return 0;
+  });
+  return unique.join("\n");
+};
+
+export const collectExcludedPositionDateWrites = (
+  rawRows: Array<Array<unknown> | undefined>,
+  startRow = EJOOS_PERSON_DATA_START_ROW,
+): Array<{
+  row: number;
+  column: number;
+  value: string;
+  wrapText: boolean;
+}> => {
+  const writes: Array<{
+    row: number;
+    column: number;
+    value: string;
+    wrapText: boolean;
+  }> = [];
+  for (let row = startRow; row <= rawRows.length; row += 1) {
+    const raw = rawRows[row - 1]?.[4];
+    const formatted = formatExcludedPositionDates(raw);
+    if (!formatted) continue;
+    const current = asPositionDateText(raw).trim();
+    if (formatted === current) continue;
+    writes.push({
+      row,
+      column: 5,
+      value: formatted,
+      wrapText: formatted.includes("\n"),
+    });
+  }
+  return writes;
+};
 
 type TransferUnitPayload = {
   type?: string;
@@ -197,6 +282,16 @@ export const shortExcludedTransferUnit = (payload: TransferUnitPayload) => {
 };
 
 /**
+ * AE «Куди вибув / Куди направлені документи» на «Виключені»:
+ * lowercase, як у шаблоні аркуша.
+ */
+export const formatExcludedDestination = (value: string | undefined | null) =>
+  String(value || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLocaleLowerCase("uk-UA");
+
+/**
  * Підстава виключення (колонка AF): коротко, як у шаблоні.
  * ПЕРЕВЕДЕННЯ
  * _ А4784
@@ -209,13 +304,6 @@ export const formatExcludedListBasis = (payload: TransferUnitPayload) => {
   const unit = shortExcludedTransferUnit(payload);
   return unit ? `${title}\n${unit}` : title;
 };
-
-/** Колонка AE «Куди вибув» — lowercase як у шаблоні. */
-export const formatExcludedDestinationText = (value: string) =>
-  value
-    .replace(/\s+/g, " ")
-    .trim()
-    .toLocaleLowerCase("uk-UA");
 
 /**
  * День вибуття в Табелі: «вибув до/у» + підрозділ з «Яка зміна» без назви посади.

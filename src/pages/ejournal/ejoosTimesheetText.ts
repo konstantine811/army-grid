@@ -7,6 +7,12 @@
  * у — стан або напрямок (знахідний):
  *   «у розпорядження», «у відрядження», «у відпустку»
  */
+import {
+  mentionsExternalMilitaryUnit,
+  mentionsForeignUnit,
+} from "./ejoosMovementRules";
+import { EJOOS_TIMESHEET_CODES } from "./ejoosRules";
+
 const LEADING_DIRECTION = /^(?:вибув(?:\s+(?:до|у|в|на))?|до|у|в|на)\s+/i;
 
 const USES_U =
@@ -36,6 +42,15 @@ export const timesheetDeparturePreposition = (
 export const formatTimesheetDeparture = (rawDestination: string) => {
   const destination = stripTimesheetDirectionPrefix(rawDestination);
   if (!destination) return "вибув";
+  const unitCodes = [
+    ...destination.matchAll(/[АA]\s*(\d{4})(?!\d)/giu),
+  ].map((match) => `А${match[1]}`);
+  const uniqueUnits = [...new Set(unitCodes)];
+  const hasSubunit =
+    /відділенн|взвод|рот[аиуы]|батальйон|батаре|дивізіон/i.test(destination);
+  if (uniqueUnits.length === 1 && !hasSubunit) {
+    return `вибув у в/ч ${uniqueUnits[0]}`;
+  }
   return `вибув ${timesheetDeparturePreposition(destination)} ${destination}`;
 };
 
@@ -124,6 +139,21 @@ export const extractTimesheetDestinationFromPosition = (
 export const isTimesheetDepartureMark = (value: unknown) => {
   const text = String(value ?? "").replace(/\s+/g, " ");
   return /вибув|переведення|розпорядження/iu.test(text);
+};
+
+/**
+ * «вибув до 3 піхотного відділення … взводу» — внутрішня зміна посади.
+ * Не плутати з вибуттям у 2ПБ / в/ч А####.
+ */
+export const isInternalStaffTimesheetDeparture = (value: unknown) => {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  if (!isTimesheetDepartureMark(text)) return false;
+  if (/розпорядж/iu.test(text)) return false;
+  if (mentionsExternalMilitaryUnit(text) || mentionsForeignUnit(text)) {
+    return false;
+  }
+  if (/батальйон/iu.test(text) && !/1\s*піхотн/iu.test(text)) return false;
+  return /відділенн|взвод|рот[аиуы]|батаре|1\s*піхотн/iu.test(text);
 };
 
 export const dayFromOrderLabel = (value: string) => {
@@ -430,6 +460,20 @@ export const buildTimesheetAbsenceSpans = (
       const departMs = period.departMs ?? 0;
       const returnMs = period.returnMs ?? null;
       const { monthStartMs, monthEndMs, timesheetDay } = options;
+      const laterPeriod = sorted
+        .slice(index + 1)
+        .find((candidate) => (candidate.departMs ?? 0) > departMs);
+      const laterDepartMs = laterPeriod?.departMs ?? 0;
+      // Старий відкритий МЕДРОТА 2025 не фарбує серпень, якщо далі вже була
+      // відпустка / інший період, що почався до місяця журналу.
+      if (
+        !returnMs &&
+        departMs < monthStartMs &&
+        laterDepartMs > departMs &&
+        laterDepartMs <= monthStartMs
+      ) {
+        return null;
+      }
       if (
         !archivePeriodOverlapsJournalTimesheet(
           departMs,
@@ -459,6 +503,7 @@ export const buildTimesheetAbsenceSpans = (
 
       const monthLastDay =
         journalDayFromDateMs(monthEndMs, monthStartMs) || timesheetDay;
+      const horizonDay = timesheetDay > 0 ? timesheetDay : monthLastDay;
       let toDay = monthLastDay;
       if (returnMs) {
         if (returnMs > monthEndMs) {
@@ -474,23 +519,22 @@ export const buildTimesheetAbsenceSpans = (
         }
       } else if (nextFromDay > fromDay) {
         toDay = nextFromDay - 1;
+      } else {
+        toDay = horizonDay;
       }
 
       if (nextFromDay > fromDay && toDay >= nextFromDay) {
         toDay = nextFromDay - 1;
       }
-      toDay = Math.min(toDay, monthLastDay);
+      toDay = Math.min(toDay, monthLastDay, horizonDay);
 
       const code = options.mapCode(period.absenceType);
       return { fromDay, toDay, code };
     })
-    .filter(
-      (span): span is TimesheetAbsenceSpan =>
-        Boolean(span) &&
-        span.fromDay > 0 &&
-        span.toDay >= span.fromDay &&
-        Boolean(span.code),
-    );
+    .filter((span): span is TimesheetAbsenceSpan => {
+      if (!span) return false;
+      return span.fromDay > 0 && span.toDay >= span.fromDay && Boolean(span.code);
+    });
 };
 
 /** Якщо sh досі СЗЧ/ЗБ, а archive вже має «повернення» — не здогадуємось. */
@@ -501,8 +545,8 @@ export const archiveReturnContradictsCurrentSh = (
 ) => hasReturn && currentStatusConfirmsOpenAbsence(shTimesheetCode, archiveTimesheetCode);
 
 /**
- * Не підключати до SyncPlan: суперечність archive-return vs sh-still-absent
- * йде в NEEDS_REVIEW, а не в автопродовження коду до дня звіту.
+ * Відкритий СЗЧ/ЛК у sh і в archive — тягнемо код до дня зрізу 1ПБ.
+ * Суперечність archive-return vs sh-still-absent лишається в NEEDS_REVIEW.
  */
 export const extendDispositionSpanToReportDay = (
   spans: TimesheetAbsenceSpan[],
@@ -571,6 +615,109 @@ export const sameTimesheetDayMark = (actual: string, expected: string) => {
   return right === "-" && DASH_MARK.test(left);
 };
 
+const KNOWN_ABSENCE_CODES = new Set(
+  EJOOS_TIMESHEET_CODES.filter((code) => code !== "+").map((code) =>
+    code.toLocaleLowerCase("uk-UA"),
+  ),
+);
+
+/** ЛК — історичний синонім «лік» у Табелі. */
+KNOWN_ABSENCE_CODES.add("лк");
+
+/** Лише відомі коди відсутності. Число «19» (сума «+») сюди не входить. */
+export const isTimesheetAbsenceCode = (code: string) => {
+  const mark = String(code || "").trim();
+  if (!mark || mark === "+") return false;
+  if (DASH_MARK.test(mark)) return false;
+  if (isTimesheetDepartureMark(mark)) return false;
+  return KNOWN_ABSENCE_CODES.has(mark.toLocaleLowerCase("uk-UA"));
+};
+
+/** Позначка дня Табеля, яку можна тягнути по горизонту. */
+export const isPlausibleTimesheetDayMark = (code: string) => {
+  const mark = String(code || "").trim();
+  if (!mark) return false;
+  if (mark === "+") return true;
+  if (DASH_MARK.test(mark)) return true;
+  if (isTimesheetDepartureMark(mark)) return true;
+  return isTimesheetAbsenceCode(mark);
+};
+
+/**
+ * Порожні дні після останньої позначки добиваємо до дня зрізу 1ПБ.
+ * Відкритий ЛК/СЗЧ без фактичного повернення лишається і на день зрізу —
+ * не ставимо «+» на 25, якщо прибуття не було.
+ */
+export const timesheetHorizonFillDays = (input: {
+  dayCodes: Array<string | null | undefined>;
+  horizon: number;
+  reportCode: string;
+  confirmedReturn?: boolean;
+}): Array<{ day: number; mark: string }> => {
+  const horizon = Math.min(31, Math.max(0, Number(input.horizon) || 0));
+  const report = String(input.reportCode || "").trim();
+  if (horizon < 1 || !report || report === "(оберіть код)") return [];
+
+  const markAt = (day: number) => String(input.dayCodes[day] ?? "").trim();
+  const keepOpenAbsence = (seen: string) =>
+    isTimesheetAbsenceCode(seen) && report === "+" && !input.confirmedReturn;
+
+  const writes: Array<{ day: number; mark: string }> = [];
+  let lastSeen = "";
+
+  for (let day = 1; day <= horizon; day += 1) {
+    const existing = markAt(day);
+    if (existing && !DASH_MARK.test(existing)) {
+      if (isTimesheetDepartureMark(existing)) {
+        lastSeen = "вибув";
+        continue;
+      }
+      if (!isPlausibleTimesheetDayMark(existing)) {
+        if (day === horizon && report) {
+          writes.push({ day, mark: report });
+          lastSeen = report;
+        }
+        continue;
+      }
+      if (day === horizon && existing === "+" && keepOpenAbsence(lastSeen)) {
+        writes.push({ day, mark: lastSeen });
+        continue;
+      }
+      if (day === horizon && report && !sameTimesheetDayMark(existing, report)) {
+        if (keepOpenAbsence(existing) || keepOpenAbsence(lastSeen)) {
+          lastSeen = isTimesheetAbsenceCode(existing)
+            ? existing
+            : lastSeen || existing;
+          continue;
+        }
+        writes.push({ day, mark: report });
+        lastSeen = report;
+        continue;
+      }
+      lastSeen = existing;
+      continue;
+    }
+
+    if (!lastSeen || lastSeen === "вибув") {
+      if (day === horizon) {
+        writes.push({ day, mark: report });
+        lastSeen = report;
+      }
+      continue;
+    }
+
+    const mark =
+      day === horizon && report !== lastSeen && !keepOpenAbsence(lastSeen)
+        ? report
+        : lastSeen;
+    if (!sameTimesheetDayMark(existing, mark)) {
+      writes.push({ day, mark });
+    }
+    lastSeen = mark;
+  }
+  return writes;
+};
+
 const UK_MONTH_TITLES = [
   "Січень",
   "Лютий",
@@ -610,25 +757,63 @@ export const parseTimesheetMonthHeaderText = (value: string) => {
   return { month: idx + 1, year: Number(match[2]), matched: match[0] };
 };
 
+const excelSerialToDate = (value: number) => {
+  if (!Number.isFinite(value) || value <= 20000 || value >= 80000) return null;
+  const utc = Date.UTC(1899, 11, 30) + Math.floor(value) * 86400000;
+  const date = new Date(utc);
+  if (Number.isNaN(date.getTime())) return null;
+  return date;
+};
+
+/** Текст заголовка місяця: рядок «Серпень 2026 р.» або дата Excel у I2. */
+export const timesheetMonthHeaderTextFromCell = (value: unknown) => {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return `${UK_MONTH_TITLES[value.getMonth()]} ${value.getFullYear()} р.`;
+  }
+  if (typeof value === "number") {
+    const date = excelSerialToDate(value);
+    if (date) {
+      return `${UK_MONTH_TITLES[date.getUTCMonth()]} ${date.getUTCFullYear()} р.`;
+    }
+  }
+  return String(value ?? "")
+    .replace(/\s+/g, " ")
+    .trim();
+};
+
 export const findTimesheetMonthHeaderCell = (
   rows: Array<Array<unknown> | undefined>,
 ) => {
+  const hits: Array<{
+    row: number;
+    column: number;
+    text: string;
+    month: number;
+    year: number;
+    matched: string;
+  }> = [];
   for (let row = 0; row < Math.min(6, rows.length); row += 1) {
     const cells = rows[row] ?? [];
     for (let column = 0; column < Math.min(40, cells.length); column += 1) {
-      const text = String(cells[column] ?? "");
+      const text = timesheetMonthHeaderTextFromCell(cells[column]);
       const parsed = parseTimesheetMonthHeaderText(text);
       if (!parsed) continue;
-      return {
+      hits.push({
         row: row + 1,
         column: column + 1,
         text,
         month: parsed.month,
         year: parsed.year,
         matched: parsed.matched,
-      };
+      });
     }
   }
+  if (!hits.length) return null;
+  const atAnchor = hits.find((hit) => hit.row === 2 && hit.column === 9);
+  if (atAnchor) return atAnchor;
+  const overDays = hits.filter((hit) => hit.row <= 3 && hit.column >= 9);
+  if (overDays.length) return overDays[overDays.length - 1];
+  // «Січень 2026 р.» у колонці A — залишок шаблону, не місяць Табеля.
   return null;
 };
 

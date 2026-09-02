@@ -47,12 +47,29 @@ export const oosIdentityAliasKeys = (identity: OosIdentity) => {
   return keys;
 };
 
+/** ID колонки C: число 24867 — це ID, не Excel-дата. */
+export const oosPersonIdText = (value: unknown) => {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return String(Math.trunc(value));
+  }
+  const text = String(value ?? "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!text || text === "[object Object]") return "";
+  if (/^\d+$/.test(text)) return text;
+  return text;
+};
+
+export const OOS_NO_EMPTY_ROW_MESSAGE =
+  "Немає вільного рядка в основному блоці 2. ООС";
+
 export const findNextEmptyOosDataRow = (
   getCell: (row: number, column: number) => unknown,
   options: {
     lastRow: number;
     startRow?: number;
     reserved?: Set<number>;
+    allowAppend?: boolean;
   },
 ) => {
   const startRow = options.startRow ?? 6;
@@ -67,8 +84,13 @@ export const findNextEmptyOosDataRow = (
   for (let row = startRow; row < sectionStart; row += 1) {
     if (options.reserved?.has(row)) continue;
     const name = cellValueToOosText(getCell(row, 2));
-    const id = cellValueToOosText(getCell(row, 3));
+    const id = oosPersonIdText(getCell(row, 3));
     if (isOosBlankOrErrorText(name) && isOosBlankOrErrorText(id)) return row;
+  }
+  if (options.allowAppend) {
+    for (let row = lastRow + 1; row <= lastRow + 200; row += 1) {
+      if (!options.reserved?.has(row)) return row;
+    }
   }
   return 0;
 };
@@ -87,14 +109,20 @@ export const createOosRowResolver = (input: {
     identity: OosIdentity,
     options?: { knownRow?: number; create?: boolean },
   ) => {
-    for (const key of oosIdentityAliasKeys(identity)) {
-      const hit = cache.get(key);
-      if (hit) return hit;
-    }
     const known = Number(options?.knownRow || 0);
     if (known > 0) {
       remember(known, identity);
       return known;
+    }
+    if (identity.personId) {
+      const idHit = cache.get(`id:${identity.personId}`);
+      if (idHit) return idHit;
+    } else {
+      const nameKey = oosNameKey(identity.fullName);
+      if (nameKey) {
+        const nameHit = cache.get(`name:${nameKey}`);
+        if (nameHit) return nameHit;
+      }
     }
     const existing = findExistingOosPersonRow(input.getCell, {
       personId: identity.personId,
@@ -174,11 +202,14 @@ export const findExistingOosPersonRow = (
   const lastRow = Math.max(6, options.lastRow);
   for (let row = options.startRow ?? 6; row <= lastRow; row += 1) {
     const name = cellValueToOosText(getCell(row, 2));
-    const id = cellValueToOosText(getCell(row, 3));
+    const id = oosPersonIdText(getCell(row, 3));
     if (isOosSectionHeaderText(name)) continue;
     if (isOosBlankOrErrorText(name) && isOosBlankOrErrorText(id)) continue;
     if (wantId && id === wantId) return row;
-    if (wantName && oosNameKey(name) === wantName && !nameHit) nameHit = row;
+    if (wantName && oosNameKey(name) === wantName && !nameHit) {
+      if (wantId && id && id !== wantId) continue;
+      nameHit = row;
+    }
   }
   return nameHit;
 };
@@ -254,6 +285,14 @@ export const isJammedOosHistory = (raw: unknown) => {
   if (!text || text.includes("\n")) return false;
   return splitOosHistoryLines(text).length > 1;
 };
+
+/** Історія посад ООС — лише числові індекси, не «РОЗПОРЯДЖЕННЯ». */
+export const filterOosStaffHistoryIndexes = (raw: string) =>
+  splitOosHistoryLines(raw)
+    .flatMap((line) => splitPackedOosIndexes(line))
+    .map((line) => line.trim())
+    .filter((line) => /^\d{5,}$/.test(line))
+    .join("\n");
 
 /** Родичі в ООС: кожна особа з нового рядка, адреса — окремим рядком. */
 export const formatOosRelativesText = (raw: unknown) => {

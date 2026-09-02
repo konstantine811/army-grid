@@ -27,6 +27,25 @@ export const normalizeAnketaNameKey = (value: unknown) =>
     .trim()
     .toLocaleLowerCase("uk-UA");
 
+/** Повний ключ і «прізвище + імʼя», щоб ловити списки без по батькові. */
+export const anketaNameKeyVariants = (value: unknown) => {
+  const key = normalizeAnketaNameKey(value);
+  const keys = new Set<string>();
+  if (!key) return keys;
+  keys.add(key);
+  const parts = key.split(" ").filter(Boolean);
+  if (parts.length >= 2) keys.add(`${parts[0]} ${parts[1]}`);
+  return keys;
+};
+
+export const expandAnketaNameKeySet = (values: Iterable<string>) => {
+  const expanded = new Set<string>();
+  for (const value of values) {
+    for (const key of anketaNameKeyVariants(value)) expanded.add(key);
+  }
+  return expanded;
+};
+
 const normalizeNameKey = normalizeAnketaNameKey;
 
 export const normalizeAnketaExternalIdKey = (value: unknown) => {

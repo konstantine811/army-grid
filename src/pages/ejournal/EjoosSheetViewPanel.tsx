@@ -25,6 +25,10 @@ import type {
   ExcelWorkbookSnapshot,
 } from "../../excelRoundTrip";
 import { useEjoosWorkspace } from "./ejoosWorkspaceState";
+import {
+  loadTimesheetGridFromFile,
+  mergeTimesheetGrids,
+} from "./ejoosTimesheetPersonRows";
 
 export type EjoosSheetKind =
   | "shpo"
@@ -67,7 +71,7 @@ const SHEET_META: Record<
   timesheet: {
     title: "6. Табель",
     patterns: [/6\.?\s*табель/i, /табель/i],
-    maxRows: 800,
+    maxRows: 3000,
   },
   irrevocableLosses: {
     title: "7. Безповоротні втрати",
@@ -95,9 +99,10 @@ const cellDisplay = (value: CellValue | undefined): string => {
   if (value instanceof Date && !Number.isNaN(value.getTime())) {
     return value.toLocaleDateString("uk-UA");
   }
-  if (typeof value === "number" && Number.isFinite(value)) {
-    // Excel serial dates often appear as numbers in rawRows
-    if (value > 20_000 && value < 60_000) {
+    if (typeof value === "number" && Number.isFinite(value)) {
+    // Staff IDs 20000–39999 overlap Excel serials; keep them as numbers.
+    // Real dates in these journals are 2020+ (serial ≥ 40000).
+    if (value >= 40_000 && value < 60_000) {
       const epoch = Date.UTC(1899, 11, 30);
       const date = new Date(epoch + value * 86_400_000);
       if (!Number.isNaN(date.getTime())) {
@@ -299,13 +304,42 @@ export function EjoosSheetViewPanel({ kind }: { kind: EjoosSheetKind }) {
   const [wrapText, setWrapText] = useState(true);
   const [pinSecondRow, setPinSecondRow] = useState(false);
   const [headerHeight, setHeaderHeight] = useState(40);
+  const [timesheetXmlRows, setTimesheetXmlRows] = useState<unknown[][] | null>(
+    null,
+  );
   const tableHeadRef = useRef<HTMLTableSectionElement | null>(null);
   const meta = SHEET_META[kind];
 
-  const sheet = useMemo(
+  const snapshotSheet = useMemo(
     () => findSheet(ejoosSnapshot, meta.patterns),
     [ejoosSnapshot, meta.patterns],
   );
+
+  useEffect(() => {
+    if (kind !== "timesheet" || !ejoosSnapshot?.file || !snapshotSheet) {
+      setTimesheetXmlRows(null);
+      return;
+    }
+    let cancelled = false;
+    void loadTimesheetGridFromFile(
+      ejoosSnapshot.file,
+      snapshotSheet.sheetName,
+    ).then((grid) => {
+      if (!cancelled) setTimesheetXmlRows(grid);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [kind, ejoosSnapshot, snapshotSheet]);
+
+  const sheet = useMemo(() => {
+    if (!snapshotSheet) return undefined;
+    if (kind !== "timesheet" || !timesheetXmlRows?.length) return snapshotSheet;
+    return {
+      ...snapshotSheet,
+      rawRows: mergeTimesheetGrids(snapshotSheet.rawRows, timesheetXmlRows),
+    };
+  }, [kind, snapshotSheet, timesheetXmlRows]);
 
   const table = useMemo(
     () => (sheet ? buildTable(sheet, meta.maxRows) : null),
@@ -313,13 +347,22 @@ export function EjoosSheetViewPanel({ kind }: { kind: EjoosSheetKind }) {
   );
 
   const filteredRows = useMemo(() => {
-    if (!table) return [];
+    if (!table || !sheet) return [];
     const needle = query.trim().toLocaleLowerCase("uk-UA");
     if (!needle) return table.rows;
-    return table.rows.filter((row) =>
-      row.join(" ").toLocaleLowerCase("uk-UA").includes(needle),
-    );
-  }, [query, table]);
+    const rows: string[][] = [];
+    const lastCol = table.headers.length;
+    for (let i = table.headerIndex + 1; i < sheet.rawRows.length; i += 1) {
+      const values = Array.from({ length: lastCol }, (_, index) =>
+        cellDisplay(sheet.rawRows[i]?.[index]),
+      );
+      if (!values.some((value) => value)) continue;
+      if (values.join(" ").toLocaleLowerCase("uk-UA").includes(needle)) {
+        rows.push(values);
+      }
+    }
+    return rows;
+  }, [query, table, sheet]);
 
   const columnLayoutKey = table
     ? `${kind}:${table.sheetName}:${table.headers.length}:${table.compactColumns.join(",")}`
@@ -474,7 +517,7 @@ export function EjoosSheetViewPanel({ kind }: { kind: EjoosSheetKind }) {
           size="small"
           variant="outlined"
           label={`рядків: ${filteredRows.length}${
-            table.truncated ? ` (ліміт ${meta.maxRows})` : ""
+            !query.trim() && table.truncated ? ` (ліміт ${meta.maxRows})` : ""
           }`}
         />
         <Chip

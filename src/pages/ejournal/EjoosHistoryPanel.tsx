@@ -9,6 +9,7 @@ import {
   Typography,
 } from "@/components/sci/SciPrimitives";
 import type { BackendEjournalLiveVersion } from "../../api";
+import { formatApiDateTime } from "../../shared/format";
 import {
   collectAppliedHistoryEntries,
   readAppliedHistoryFromWorkbook,
@@ -305,7 +306,7 @@ export function EjoosHistoryPanel() {
                           ) : null}
                         </Stack>
                         <Typography variant="body2">
-                          {new Date(version.createdAt).toLocaleString("uk-UA")}
+                          {formatApiDateTime(version.createdAt)}
                           {version.sourceFileName
                             ? ` · ${version.sourceFileName}`
                             : ""}

@@ -14,15 +14,29 @@ export type DocumentsJournalExcelRow = {
   status: string;
   note: string;
   files: string;
+  formPurpose?: string;
   taskPeriodEnd?: string;
   createdAt: string;
   updatedAt: string;
 };
 
-const BASE_COLUMNS = 11;
+const FULL_BASE_COLUMNS = 11;
+const COMPACT_FORM_COLUMNS = 6;
 
-const journalColumnCount = (includeUbdExitDate: boolean) =>
-  includeUbdExitDate ? BASE_COLUMNS + 1 : BASE_COLUMNS;
+const journalColumnCount = ({
+  includeUbdExitDate,
+  includeFormPurpose,
+  compactFormExport,
+}: {
+  includeUbdExitDate: boolean;
+  includeFormPurpose: boolean;
+  compactFormExport: boolean;
+}) =>
+  compactFormExport
+    ? COMPACT_FORM_COLUMNS
+    : FULL_BASE_COLUMNS +
+      (includeUbdExitDate ? 1 : 0) +
+      (includeFormPurpose ? 1 : 0);
 const HEADER_GREEN = "#1F4E3D";
 const TITLE_GREEN = "#14382C";
 const META_BG = "#E8F0EC";
@@ -113,22 +127,38 @@ const buildJournalSheet = (
   rows: DocumentsJournalExcelRow[],
   meta: string,
   includeUbdExitDate: boolean,
+  includeFormPurpose: boolean,
+  compactFormExport: boolean,
 ): SheetData => {
-  const columns = journalColumnCount(includeUbdExitDate);
-  const headers = [
-    "№",
-    "Службовець",
-    "ID",
-    "Статус службовця",
-    "Документ",
-    "Прогрес",
-    "Статус документа",
-    "Коментар",
-    "Файли",
-    ...(includeUbdExitDate ? ["Вихід від"] : []),
-    "Створено",
-    "Оновлено",
-  ];
+  const columns = journalColumnCount({
+    includeUbdExitDate,
+    includeFormPurpose,
+    compactFormExport,
+  });
+  const headers = compactFormExport
+    ? [
+        "№",
+        "Службовець",
+        "ID",
+        "Статус службовця",
+        "Документ",
+        "Для чого форма",
+      ]
+    : [
+        "№",
+        "Службовець",
+        "ID",
+        "Статус службовця",
+        "Документ",
+        "Прогрес",
+        "Статус документа",
+        "Коментар",
+        "Файли",
+        ...(includeFormPurpose ? ["Для чого форма"] : []),
+        ...(includeUbdExitDate ? ["Вихід від"] : []),
+        "Створено",
+        "Оновлено",
+      ];
 
   return [
     titleRow("Журнал документів", columns),
@@ -139,12 +169,21 @@ const buildJournalSheet = (
       const zebra = index % 2 === 1 ? { backgroundColor: ZEBRA } : { backgroundColor: WHITE };
       const created = dayjs(row.createdAt);
       const updated = dayjs(row.updatedAt);
-      return [
+      const lead = [
         cell(index + 1, { type: Number, align: "center", textColor: MUTED, ...zebra }),
         cell(row.personName, { fontWeight: "bold", textColor: TEXT, wrap: true, ...zebra }),
         cell(row.personId || "—", { align: "left", textColor: MUTED, wrap: true, ...zebra }),
         cell(row.personStatus || "—", { wrap: true, ...zebra }),
         cell(row.documentType, { wrap: true, ...zebra }),
+      ];
+      if (compactFormExport) {
+        return [
+          ...lead,
+          cell(row.formPurpose || "—", { wrap: true, ...zebra }),
+        ];
+      }
+      return [
+        ...lead,
         cell(row.progressPercent / 100, {
           type: Number,
           format: "0%",
@@ -156,6 +195,9 @@ const buildJournalSheet = (
         cell(row.status, { wrap: true, ...zebra }),
         cell(row.note || "—", { wrap: true, ...zebra }),
         cell(row.files, { align: "center", ...zebra }),
+        ...(includeFormPurpose
+          ? [cell(row.formPurpose || "—", { wrap: true, ...zebra })]
+          : []),
         ...(includeUbdExitDate
           ? [cell(row.taskPeriodEnd || "—", { align: "center", ...zebra })]
           : []),
@@ -228,6 +270,8 @@ export const exportDocumentsJournalExcel = async ({
   periodFilterLabel,
   totalCount,
   includeUbdExitDate = false,
+  includeFormPurpose = false,
+  compactFormExport = false,
 }: {
   rows: DocumentsJournalExcelRow[];
   typeFilterLabel: string;
@@ -235,6 +279,8 @@ export const exportDocumentsJournalExcel = async ({
   periodFilterLabel: string;
   totalCount: number;
   includeUbdExitDate?: boolean;
+  includeFormPurpose?: boolean;
+  compactFormExport?: boolean;
 }) => {
   const exportedAt = dayjs();
   const meta = [
@@ -245,26 +291,42 @@ export const exportDocumentsJournalExcel = async ({
   const periodSuffix =
     periodFilterLabel === "Усі місяці" ? "" : ` ${periodFilterLabel}`;
   const fileName = `Журнал документів${periodSuffix} ${exportedAt.format("DD.MM.YYYY")}.xlsx`;
-  const journalColumns = [
-    { width: 6 },
-    { width: 34 },
-    { width: 22 },
-    { width: 22 },
-    { width: 32 },
-    { width: 12 },
-    { width: 24 },
-    { width: 36 },
-    { width: 14 },
-    ...(includeUbdExitDate ? [{ width: 14 }] : []),
-    { width: 20 },
-    { width: 20 },
-  ];
+  const journalColumns = compactFormExport
+    ? [
+        { width: 6 },
+        { width: 34 },
+        { width: 22 },
+        { width: 22 },
+        { width: 32 },
+        { width: 36 },
+      ]
+    : [
+        { width: 6 },
+        { width: 34 },
+        { width: 22 },
+        { width: 22 },
+        { width: 32 },
+        { width: 12 },
+        { width: 24 },
+        { width: 36 },
+        { width: 14 },
+        ...(includeFormPurpose ? [{ width: 28 }] : []),
+        ...(includeUbdExitDate ? [{ width: 14 }] : []),
+        { width: 20 },
+        { width: 20 },
+      ];
 
   await writeXlsxFile(
     [
       {
         sheet: "Журнал",
-        data: buildJournalSheet(rows, meta, includeUbdExitDate),
+        data: buildJournalSheet(
+          rows,
+          meta,
+          includeUbdExitDate,
+          includeFormPurpose,
+          compactFormExport,
+        ),
         orientation: "landscape",
         stickyRowsCount: 4,
         stickyColumnsCount: 2,

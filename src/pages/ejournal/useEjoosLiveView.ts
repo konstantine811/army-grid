@@ -10,6 +10,7 @@ const VIEW_TABS = new Set([
   "tempAbsents",
   "timesheet",
   "irrevocableLosses",
+  "export",
 ]);
 
 /** Loads live ЕЖООС snapshot when needed and builds read-model for Phase 2 screens. */

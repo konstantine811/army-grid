@@ -133,7 +133,11 @@ export function PersonnelVirtualList({
               <span className="personnel-list-meta">
                 <strong>{record.summary.name}</strong>
                 <span>
-                  {[record.summary.rank || "звання не вказано", record.summary.callSign]
+                  {[
+                    record.summary.rank || "звання не вказано",
+                    record.summary.callSign,
+                    record.summary.birthDate,
+                  ]
                     .filter(Boolean)
                     .join(" · ")}
                 </span>

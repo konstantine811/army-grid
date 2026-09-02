@@ -4,6 +4,7 @@ import {
   getPersonFullPositionTitle,
 } from "../personnel/personnelUtils";
 import { toUkrainianGenitiveFullName } from "./form6Report";
+import { capitalizeReportPosition } from "./reportPosition";
 
 export type UbdRestoreSignatory = {
   blockType: "SIGNER" | "APPROVAL";
@@ -125,7 +126,7 @@ export const toUkrainianGenitiveGivenSurname = (fullName: string) => {
 };
 
 export const formatPositionTitleBlock = (position: string) => {
-  const text = position.trim();
+  const text = capitalizeReportPosition(position);
   if (!text) return "";
   const unit = text.match(/^(.*?)[, ]+(військової частини\s+\S+)$/i);
   if (!unit) return text;
@@ -138,7 +139,7 @@ export const formatPositionTitleBlock = (position: string) => {
 export const buildUbdRestoreBody = (fields: UbdRestoreReportFields) => {
   const rank = fields.rank.trim() || "звання";
   const fullName = fields.fullName.trim() || "______";
-  const position = fields.staffPosition.trim() || "посада";
+  const position = capitalizeReportPosition(fields.staffPosition) || "посада";
   const circumstances =
     fields.circumstances.trim() || DEFAULT_UBD_RESTORE_CIRCUMSTANCES;
   const series = fields.certificateSeries.trim() || "серія ______";
@@ -166,7 +167,7 @@ export const createUbdRestoreFields = (
     commander: DEFAULT_UBD_RESTORE_COMMANDER,
     fullName,
     rank: summary.rank || "",
-    staffPosition,
+    staffPosition: capitalizeReportPosition(staffPosition),
     signerTitle: formatPositionTitleBlock(staffPosition),
     certificateSeries: "серія ______",
     circumstances: DEFAULT_UBD_RESTORE_CIRCUMSTANCES,
@@ -186,11 +187,17 @@ export const createUbdRestoreFields = (
 export const mergeUbdRestoreFields = (
   defaults: UbdRestoreReportFields,
   value: unknown,
-): UbdRestoreReportFields =>
-  value && typeof value === "object" && !Array.isArray(value)
-    ? {
-        ...defaults,
-        ...(value as Partial<UbdRestoreReportFields>),
-        signatories: defaults.signatories,
-      }
-    : defaults;
+): UbdRestoreReportFields => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return defaults;
+  }
+  const next = {
+    ...defaults,
+    ...(value as Partial<UbdRestoreReportFields>),
+    signatories: defaults.signatories,
+  };
+  return {
+    ...next,
+    staffPosition: capitalizeReportPosition(next.staffPosition),
+  };
+};

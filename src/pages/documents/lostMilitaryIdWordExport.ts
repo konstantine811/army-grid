@@ -22,6 +22,7 @@ import {
   reporterHeaderBlock,
   type LostMilitaryIdFields,
 } from "./lostMilitaryIdReport";
+import { capitalizeReportPosition } from "./reportPosition";
 
 const FONT = "Times New Roman";
 
@@ -193,7 +194,7 @@ const buildActDocument = (fields: LostMilitaryIdFields) => {
   const person = declinedPerson(fields);
   const unit = fields.militaryUnit.trim() || "А4862";
   const investigator = [
-    fields.investigatorPosition.trim(),
+    capitalizeReportPosition(fields.investigatorPosition),
     fields.investigatorRank.trim(),
     fields.investigatorFullName.trim(),
   ]
@@ -320,7 +321,7 @@ const buildActDocument = (fields: LostMilitaryIdFields) => {
           ),
           empty(),
           ...(fields.investigatorPosition
-            ? fields.investigatorPosition
+            ? capitalizeReportPosition(fields.investigatorPosition)
                 .split(/\n/)
                 .map((line) => para(line, { spacingAfter: 40 }))
             : [para("Особа, яка проводила службове розслідування", { spacingAfter: 40 })]),

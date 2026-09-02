@@ -5,7 +5,9 @@ import type {
 } from "../../excelRoundTrip";
 import {
   EJOOS_PERSON_DATA_START_ROW,
+  formatExcludedDestination,
   formatExcludedListBasis,
+  formatExcludedPositionDates,
   formatTimesheetTransferMark,
   OOS_TO_EXCLUDED_BASE,
 } from "./ejoosExcludedColumns";
@@ -17,6 +19,7 @@ import {
 } from "./ejoosSyncPlan";
 import {
   cellValueToOosText,
+  filterOosStaffHistoryIndexes,
   findOosStyleSourceRow,
   mergeOosHistoryValue,
 } from "./ejoosOosText";
@@ -30,6 +33,7 @@ import {
   timesheetMarkBeforeDeparture,
   timesheetMarkFromArchive,
 } from "./ejoosTimesheetText";
+import { positionCloseWritesExcluded } from "./ejoosExcludePolicy";
 import {
   applyInlineStringWritesToWorkbook,
   type ZipCellWrite,
@@ -129,8 +133,9 @@ const collectWrites = (op: EjoosSyncOp, ctx: PositionChangeContext) => {
     personId: op.payload.nextPersonId || op.payload.fromPersonId || op.personId,
   });
   const nextIndex = op.payload.nextIndex || op.positionIndex;
-  const oosHistoryIndexes =
-    op.payload.oosHistoryIndexes || nextIndex || "";
+  const oosHistoryIndexes = filterOosStaffHistoryIndexes(
+    op.payload.oosHistoryIndexes || nextIndex || "",
+  );
   const previousIndex =
     op.payload.fromPositionIndex || op.payload.previousIndex;
   const appointmentDate = op.payload.orderDate || plan.timesheetDayLabel;
@@ -141,17 +146,20 @@ const collectWrites = (op: EjoosSyncOp, ctx: PositionChangeContext) => {
     dayFromOrderLabel(op.payload.timesheetActiveFrom || op.payload.transferCancelDate) ||
     departDay;
 
-  // 1) Виключені — історія закриття старої штатної посади.
-  const oosRow = Number(op.payload.oosExcelRow || 0);
-  const excludedRow = ctx.takeExcludedRow();
+  // 1) Виключені — лише коли особа вибула з частини, не внутрішній стрибок.
+  if (positionCloseWritesExcluded(op.payload)) {
+    const oosRow = Number(op.payload.oosExcelRow || 0);
+    const excludedRow = ctx.takeExcludedRow();
   if (oosRow > 0) {
     for (const [fromColumn, toColumn] of OOS_TO_EXCLUDED_BASE) {
+      const raw = valueOf(oos.rawRows[oosRow - 1]?.[fromColumn - 1]);
       ctx.excludedWrites.push({
         row: excludedRow,
         column: toColumn,
-        value: valueOf(oos.rawRows[oosRow - 1]?.[fromColumn - 1]),
+        value:
+          toColumn === 5 ? formatExcludedPositionDates(raw) || raw : raw,
         styleSourceRow: ctx.excludedStyleSourceRow,
-        wrapText: true,
+        wrapText: toColumn === 5 || toColumn === 32,
       });
     }
   }
@@ -170,10 +178,7 @@ const collectWrites = (op: EjoosSyncOp, ctx: PositionChangeContext) => {
     ],
     [
       31,
-      String(op.payload.documentsDest || "")
-        .replace(/\s+/g, " ")
-        .trim()
-        .toLocaleLowerCase("uk-UA") || null,
+      formatExcludedDestination(op.payload.documentsDest) || null,
     ],
     [
       32,
@@ -192,63 +197,80 @@ const collectWrites = (op: EjoosSyncOp, ctx: PositionChangeContext) => {
       wrapText: true,
     });
   }
+  }
 
-  // 2) Табель — стару позицію закриваємо копією рядка з датою вибуття.
+  // 2) Табель — стару позицію звільняємо. Іменну копію з «вибув» пишемо
+  // лише коли це справжній новий епізод (вибуття з частини), не стрибок посади.
   const oldTimesheetRow = Number(
     op.payload.previousIndexTimesheetExcelRow || 0,
   );
   if (oldTimesheetRow > 0) {
-    const historyRow = nextTimesheetFreeRow(
-      timesheet,
-      oldTimesheetRow,
-      ctx.reservedTimesheetRows,
-    );
-    for (let column = 1; column <= 40; column += 1) {
-      ctx.timesheetWrites.push({
-        row: historyRow,
-        column,
-        value: valueOf(timesheet.rawRows[oldTimesheetRow - 1]?.[column - 1]),
-        styleSourceRow: oldTimesheetRow,
-      });
-    }
-    let presentDays = 0;
-    const historySpans = historyAbsenceSpansForClosedEpisode(
-      op.payload,
-      departDay,
-    );
-    for (let day = 1; day <= 31; day += 1) {
-      let value: string | null = null;
-      if (departDay > 0 && day < departDay) {
-        value = timesheetMarkBeforeDeparture(day, departDay, historySpans);
-        if (value === "+") presentDays += 1;
-      } else if (day === departDay) {
-        value = formatTimesheetTransferMark(op.payload);
+    if (preserveHistory) {
+      const historyRow = nextTimesheetFreeRow(
+        timesheet,
+        oldTimesheetRow,
+        ctx.reservedTimesheetRows,
+      );
+      for (let column = 1; column <= 40; column += 1) {
+        ctx.timesheetWrites.push({
+          row: historyRow,
+          column,
+          value: valueOf(timesheet.rawRows[oldTimesheetRow - 1]?.[column - 1]),
+          styleSourceRow: oldTimesheetRow,
+        });
+      }
+      let presentDays = 0;
+      const historySpans = historyAbsenceSpansForClosedEpisode(
+        op.payload,
+        departDay,
+      );
+      for (let day = 1; day <= 31; day += 1) {
+        let value: string | null = null;
+        if (departDay > 0 && day < departDay) {
+          value = timesheetMarkBeforeDeparture(day, departDay, historySpans);
+          if (value === "+") presentDays += 1;
+        } else if (day === departDay) {
+          value = formatTimesheetTransferMark(op.payload);
+        }
+        ctx.timesheetWrites.push({
+          row: historyRow,
+          column: 8 + day,
+          value,
+          styleSourceRow: oldTimesheetRow,
+          wrapText: typeof value === "string" && /вибув/iu.test(value),
+        });
+        ctx.timesheetWrites.push({
+          row: oldTimesheetRow,
+          column: 8 + day,
+          value: null,
+        });
       }
       ctx.timesheetWrites.push({
         row: historyRow,
-        column: 8 + day,
-        value,
+        column: 40,
+        value: presentDays,
         styleSourceRow: oldTimesheetRow,
-        wrapText: typeof value === "string" && /вибув/iu.test(value),
       });
+      if (personId && !textAt(timesheet, oldTimesheetRow, 8)) {
+        ctx.timesheetWrites.push({
+          row: historyRow,
+          column: 8,
+          value: personId,
+          styleSourceRow: oldTimesheetRow,
+        });
+      }
+    } else {
+      for (let day = 1; day <= 31; day += 1) {
+        ctx.timesheetWrites.push({
+          row: oldTimesheetRow,
+          column: 8 + day,
+          value: null,
+        });
+      }
       ctx.timesheetWrites.push({
         row: oldTimesheetRow,
-        column: 8 + day,
+        column: 40,
         value: null,
-      });
-    }
-    ctx.timesheetWrites.push({
-      row: historyRow,
-      column: 40,
-      value: presentDays,
-      styleSourceRow: oldTimesheetRow,
-    });
-    if (personId && !textAt(timesheet, oldTimesheetRow, 8)) {
-      ctx.timesheetWrites.push({
-        row: historyRow,
-        column: 8,
-        value: personId,
-        styleSourceRow: oldTimesheetRow,
       });
     }
     for (const column of [6, 7, 8]) {
@@ -266,7 +288,18 @@ const collectWrites = (op: EjoosSyncOp, ctx: PositionChangeContext) => {
       (nameKey(occupiedBy) === nameKey(fullName) ||
         (Boolean(personId) && occupiedId === personId));
     const otherPerson = Boolean(occupiedBy || occupiedId) && !samePerson;
-    const existingHistoryRow = Number(op.payload.previousTimesheetExcelRow || 0);
+    const existingHistoryRow = Number(
+      op.payload.historyTimesheetExcelRow ||
+        op.payload.previousTimesheetExcelRow ||
+        0,
+    );
+    const staffHasDeparture = Array.from({ length: 31 }, (_, index) =>
+      isTimesheetDepartureMark(
+        timesheet.rawRows[newTimesheetRow - 1]?.[8 + index],
+      ),
+    ).some(Boolean);
+    const historyAlreadySeparate =
+      existingHistoryRow > 0 && existingHistoryRow !== newTimesheetRow;
     const presenceFrom =
       activeFromDay ||
       dayFromOrderLabel(op.payload.timesheetActiveFrom || appointmentDate) ||
@@ -276,7 +309,14 @@ const collectWrites = (op: EjoosSyncOp, ctx: PositionChangeContext) => {
       presenceFrom > 1 ? presenceFrom : 1,
     );
 
-    if (otherPerson || (preserveHistory && existingHistoryRow <= 0)) {
+    const isTransferCancel = Boolean(op.payload.transferCancelOrder);
+    if (
+      otherPerson ||
+      (samePerson &&
+        staffHasDeparture &&
+        !historyAlreadySeparate &&
+        !isTransferCancel)
+    ) {
       const historyRow = nextTimesheetFreeRow(
         timesheet,
         newTimesheetRow,
@@ -531,9 +571,9 @@ const collectWrites = (op: EjoosSyncOp, ctx: PositionChangeContext) => {
 };
 
 /**
- * Зміна штатної посади всередині 1ПБ: стару посаду закриваємо як історію
- * (Виключені + Табель + звільнення індексу в ШПО), особу ставимо на новий
- * індекс, а активний запис в ООС зберігаємо — людина лишається в частині.
+ * Зміна штатної посади всередині 1ПБ: стару посаду звільняємо в ШПО/Табелі,
+ * особу ставимо на новий індекс, активний запис в ООС зберігаємо.
+ * «Виключені» пишемо лише якщо це не внутрішній стрибок індексу.
  */
 export async function applyPositionChangeWithZip(input: {
   ejoos: ExcelWorkbookSnapshot;

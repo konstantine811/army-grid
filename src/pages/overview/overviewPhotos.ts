@@ -3,6 +3,7 @@ import type { EjournalPreviewRow } from "../ejournal/ejournalTypes";
 import {
   collectPersonAttachmentLookupIds,
   loadPersonPhotoForRow,
+  parseOrphanAttachmentIdentityId,
 } from "../personnel/personAttachments";
 import {
   buildPersonIdentityFingerprint,
@@ -13,6 +14,8 @@ import {
   resolvePersonIdentityKey,
 } from "../personnel/personnelUtils";
 import { normalizeRosterMatchText } from "../personnel/fighterStatusImport";
+import { normalizeOverviewName } from "./overviewNameSearch";
+import { overviewPersonMatchKey } from "./overviewPersonnelAssets";
 
 const birthFromDisplayName = (name: string) => {
   const match = String(name ?? "").match(
@@ -39,13 +42,18 @@ const nameKeyFromPhotoId = (id: string) => {
 
 export const overviewPhotoLookupKeys = (row: BackendPersonnelOverviewRow) => {
   const birth = birthFromDisplayName(row.name);
+  const cleaned = cleanPersonDisplayName(row.name) || row.name;
+  const soft = normalizeOverviewName(cleaned);
   return [
     row.externalId,
     row.id,
+    overviewPersonMatchKey(row.name, birth),
     buildPersonIdentityFingerprint(row.name, birth),
     buildPersonIdentityFingerprint(row.name),
-    buildPersonIdentityFingerprint(cleanPersonDisplayName(row.name), birth),
-    buildPersonIdentityFingerprint(cleanPersonDisplayName(row.name)),
+    buildPersonIdentityFingerprint(cleaned, birth),
+    buildPersonIdentityFingerprint(cleaned),
+    buildPersonIdentityFingerprint(soft, birth),
+    buildPersonIdentityFingerprint(soft),
   ].filter(Boolean);
 };
 
@@ -86,6 +94,7 @@ export const findOverviewRosterRow = (
     if (byId) return byId;
   }
   const nameKeys = [
+    normalizeOverviewName(row.name),
     normalizeRosterMatchText(row.name),
     normalizeRosterMatchText(cleanPersonDisplayName(row.name)),
   ].filter(Boolean);
@@ -107,8 +116,11 @@ export const indexOverviewRosterRows = (rosterRows: EjournalPreviewRow[]) => {
     if (id) rosterById.set(id, row);
     if (identity) rosterById.set(identity, row);
     for (const name of [displayName, row.ПІБ, row.піб, row.прізвище]) {
-      const key = normalizeRosterMatchText(name);
-      if (key) rosterByName.set(key, row);
+      const raw = String(name ?? "").trim();
+      if (!raw) continue;
+      for (const key of [normalizeOverviewName(raw), normalizeRosterMatchText(raw)]) {
+        if (key) rosterByName.set(key, row);
+      }
     }
   }
 
@@ -144,7 +156,13 @@ export const buildOverviewPhotoMap = (
     else if (id) idsWithoutData.push(id);
   }
 
-  const { rosterById, rosterByName } = indexOverviewRosterRows(rosterRows);
+  let rosterById = new Map<string, EjournalPreviewRow>();
+  let rosterByName = new Map<string, EjournalPreviewRow>();
+  try {
+    ({ rosterById, rosterByName } = indexOverviewRosterRows(rosterRows));
+  } catch {
+    /* still match by overview keys */
+  }
 
   const assign = (keys: string[], photo: string) => {
     if (!photo) return;
@@ -153,29 +171,42 @@ export const buildOverviewPhotoMap = (
     }
   };
 
-  const findListedPhoto = (keys: string[]) => {
+  const findListedPhoto = (keys: string[], personName: string) => {
     for (const key of keys) {
       if (photos[key]) return photos[key];
     }
-    const nameKeys = keys
-      .map((key) => nameKeyFromPhotoId(key) || key.replace(/^p:/, "").split(":")[0])
-      .filter(Boolean);
-    if (!nameKeys.length) return "";
+    const personKey = normalizeOverviewName(personName);
+    if (!personKey) return "";
+    const exact: string[] = [];
     for (const [id, data] of Object.entries(photos)) {
-      const photoName = nameKeyFromPhotoId(id);
-      if (photoName && nameKeys.includes(photoName)) return data;
+      const photoName =
+        parseOrphanAttachmentIdentityId(id)?.nameKey || nameKeyFromPhotoId(id);
+      if (photoName && normalizeOverviewName(photoName) === personKey) {
+        exact.push(data);
+      }
     }
-    return "";
+    return exact[0] || "";
   };
 
   for (const row of rows) {
-    const rosterRow = findOverviewRosterRow(row, rosterById, rosterByName);
-    const keys = [
-      ...overviewPhotoLookupKeys(row),
-      ...(rosterRow ? collectPersonAttachmentLookupIds(rosterRow) : []),
-    ].filter(Boolean);
-    const photo = findListedPhoto(keys);
-    if (photo) assign(keys, photo);
+    try {
+      const rosterRow = findOverviewRosterRow(row, rosterById, rosterByName);
+      const fallbackRow = {
+        ПІБ: cleanPersonDisplayName(row.name) || row.name,
+        прізвище: cleanPersonDisplayName(row.name) || row.name,
+        id: row.externalId,
+      } as EjournalPreviewRow;
+      const keys = [
+        ...overviewPhotoLookupKeys(row),
+        ...collectPersonAttachmentLookupIds(rosterRow ?? fallbackRow, undefined, {
+          includeLooseKeys: true,
+        }),
+      ].filter(Boolean);
+      const photo = findListedPhoto(keys, row.name);
+      if (photo) assign([...keys, row.externalId, row.id], photo);
+    } catch {
+      /* one bad row must not wipe photos for everyone */
+    }
   }
 
   return { photos, idsWithoutData };
@@ -206,7 +237,13 @@ export const fillMissingOverviewPhotos = async (
   onProgress?: (next: Record<string, string>) => void,
 ) => {
   const next = { ...photos };
-  const { rosterById, rosterByName } = indexOverviewRosterRows(rosterRows);
+  let rosterById = new Map<string, EjournalPreviewRow>();
+  let rosterByName = new Map<string, EjournalPreviewRow>();
+  try {
+    ({ rosterById, rosterByName } = indexOverviewRosterRows(rosterRows));
+  } catch {
+    /* still fetch by overview keys */
+  }
   const missing = rows.filter((row) => !resolveOverviewPhoto(row, next));
   if (!missing.length) return next;
 
@@ -218,7 +255,10 @@ export const fillMissingOverviewPhotos = async (
       id: row.externalId,
     } as EjournalPreviewRow;
 
-    const result = await loadPersonPhotoForRow(rosterRow ?? fallbackRow);
+    const result = await loadPersonPhotoForRow(
+      rosterRow ?? fallbackRow,
+      undefined,
+    );
     const photo = result.photoData?.trim() || "";
     if (!photo) return;
 

@@ -7,13 +7,8 @@ import {
   SyncAltOutlinedIcon,
 } from "@/components/sci/icons";
 import { api } from "../../api";
-import {
-  CacheKeys,
-  fetchWithCache,
-  jsonChanged,
-  readDataCache,
-  writeDataCache,
-} from "../../data/idbDataCache";
+import { CacheKeys, readDataCache } from "../../data/idbDataCache";
+import { loadSharedRosterLatest } from "../../data/sharedAppData";
 import {
   type CellValue,
   type ExcelSheetSnapshot,
@@ -1041,17 +1036,7 @@ export function ExcelFillPage() {
         }
       }
 
-      const latest = forceRefresh
-        ? await (async () => {
-            const fresh = await api.getLatestPersonnelRoster();
-            if (fresh) await writeDataCache(CacheKeys.rosterLatest, fresh);
-            return fresh;
-          })()
-        : await fetchWithCache({
-            key: CacheKeys.rosterLatest,
-            fetcher: () => api.getLatestPersonnelRoster(),
-            isChanged: jsonChanged,
-          });
+      const latest = await loadSharedRosterLatest({ force: forceRefresh });
       if (!latest?.sheet) {
         setRosterSource(null);
         setRosterPreviewRows([]);
@@ -1140,11 +1125,7 @@ export function ExcelFillPage() {
         setIsBusy(false);
       }
 
-      const latest = await fetchWithCache({
-        key: CacheKeys.rosterLatest,
-        fetcher: () => api.getLatestPersonnelRoster(),
-        isChanged: jsonChanged,
-      });
+      const latest = await loadSharedRosterLatest();
       if (!latest?.sheet) {
         setPositionsPeople([]);
         setPositionsRosterLabel("");

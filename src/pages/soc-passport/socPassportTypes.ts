@@ -189,6 +189,7 @@ export type SocPerson = {
   morningStatus: string;
   morningAbsenceNotes: string;
   morningDestination: string;
+  morningLocation: string;
   isTransiter: boolean;
   bzvpStatus: string;
   brezAssignment: string;

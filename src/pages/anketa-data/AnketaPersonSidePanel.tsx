@@ -289,7 +289,7 @@ export function AnketaPersonSidePanel({
         previewUrl={panel.previewUrl}
         pendingFile={false}
         isUploading={false}
-        placement="right"
+        placement="left"
         defaultWidth={720}
         defaultHeight={920}
         minWidth={480}

@@ -1,10 +1,10 @@
 import type { EjoosSyncOp } from "./ejoosSyncPlan";
 import {
-  formatExcludedDestinationText,
+  formatExcludedDestination,
   formatExcludedListBasis,
   formatTimesheetTransferMark,
 } from "./ejoosExcludedColumns";
-import { excludeWritePlan } from "./ejoosExcludePolicy";
+import { excludeWritePlan, positionCloseWritesExcluded } from "./ejoosExcludePolicy";
 import {
   dayFromOrderLabel,
   parseTimesheetAbsenceSpans,
@@ -55,6 +55,9 @@ const previewCell = (
         : value || "—",
   kind,
 });
+
+const compactPreviewText = (value: string | undefined) =>
+  String(value || "").replace(/\s+/g, " ").trim();
 
 const dayHeader = (from: number, to: number) =>
   from === to
@@ -124,8 +127,8 @@ const excludePreviews = (
     op.payload.previousIndex ||
     op.positionIndex ||
     "";
-  const dest = formatExcludedDestinationText(
-    op.payload.documentsDest || op.payload.destination || "",
+  const dest = formatExcludedDestination(
+    op.payload.documentsDest || op.payload.changeText,
   );
   const basis = formatExcludedListBasis(op.payload);
   const departPhrase = formatTimesheetTransferMark(op.payload);
@@ -161,12 +164,11 @@ const excludePreviews = (
     });
   }
 
-  rows.push({
+  if (!op.payload.excludedExcelRow) {
+    rows.push({
     sheetKey: "excluded",
     sheetLabel: "3. Виключені",
-    role: op.payload.excludedExcelRow
-      ? `Дописати рядок R${op.payload.excludedExcelRow}`
-      : "Новий рядок (після останнього)",
+    role: "Новий рядок (після останнього)",
     note: op.payload.oosExcelRow
       ? `A–AA копіюються з ООС R${op.payload.oosExcelRow}; AB–AF дописуємо з РУХ.`
       : "Картки в ООС немає — звання/ПІБ/ID/індекс і поля вибуття пишемо з РУХ.",
@@ -185,30 +187,37 @@ const excludePreviews = (
       previewCell(32, "підстава", basis),
     ],
   });
+  }
 
   const historyDays = timesheetDayCells(op, timesheetDay, departPhrase);
-  rows.push({
-    sheetKey: "timesheet-history",
-    sheetLabel: "6. Табель",
-    role: excludeWritePlan(op.payload).createTimesheetHistory
-      ? "Новий історичний рядок"
-      : `Історична копія · з R${op.payload.timesheetExcelRow || "—"}`,
-    note: "У день вибуття — повна фраза без назви посади, прийменник до/у за підрозділом.",
-    cells: [
-      previewCell(6, "звання", rank),
-      previewCell(7, "ПІБ", name),
-      previewCell(8, "ID", personId),
-      ...historyDays,
-    ],
-  });
+  const timesheetPlan = excludeWritePlan(op.payload);
+  if (timesheetPlan.createTimesheetHistory || op.payload.timesheetExcelRow) {
+    rows.push({
+      sheetKey: "timesheet-history",
+      sheetLabel: "6. Табель",
+      role: timesheetPlan.replaceInPlace
+        ? `Замінити наявний рядок · R${op.payload.timesheetExcelRow || "—"}`
+        : timesheetPlan.createTimesheetHistory
+        ? "Новий історичний рядок"
+        : `Історична копія · з R${op.payload.timesheetExcelRow || "—"}`,
+      note: "У день вибуття — повна фраза без назви посади, прийменник до/у за підрозділом.",
+      cells: [
+        previewCell(6, "звання", rank),
+        previewCell(7, "ПІБ", name),
+        previewCell(8, "ID", personId),
+        ...historyDays,
+      ],
+    });
+  }
 
-  if (op.payload.timesheetExcelRow) {
+  if (op.payload.timesheetExcelRow && !timesheetPlan.replaceInPlace) {
     rows.push({
       sheetKey: "timesheet-active",
       sheetLabel: "6. Табель",
-      role: `Активний рядок · R${op.payload.timesheetExcelRow}`,
-      note: "Особу з штатного рядка прибираємо; індекс посади лишається.",
+      role: `Штатний рядок · R${op.payload.timesheetExcelRow}`,
+      note: "Особу й дні прибираємо; індекс посади, ВОС і тарифний план лишаються.",
       cells: [
+        previewCell(2, "індекс", index, "keep"),
         previewCell(6, "звання", "", "empty"),
         previewCell(7, "ПІБ", "", "empty"),
         previewCell(8, "ID", "", "empty"),
@@ -223,7 +232,7 @@ const positionPreviews = (op: EjoosSyncOp): SheetRowPreview[] => {
   const index = op.payload.nextIndex || op.positionIndex || "";
   const prev = op.payload.previousIndex || "";
   const rows: SheetRowPreview[] = [];
-  if (op.payload.closeOldPosition === "1") {
+  if (positionCloseWritesExcluded(op.payload)) {
     rows.push({
       sheetKey: "excluded",
       sheetLabel: "3. Виключені",
@@ -236,7 +245,9 @@ const positionPreviews = (op: EjoosSyncOp): SheetRowPreview[] => {
         previewCell(
           31,
           "куди вибув",
-          formatExcludedDestinationText(op.payload.documentsDest || ""),
+          formatExcludedDestination(
+            op.payload.documentsDest || op.payload.changeText,
+          ),
         ),
         previewCell(32, "підстава", formatExcludedListBasis(op.payload)),
       ],

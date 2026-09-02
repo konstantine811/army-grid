@@ -1,3 +1,4 @@
+import { excludedRowsToClear } from "./ejoosExcludePolicy";
 import type { EjoosSyncOp } from "./ejoosSyncPlan";
 
 const PLACEHOLDER_TIMESHEET_CODE = "(оберіть код)";
@@ -13,9 +14,15 @@ export function timesheetOpUsesDerivedPayload(op: EjoosSyncOp) {
   );
 }
 
+const timesheetOpClearsExcludedOnly = (op: EjoosSyncOp) =>
+  excludedRowsToClear(op.payload).length > 0 &&
+  !op.payload.timesheetCode?.trim() &&
+  !timesheetOpUsesDerivedPayload(op);
+
 export function timesheetOpNeedsManualCode(op: EjoosSyncOp) {
   if (op.kind !== "timesheet_day") return false;
   if (op.payload.clearStalePerson === "1") return false;
+  if (timesheetOpClearsExcludedOnly(op)) return false;
   if (timesheetOpUsesDerivedPayload(op)) return false;
 
   const code = op.payload.timesheetCode?.trim() || "";
@@ -25,6 +32,7 @@ export function timesheetOpNeedsManualCode(op: EjoosSyncOp) {
 export function timesheetOpBlocksApply(op: EjoosSyncOp) {
   if (op.kind !== "timesheet_day") return false;
   if (op.payload.clearStalePerson === "1") return !op.payload.excelRow;
+  if (timesheetOpClearsExcludedOnly(op)) return false;
   if (timesheetOpNeedsManualCode(op)) return true;
   return !op.payload.excelRow;
 }

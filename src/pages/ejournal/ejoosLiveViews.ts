@@ -7,16 +7,19 @@ import {
   parseEjoosTimesheetDay,
   parseEjoosTimesheetPeople,
   parseTimesheetDayFromPbName,
-  resolveJournalTimesheetDay,
   type EjoosAbsentRow,
   type EjoosShpoRow,
+  type EjoosTimesheetPersonScan,
   type EjoosTimesheetRow,
 } from "./ejoosSyncPlan";
 import {
   findDuplicateOosById,
   findPossibleDuplicateOosByName,
 } from "./ejoosOosText";
-import { findDuplicateTimesheetExtras } from "./ejoosTimesheetDuplicates";
+import {
+  findDuplicateTimesheetExtras,
+  isClosedTimesheetHistoryRow,
+} from "./ejoosTimesheetDuplicates";
 import type { BackendEjournalLiveVersion } from "../../api";
 import type { EjoosDiffSession } from "./ejoosPersonDiff";
 import { formatValueForDisplay } from "../../shared/format";
@@ -241,19 +244,81 @@ const resolveDay = (input: {
     }
   }
   if (input.pbFileName) {
-    return resolveJournalTimesheetDay(input.pbFileName);
+    const fromName = parseTimesheetDayFromPbName(input.pbFileName);
+    if (!fromName.sourceDateUnknown) return fromName;
   }
-  return resolveJournalTimesheetDay("");
+  return { day: 0, label: "", sourceDateUnknown: true };
+};
+
+const sameRosterPerson = (
+  left: { personId?: string; fullName?: string },
+  right: { personId?: string; fullName?: string },
+) => {
+  const leftId = String(left.personId || "").trim();
+  const rightId = String(right.personId || "").trim();
+  if (leftId && rightId) return leftId === rightId;
+  const leftName = normKey(left.fullName || "");
+  const rightName = normKey(right.fullName || "");
+  return Boolean(leftName && rightName && leftName === rightName);
+};
+
+const pickTimesheetDayRow = (
+  candidates: EjoosTimesheetRow[],
+  occupant: { personId?: string; fullName?: string } | null,
+  scanByRow: Map<number, EjoosTimesheetPersonScan>,
+) => {
+  if (!candidates.length) return null;
+  const identity = occupant
+    ? candidates.filter((row) => sameRosterPerson(row, occupant))
+    : [];
+  const pool = identity.length ? identity : occupant ? [] : candidates;
+  if (!pool.length) return null;
+  const active = pool.filter((row) => {
+    const scan = scanByRow.get(row.excelRow);
+    return !scan || !isClosedTimesheetHistoryRow(scan);
+  });
+  return (active[0] ?? pool[0]) ?? null;
+};
+
+const applyTimesheetToRoster = (
+  entry: EjoosRegisterPerson,
+  dayRow: EjoosTimesheetRow | null,
+) => {
+  if (!dayRow) return;
+  entry.dayCode = dayRow.dayValue;
+  if (!entry.fullName) entry.fullName = dayRow.fullName;
+  if (!entry.rank) entry.rank = dayRow.rank;
+  if (!entry.personId) entry.personId = dayRow.personId;
+  entry.isVacant = !entry.fullName && !entry.personId;
+  entry.key = personKey(entry.personId, entry.fullName, entry.positionIndex);
 };
 
 const buildRoster = (
   shpo: EjoosShpoRow[],
   timesheet: EjoosTimesheetRow[],
+  timesheetPeople: EjoosTimesheetPersonScan[] = [],
 ): EjoosRegisterPerson[] => {
   const byIndex = new Map<string, EjoosRegisterPerson>();
+  const scanByRow = new Map(
+    timesheetPeople.map((row) => [row.excelRow, row]),
+  );
+  const byPosition = new Map<string, EjoosTimesheetRow[]>();
+  for (const row of timesheet) {
+    const list = byPosition.get(row.positionIndex) ?? [];
+    list.push(row);
+    byPosition.set(row.positionIndex, list);
+  }
+  const used = new Set<number>();
 
   shpo.forEach((row) => {
-    byIndex.set(row.positionIndex, {
+    const occupant = row.fullName || row.personId ? row : null;
+    const dayRow = pickTimesheetDayRow(
+      byPosition.get(row.positionIndex) ?? [],
+      occupant,
+      scanByRow,
+    );
+    if (dayRow) used.add(dayRow.excelRow);
+    const entry: EjoosRegisterPerson = {
       key: personKey(row.personId, row.fullName, row.positionIndex),
       excelRow: row.excelRow,
       personId: row.personId,
@@ -262,35 +327,32 @@ const buildRoster = (
       positionIndex: row.positionIndex,
       dayCode: "",
       isVacant: !row.fullName && !row.personId,
-    });
+    };
+    applyTimesheetToRoster(entry, dayRow);
+    byIndex.set(row.positionIndex, entry);
   });
 
-  timesheet.forEach((row) => {
-    const existing = byIndex.get(row.positionIndex);
-    if (existing) {
-      existing.dayCode = row.dayValue;
-      if (!existing.fullName) existing.fullName = row.fullName;
-      if (!existing.rank) existing.rank = row.rank;
-      if (!existing.personId) existing.personId = row.personId;
-      existing.isVacant = !existing.fullName && !existing.personId;
-      existing.key = personKey(
-        existing.personId,
-        existing.fullName,
-        existing.positionIndex,
-      );
-      return;
-    }
-    byIndex.set(row.positionIndex, {
-      key: personKey(row.personId, row.fullName, row.positionIndex),
-      excelRow: row.excelRow,
-      personId: row.personId,
-      fullName: row.fullName,
-      rank: row.rank,
-      positionIndex: row.positionIndex,
-      dayCode: row.dayValue,
-      isVacant: !row.fullName && !row.personId,
+  const leftoverByIndex = new Map<string, EjoosTimesheetRow[]>();
+  for (const row of timesheet) {
+    if (used.has(row.excelRow) || byIndex.has(row.positionIndex)) continue;
+    const list = leftoverByIndex.get(row.positionIndex) ?? [];
+    list.push(row);
+    leftoverByIndex.set(row.positionIndex, list);
+  }
+  for (const [index, rows] of leftoverByIndex) {
+    const dayRow = pickTimesheetDayRow(rows, null, scanByRow);
+    if (!dayRow) continue;
+    byIndex.set(index, {
+      key: personKey(dayRow.personId, dayRow.fullName, dayRow.positionIndex),
+      excelRow: dayRow.excelRow,
+      personId: dayRow.personId,
+      fullName: dayRow.fullName,
+      rank: dayRow.rank,
+      positionIndex: dayRow.positionIndex,
+      dayCode: dayRow.dayValue,
+      isVacant: !dayRow.fullName && !dayRow.personId,
     });
-  });
+  }
 
   return [...byIndex.values()].sort((a, b) =>
     a.positionIndex.localeCompare(b.positionIndex, "uk", { numeric: true }),
@@ -568,7 +630,7 @@ export const buildEjoosLiveView = (input: {
   const oosPeople = parseEjoosOos(oosSheet);
   const duplicateOosById = findDuplicateOosById(oosPeople);
   const possibleDuplicateOosByName = findPossibleDuplicateOosByName(oosPeople);
-  const roster = buildRoster(shpo, timesheet);
+  const roster = buildRoster(shpo, timesheet, timesheetPeople);
   const arrivals = parseArrivals(arrivalSheet);
   const irrevocableLosses = parseIrrevocableLosses(irrevocableLossSheet);
   const excluded = parseExcluded(excludedSheet);

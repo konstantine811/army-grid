@@ -1,6 +1,7 @@
 import { toUkrainianDativeFullName, toUkrainianDativeRank } from "./form12Report";
 import { toUkrainianGenitiveFullName } from "./form6Report";
 import { toUkrainianGenitiveRank } from "./ubdRestoreReport";
+import { capitalizeReportPosition } from "./reportPosition";
 
 const titleCaseUk = (value: string) =>
   value
@@ -180,7 +181,7 @@ export const toUkrainianInstrumentalPosition = (position: string) => {
   } else if (!/(ом|ем|ею|ою)$/u.test(key)) {
     instrumentalFirst = `${key}ом`;
   }
-  return [instrumentalFirst, ...rest].join(" ");
+  return capitalizeReportPosition([instrumentalFirst, ...rest].join(" "));
 };
 
 /** «Андрій КІЯНЕНКО» / «КІЯНЕНКО Андрій» → «Андрія КІЯНЕНКА». */

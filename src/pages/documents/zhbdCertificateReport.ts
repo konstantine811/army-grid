@@ -4,6 +4,7 @@ import {
   getPersonFullPositionTitle,
 } from "../personnel/personnelUtils";
 import { toUkrainianDativeRank } from "./form12Report";
+import { capitalizeReportPosition } from "./reportPosition";
 import { splitFullNameParts } from "./serviceCharacteristicReport";
 
 const SELECTED_PERSON_FULL_POSITION_KEY =
@@ -158,7 +159,9 @@ export const createZhbdCertificateFields = (
   const rank = summary.rank || "";
   const rawStaffPosition =
     getPersonFullPositionTitle(row) || readStoredSelectedPersonFullPosition();
-  const staffPosition = resolveZhbdCombatStaffPosition(rank, rawStaffPosition);
+  const staffPosition = capitalizeReportPosition(
+    resolveZhbdCombatStaffPosition(rank, rawStaffPosition),
+  );
   const now = new Date();
   const yearStart = `01.01.${now.getFullYear()}`;
   const base = {
@@ -208,9 +211,11 @@ export const mergeZhbdCertificateFields = (
     defaults.actualFullPosition,
     String(merged.actualFullPosition ?? ""),
   );
-  const staffPosition = resolveZhbdCombatStaffPosition(
-    rank,
-    actualFullPosition || pick(defaults.staffPosition, merged.staffPosition),
+  const staffPosition = capitalizeReportPosition(
+    resolveZhbdCombatStaffPosition(
+      rank,
+      actualFullPosition || pick(defaults.staffPosition, merged.staffPosition),
+    ),
   );
   const periodFrom = pick(defaults.periodFrom, merged.periodFrom);
   const periodTo = pick(defaults.periodTo, merged.periodTo);

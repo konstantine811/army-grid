@@ -9,6 +9,8 @@ import {
   CacheKeys,
   fetchWithCache,
   jsonChanged,
+  readDataCache,
+  writeDataCache,
 } from "../../data/idbDataCache";
 import {
   dataUrlToUint8Array,
@@ -1040,12 +1042,7 @@ export const inferRosterFieldLabel = (
   rosterLabels: Record<string, string>,
 ) => {
   const storedLabel = rosterLabels[sourceKey]?.trim() ?? "";
-  const isGenericLabel =
-    !storedLabel ||
-    isGenericRosterColumnKey(storedLabel) ||
-    isGenericRosterColumnKey(sourceKey);
-
-  if (!isGenericLabel) return storedLabel;
+  if (storedLabel && !isGenericRosterColumnKey(storedLabel)) return storedLabel;
 
   const fromMorningMap = resolveMorningGeneralListColumnLabel(sourceKey);
   if (fromMorningMap && !isGenericRosterColumnKey(fromMorningMap)) {
@@ -1063,6 +1060,60 @@ export const inferRosterFieldLabel = (
 
   if (fromMorningMap) return fromMorningMap;
   return storedLabel || sourceKey;
+};
+
+/** Статус зі штатки / ранкового («В строю», «Новоприбулий»), не «Статус БГ». */
+export const resolvePersonRosterStatus = (
+  row: EjournalPreviewRow | null,
+  rosterLabels: Record<string, string> = {},
+) => {
+  if (!row) return "";
+
+  for (const [key, raw] of Object.entries(row)) {
+    if (key.startsWith("__") || key.includes("fighter_status_")) continue;
+    const displayed = previewValueToDisplay(raw).trim();
+    if (!displayed) continue;
+    const sourceKey = rosterSourceKey(key);
+    const label = inferRosterFieldLabel(sourceKey, displayed, rosterLabels)
+      .trim()
+      .toLocaleLowerCase("uk-UA")
+      .replace(/_/g, " ");
+    if (label === "статус") return displayed;
+  }
+
+  for (const columnNumber of [21, 37] as const) {
+    const displayed = previewValueToDisplay(
+      row[`column_${columnNumber}`] ?? row[`${ROSTER_FIELD_PREFIX}column_${columnNumber}`],
+    ).trim();
+    if (displayed) return displayed;
+  }
+
+  return "";
+};
+
+/** Категорія огляду з тексту колонки «Статус» у Штатці. */
+export const classifyOverviewStatusFromRoster = (status: string) => {
+  const normalized = String(status ?? "")
+    .replace(/[ʼ’']/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLocaleLowerCase("uk-UA");
+  if (normalized.includes("відряд")) {
+    return { status: "BUSINESS_TRIP", statusLabel: "Відрядження" };
+  }
+  if (normalized.includes("відпуст")) {
+    return { status: "LEAVE", statusLabel: "Відпустка" };
+  }
+  if (normalized.includes("ліку") || normalized.includes("шпит")) {
+    return { status: "MEDICAL", statusLabel: "Лікування" };
+  }
+  if (normalized.includes("сзч")) {
+    return { status: "AWOL", statusLabel: "СЗЧ" };
+  }
+  if (normalized.includes("безв") || normalized.includes("зник")) {
+    return { status: "MISSING", statusLabel: "Безвісти" };
+  }
+  return { status: "ON_DUTY", statusLabel: "На службі" };
 };
 
 export const buildPersonSummary = (row: EjournalPreviewRow | null) => {
@@ -1315,13 +1366,16 @@ export const collectPersonExternalIdCandidates = (
   const birthKey = normalizePersonBirthKey(resolvePersonBirthDate(row));
   const callSignKey = normalizePersonIdentityText(resolvePersonCallSign(row));
   if (nameKey) {
-    push(`roster:${nameKey}`);
-    push(`roster:${String(name).trim()}`);
-    push(`name:${nameKey}`);
-    if (birthKey) push(`name-birth:${nameKey}:${birthKey}`);
-    if (callSignKey) push(`name-call:${nameKey}:${callSignKey}`);
+    if (birthKey) {
+      push(`name-birth:${nameKey}:${birthKey}`);
+    } else {
+      push(`roster:${nameKey}`);
+      push(`roster:${String(name).trim()}`);
+      push(`name:${nameKey}`);
+      if (callSignKey) push(`name-call:${nameKey}:${callSignKey}`);
+    }
   }
-  if (callSignKey) push(`call:${callSignKey}`);
+  if (callSignKey && !birthKey) push(`call:${callSignKey}`);
   if (spreadsheetId) push(`roster:${spreadsheetId}`);
 
   const identityKey = resolvePersonIdentityKey(row);
@@ -1498,11 +1552,47 @@ export const sheetRowsCacheKey = (sheet: BackendEjournalImportSheet) =>
     `${sheet.updatedAt}|${sheet.rowCount}|${sheet.columnCount}`,
   );
 
+const sheetRowsToPreview = (
+  sheet: BackendEjournalImportSheet,
+  columns: ReturnType<typeof parseDbColumns>,
+  items: Array<{
+    id: string;
+    excelRowNumber?: number | null;
+    values: Record<string, unknown>;
+  }>,
+  total: number,
+): DbPreviewState => ({
+  sheet,
+  columns,
+  rows: items.map((row) => ({
+    __dbRowId: row.id,
+    __rowNumber: row.excelRowNumber,
+    ...row.values,
+  })),
+  total,
+  offset: 0,
+  limit: items.length,
+});
+
 export const loadAllEjournalSheetRows = async (
   sheet: BackendEjournalImportSheet,
-  options?: { onCached?: (preview: DbPreviewState) => void | Promise<void> },
+  options?: {
+    onCached?: (preview: DbPreviewState) => void | Promise<void>;
+    onPage?: (preview: DbPreviewState) => void | Promise<void>;
+    isCancelled?: () => boolean;
+  },
 ): Promise<DbPreviewState> => {
-  const fetchFresh = async (): Promise<DbPreviewState> => {
+  const toPreview = (
+    items: Array<{
+      id: string;
+      excelRowNumber?: number | null;
+      values: Record<string, unknown>;
+    }>,
+    columns: ReturnType<typeof parseDbColumns>,
+    total: number,
+  ) => sheetRowsToPreview(sheet, columns, items, total);
+
+  const fetchFreshParallel = async (): Promise<DbPreviewState> => {
     const pageSize = 1000;
     const firstPage = await api.listEjournalSheetRows(sheet.id, {
       limit: pageSize,
@@ -1530,26 +1620,60 @@ export const loadAllEjournalSheetRows = async (
       for (const page of pages) items.push(...page.items);
     }
 
-    return {
-      sheet,
-      columns,
-      rows: items.map((row) => ({
-        __dbRowId: row.id,
-        __rowNumber: row.excelRowNumber,
-        ...row.values,
-      })),
-      total: firstPage.total,
-      offset: 0,
-      limit: items.length,
-    };
+    return toPreview(items, columns, firstPage.total);
   };
 
-  return fetchWithCache({
-    key: sheetRowsCacheKey(sheet),
-    fetcher: fetchFresh,
-    onCached: options?.onCached,
-    isChanged: jsonChanged,
-  });
+  const fetchFreshStream = async (): Promise<DbPreviewState> => {
+    const firstSize = 20;
+    const nextSize = 20;
+    const firstPage = await api.listEjournalSheetRows(sheet.id, {
+      limit: firstSize,
+      offset: 0,
+    });
+    const columns = parseDbColumns(firstPage.columns);
+    const items = [...firstPage.items];
+    const total = firstPage.total;
+    await options?.onPage?.(toPreview(items, columns, total));
+
+    let offset = firstPage.items.length;
+    const pageLimit = firstPage.limit || firstSize;
+    while (offset < total && !options?.isCancelled?.()) {
+      const page = await api.listEjournalSheetRows(sheet.id, {
+        limit: nextSize,
+        offset,
+      });
+      if (!page.items.length) break;
+      items.push(...page.items);
+      const grown = page.items.length;
+      offset += grown || page.limit || pageLimit;
+      await options?.onPage?.(toPreview(items, columns, total));
+      await new Promise<void>((resolve) => {
+        window.setTimeout(resolve, 0);
+      });
+    }
+
+    return toPreview(items, columns, total);
+  };
+
+  if (!options?.onPage) {
+    return fetchWithCache({
+      key: sheetRowsCacheKey(sheet),
+      fetcher: fetchFreshParallel,
+      onCached: options?.onCached,
+      isChanged: jsonChanged,
+    });
+  }
+
+  const cacheKey = sheetRowsCacheKey(sheet);
+  const cached = await readDataCache<DbPreviewState>(cacheKey);
+  if (cached) await options.onCached?.(cached);
+
+  const fresh = await fetchFreshStream();
+  const complete = fresh.total === 0 || fresh.rows.length >= fresh.total;
+  if (complete && (!cached || jsonChanged(cached, fresh))) {
+    await writeDataCache(cacheKey, fresh);
+  }
+  return fresh;
 };
 
 export * from "./personAttachments";

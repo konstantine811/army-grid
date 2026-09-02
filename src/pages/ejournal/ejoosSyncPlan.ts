@@ -3,17 +3,29 @@ import { mapPbStatusToEjoosWithRules, readOperatorSettings } from "./ejoosStatus
 import type { EjoosTimesheetCode } from "./ejoosRules";
 import {
   findLatestPriorOwnUnitStaffMove,
+  isAbsenceOnlyMovement,
   isAmbiguousStaffTransfer,
+  isDispositionAbsenceStatus,
   isDispositionToStaffPlacement,
+  isInternalStaffIndexHop,
   isOutboundStaffMove,
   isOwnFirstPbDestination,
   isOwnUnitStaffMove,
   resolveOutboundTransferDestination,
 } from "./ejoosMovementRules";
+import { resolveTimesheetEpisodeStart } from "./ejoosTimesheetEpisode";
 import {
+  absenceOnlyBlocksExclusion,
+  excludedTimesheetWrite,
+  excludedRowsToClear,
+  externalTransferProcessState,
+  isFalseInternalHopExclusion,
+  staleExcludedRowsToClear,
   isStaleVacatedAbsence,
   isUnrecordedSameMonthTransit,
+  laterReturnSupersedesOutbound,
   ownUnitMoveSupersededByOutbound,
+  positionCloseWritesExcluded,
   skipExternalIfAlreadyProcessed,
 } from "./ejoosExcludePolicy";
 import {
@@ -24,15 +36,21 @@ import {
   currentStatusConfirmsOpenAbsence,
   encodeTimesheetAbsenceSpans,
   archiveReturnContradictsCurrentSh,
+  extendDispositionSpanToReportDay,
   findTimesheetMonthHeaderCell,
   formatTimesheetMonthHeader,
+  isTimesheetAbsenceCode,
   isTimesheetDepartureMark,
   journalDayFromDateMs,
   sameTimesheetDayMark,
+  timesheetHorizonFillDays,
   timesheetMarkFromArchive,
   extractTimesheetDestinationFromPosition,
 } from "./ejoosTimesheetText";
-import { findDuplicateTimesheetExtras } from "./ejoosTimesheetDuplicates";
+import {
+  findDuplicateTimesheetExtras,
+  isClosedTimesheetHistoryRow,
+} from "./ejoosTimesheetDuplicates";
 import { findDuplicateOosById } from "./ejoosOosText";
 
 export { extractTimesheetDestinationFromPosition };
@@ -80,6 +98,10 @@ export type EjoosSyncPlan = {
   timesheetDayLabel: string;
   /** Місяць Табеля ЕЖООС ≠ місяць 1ПБ — apply заборонено. */
   monthRolloverRequired?: boolean;
+  /** Назва 1ПБ без дати — горизонт Табеля невідомий. */
+  sourceDateUnknown?: boolean;
+  /** Заголовок місяця «6. Табель» не знайдено — apply заборонено. */
+  timesheetMonthHeaderUnknown?: boolean;
   ejoosTimesheetMonthLabel?: string;
   ops: EjoosSyncOp[];
   summary: {
@@ -377,9 +399,6 @@ const isSzchCancellation = (event: PbMovement) =>
     [event.type, event.status, event.note, event.changeText].join(" "),
   );
 
-const isDispositionAbsenceStatus = (value: string) =>
-  /СЗЧ|САМОВІЛ|БЕЗВІСТ|(?:^|[^А-ЯІЇЄҐ])ЗБ(?:$|[^А-ЯІЇЄҐ])/iu.test(value);
-
 const movementBlob = (event: PbMovement) =>
   [event.type, event.status, event.note, event.changeText, event.destination].join(
     " ",
@@ -522,8 +541,12 @@ export const parsePbMovements = (workbook: ExcelWorkbookSnapshot): PbMovement[] 
   const statusCol = findCol(headers, /^статус$/);
   const prevIdxCol = findCol(headers, /індекс.*попер|попер.*індекс/);
   const nextIdxCol = findCol(headers, /індекс.*як|яка зміна.*індекс|індекси посад \(яка/);
-  // Fallback columns when layout differs (older file had ID in H, type in E)
-  const changeCol = findCol(headers, /яка зміна/, /попер/);
+  const changeCol = (() => {
+    for (const [key, index] of headers.entries()) {
+      if (/яка зміна/.test(key) && !/індекс/.test(key)) return index;
+    }
+    return findCol(headers, /попер/);
+  })();
   const destCol = findCol(
     headers,
     /^куди(?:\s|$)/,
@@ -551,6 +574,9 @@ export const parsePbMovements = (workbook: ExcelWorkbookSnapshot): PbMovement[] 
     if (text.includes("ЗВАН")) return "ЗВАННЯ";
     if (text.includes("ЗВІЛ")) return "ЗВІЛЬН";
     if (text.includes("СЗЧ") || text.includes("САМОВІЛ")) return "СЗЧ";
+    if (text.includes("БЕЗВІСТ") || /(?:^|[^А-ЯІЇЄҐ])ЗБ(?:$|[^А-ЯІЇЄҐ])/.test(text)) {
+      return "БЕЗВІСТИ";
+    }
     return text || "—";
   };
 
@@ -626,6 +652,7 @@ export type EjoosTimesheetPersonScan = {
   plusDays: number[];
   /** 1-based day → нормалізована позначка (або «вибув»). */
   dayCodes: string[];
+  departureText?: string;
 };
 
 export type EjoosShpoRow = {
@@ -660,6 +687,8 @@ export type EjoosExcludedRow = {
   fullName: string;
   orderNumber: string;
   orderDate: string;
+  destination: string;
+  note: string;
 };
 
 export const parseEjoosAbsents = (
@@ -696,12 +725,14 @@ export const parseEjoosTimesheetDay = (
   const rows: EjoosTimesheetRow[] = [];
   for (let i = 6; i < sheet.rawRows.length; i += 1) {
     const row = sheet.rawRows[i];
-    const positionIndex = norm(row?.[1]);
+    const rawIndex = norm(row?.[1]);
+    const positionIndex = /^\d{5,}$/.test(rawIndex) ? rawIndex : "";
     const fullName = norm(row?.[6]);
-    if (!positionIndex || !/^\d/.test(positionIndex)) continue;
+    const personId = normId(row?.[7]);
+    if (!positionIndex && !fullName && !personId) continue;
     rows.push({
       excelRow: i + 1,
-      personId: normId(row?.[7]),
+      personId,
       fullName,
       rank: norm(row?.[5]),
       positionIndex,
@@ -718,20 +749,24 @@ export const parseEjoosTimesheetPeople = (
   const rows: EjoosTimesheetPersonScan[] = [];
   for (let i = 6; i < sheet.rawRows.length; i += 1) {
     const row = sheet.rawRows[i];
-    const positionIndex = norm(row?.[1]);
+    const rawIndex = norm(row?.[1]);
+    const positionIndex = /^\d{5,}$/.test(rawIndex) ? rawIndex : "";
     const fullName = norm(row?.[6]);
     const personId = normId(row?.[7]);
-    if (!positionIndex || !/^\d/.test(positionIndex)) continue;
     if (!fullName && !personId) continue;
     const plusDays: number[] = [];
     const dayCodes: string[] = [];
     let hasDepartureText = false;
     let firstDepartureDay = 0;
+    let departureText = "";
     for (let day = 1; day <= 31; day += 1) {
       const value = row?.[8 + (day - 1)];
       if (isTimesheetDepartureMark(value)) {
         hasDepartureText = true;
-        if (!firstDepartureDay) firstDepartureDay = day;
+        if (!firstDepartureDay) {
+          firstDepartureDay = day;
+          departureText = norm(value);
+        }
         dayCodes[day] = "вибув";
         continue;
       }
@@ -747,6 +782,7 @@ export const parseEjoosTimesheetPeople = (
       positionIndex,
       hasDepartureText,
       firstDepartureDay,
+      departureText,
       plusDays,
       dayCodes,
     });
@@ -874,15 +910,56 @@ export const parseEjoosExcluded = (
       fullName,
       orderDate: norm(row?.[28]) || norm(row?.[10]),
       orderNumber: norm(row?.[29]) || norm(row?.[11]),
+      destination: norm(row?.[30]),
+      note: norm(row?.[31]),
     });
   }
   return rows;
 };
 
+export type JournalTimesheetDay = {
+  day: number;
+  label: string;
+  sourceDateUnknown?: boolean;
+};
+
+const journalDayFromParts = (
+  day: number,
+  month: number,
+  year: number,
+): JournalTimesheetDay => ({
+  day,
+  label: `${String(day).padStart(2, "0")}.${String(month).padStart(2, "0")}.${year}`,
+  sourceDateUnknown: false,
+});
+
+export const SOURCE_DATE_UNKNOWN_MESSAGE =
+  "SOURCE_DATE_UNKNOWN: не вдалося визначити дату 1ПБ. Вкажіть «станом на» вручну.";
+
+export const TIMESHEET_MONTH_HEADER_UNKNOWN_MESSAGE =
+  "TIMESHEET_MONTH_HEADER_UNKNOWN: заголовок місяця в I2 не прочитано. Місяць беремо з дати 1ПБ.";
+
+export const MONTH_ROLLOVER_BLOCK_MESSAGE =
+  "MONTH_ROLLOVER_REQUIRED: місяць Табеля ЕЖООС не збігається з місяцем 1ПБ. Заголовок не перейменовуємо — потрібен новий файл ЕЖООС на цей місяць.";
+
+/** ISO `YYYY-MM-DD` або `DD.MM.YYYY` — явна дата «станом на». */
+export const parseAsOfDateLabel = (value: string): JournalTimesheetDay => {
+  const iso = String(value || "").trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (iso) {
+    const year = Number(iso[1]);
+    const month = Number(iso[2]);
+    const day = Number(iso[3]);
+    if (day >= 1 && day <= 31 && month >= 1 && month <= 12) {
+      return journalDayFromParts(day, month, year);
+    }
+  }
+  return parseTimesheetDayFromPbName(value);
+};
+
 export const parseTimesheetDayFromPbName = (
   fileName: string,
-  fallback = new Date(),
-) => {
+  _fallback?: Date,
+): JournalTimesheetDay => {
   const match = fileName.match(/(\d{2})[._-](\d{2})[._-](\d{2,4})/);
   if (match) {
     const day = Number(match[1]);
@@ -890,10 +967,7 @@ export const parseTimesheetDayFromPbName = (
       const month = Number(match[2]);
       const yearRaw = Number(match[3]);
       const year = yearRaw < 100 ? 2000 + yearRaw : yearRaw;
-      return {
-        day,
-        label: `${String(day).padStart(2, "0")}.${String(month).padStart(2, "0")}.${year}`,
-      };
+      return journalDayFromParts(day, month, year);
     }
   }
   // Also 1ПБ_25082026
@@ -902,29 +976,44 @@ export const parseTimesheetDayFromPbName = (
     const day = Number(compact[1]);
     const month = Number(compact[2]);
     const year = Number(compact[3]);
-    return {
-      day,
-      label: `${String(day).padStart(2, "0")}.${String(month).padStart(2, "0")}.${year}`,
-    };
+    return journalDayFromParts(day, month, year);
   }
-  return {
-    day: fallback.getDate(),
-    label: fallback.toLocaleDateString("uk-UA"),
-  };
+  return { day: 0, label: "", sourceDateUnknown: true };
 };
 
-/** День табеля з назви файлу 1ПБ / ЄЖООС або сьогодні. */
+/** День табеля з назви файлу 1ПБ / ЄЖООС. Без дати — SOURCE_DATE_UNKNOWN. */
 export const resolveJournalTimesheetDay = parseTimesheetDayFromPbName;
-
-export const MONTH_ROLLOVER_BLOCK_MESSAGE =
-  "MONTH_ROLLOVER_REQUIRED: місяць Табеля ЕЖООС не збігається з місяцем 1ПБ. Заголовок не перейменовуємо — потрібен новий файл ЕЖООС на цей місяць.";
 
 export const sourceTimesheetHorizonNote = (timesheetDayLabel: string) =>
   `Джерело 1ПБ станом на ${timesheetDayLabel}. Табель буде оновлено лише по ${timesheetDayLabel}.`;
 
+export const workbookApplyBlockMessage = (
+  plan:
+    | Pick<
+        EjoosSyncPlan,
+        | "monthRolloverRequired"
+        | "sourceDateUnknown"
+        | "timesheetMonthHeaderUnknown"
+      >
+    | null
+    | undefined,
+) => {
+  if (!plan) return "";
+  if (plan.sourceDateUnknown) return SOURCE_DATE_UNKNOWN_MESSAGE;
+  return "";
+};
+
 export const planBlocksWorkbookApply = (
-  plan: Pick<EjoosSyncPlan, "monthRolloverRequired"> | null | undefined,
-) => Boolean(plan?.monthRolloverRequired);
+  plan:
+    | Pick<
+        EjoosSyncPlan,
+        | "monthRolloverRequired"
+        | "sourceDateUnknown"
+        | "timesheetMonthHeaderUnknown"
+      >
+    | null
+    | undefined,
+) => Boolean(workbookApplyBlockMessage(plan));
 
 /**
  * Горизонт Табеля = дата джерела 1ПБ. Не дотягуємо до «сьогодні»:
@@ -950,14 +1039,21 @@ export const buildEjoosSyncPlan = (
   options?: {
     statusRules?: import("./ejoosRules").EjoosStatusRule[];
     processedMovementKeys?: Iterable<string>;
+    sourceAsOfDate?: string;
   },
 ): EjoosSyncPlan => {
   const statusRules =
     options?.statusRules ?? readOperatorSettings().statusRules;
   const mapStatus = (raw: string) => mapPbStatusToEjoosWithRules(raw, statusRules);
-  const { day: timesheetDay, label: timesheetDayLabel } = parseTimesheetDayFromPbName(
-    pb.fileName,
-  );
+  const fromName = parseTimesheetDayFromPbName(pb.fileName);
+  const fromOverride = options?.sourceAsOfDate
+    ? parseAsOfDateLabel(options.sourceAsOfDate)
+    : null;
+  const sourceDay =
+    fromOverride && !fromOverride.sourceDateUnknown ? fromOverride : fromName;
+  const timesheetDay = sourceDay.day;
+  const timesheetDayLabel = sourceDay.label;
+  const sourceDateUnknown = Boolean(sourceDay.sourceDateUnknown);
   const shPeople = parsePbShPeople(pb);
   const archiveAll = parsePbArchive(pb);
   const movementsAll = parsePbMovements(pb);
@@ -1158,6 +1254,22 @@ export const buildEjoosSyncPlan = (
       (personId && shpoPersonById.has(personId)) ||
         byPersonName(shpoPersonByName, personId, fullName),
     );
+  const onStaffOos = (personId: string, fullName: string) =>
+    Boolean(
+      (personId && oosPersonById.has(personId)) ||
+        byPersonName(oosPersonByName, personId, fullName),
+    );
+  const timesheetClosedFor = (personId: string, fullName: string) => {
+    const rows = timesheetPeople.filter(
+      (row) =>
+        (personId && row.personId === personId) ||
+        [...personNameKeys(personId, fullName)].some(
+          (key) => canonicalName(row.fullName) === key,
+        ),
+    );
+    if (!rows.length) return false;
+    return rows.every((row) => isClosedTimesheetHistoryRow(row));
+  };
   const hasOpenAbsence = (personId: string, fullName: string) =>
     Boolean(
       (personId && openAbsentIds.has(personId)) ||
@@ -1195,6 +1307,35 @@ export const buildEjoosSyncPlan = (
     [...ejoosExcluded]
       .filter((row) => isSamePerson({ personId, fullName }, row))
       .sort((left, right) => right.excelRow - left.excelRow)[0] ?? null;
+  const excludedRowsOfPerson = (personId: string, fullName: string) =>
+    ejoosExcluded.filter((row) => isSamePerson({ personId, fullName }, row));
+  const staleExcludedForMovement = (event: {
+    personId: string;
+    fullName: string;
+    orderNumber: string;
+    orderDate: string;
+  }) =>
+    staleExcludedRowsToClear({
+      rows: excludedRowsOfPerson(event.personId, event.fullName),
+      currentOrderNumber: event.orderNumber,
+      currentOrderDate: event.orderDate,
+    });
+  const staleExcludedClearPayload = (
+    stale: Array<{ excelRow: number }>,
+  ): Pick<
+    EjoosSyncOp["payload"],
+    "clearExcludedExcelRow" | "clearExcludedExcelRows"
+  > => ({
+    clearExcludedExcelRow: stale[0] ? String(stale[0].excelRow) : "",
+    clearExcludedExcelRows: stale.map((row) => row.excelRow).join(","),
+  });
+  const findFalseHopExcludedRow = (personId: string, fullName: string) => {
+    if (!personStillInSh(personId, fullName)) return null;
+    if (!personStillInEjoos(personId, fullName)) return null;
+    const row = findLatestExcludedRow(personId, fullName);
+    if (!row || !isFalseInternalHopExclusion(row)) return null;
+    return row;
+  };
   const movementPersonKey = (event: {
     personId: string;
     fullName: string;
@@ -1323,6 +1464,7 @@ export const buildEjoosSyncPlan = (
     return 1;
   };
   for (const row of ejoosDays) {
+    if (!row.positionIndex) continue;
     const current = dayByIndex.get(row.positionIndex);
     if (!current || dayRowScore(row) > dayRowScore(current)) {
       dayByIndex.set(row.positionIndex, row);
@@ -1374,6 +1516,29 @@ export const buildEjoosSyncPlan = (
   };
   const timesheetRowsOf = (personId: string, fullName: string) =>
     timesheetPeople.filter((row) => isSamePerson({ personId, fullName }, row));
+  /** Табель інколи має чужий Excel-серійний ID — для РОЗПОРЯДЖ шукаємо ще за ПІБ. */
+  const timesheetRowByCanonicalName = (fullName: string) => {
+    const want = canonicalName(fullName);
+    if (!want) return null;
+    const scan = timesheetPeople
+      .filter((row) => canonicalName(row.fullName) === want)
+      .sort((left, right) => {
+        const leftOpen = isClosedTimesheetHistoryRow(left) ? 0 : 1;
+        const rightOpen = isClosedTimesheetHistoryRow(right) ? 0 : 1;
+        return rightOpen - leftOpen || left.excelRow - right.excelRow;
+      })[0];
+    if (!scan) return null;
+    return (
+      ejoosDays.find((row) => row.excelRow === scan.excelRow) ?? {
+        excelRow: scan.excelRow,
+        personId: scan.personId,
+        fullName: scan.fullName,
+        rank: "",
+        positionIndex: scan.positionIndex,
+        dayValue: "",
+      }
+    );
+  };
   const priorEpisodeTimesheetOf = (
     personId: string,
     fullName: string,
@@ -1402,9 +1567,10 @@ export const buildEjoosSyncPlan = (
       (row) => row.positionIndex === positionIndex,
     );
     if (personRows.length) {
-      return [...personRows].sort(
+      const ranked = [...personRows].sort(
         (left, right) => right.plusDays.length - left.plusDays.length,
-      )[0];
+      );
+      return ranked.find((row) => !row.hasDepartureText) ?? ranked[0];
     }
     const indexRow = positionIndex ? dayByIndex.get(positionIndex) : undefined;
     if (indexRow && isSamePerson({ personId, fullName }, indexRow)) return indexRow;
@@ -1526,7 +1692,13 @@ export const buildEjoosSyncPlan = (
       currentEjoosPerson?.positionIndex &&
         currentEjoosPerson.positionIndex !== person.positionIndex,
     );
-    const isNewPlacement = !currentEjoosPerson && confirmsCurrentIndex;
+    const currentShpoPerson =
+      ((person.personId || event.personId) &&
+        shpoPersonById.get(person.personId || event.personId)) ||
+      byPersonName(shpoPersonByName, event.personId, event.fullName) ||
+      null;
+    // ООС уже може бути на індексі, а ШПО ще вакантний — це все одно постановка.
+    const isNewPlacement = confirmsCurrentIndex && !currentShpoPerson;
     const cancel = transferCancelForPerson(
       person.personId || event.personId,
       person.fullName || event.fullName,
@@ -1712,6 +1884,7 @@ export const buildEjoosSyncPlan = (
     "ПРИБУВ",
     "ЗВІЛЬН",
     "СЗЧ",
+    "БЕЗВІСТИ",
   ]);
   const latestOperationalRowByPerson = new Map<string, number>();
   for (const event of activeMovementsAll) {
@@ -1771,6 +1944,7 @@ export const buildEjoosSyncPlan = (
   const positionEventForShPerson = (person: PbShPerson) => {
     const event = latestPositionByName.get(normKey(person.fullName));
     if (!event) return null;
+    if (wasMovementProcessed(event)) return null;
     if (
       event.nextIndex &&
       person.positionIndex &&
@@ -1806,6 +1980,7 @@ export const buildEjoosSyncPlan = (
   );
   const journalMonth = monthStartMs ? new Date(monthStartMs).getUTCMonth() + 1 : 0;
   const journalYear = monthStartMs ? new Date(monthStartMs).getUTCFullYear() : 0;
+  const timesheetMonthHeaderUnknown = !timesheetHeaderCell;
   const timesheetMonthHeaderMismatch = Boolean(
     timesheetMonthHeader &&
       timesheetHeaderCell &&
@@ -1863,37 +2038,72 @@ export const buildEjoosSyncPlan = (
       mapStatus(period.absenceType).timesheetCode,
     );
   };
+  const laterArchivePeriodOf = (period: {
+    personId: string;
+    fullName: string;
+    departDate: string;
+  }) => {
+    const departMs = dateMs(period.departDate);
+    if (!departMs) return null;
+    return (
+      archiveAll
+        .filter(
+          (other) =>
+            isSamePerson(period, other) && dateMs(other.departDate) > departMs,
+        )
+        .sort(
+          (left, right) => dateMs(left.departDate) - dateMs(right.departDate),
+        )[0] ?? null
+    );
+  };
+  const laterArchivePeriodSupersedesOpen = (period: {
+    personId: string;
+    fullName: string;
+    departDate: string;
+    returnDate: string;
+  }) =>
+    !hasActualReturn(period.returnDate) && Boolean(laterArchivePeriodOf(period));
   const archive = archiveAll.filter((period) => {
-    if (!personStillInSh(period.personId, period.fullName)) return false;
+    const stillInSh = personStillInSh(period.personId, period.fullName);
+    const stillTracked =
+      stillInSh ||
+      onStaffOos(period.personId, period.fullName) ||
+      hasOpenAbsence(period.personId, period.fullName);
+    if (!stillTracked) return false;
     const departMs = dateMs(period.departDate);
     const returnMs = hasActualReturn(period.returnDate)
       ? dateMs(period.returnDate)
       : null;
+    const carryOpen = stillInSh
+      ? shConfirmsOpenArchive(period)
+      : hasOpenAbsence(period.personId, period.fullName);
     if (
       archivePeriodTouchesJournalMonth(
         departMs,
         returnMs,
         leadWindowStart,
         leadWindowEnd,
-        { carryOpen: shConfirmsOpenArchive(period) },
+        { carryOpen },
       )
     ) {
       return true;
     }
     // Відкритий період до місяця: особа саме зараз заходить на штат
-    // (sh уже «В СТРОЮ», тож confirmOpenCarry не спрацює).
+    // (sh уже «В СТРОЮ», тож confirmOpenCarry не спрацює). Внутрішній
+    // стрибок посади і пізніша закрита відпустка старий МЕДРОТА не оживають.
     if (
       !returnMs &&
       departMs &&
       departMs < leadWindowStart &&
-      inboundStaffPlacementThisMonth(period.personId, period.fullName)
+      inboundStaffPlacementThisMonth(period.personId, period.fullName) &&
+      !laterArchivePeriodSupersedesOpen(period)
     ) {
       return true;
     }
     return false;
   });
-  const augustAbsenceSpansFor = (personId: string, fullName: string) =>
-    buildTimesheetAbsenceSpans(
+  const augustAbsenceSpansFor = (personId: string, fullName: string) => {
+    const spans = buildTimesheetAbsenceSpans(
       archiveAll
         .filter((period) => isSamePerson({ personId, fullName }, period))
         .map((period) => ({
@@ -1923,6 +2133,21 @@ export const buildEjoosSyncPlan = (
           }),
       },
     );
+    const shPerson =
+      (personId && shPersonById.get(personId)) ||
+      byPersonName(shPersonByName, personId, fullName) ||
+      null;
+    const shCode = shPerson
+      ? mapStatus(shPerson.status).timesheetCode
+      : null;
+    const latest =
+      [...spans].reverse().find((span) => span.code)?.code ?? null;
+    return extendDispositionSpanToReportDay(spans, {
+      timesheetDay,
+      shTimesheetCode: shCode,
+      latestArchiveCode: latest,
+    });
+  };
 
   const inboundStaffPlacementBefore = (event: PbMovement) =>
     findLatestPriorOwnUnitStaffMove(activeMovementsAll, event, {
@@ -1953,16 +2178,48 @@ export const buildEjoosSyncPlan = (
     return "";
   };
 
+  const timesheetEpisodeStartFor = (
+    personId: string,
+    fullName: string,
+    staffIndex: string,
+  ) => {
+    const ownUnitMoves: PbMovement[] = [];
+    let leftUnitThisMonth = false;
+    for (const event of activeMovementsAll) {
+      if (!isSamePerson({ personId, fullName }, event)) continue;
+      if (!eventInLeadWindow(event)) continue;
+      if (isOutboundStaffMove(event)) leftUnitThisMonth = true;
+      if (isOwnUnitStaffMove(event)) ownUnitMoves.push(event);
+    }
+    const inbound = inboundStaffDateFor(personId, fullName);
+    if (inbound) leftUnitThisMonth = true;
+    const departed = timesheetRowsOf(personId, fullName).some(
+      (row) => row.hasDepartureText,
+    );
+    return resolveTimesheetEpisodeStart({
+      monthStartLabel: journalMonthStartLabel,
+      appointmentDate: staffAppointmentDateFor(personId, fullName, staffIndex),
+      inboundDate: inbound,
+      hasMonthStartAbsence: augustAbsenceSpansFor(personId, fullName).some(
+        (span) => span.fromDay === 1,
+      ),
+      hasDepartureEvidence: departed,
+      leftUnitThisMonth,
+      ownUnitMoves,
+    });
+  };
+
   const staffEpisodePaintPayload = (
     personId: string,
     fullName: string,
     staffIndex: string,
     activeExcelRow: number,
   ) => {
-    const appointment =
-      staffAppointmentDateFor(personId, fullName, staffIndex) ||
-      inboundStaffDateFor(personId, fullName) ||
-      "";
+    const appointment = timesheetEpisodeStartFor(
+      personId,
+      fullName,
+      staffIndex,
+    );
     const allSpans = augustAbsenceSpansFor(personId, fullName);
     const carryFromMonthStart = allSpans.some((span) => span.fromDay === 1);
     const activeFromDay = carryFromMonthStart
@@ -1983,9 +2240,7 @@ export const buildEjoosSyncPlan = (
       staffIndex,
     );
     return {
-      timesheetActiveFrom: carryFromMonthStart
-        ? journalMonthStartLabel
-        : appointment,
+      timesheetActiveFrom: appointment,
       timesheetPreserveHistory:
         !carryFromMonthStart && activeFromDay > 1 ? "1" : "",
       timesheetAbsenceSpans: encodeTimesheetAbsenceSpans(activeSpans),
@@ -2311,18 +2566,51 @@ export const buildEjoosSyncPlan = (
     // Постановку на штат фарбує position_change; окремий timesheet_day тут
     // лише дублює і може зіпсувати коди СЗЧ на початку місяця.
     if (hasPositionEvent) return;
+    const personTimesheetScan =
+      timesheetRowsOf(person.personId, person.fullName).find(
+        (row) => !row.hasDepartureText,
+      ) || timesheetRowsOf(person.personId, person.fullName)[0];
     const personTimesheet =
-      (person.personId && dayById.get(person.personId)) ||
-      ejoosDays.find((row) =>
-        isSamePerson(person, { personId: row.personId, fullName: row.fullName }),
+      activeTimesheetRowOf(
+        person.personId,
+        person.fullName,
+        person.positionIndex,
       ) ||
-      null;
+      (personTimesheetScan
+        ? ejoosDays.find(
+            (row) => row.excelRow === personTimesheetScan.excelRow,
+          ) || {
+            excelRow: personTimesheetScan.excelRow,
+            personId: personTimesheetScan.personId,
+            fullName: personTimesheetScan.fullName,
+            rank: personTimesheetScan.rank,
+            positionIndex: personTimesheetScan.positionIndex,
+            dayValue: String(
+              personTimesheetScan.dayCodes[timesheetDay] || "",
+            ).trim(),
+          }
+        : null);
     const indexTimesheet = person.positionIndex
       ? dayByIndex.get(person.positionIndex) ?? null
       : null;
     const timesheetRow = personTimesheet || indexTimesheet;
+    const timesheetScan = timesheetRow
+      ? timesheetScanByRow.get(timesheetRow.excelRow)
+      : undefined;
+    const confirmedReturn = archiveAll.some(
+      (period) =>
+        isSamePerson(person, period) && hasActualReturn(period.returnDate),
+    );
     const before = personTimesheet?.dayValue || "—";
     const afterCode = mapped.timesheetCode;
+    const horizonFills = timesheetHorizonFillDays({
+      dayCodes: timesheetScan?.dayCodes ?? [],
+      horizon: timesheetDay,
+      reportCode: afterCode || "+",
+      confirmedReturn,
+    });
+    const continuedMark =
+      horizonFills.find((item) => item.day === timesheetDay)?.mark || "";
     const onMatchingShpo = Boolean(
       person.positionIndex &&
         shpoByIndex.get(person.positionIndex) &&
@@ -2372,9 +2660,23 @@ export const buildEjoosSyncPlan = (
     }
 
     if (!missingFromTimesheet && afterCode) {
-      const after = afterCode;
-      if (before !== after) {
+      const after =
+        afterCode === "+" && continuedMark && continuedMark !== "+"
+          ? continuedMark
+          : afterCode;
+      const needsHorizonFill = horizonFills.length > 0;
+      const falseHopExcluded = findFalseHopExcludedRow(
+        person.personId,
+        person.fullName,
+      );
+      if (before !== after || needsHorizonFill || falseHopExcluded) {
         const isReady = mapped.confidence === "high" && Boolean(timesheetRow);
+        const fillingGaps =
+          needsHorizonFill &&
+          (before === after ||
+            before === "—" ||
+            !String(before || "").trim() ||
+            (after === "+" && before === "+"));
         ops.push({
           id: opId(["ts", person.personId || person.positionIndex, String(timesheetDay), after]),
           kind: "timesheet_day",
@@ -2385,7 +2687,7 @@ export const buildEjoosSyncPlan = (
               : mapped.confidence === "review"
                 ? "conflict"
                 : "ready",
-          sheet: "6. Табель",
+          sheet: falseHopExcluded ? "6. Табель / 3. Виключені" : "6. Табель",
           personId: person.personId,
           fullName: person.fullName,
           positionIndex: person.positionIndex,
@@ -2393,13 +2695,25 @@ export const buildEjoosSyncPlan = (
           before,
           after,
           sourceRef: `sh!R${person.excelRow} СТАТУС=«${person.status}»`,
-          why: mapped.reason,
+          why: falseHopExcluded
+            ? `Внутрішня ПОСАДА 1ПБ не є вибуттям — прибрати хибний рядок Виключені R${falseHopExcluded.excelRow}${
+                before !== after ? `; Табель ${before} → ${after}` : ""
+              }`
+            : fillingGaps
+            ? `У Табелі порожні дні до зрізу ${timesheetDayLabel} — продовжуємо «${after}», не лише день ${timesheetDay}`
+            : isTimesheetAbsenceCode(after) && afterCode === "+"
+              ? `Відкритий «${after}» без фактичного прибуття — лишаємо той самий статус по ${timesheetDayLabel}`
+              : mapped.reason,
           confidence: mapped.confidence,
           payload: {
             timesheetCode: after,
             day: String(timesheetDay),
             excelRow: timesheetRow ? String(timesheetRow.excelRow) : "",
             statusRaw: person.status,
+            confirmedReturn: confirmedReturn ? "1" : "",
+            clearExcludedExcelRow: falseHopExcluded
+              ? String(falseHopExcluded.excelRow)
+              : "",
           },
           checkedDefault: isReady,
         });
@@ -2410,9 +2724,61 @@ export const buildEjoosSyncPlan = (
       mapped.ruleId !== "absent_archive"
     ) {
       const alreadyPresent = before === "+";
+      const continueAbsence =
+        continuedMark &&
+        continuedMark !== "+" &&
+        isTimesheetAbsenceCode(continuedMark);
       const defaultsToPresent =
-        Boolean(timesheetRow) && (before === "—" || alreadyPresent);
-      if (!alreadyPresent) {
+        Boolean(timesheetRow) &&
+        !continueAbsence &&
+        (before === "—" || alreadyPresent);
+      if (continueAbsence) {
+        ops.push({
+          id: opId(["ts_continue", person.personId || person.fullName, continuedMark]),
+          kind: "timesheet_day",
+          class: "ready",
+          sheet: "6. Табель",
+          personId: person.personId,
+          fullName: person.fullName,
+          positionIndex: person.positionIndex,
+          rank: person.rank,
+          before,
+          after: continuedMark,
+          sourceRef: `sh!R${person.excelRow} СТАТУС=«${person.status}»`,
+          why: `Відкритий «${continuedMark}» без прибуття — продовжуємо по ${timesheetDayLabel}, не ставимо «+»`,
+          confidence: "high",
+          payload: {
+            day: String(timesheetDay),
+            excelRow: timesheetRow ? String(timesheetRow.excelRow) : "",
+            statusRaw: person.status,
+            timesheetCode: continuedMark,
+          },
+          checkedDefault: true,
+        });
+      } else if (horizonFills.length && alreadyPresent) {
+        ops.push({
+          id: opId(["ts_fill", person.personId || person.fullName, String(timesheetDay)]),
+          kind: "timesheet_day",
+          class: "ready",
+          sheet: "6. Табель",
+          personId: person.personId,
+          fullName: person.fullName,
+          positionIndex: person.positionIndex,
+          rank: person.rank,
+          before,
+          after: "+",
+          sourceRef: `sh!R${person.excelRow} СТАТУС=«${person.status}»`,
+          why: `У Табелі порожні дні до зрізу ${timesheetDayLabel} — добиваємо «+»`,
+          confidence: "high",
+          payload: {
+            day: String(timesheetDay),
+            excelRow: timesheetRow ? String(timesheetRow.excelRow) : "",
+            statusRaw: person.status,
+            timesheetCode: "+",
+          },
+          checkedDefault: true,
+        });
+      } else if (!alreadyPresent) {
         ops.push({
           id: opId(["ts_manual", person.personId || person.fullName, person.status]),
           kind: "timesheet_day",
@@ -2498,7 +2864,51 @@ export const buildEjoosSyncPlan = (
       (canonicalName(open.ground) === canonicalName(period.absenceType) ||
         (isDispositionAbsenceStatus(open.ground) &&
           isDispositionAbsenceStatus(period.absenceType)));
-    if (sameAbsenceKind && !hasActualReturn(period.returnDate)) return;
+    if (sameAbsenceKind && !hasActualReturn(period.returnDate)) {
+      const later = laterArchivePeriodOf(period);
+      const shNow =
+        (period.personId && shPersonById.get(period.personId)) ||
+        byPersonName(shPersonByName, period.personId, period.fullName) ||
+        null;
+      const shPresent =
+        Boolean(shNow) && mapStatus(shNow!.status).timesheetCode === "+";
+      const openRow = reuseAbsent || open;
+      if (
+        later &&
+        shPresent &&
+        openRow &&
+        !hasActualReturn(openRow.actualReturn)
+      ) {
+        ops.push({
+          id: opId([
+            "close-stale-abs",
+            period.personId || period.fullName,
+            String(openRow.excelRow),
+          ]),
+          kind: "absent_close",
+          class: "ready",
+          sheet: "5. Тимчасово відсутні",
+          personId: period.personId || openRow.personId,
+          fullName: period.fullName || openRow.fullName,
+          positionIndex: shNow?.positionIndex || openRow.positionIndex,
+          rank: shNow?.rank || period.rank || openRow.rank,
+          before: `${openRow.ground} з ${openRow.departDate || "?"} ще відкритий`,
+          after: `закрити ${later.departDate} — далі вже ${later.absenceType || "інший період"}`,
+          sourceRef: `archive!R${period.excelRow} · «Тимч. відсутні» R${openRow.excelRow}`,
+          why: `Старий відкритий «${openRow.ground}» перекритий пізнішим періодом ${later.absenceType || ""} з ${later.departDate}. У sh особа в строю — лікування в Табелі після відпустки не продовжуємо.`,
+          confidence: "high",
+          payload: {
+            type: "CLOSE_SUPERSEDED_OPEN_ABSENCE",
+            excelRow: String(openRow.excelRow),
+            returnDate: later.departDate,
+            returnDay: later.departDate,
+            timesheetSkipHistory: "1",
+          },
+          checkedDefault: true,
+        });
+      }
+      return;
+    }
     if (
       reuseAbsent &&
       absenceRowsClosedByMovement.has(reuseAbsent.excelRow)
@@ -2618,6 +3028,53 @@ export const buildEjoosSyncPlan = (
     });
   });
 
+  for (const row of ejoosAbsents.filter((item) => !item.actualReturn)) {
+    if (absenceRowsClosedByMovement.has(row.excelRow)) continue;
+    if (
+      ops.some(
+        (op) =>
+          op.kind === "absent_close" &&
+          Number(op.payload.excelRow || 0) === row.excelRow,
+      )
+    ) {
+      continue;
+    }
+    const shNow =
+      (row.personId && shPersonById.get(row.personId)) ||
+      byPersonName(shPersonByName, row.personId, row.fullName) ||
+      null;
+    if (!shNow || mapStatus(shNow.status).timesheetCode !== "+") continue;
+    const later = laterArchivePeriodOf({
+      personId: row.personId,
+      fullName: row.fullName,
+      departDate: row.departDate,
+    });
+    if (!later) continue;
+    ops.push({
+      id: opId(["close-stale-abs", row.personId || row.fullName, String(row.excelRow)]),
+      kind: "absent_close",
+      class: "ready",
+      sheet: "5. Тимчасово відсутні",
+      personId: row.personId || shNow.personId,
+      fullName: row.fullName || shNow.fullName,
+      positionIndex: shNow.positionIndex || row.positionIndex,
+      rank: shNow.rank || row.rank,
+      before: `${row.ground} з ${row.departDate || "?"} ще відкритий`,
+      after: `закрити ${later.departDate} — далі вже ${later.absenceType || "інший період"}`,
+      sourceRef: `«Тимч. відсутні» R${row.excelRow} · archive далі ${later.absenceType || ""}`,
+      why: `Старий відкритий «${row.ground}» перекритий пізнішим періодом ${later.absenceType || ""} з ${later.departDate}. У sh особа в строю — після відпустки в Табелі має бути «+», не «лік».`,
+      confidence: "high",
+      payload: {
+        type: "CLOSE_SUPERSEDED_OPEN_ABSENCE",
+        excelRow: String(row.excelRow),
+        returnDate: later.departDate,
+        returnDay: later.departDate,
+        timesheetSkipHistory: "1",
+      },
+      checkedDefault: true,
+    });
+  }
+
   const timesheetAlreadyPainted = (personId: string, fullName: string) =>
     ops.some(
       (op) =>
@@ -2676,7 +3133,9 @@ export const buildEjoosSyncPlan = (
     if (activeFromDay <= 1 && scan?.plusDays.length) {
       const firstPlus = Math.min(...scan.plusDays);
       const absenceEndedBeforePlus =
-        firstPlus > 1 && spans.every((span) => span.toDay < firstPlus);
+        spans.length > 0 &&
+        firstPlus > 1 &&
+        spans.every((span) => span.toDay < firstPlus);
       const prefixInactive =
         firstPlus > 1 &&
         Array.from({ length: firstPlus - 1 }, (_, index) => index + 1).every(
@@ -2697,7 +3156,24 @@ export const buildEjoosSyncPlan = (
       activeFromDay > 1
         ? clipAbsenceSpansToActiveEpisode(spans, activeFromDay)
         : spans;
-    if (!episodeSpans.length && activeFromDay <= 1 && !spans.length) continue;
+    const firstPlusDay = scan?.plusDays.length
+      ? Math.min(...scan.plusDays)
+      : 0;
+    const falseInactivePrefix =
+      activeFromDay <= 1 &&
+      !spans.length &&
+      firstPlusDay > 1 &&
+      Array.from({ length: firstPlusDay - 1 }, (_, index) => index + 1).some(
+        (day) => sameTimesheetDayMark(scan?.dayCodes[day] || "", "-"),
+      );
+    if (
+      !episodeSpans.length &&
+      activeFromDay <= 1 &&
+      !spans.length &&
+      !falseInactivePrefix
+    ) {
+      continue;
+    }
     let mismatch = false;
     for (let day = 1; day <= timesheetDay; day += 1) {
       const expected = timesheetMarkFromArchive(day, {
@@ -3090,8 +3566,12 @@ export const buildEjoosSyncPlan = (
       byPersonName(oosPersonByName, event.personId, event.fullName) ||
       null;
     const ts =
+      staffIndexTimesheetForPerson(
+        event.personId,
+        event.fullName,
+        shpo?.positionIndex || "",
+      ) ||
       (event.personId && dayById.get(event.personId)) ||
-      (shpo?.positionIndex && dayByIndex.get(shpo.positionIndex)) ||
       ejoosDays.find((row) => isSamePerson(event, row)) ||
       null;
     const currentRank = oos?.rank || shpo?.rank || ts?.rank || "";
@@ -3137,6 +3617,42 @@ export const buildEjoosSyncPlan = (
     if (key) pendingRankByPerson.set(key, rankOp);
     if (event.personId) pendingRankByPerson.set(`id:${event.personId}`, rankOp);
   }
+
+  const latestAbsenceOnlyOf = (personId: string, fullName: string) => {
+    let found: PbMovement | null = null;
+    for (const event of activeMovementsAll) {
+      if (!isSamePerson({ personId, fullName }, event)) continue;
+      if (!eventInLeadWindow(event)) continue;
+      if (!isAbsenceOnlyMovement(event)) continue;
+      if (
+        !found ||
+        movementEventTime(event) > movementEventTime(found) ||
+        (movementEventTime(event) === movementEventTime(found) &&
+          event.excelRow > found.excelRow)
+      ) {
+        found = event;
+      }
+    }
+    return found;
+  };
+  const openDispositionAbsenceMs = (personId: string, fullName: string) => {
+    let latest = 0;
+    for (const period of archiveAll) {
+      if (!isSamePerson({ personId, fullName }, period)) continue;
+      if (!isDispositionAbsenceStatus(period.absenceType)) continue;
+      if (hasActualReturn(period.returnDate)) continue;
+      latest = Math.max(latest, dateMs(period.departDate) || 0);
+    }
+    for (const row of ejoosAbsents) {
+      if (!isSamePerson({ personId, fullName }, row)) continue;
+      if (!isDispositionAbsenceStatus(row.ground)) continue;
+      if (row.actualReturn) continue;
+      latest = Math.max(latest, dateMs(row.departDate) || 0);
+    }
+    const movement = latestAbsenceOnlyOf(personId, fullName);
+    if (movement) latest = Math.max(latest, movementEventTime(movement));
+    return latest;
+  };
 
   const considerMovement = (event: PbMovement) => {
     const movementDate = dateMs(event.orderDate || event.basisDate);
@@ -3193,6 +3709,8 @@ export const buildEjoosSyncPlan = (
       return;
     }
 
+    if (isAbsenceOnlyMovement(event)) return;
+
     if (event.type === "РОЗПОРЯДЖ") {
       const samePerson = (personId: string, fullName: string) =>
         isSamePerson(event, { personId, fullName });
@@ -3200,7 +3718,10 @@ export const buildEjoosSyncPlan = (
       const inActiveShpo = onStaffShpo(event.personId, event.fullName);
       const hasOpenAbsence = ejoosAbsents.some(
         (row) =>
-          samePerson(row.personId, row.fullName) &&
+          (samePerson(row.personId, row.fullName) ||
+            (event.fullName &&
+              row.fullName &&
+              canonicalName(row.fullName) === canonicalName(event.fullName))) &&
           !row.actualReturn,
       );
       const inActiveOos = Boolean(
@@ -3233,7 +3754,10 @@ export const buildEjoosSyncPlan = (
       );
       const szchRemains = ejoosAbsents.some(
         (row) =>
-          samePerson(row.personId, row.fullName) &&
+          (samePerson(row.personId, row.fullName) ||
+            (event.fullName &&
+              row.fullName &&
+              canonicalName(row.fullName) === canonicalName(event.fullName))) &&
           isDispositionAbsenceStatus(row.ground) &&
           !row.actualReturn,
       );
@@ -3264,9 +3788,12 @@ export const buildEjoosSyncPlan = (
             isDispositionAbsenceStatus(period.absenceType),
           ) ?? openArchivePeriods[0])
         : openArchivePeriods[0];
-      const timesheetRow = ejoosDays.find((row) =>
-        samePerson(row.personId, row.fullName),
-      );
+      const timesheetRow =
+        activeTimesheetRowOf(
+          event.personId,
+          event.fullName,
+          event.previousIndex,
+        ) || timesheetRowByCanonicalName(event.fullName);
       // Рядок особи в ШПО/Табелі може бути вже в блоці розпорядження — тоді
       // його не чіпаємо. Закривати треба лише штатний рядок.
       const shpoDispositionExcelRows = new Set(
@@ -3357,6 +3884,17 @@ export const buildEjoosSyncPlan = (
       // згадка в тексті Табеля запису не заміняє.
       const needsAbsenceRecord = hasSzchContext && !szchRemains;
       const needsTimesheetClose = Boolean(staffTimesheetRow);
+      const keepOpenSzchTimesheet = Boolean(hasSzchContext || szchRemains);
+      const indexTimesheet = event.previousIndex
+        ? dayByIndex.get(event.previousIndex)
+        : undefined;
+      const vacateTimesheetStaffSlot =
+        keepOpenSzchTimesheet &&
+        Boolean(
+          staffTimesheetRow &&
+            indexTimesheet &&
+            staffTimesheetRow.excelRow === indexTimesheet.excelRow,
+        );
       const canMoveToDisposition = Boolean(
         staffShpoRow || needsTimesheetClose || needsAbsenceRecord,
       );
@@ -3365,6 +3903,15 @@ export const buildEjoosSyncPlan = (
           ? norm(event.status)
           : activeArchivePeriod?.absenceType || event.status || "РОЗПОРЯДЖЕННЯ";
         const mappedAbsence = mapStatus(absenceStatus);
+        const openAbsentRow = ejoosAbsents.find(
+          (row) =>
+            (samePerson(row.personId, row.fullName) ||
+              (event.fullName &&
+                row.fullName &&
+                canonicalName(row.fullName) ===
+                  canonicalName(event.fullName))) &&
+            !row.actualReturn,
+        );
         ops.push({
           id: opId([
             "move-to-disposition",
@@ -3383,10 +3930,15 @@ export const buildEjoosSyncPlan = (
           after: [
             event.destination || event.changeText || "у розпорядження",
             absenceStatus,
+            keepOpenSzchTimesheet
+              ? `Табель 01–${String(timesheetDay).padStart(2, "0")} ${mappedAbsence.timesheetCode || "СЗЧ"}`
+              : "",
             needsAbsenceRecord && !activeArchivePeriod
               ? "немає даних архіву для запису відсутності — перевірити"
               : "",
-            !staffTimesheetRow && !dispositionInTimesheet
+            !keepOpenSzchTimesheet &&
+            !staffTimesheetRow &&
+            !dispositionInTimesheet
               ? "штатний рядок Табеля не знайдено — перевірити"
               : "",
             !remainsInOos ? "в ООС активного запису немає" : "",
@@ -3394,7 +3946,9 @@ export const buildEjoosSyncPlan = (
             .filter(Boolean)
             .join(" · "),
           sourceRef: `Рух!R${event.excelRow} №${event.movementNumber}`,
-          why: "РОЗПОРЯДЖ звільняє стару штатну посаду, але залишає особу в ООС. Виключені не змінюються.",
+          why: keepOpenSzchTimesheet
+            ? "СЗЧ → РОЗПОРЯДЖ: звільнити ШПО (фінальний sh wins), ООС і відкритий СЗЧ лишити, Табель один рядок СЗЧ без «вибув у розпорядження». Виключені не змінюються."
+            : "РОЗПОРЯДЖ звільняє стару штатну посаду, але залишає особу в ООС. Виключені не змінюються.",
           confidence: activeArchivePeriod ? "high" : "review",
           payload: {
             type: event.type,
@@ -3407,12 +3961,7 @@ export const buildEjoosSyncPlan = (
             shpoExcelRow: String(staffShpoRow?.excelRow || ""),
             timesheetExcelRow: String(staffTimesheetRow?.excelRow || ""),
             skipShpoDisposition: dispositionInShpo ? "1" : "",
-            absenceExcelRow: String(
-              ejoosAbsents.find(
-                (row) =>
-                  samePerson(row.personId, row.fullName) && !row.actualReturn,
-              )?.excelRow || "",
-            ),
+            absenceExcelRow: String(openAbsentRow?.excelRow || ""),
             needsAbsenceRecord: needsAbsenceRecord ? "1" : "",
             absenceType: absenceStatus,
             absenceCode: mappedAbsence.timesheetCode || absenceStatus,
@@ -3423,6 +3972,8 @@ export const buildEjoosSyncPlan = (
             plannedReturn: activeArchivePeriod?.plannedReturn || "",
             remainsInOos: String(remainsInOos),
             timesheetFound: String(Boolean(staffTimesheetRow)),
+            keepOpenSzchTimesheet: keepOpenSzchTimesheet ? "1" : "",
+            vacateTimesheetStaffSlot: vacateTimesheetStaffSlot ? "1" : "",
             hasSzchContext: String(hasSzchContext),
             szchRemains: String(szchRemains),
             szchReflectedElsewhere: String(szchReflectedElsewhere),
@@ -3493,18 +4044,26 @@ export const buildEjoosSyncPlan = (
       ) &&
       !(event.type === "ПОСАДА" && isPositionChangeRow(event.excelRow));
     if (isExternalUnitDeparture) {
-      const inboundPlacement = inboundStaffPlacementBefore(event);
       const existingExcludedEarly = findMovementExcludedRow(event);
+      if (wasMovementProcessed(event) && existingExcludedEarly) return;
+      const inboundPlacement = inboundStaffPlacementBefore(event);
       const unrecordedSameMonthTransit = isUnrecordedSameMonthTransit({
         hasInboundPlacement: Boolean(inboundPlacement),
         alreadyExcluded: Boolean(existingExcludedEarly),
         stillInSh: personStillInSh(event.personId, event.fullName),
         stillInEjoos: personStillInEjoos(event.personId, event.fullName),
       });
+      const transferProcessState = externalTransferProcessState({
+        onStaffShpo: onStaffShpo(event.personId, event.fullName),
+        onStaffOos: onStaffOos(event.personId, event.fullName),
+        hasMatchingExcluded: Boolean(existingExcludedEarly),
+        timesheetClosed: timesheetClosedFor(event.personId, event.fullName),
+      });
       if (
         skipExternalIfAlreadyProcessed({
           stillInEjoos: personStillInEjoos(event.personId, event.fullName),
           unrecordedTransit: unrecordedSameMonthTransit,
+          processState: transferProcessState,
         })
       ) {
         return;
@@ -3522,8 +4081,22 @@ export const buildEjoosSyncPlan = (
         }
       }
       // Вибуття підтверджуємо не лише рядком РУХ: людини вже не повинно бути
-      // в актуальному sh. Інакше старий ПЕРЕВ/РОЗПОРЯДЖ створює хибне виключення.
-      if (personStillInSh(event.personId, event.fullName)) return;
+      // в актуальному sh. Повернення 07.08 після вибуття 05.08 теж скасовує
+      // виключення — Атрахов знову чинний occupant.
+      if (
+        laterReturnSupersedesOutbound({
+          stillInSh: personStillInSh(event.personId, event.fullName),
+          returnedAfterOutbound: Boolean(
+            inboundStaffDateFor(event.personId, event.fullName),
+          ),
+        }) ||
+        absenceOnlyBlocksExclusion({
+          absenceAt: openDispositionAbsenceMs(event.personId, event.fullName),
+          outboundAt: movementEventTime(event),
+        })
+      ) {
+        return;
+      }
       const existingExcluded = existingExcludedEarly;
       const alreadyExcluded = Boolean(existingExcluded);
       const destinationRaw = event.destination || "";
@@ -3625,18 +4198,19 @@ export const buildEjoosSyncPlan = (
       const arrival =
         arrivalOf(fromId, fromName) ||
         arrivalOf(event.personId, event.fullName);
-      const tsCandidate =
-        activeTimesheetRowOf(event.personId, event.fullName, occupiedIndex) ||
-        ejoosDays.find((row) => isSamePerson(event, row)) ||
-        (occupiedIndex
-          ? staffIndexTimesheetForPerson(fromId, fromName, occupiedIndex)
-          : null) ||
-        null;
-      const ts =
-        tsCandidate &&
-        (isVacantStaffRow(tsCandidate) || isSamePerson(event, tsCandidate))
-          ? tsCandidate
-          : ejoosDays.find((row) => isSamePerson(event, row)) || null;
+      const namedTimesheetRows = [
+        ...timesheetRowsOf(fromId, fromName),
+        ...timesheetRowsOf(event.personId, event.fullName),
+      ].filter(
+        (row, index, rows) =>
+          rows.findIndex((other) => other.excelRow === row.excelRow) === index,
+      );
+      const timesheetWrite = excludedTimesheetWrite(
+        namedTimesheetRows,
+        fromIndex && isVacantStaffRow(dayByIndex.get(fromIndex))
+          ? dayByIndex.get(fromIndex)?.excelRow || 0
+          : 0,
+      );
       // Колонки «наказ» і перша «дата» — стройовий наказ. Окремі реквізити
       // підстави (наприклад 668-РС від 03.08.2026) сюди не підставляємо.
       const excludeDate = event.orderDate;
@@ -3647,6 +4221,11 @@ export const buildEjoosSyncPlan = (
           event.orderNumber &&
           event.orderDate,
       );
+      const staleExcluded = staleExcludedForMovement(event);
+      const staleClear = staleExcludedClearPayload(staleExcluded);
+      const staleClearNote = staleExcluded.length
+        ? ` Попередн${staleExcluded.length === 1 ? "ій рядок" : "і рядки"} Виключені R${staleExcluded.map((row) => row.excelRow).join(", R")} прибираємо — лишаємо чинне ПЕРЕВ.`
+        : "";
 
       ops.push({
         id: opId(["excl", event.movementNumber || String(event.excelRow), event.type]),
@@ -3670,7 +4249,7 @@ export const buildEjoosSyncPlan = (
         after: `${alreadyExcluded ? "доробити очищення після виключення" : "виключити"}: ${event.type} → ${exclusionPlace || "(куди?)"} · табель: ${timesheetDestination || "(куди?)"} · ${exclusionReason} · наказ №${event.orderNumber || "?"} від ${event.orderDate || "?"}`,
         sourceRef: `Рух!R${event.excelRow} №${event.movementNumber}`,
         why: alreadyExcluded
-            ? "Рядок у Виключених уже є — не дублюємо його, доробляємо Табель → ШПО/ООС. Тимч. відсутні/прибулі не чіпаємо."
+            ? `Рядок у Виключених уже є — не дублюємо його, доробляємо Табель → ШПО/ООС. Тимч. відсутні/прибулі не чіпаємо.${staleClearNote}`
           : unrecordedSameMonthTransit
             ? `Постановка ${inboundPlacement?.orderDate || "?"} на ${fromIndex || "штабний індекс"} і вибуття ${event.orderDate || "?"} у цьому місяці, але в ЕЖООС особи не було. Пишемо Виключені + історичний Табель; зайнятий індекс ШПО/ООС не чіпаємо.`
           : hasRequiredExcludedFields
@@ -3678,7 +4257,7 @@ export const buildEjoosSyncPlan = (
               ? `Спочатку звання ${pendingRank.payload.nextRank} (№${pendingRank.payload.orderNumber || "?"} від ${pendingRank.payload.orderDate || "?"}), потім ${event.type} → ${exclusionPlace}: Виключені → Табель → очистка ШПО/ООС`
               : inboundPlacement
                 ? `Ланцюг: ${inboundPlacement.orderDate || "?"} ${inboundPlacement.type} ${inboundPlacement.previousIndex || "?"} → ${inboundPlacement.nextIndex || fromIndex} (лишився б у ООС); далі ${event.type} №${event.orderNumber || "?"} від ${event.orderDate || "?"} — вибув з 1ПБ, в sh немає. Виключені з інд. ${fromIndex}; внутрішню постановку на штат не проводимо.`
-                : `${event.type} з «куди»: алгоритм Виключені → Табель (історія) → очистка ШПО/ООС. Відкритий рядок «Тимч. прибулі» закриваємо.`
+                : `${event.type} з «куди»: алгоритм Виключені → Табель (історія) → очистка ШПО/ООС. Відкритий рядок «Тимч. прибулі» закриваємо.${staleClearNote}`
             : "У РУХ не вистачає фактичного місця вибуття або реквізитів стройового наказу",
         confidence:
           hasRequiredExcludedFields && (shpo || unrecordedSameMonthTransit)
@@ -3692,11 +4271,12 @@ export const buildEjoosSyncPlan = (
           orderNumber: event.orderNumber,
           orderDate: event.orderDate,
           excludeDate,
-          timesheetActiveFrom: inboundPlacement?.orderDate || "",
-          timesheetCreateHistory:
-            !ts || isVacantStaffRow(ts) || !isSamePerson(event, ts)
-              ? "1"
+          timesheetActiveFrom:
+            unrecordedSameMonthTransit || arrival
+              ? inboundPlacement?.orderDate || ""
               : "",
+          timesheetCreateHistory: timesheetWrite.createHistory ? "1" : "",
+          timesheetReplaceInPlace: timesheetWrite.replaceInPlace ? "1" : "",
           transitSameMonth: unrecordedSameMonthTransit ? "1" : "",
           basisNumber: event.basisNumber,
           basisDate: event.basisDate,
@@ -3727,8 +4307,9 @@ export const buildEjoosSyncPlan = (
           excludedExcelRow: existingExcluded ? String(existingExcluded.excelRow) : "",
           oosExcelRow: oos ? String(oos.excelRow) : "",
           shpoExcelRow: shpo ? String(shpo.excelRow) : "",
-          timesheetExcelRow:
-            ts && isSamePerson(event, ts) ? String(ts.excelRow) : "",
+          timesheetExcelRow: timesheetWrite.sourceExcelRow
+            ? String(timesheetWrite.sourceExcelRow)
+            : "",
           fromRank,
           fromName,
           fromPersonId: fromId || event.personId,
@@ -3741,14 +4322,13 @@ export const buildEjoosSyncPlan = (
             pendingRank?.payload.orderDate ||
             rankBeforeTransfer?.orderDate ||
             "",
-          // AE «Куди вибув»: в/ч з примітки / «Куди», не стара посада з «Яка зміна».
-          documentsDest:
-            exclusionPlace ||
-            positionChangeDestination(event) ||
-            event.changeText,
+          // AE «Куди вибув / Куди направлені документи»: дослівно з РУХ
+          // «Яка зміна». Підрозділ/вч з «Куди» лишається для Табеля/підстави.
+          documentsDest: event.changeText || "",
           changeText: event.changeText || "",
           exclusionReason,
           awaitRankChange: pendingRank ? "1" : "",
+          ...staleClear,
         },
         movementKey: createMovementKey(event),
         checkedDefault:
@@ -3859,10 +4439,39 @@ export const buildEjoosSyncPlan = (
           .sort((left, right) => right.plusDays.length - left.plusDays.length)[0] ??
         null;
       const targetTimesheet = (() => {
-        if (personStaffTimesheet) return personStaffTimesheet;
+        const vacantStaff = isVacantStaffRow(indexTimesheet)
+          ? indexTimesheet
+          : null;
+        if (transferCancel) {
+          if (personStaffTimesheet) return personStaffTimesheet;
+          if (personActiveTimesheet) return personActiveTimesheet;
+          if (vacantStaff) return vacantStaff;
+          if (
+            indexTimesheet &&
+            isSamePerson({ personId, fullName }, indexTimesheet)
+          ) {
+            return indexTimesheet;
+          }
+          return indexTimesheet;
+        }
+        const staffScan = personStaffTimesheet
+          ? timesheetPeople.find(
+              (row) => row.excelRow === personStaffTimesheet.excelRow,
+            )
+          : undefined;
+        // Реальне вибуття: історичний «вибув» не зафарбовуємо — новий епізод
+        // пишемо на вакантний штатний рядок.
+        if (vacantStaff && staffScan?.hasDepartureText) return vacantStaff;
+        if (personStaffTimesheet && !staffScan?.hasDepartureText) {
+          return personStaffTimesheet;
+        }
         if (personActiveTimesheet) return personActiveTimesheet;
-        if (isVacantStaffRow(indexTimesheet)) return indexTimesheet;
-        if (indexTimesheet && isSamePerson({ personId, fullName }, indexTimesheet)) {
+        if (vacantStaff) return vacantStaff;
+        if (personStaffTimesheet) return personStaffTimesheet;
+        if (
+          indexTimesheet &&
+          isSamePerson({ personId, fullName }, indexTimesheet)
+        ) {
           return indexTimesheet;
         }
         return indexTimesheet;
@@ -3904,14 +4513,18 @@ export const buildEjoosSyncPlan = (
       const previousShpoTimesheet = samePersonRow(previousIndexTimesheet)
         ? previousIndexTimesheet
         : null;
-      // Стару штатну посаду закриваємо як історію: рядок у «3. Виключені»,
-      // копія рядка Табеля і звільнення індексу в ШПО. ООС не чіпаємо —
-      // особа лишається в частині.
+      // Стару штатну посаду звільняємо в ШПО/Табелі. У «Виключені» рядок
+      // пишемо лише коли це не внутрішній стрибок 1ПБ→1ПБ.
       const closeOldPosition = Boolean(
         event.previousIndex &&
           event.previousIndex !== nextIndex &&
           (oldShpo || previousShpoTimesheet),
       );
+      const internalStaffHop = isInternalStaffIndexHop(event);
+      const writeExcludedOnClose = positionCloseWritesExcluded({
+        closeOldPosition: closeOldPosition ? "1" : "",
+        internalStaffHop: internalStaffHop ? "1" : "",
+      });
       const returningToStaffIndex = Boolean(
         shPerson &&
           nextIndex === shPerson.positionIndex &&
@@ -3921,9 +4534,13 @@ export const buildEjoosSyncPlan = (
           !transferCancel,
       );
       // Якщо особа вже стоїть на цільовому індексі в ЕЖООС і стару посаду
-      // закривати не треба — у РУХ лише історія. Скасоване переведення не
-      // розкладає Табель: один рядок, «вибув» знімаємо на місці.
-      if (samePersonRow(targetShpo) && !closeOldPosition && !returningToStaffIndex) {
+      // закривати не треба — у РУХ лише історія. Внутрішній стрибок теж
+      // не вигадує «Виключені»: залишки старого Табеля чистить детектор дублів.
+      if (
+        samePersonRow(targetShpo) &&
+        !returningToStaffIndex &&
+        (!closeOldPosition || internalStaffHop)
+      ) {
         const arrivalStillOpen = Boolean(arrival);
         const oosMissing = !existingOos;
         if (
@@ -3988,7 +4605,7 @@ export const buildEjoosSyncPlan = (
         .map((item) => item.date)
         .join("\n");
       const staffTimesheetFrom =
-        staffAppointmentDateFor(personId, fullName, nextIndex) ||
+        timesheetEpisodeStartFor(personId, fullName, nextIndex) ||
         inboundStaffDateFor(personId, fullName) ||
         event.orderDate;
       const monthSpans = augustAbsenceSpansFor(personId, fullName);
@@ -4003,6 +4620,7 @@ export const buildEjoosSyncPlan = (
       const timesheetPreserveHistory =
         transferCancel ||
         carryAbsenceFromMonthStart ||
+        returningFromDisposition ||
         journalDayFromDateMs(dateMs(timesheetActiveFrom), leadWindowStart) <= 1
           ? ""
           : "1";
@@ -4035,11 +4653,13 @@ export const buildEjoosSyncPlan = (
         class: applyNow ? "ready" : "needs_input",
         sheet: returningFromDisposition
           ? "5. Тимч. відсутні → 1. ШПО / 2. ООС / 6. Табель"
-          : closeOldPosition
+          : writeExcludedOnClose
             ? "3. Виключені → 6. Табель → 1. ШПО / 2. ООС"
-            : isTempArrivalPlacement
-              ? "4. Тимч. прибулі → 1. ШПО / 2. ООС / 6. Табель"
-              : "1. ШПО / 2. ООС / 6. Табель",
+            : closeOldPosition
+              ? "1. ШПО / 2. ООС / 6. Табель"
+              : isTempArrivalPlacement
+                ? "4. Тимч. прибулі → 1. ШПО / 2. ООС / 6. Табель"
+                : "1. ШПО / 2. ООС / 6. Табель",
         personId,
         fullName,
         positionIndex: nextIndex,
@@ -4070,7 +4690,9 @@ export const buildEjoosSyncPlan = (
                       : ""
                   }`
                 : closeOldPosition
-                  ? `зміна посади в межах 1ПБ: закрити ${event.previousIndex} у Виключених і Табелі, поставити на ${nextIndex}, ООС лишити активним`
+                  ? writeExcludedOnClose
+                    ? `зміна посади в межах 1ПБ: закрити ${event.previousIndex} у Виключених і Табелі, поставити на ${nextIndex}, ООС лишити активним`
+                    : `внутрішня зміна посади 1ПБ ${event.previousIndex} → ${nextIndex}: оновити ШПО/ООС/Табель, у «Виключені» не пишемо`
                   : isTempArrivalPlacement
                     ? `ПОСАДА №${event.orderNumber || "?"} від ${event.orderDate || "?"}: закрити тимчасове прибуття, поставити на штат ${nextIndex}; Табель з ${staffTimesheetFrom || event.orderDate || "дати наказу"}, коди archive в цьому ж кроці`
                     : transferCancel
@@ -4182,16 +4804,19 @@ export const buildEjoosSyncPlan = (
             : "",
           chainTotal: personChain?.length ? String(personChain.length) : "",
           closeOldPosition: closeOldPosition ? "1" : "",
+          internalStaffHop: internalStaffHop ? "1" : "",
           previousShpoExcelRow:
             closeOldPosition && oldShpo ? String(oldShpo.excelRow) : "",
           previousIndexTimesheetExcelRow:
             closeOldPosition && previousShpoTimesheet
               ? String(previousShpoTimesheet.excelRow)
               : "",
-          excludeDate: closeOldPosition ? event.orderDate : "",
-          documentsDest: closeOldPosition ? newPositionText : "",
+          excludeDate: writeExcludedOnClose ? event.orderDate : "",
+          documentsDest: writeExcludedOnClose
+            ? event.changeText || newPositionText
+            : "",
           timesheetDestination: closeOldPosition ? timesheetDestination : "",
-          exclusionReason: closeOldPosition ? "ПЕРЕВЕДЕННЯ 1 ПБ" : "",
+          exclusionReason: writeExcludedOnClose ? "ПЕРЕВЕДЕННЯ 1 ПБ" : "",
           fromRank: oldShpo?.rank || previousShpoTimesheet?.rank || rank,
           fromName: oldShpo?.fullName || fullName,
           fromPersonId: oldShpo?.personId || personId,
@@ -4303,6 +4928,14 @@ export const buildEjoosSyncPlan = (
       if (personStillInSh(row.personId, row.fullName)) continue;
       if (excludeAlreadyPlanned(row.personId, row.fullName)) continue;
       const transfer = finalExternalTransferFor(row.personId, row.fullName);
+      if (
+        absenceOnlyBlocksExclusion({
+          absenceAt: openDispositionAbsenceMs(row.personId, row.fullName),
+          outboundAt: transfer ? movementEventTime(transfer) : 0,
+        })
+      ) {
+        continue;
+      }
       if (!transfer) continue;
       if (!eventInLeadWindow(transfer)) continue;
       if (cancelledExternalTransferRows.has(transfer.excelRow)) continue;
@@ -4319,7 +4952,18 @@ export const buildEjoosSyncPlan = (
     if (personStillInSh(row.personId, row.fullName)) continue;
     if (transferCancelForPerson(row.personId, row.fullName)) continue;
     const transfer = finalExternalTransferFor(row.personId, row.fullName);
+    if (
+      absenceOnlyBlocksExclusion({
+        absenceAt: openDispositionAbsenceMs(row.personId, row.fullName),
+        outboundAt: transfer ? movementEventTime(transfer) : 0,
+      })
+    ) {
+      continue;
+    }
     if (!transfer) continue;
+    if (!excludeAlreadyPlanned(row.personId, row.fullName)) {
+      considerMovement(transfer);
+    }
     if (excludeAlreadyPlanned(row.personId, row.fullName)) continue;
     const history = timesheetRowsOf(row.personId, row.fullName).find(
       (other) => other.excelRow !== row.excelRow && other.hasDepartureText,
@@ -4348,6 +4992,93 @@ export const buildEjoosSyncPlan = (
         keepHistoryRow: history ? String(history.excelRow) : "",
       },
       movementKey: createMovementKey(transfer),
+      checkedDefault: true,
+    });
+  }
+
+  const excludedClearAlreadyPlanned = (excelRow: number) =>
+    ops.some((op) => excludedRowsToClear(op.payload).includes(excelRow));
+  const latestOutboundTransferOf = (personId: string, fullName: string) =>
+    [...activeMovementsAll]
+      .filter(
+        (event) =>
+          event.type === "ПЕРЕВ" &&
+          isOutboundStaffMove(event) &&
+          !cancelledExternalTransferRows.has(event.excelRow) &&
+          isSamePerson({ personId, fullName }, event),
+      )
+      .sort((left, right) => movementEventTime(right) - movementEventTime(left))[0] ??
+    null;
+  const seenStaleExcludedPeople = new Set<string>();
+  for (const row of ejoosExcluded) {
+    const key = movementPersonKey(row);
+    if (!key || seenStaleExcludedPeople.has(key)) continue;
+    seenStaleExcludedPeople.add(key);
+    if (personStillInSh(row.personId, row.fullName)) continue;
+    const latest = latestOutboundTransferOf(row.personId, row.fullName);
+    if (!latest) continue;
+    const stale = staleExcludedForMovement(latest).filter(
+      (item) => !excludedClearAlreadyPlanned(item.excelRow),
+    );
+    if (!stale.length) continue;
+    ops.push({
+      id: opId([
+        "clear-stale-excl",
+        row.personId || row.fullName,
+        stale.map((item) => String(item.excelRow)).join("-"),
+      ]),
+      kind: "timesheet_day",
+      class: "ready",
+      sheet: "3. Виключені",
+      personId: row.personId || latest.personId,
+      fullName: row.fullName || latest.fullName,
+      positionIndex: latest.previousIndex || "",
+      rank: latest.rank || "",
+      before: `Виключені ${stale.map((item) => `R${item.excelRow}`).join(", ")} — старі ПЕРЕВ`,
+      after: `прибрати дублі; лишити чинне ПЕРЕВ №${latest.orderNumber || "?"} від ${latest.orderDate || "?"}`,
+      sourceRef: stale.map((item) => `Виключені!R${item.excelRow}`).join(" · "),
+      why: "Особа вже має чинне зовнішнє ПЕРЕВ. Попередні рядки «Виключені» не видалились — лишаємо один актуальний запис.",
+      confidence: "high",
+      payload: {
+        type: "CLEAR_STALE_EXCLUSION_DUPLICATE",
+        ...staleExcludedClearPayload(stale),
+      },
+      checkedDefault: true,
+    });
+  }
+  for (const row of ejoosExcluded) {
+    if (excludedClearAlreadyPlanned(row.excelRow)) continue;
+    if (!isFalseInternalHopExclusion(row)) continue;
+    if (!personStillInSh(row.personId, row.fullName)) continue;
+    if (!personStillInEjoos(row.personId, row.fullName)) continue;
+    const shPerson =
+      (row.personId && shPersonById.get(row.personId)) ||
+      byPersonName(shPersonByName, row.personId, row.fullName) ||
+      null;
+    const timesheetRow = activeTimesheetRowOf(
+      row.personId,
+      row.fullName,
+      shPerson?.positionIndex || "",
+    );
+    ops.push({
+      id: opId(["clear-hop-excl", row.personId || row.fullName, String(row.excelRow)]),
+      kind: "timesheet_day",
+      class: "ready",
+      sheet: "3. Виключені",
+      personId: row.personId || shPerson?.personId || "",
+      fullName: row.fullName || shPerson?.fullName || "",
+      positionIndex: shPerson?.positionIndex || "",
+      rank: shPerson?.rank || "",
+      before: `Виключені R${row.excelRow}: ${row.note || "ПЕРЕВЕДЕННЯ 1 ПБ"}`,
+      after: "прибрати — особа досі в 1ПБ на штатній посаді",
+      sourceRef: `Виключені!R${row.excelRow}`,
+      why: "Внутрішня зміна посади 1ПБ потрапила в «Виключені» помилково. Людина є в актуальному sh і в ШПО/ООС — рядок виключення прибираємо.",
+      confidence: "high",
+      payload: {
+        type: "CLEAR_INTERNAL_HOP_EXCLUSION",
+        clearExcludedExcelRow: String(row.excelRow),
+        excelRow: timesheetRow ? String(timesheetRow.excelRow) : "",
+      },
       checkedDefault: true,
     });
   }
@@ -4441,6 +5172,22 @@ export const buildEjoosSyncPlan = (
       )
       .map((op) => Number(op.payload.excelRow)),
   );
+  const namesForTimesheetId = new Map<string, Set<string>>();
+  for (const row of timesheetPeople) {
+    const id = String(row.personId || "").trim();
+    const name = canonicalName(row.fullName);
+    if (!id || !name) continue;
+    const names = namesForTimesheetId.get(id) ?? new Set<string>();
+    names.add(name);
+    namesForTimesheetId.set(id, names);
+  }
+  const uniqueTimesheetPersonId = (personId: string) => {
+    const id = String(personId || "").trim();
+    if (!id) return "";
+    const names = namesForTimesheetId.get(id);
+    if (!names || names.size > 1) return "";
+    return id;
+  };
   for (const item of findDuplicateTimesheetExtras(
     timesheetPeople,
     timesheetOccupantByIndex,
@@ -4457,7 +5204,7 @@ export const buildEjoosSyncPlan = (
       kind: "timesheet_day",
       class: "ready",
       sheet: "6. Табель",
-      personId: item.extra.personId,
+      personId: uniqueTimesheetPersonId(item.extra.personId),
       fullName: item.extra.fullName,
       positionIndex: item.extra.positionIndex,
       rank: "",
@@ -4465,7 +5212,11 @@ export const buildEjoosSyncPlan = (
       after: `прибрати рядок — лишається R${item.keep.excelRow} (${keepName})`,
       sourceRef: `Табель!R${item.extra.excelRow} · канон R${item.keep.excelRow}`,
       why:
-        item.reason === "same_person"
+        item.reason === "leftover_history"
+          ? "Після вибуття в Табелі лишився другий іменний рядок. Історію з «вибув» лишаємо, копію з ПІБ прибираємо."
+          : item.reason === "internal_hop"
+          ? "Внутрішня зміна посади в 1ПБ: один місячний рядок. Копію з «вибув до відділення/взводу» прибираємо."
+          : item.reason === "same_person"
           ? "У Табелі не може бути двох активних записів однієї особи. Повторне застосування раніше дописувало копію замість штатного рядка."
           : "Один штатний індекс — один активний рядок Табеля. Історія з «вибув» лишається, зайві копії з «+» прибираємо.",
       confidence: "high",
@@ -4764,9 +5515,15 @@ export const buildEjoosSyncPlan = (
     ops,
     summary,
     monthRolloverRequired: timesheetMonthHeaderMismatch,
+    sourceDateUnknown,
+    timesheetMonthHeaderUnknown,
     ejoosTimesheetMonthLabel: timesheetHeaderCell?.matched || "",
     limitsNote:
-      `${sourceTimesheetHorizonNote(timesheetDayLabel)} ` +
+      `${
+        sourceDateUnknown
+          ? SOURCE_DATE_UNKNOWN_MESSAGE
+          : sourceTimesheetHorizonNote(timesheetDayLabel)
+      } ` +
       `РУХ: перевірено всі ${movementsAll.length} рядків, активних ` +
       `${activeMovementsAll.length}, останніх кадрових подій ` +
       `${effectiveMovements.length}` +
@@ -4775,8 +5532,11 @@ export const buildEjoosSyncPlan = (
         : "") +
       `; archive — ${archive.length} періодів цього місяця ` +
       `з ${archiveAll.length}.` +
+      (timesheetMonthHeaderUnknown
+        ? ` ${TIMESHEET_MONTH_HEADER_UNKNOWN_MESSAGE}`
+        : "") +
       (timesheetMonthHeaderMismatch && timesheetMonthHeader
-        ? ` MONTH_ROLLOVER_REQUIRED: заголовок «6. Табель» зараз «${timesheetHeaderCell?.matched}», 1ПБ — «${timesheetMonthHeader}». Apply заблоковано, заголовок не перейменовуємо.`
+        ? ` MONTH_ROLLOVER: у шаблоні «${timesheetHeaderCell?.matched}», 1ПБ — «${timesheetMonthHeader}». Місяць беремо з 1ПБ, заголовок не перейменовуємо.`
         : ""),
   };
 };

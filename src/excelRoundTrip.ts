@@ -677,8 +677,11 @@ export async function readWorkbookSnapshot(
       const hasData = fullDataRows.some(
         (row) => !isEmptyValue(row[columnIndex]),
       );
+      const hasTitle = fullRows
+        .slice(0, Math.min(6, fullRows.length))
+        .some((row) => !isEmptyValue(row[columnIndex]));
 
-      return hasHeader || hasData;
+      return hasHeader || hasData || hasTitle;
     });
     const firstUsedColumnIndex = options.preserveLeadingColumns
       ? 0

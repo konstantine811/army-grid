@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { applyConfirmedEjoosOps } from "./ejoosSyncApply";
 import {
-  MONTH_ROLLOVER_BLOCK_MESSAGE,
+  parseTimesheetDayFromPbName,
   planBlocksWorkbookApply,
   refreshPlanTimesheetHorizon,
+  SOURCE_DATE_UNKNOWN_MESSAGE,
   sourceTimesheetHorizonNote,
   type EjoosSyncOp,
   type EjoosSyncPlan,
@@ -39,14 +40,38 @@ describe("timesheet horizon stays on the 1PB source date", () => {
   });
 });
 
-describe("month rollover blocks apply", () => {
-  it("treats a mismatched timesheet month as a workbook apply block", () => {
-    const blocked = plan({ monthRolloverRequired: true });
-    expect(planBlocksWorkbookApply(blocked)).toBe(true);
+describe("1PB source date is not guessed from today", () => {
+  it("marks 1ПБ_актуальний.xlsx as SOURCE_DATE_UNKNOWN", () => {
+    const parsed = parseTimesheetDayFromPbName(
+      "1ПБ_актуальний.xlsx",
+      new Date(2026, 7, 31),
+    );
+    expect(parsed).toEqual({
+      day: 0,
+      label: "",
+      sourceDateUnknown: true,
+    });
+    expect(planBlocksWorkbookApply(plan({ sourceDateUnknown: true }))).toBe(
+      true,
+    );
+  });
+});
+
+describe("month rollover does not block August apply", () => {
+  it("keeps apply open — month comes from the 1PB date", () => {
+    expect(planBlocksWorkbookApply(plan({ monthRolloverRequired: true }))).toBe(
+      false,
+    );
     expect(planBlocksWorkbookApply(plan())).toBe(false);
   });
 
-  it("applyConfirmedEjoosOps refuses to write when rollover is required", async () => {
+  it("does not block apply when I2 has no month — 1PB date is enough", () => {
+    expect(
+      planBlocksWorkbookApply(plan({ timesheetMonthHeaderUnknown: true })),
+    ).toBe(false);
+  });
+
+  it("applyConfirmedEjoosOps refuses to write when the 1PB date is unknown", async () => {
     const op: EjoosSyncOp = {
       id: "op-1",
       kind: "timesheet_day",
@@ -79,9 +104,9 @@ describe("month rollover blocks apply", () => {
     await expect(
       applyConfirmedEjoosOps({
         ejoos,
-        plan: plan({ monthRolloverRequired: true, ops: [op] }),
+        plan: plan({ sourceDateUnknown: true, ops: [op] }),
         ops: [op],
       }),
-    ).rejects.toThrow(MONTH_ROLLOVER_BLOCK_MESSAGE);
+    ).rejects.toThrow(SOURCE_DATE_UNKNOWN_MESSAGE);
   });
 });

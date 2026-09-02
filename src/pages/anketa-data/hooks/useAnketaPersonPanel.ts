@@ -8,6 +8,7 @@ import {
 } from "../../personnel/personAttachments";
 import {
   buildQuestionnaireExportFileName,
+  dataUrlToObjectUrl,
   downloadQuestionnairePdf,
   revokeQuestionnairePreviewUrl,
 } from "../../personnel/personnelUtils";
@@ -121,13 +122,6 @@ export function useAnketaPersonPanel(
       storedFileName?: string | null,
     ) => {
       const epoch = ++previewEpochRef.current;
-      const expectedNames = [name].filter(Boolean);
-      if (
-        storedFileName &&
-        !questionnaireFileMatchesPerson(storedFileName, expectedNames)
-      ) {
-        return;
-      }
       const fileName =
         String(storedFileName ?? "").trim() ||
         buildQuestionnaireExportFileName(name, callSign);
@@ -147,11 +141,15 @@ export function useAnketaPersonPanel(
           return nextUrl;
         });
         setPreviewOpen(true);
-      } catch {
-        /* keep panel usable */
+      } catch (error) {
+        onMessage?.(
+          error instanceof Error
+            ? `Не вдалося відкрити анкету: ${error.message}`
+            : "Не вдалося відкрити анкету.",
+        );
       }
     },
-    [],
+    [onMessage],
   );
 
   const mergePreview = useMemo(
@@ -345,16 +343,29 @@ export function useAnketaPersonPanel(
   }, []);
 
   const openQuestionnairePreview = async () => {
-    if (!questionnaire || !personnelExternalId) return;
-    const stored = String(questionnaire.fileName ?? "").trim();
-    if (
-      stored &&
-      !questionnaireFileMatchesPerson(stored, [displayName])
-    ) {
+    if (!questionnaire) {
+      onMessage?.("Анкета ще не завантажена.");
+      return;
+    }
+    if (questionnaire.fileData) {
+      const nextUrl = dataUrlToObjectUrl(questionnaire.fileData);
+      setPreviewTitle(`Анкета · ${displayName} · ${exportFileName}`);
+      setPreviewUrl((current) => {
+        if (current) revokeQuestionnairePreviewUrl(current);
+        previewUrlRef.current = nextUrl;
+        return nextUrl;
+      });
+      setPreviewOpen(true);
+      return;
+    }
+    const externalId =
+      questionnaire.personExternalId?.trim() || personnelExternalId;
+    if (!externalId) {
+      onMessage?.("Немає ID службовця, щоб відкрити анкету.");
       return;
     }
     await openPreviewForExternalId(
-      personnelExternalId,
+      externalId,
       displayName,
       match?.summary.callSign ?? "",
       questionnaire.fileName,
@@ -362,7 +373,16 @@ export function useAnketaPersonPanel(
   };
 
   const openQuestionnaireTab = async () => {
-    if (!questionnaire || !personnelExternalId) return;
+    if (!questionnaire) return;
+    if (questionnaire.fileData) {
+      window.open(
+        dataUrlToObjectUrl(questionnaire.fileData),
+        "_blank",
+        "noopener,noreferrer",
+      );
+      return;
+    }
+    if (!personnelExternalId) return;
     try {
       const url = await api.createPersonQuestionnairePreviewUrl(
         personnelExternalId,

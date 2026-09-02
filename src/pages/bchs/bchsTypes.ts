@@ -175,6 +175,8 @@ export type BchsPersonnelAwayPerson = {
   fullName: string;
   /** Excel O — позивний. */
   callsign: string;
+  /** Excel P — дата народження (якщо колонка є в штатці). */
+  birthDate?: string;
   status: string;
   roleType: string;
   combatReadiness: string;
@@ -188,8 +190,22 @@ export type BchsPersonnelAwayPerson = {
   mobilizationContract: string;
   medicalPlace: string;
   medicalNote: string;
+  /** Excel AG — «Напрямок» (col 33). */
+  direction?: string;
+  /** «Статус бійців · Дата виходу», якщо є в Штатці. */
+  fighterExitDate?: string;
+  /** «Статус бійців · Дата повернення», якщо є в Штатці. */
+  fighterReturnDate?: string;
   /** ARGB заливки клітинки ПІБ (column N), якщо зчитано з Excel. */
   pibHighlightRgb?: string | null;
+};
+
+export type BchsPersonnelStayStats = {
+  total: number;
+  stayPlaces: AnalyticsMetric[];
+  battleReady: number;
+  notBattleReady: number;
+  onExit: BchsPersonnelAwayPerson[];
 };
 
 export type BchsUnitAbsenceCategoryStats = {

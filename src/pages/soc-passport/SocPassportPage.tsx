@@ -9,11 +9,17 @@ import { Button as SciButton } from "../../components/ui/button/button";
 import { readWorkbookSnapshot, type ExcelWorkbookSnapshot } from "../../excelRoundTrip";
 import { buildSocPassportResult } from "./socPassportCalc";
 import {
+  exportSocPassportBirthdaysWorkbook,
   exportSocPassportExitsWorkbook,
   exportSocPassportNoExitsWorkbook,
   exportSocPassportRussiaWorkbook,
   exportSocPassportWorkbook,
 } from "./socPassportExport";
+import {
+  listCurrentMonthBirthdays,
+  listOnDutyMissingBirthDates,
+  ukrainianMonthLabel,
+} from "./socPassportBirthdays";
 import { exportSocPassportDeparturesWorkbook } from "./socPassportDeparturesExport";
 import {
   buildArrivalsFromPb,
@@ -405,6 +411,16 @@ export function SocPassportPage() {
         .includes(needle),
     );
   }, [query, result]);
+
+  const birthdayMonthLabel = ukrainianMonthLabel();
+  const birthdayPeople = useMemo(
+    () => (result ? listCurrentMonthBirthdays(result.people) : []),
+    [result],
+  );
+  const missingBirthdayPeople = useMemo(
+    () => (result ? listOnDutyMissingBirthDates(result.people) : []),
+    [result],
+  );
 
   const noExitsPeople = useMemo(() => {
     if (!result) return [];
@@ -984,6 +1000,29 @@ export function SocPassportPage() {
     }
   };
 
+  const exportBirthdaysOnly = async () => {
+    if (!birthdayPeople.length && !missingBirthdayPeople.length) return;
+    setIsBusy(true);
+    try {
+      const count = await exportSocPassportBirthdaysWorkbook(
+        birthdayPeople,
+        birthdayMonthLabel,
+        missingBirthdayPeople,
+      );
+      setMessage(
+        `Експортовано «Дні народження»: ${count.birthdays} за ${birthdayMonthLabel} · без дати з ЕЖООС: ${count.missing}.`,
+      );
+    } catch (error) {
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "Не вдалося експортувати дні народження.",
+      );
+    } finally {
+      setIsBusy(false);
+    }
+  };
+
   const exportDeparturesOnly = async () => {
     if (!departures) return;
     setIsBusy(true);
@@ -1129,12 +1168,116 @@ export function SocPassportPage() {
             <FileDownloadOutlinedIcon fontSize="small" />
             Вибули
           </SciButton>
+          <SciButton
+            variant="OUTLINE"
+            disabled={isBusy || (!birthdayPeople.length && !missingBirthdayPeople.length)}
+            onClick={() => void exportBirthdaysOnly()}
+            title="Дні народження поточного місяця + хто в строю зі штатки без дати з ЕЖООС"
+          >
+            <FileDownloadOutlinedIcon fontSize="small" />
+            Дні народження
+          </SciButton>
         </Stack>
       </header>
 
       <Alert severity="info" sx={{ mb: 2 }}>
         {message}
       </Alert>
+
+      {result ? (
+        <section className="analytics-panel" id="soc-birthdays">
+          <div className="panel-heading">
+            Дні народження за поточний місяць · {birthdayMonthLabel} ·{" "}
+            {birthdayPeople.length}
+          </div>
+          <Typography variant="body2" sx={{ mb: 1.5, lineHeight: 1.7 }}>
+            З ранкового звіту: статус «в строю», без «ТРАНЗИТЕР» (колонки «В
+            якому підрозділі» та «Примітки»). Дата народження — з ООС ЕЖООС;
+            якщо там немає — з колонки «Дата народження» штатки. Нижче — хто є
+            в штатці, але дати не знайдено ні там, ні там.
+          </Typography>
+          <Stack direction="row" spacing={1} sx={{ mb: 1.5 }}>
+            <SciButton
+              variant="OUTLINE"
+              disabled={
+                isBusy ||
+                (!birthdayPeople.length && !missingBirthdayPeople.length)
+              }
+              onClick={() => void exportBirthdaysOnly()}
+            >
+              <FileDownloadOutlinedIcon fontSize="small" />
+              Експорт Excel
+            </SciButton>
+          </Stack>
+          {birthdayPeople.length ? (
+            <div className="bchs-analytics-table-wrap soc-passport-table-wrap">
+              <table className="bchs-analytics-table">
+                <thead>
+                  <tr>
+                    <th>№</th>
+                    <th>ПІБ</th>
+                    <th>Позивний</th>
+                    <th>Дата народження</th>
+                    <th>Місце перебування</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {birthdayPeople.map((person, index) => (
+                    <tr key={`${person.name}-${person.birthDate}-${index}`}>
+                      <td>{index + 1}</td>
+                      <td>{person.name}</td>
+                      <td>{person.callsign || "—"}</td>
+                      <td>{person.birthDate}</td>
+                      <td>{person.location || "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <Typography variant="body2" color="text.secondary">
+              Немає людей у строю з днем народження в {birthdayMonthLabel}.
+            </Typography>
+          )}
+          <div className="panel-heading" style={{ marginTop: 20 }}>
+            Є в штатці, дати народження немає · {missingBirthdayPeople.length}
+          </div>
+          <Typography variant="body2" sx={{ mb: 1.5, lineHeight: 1.7 }}>
+            Ті самі умови (в строю, не транзитери), але немає розпізнаної дати
+            ні в ООС ЕЖООС, ні в колонці «Дата народження» штатки.
+          </Typography>
+          {missingBirthdayPeople.length ? (
+            <div className="bchs-analytics-table-wrap soc-passport-table-wrap">
+              <table className="bchs-analytics-table">
+                <thead>
+                  <tr>
+                    <th>№</th>
+                    <th>ПІБ</th>
+                    <th>Позивний</th>
+                    <th>Місце перебування</th>
+                    <th>Примітка</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {missingBirthdayPeople.map((person, index) => (
+                    <tr key={`${person.name}-missing-${index}`}>
+                      <td>{index + 1}</td>
+                      <td>{person.name}</td>
+                      <td>{person.callsign || "—"}</td>
+                      <td>{person.location || "—"}</td>
+                      <td>{person.note || "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <Typography variant="body2" color="text.secondary">
+              У всіх у строю дата народження з ЕЖООС знайдена.
+            </Typography>
+          )}
+        </section>
+      ) : null}
 
       {departures ? (
         <section className="analytics-panel">

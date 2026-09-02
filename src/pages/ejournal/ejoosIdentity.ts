@@ -39,7 +39,11 @@ export const dateMs = (value: string) => {
 
 /** Штатний ID 1ПБ/ЕЖООС — коротке число, не РНОКПП/ІПН з 8+ цифр. */
 export const isJournalPersonId = (value: string) =>
-  /^\d{1,7}$/.test(value.trim());
+  /^\d{1,7}$/.test(String(value || "").trim());
+
+/** Індекс штатної посади: 5+ цифр (`2103520`), не слово «РОЗПОРЯДЖЕННЯ». */
+export const isNumericStaffIndex = (value: string) =>
+  /^\d{5,}$/.test(String(value || "").trim());
 
 /** ID is never an Excel date. Reject date-shaped fallback values instead of showing them as IDs. */
 export const normId = (value: CellValue | unknown) => {

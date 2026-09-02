@@ -1,5 +1,31 @@
 export const formatFileSize = (size: number) => `${(size / 1024).toFixed(1)} KB`;
 
+export const KYIV_TIME_ZONE = "Europe/Kyiv";
+
+const parseApiDate = (value: string | Date | null | undefined) => {
+  if (value == null || value === "") return null;
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+};
+
+/** API instants (ISO) as Kyiv wall clock, independent of the browser time zone. */
+export const formatApiDateTime = (value: string | Date | null | undefined) => {
+  const date = parseApiDate(value);
+  if (!date) return value == null ? "" : String(value);
+  return date.toLocaleString("uk-UA", { timeZone: KYIV_TIME_ZONE });
+};
+
+export const formatApiDate = (value: string | Date | null | undefined) => {
+  const date = parseApiDate(value);
+  if (!date) return "";
+  return date.toLocaleDateString("uk-UA", {
+    timeZone: KYIV_TIME_ZONE,
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+  });
+};
+
 export const formatDateTime = () =>
   new Intl.DateTimeFormat("uk-UA", {
     day: "2-digit",
@@ -7,6 +33,7 @@ export const formatDateTime = () =>
     year: "numeric",
     hour: "2-digit",
     minute: "2-digit",
+    timeZone: KYIV_TIME_ZONE,
   }).format(new Date());
 
 const EXCEL_SERIAL_MIN = 1000;

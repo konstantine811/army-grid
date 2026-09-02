@@ -5,8 +5,10 @@ import type {
 } from "../../excelRoundTrip";
 import {
   EJOOS_PERSON_DATA_START_ROW,
-  formatExcludedDestinationText,
+  collectExcludedPositionDateWrites,
+  formatExcludedDestination,
   formatExcludedListBasis,
+  formatExcludedPositionDates,
   formatTimesheetTransferMark,
   OOS_TO_EXCLUDED_BASE,
 } from "./ejoosExcludedColumns";
@@ -21,7 +23,15 @@ import {
   type ZipCellWrite,
 } from "./ejoosZipCellWrites";
 import {
+  findTimesheetPersonRowsInGrid,
+  loadTimesheetGridFromFile,
+  mergeTimesheetGrids,
+  pickTimesheetKeepRow,
+  uniqueExcelRows,
+} from "./ejoosTimesheetPersonRows";
+import {
   dayFromOrderLabel,
+  isTimesheetDepartureMark,
   parseTimesheetAbsenceSpans,
   timesheetTransferMarkForDay,
 } from "./ejoosTimesheetText";
@@ -70,6 +80,17 @@ const findPersonRow = (
   return 0;
 };
 
+const timesheetGridHasDeparture = (
+  grid: Array<unknown[] | undefined>,
+  row: number,
+) => {
+  const cells = grid[row - 1] ?? [];
+  for (let day = 1; day <= 31; day += 1) {
+    if (isTimesheetDepartureMark(cells[7 + day])) return true;
+  }
+  return false;
+};
+
 const nextExcludedRow = (sheet: ExcelSheetSnapshot) => {
   let last = 5;
   for (let row = 6; row <= sheet.rawRows.length; row += 1) {
@@ -102,6 +123,16 @@ const findExcludedStyleSourceRow = (
   return EJOOS_PERSON_DATA_START_ROW;
 };
 
+const timesheetRowHasDeparture = (
+  sheet: ExcelSheetSnapshot,
+  row: number,
+) => {
+  for (let day = 1; day <= 31; day += 1) {
+    if (isTimesheetDepartureMark(cellText(sheet, row, 8 + day))) return true;
+  }
+  return false;
+};
+
 const findTimesheetStyleRow = (sheet: ExcelSheetSnapshot) => {
   for (let row = 7; row <= sheet.rawRows.length; row += 1) {
     if (cellText(sheet, row, 2) || cellText(sheet, row, 7)) return row;
@@ -109,27 +140,57 @@ const findTimesheetStyleRow = (sheet: ExcelSheetSnapshot) => {
   return 7;
 };
 
+const timesheetRowLooksOccupied = (
+  sheet: ExcelSheetSnapshot,
+  row: number,
+  xmlGrid?: Array<unknown[] | undefined>,
+) => {
+  const xmlRow = xmlGrid?.[row - 1] ?? [];
+  const indexText =
+    cellText(sheet, row, 2) || String(xmlRow[1] ?? "").trim();
+  const titleText =
+    cellText(sheet, row, 1) || String(xmlRow[0] ?? "").trim();
+  if (indexText && !/^\d/.test(indexText) && /[а-яіїєґa-z]/i.test(indexText)) {
+    return true;
+  }
+  if (
+    !indexText &&
+    /рота|взвод|батальйон|відділен|управлінн/i.test(titleText)
+  ) {
+    return true;
+  }
+  if (
+    cellText(sheet, row, 2) ||
+    cellText(sheet, row, 7) ||
+    cellText(sheet, row, 8)
+  ) {
+    return true;
+  }
+  return Boolean(
+    xmlRow[1] ||
+      xmlRow[6] ||
+      xmlRow[7] ||
+      String(xmlRow[1] ?? "").trim() ||
+      String(xmlRow[6] ?? "").trim() ||
+      String(xmlRow[7] ?? "").trim(),
+  );
+};
+
 const nextTimesheetHistoryRow = (
   sheet: ExcelSheetSnapshot,
   sourceRow: number,
   reserved: Set<number>,
+  xmlGrid?: Array<unknown[] | undefined>,
 ) => {
-  for (
-    let row = sourceRow + 1;
-    row <= sheet.rawRows.length + 30;
-    row += 1
-  ) {
+  const last = Math.max(sheet.rawRows.length, xmlGrid?.length ?? 0);
+  for (let row = sourceRow + 1; row <= last + 30; row += 1) {
     if (reserved.has(row)) continue;
-    if (
-      !cellText(sheet, row, 2) &&
-      !cellText(sheet, row, 7) &&
-      !cellText(sheet, row, 8)
-    ) {
+    if (!timesheetRowLooksOccupied(sheet, row, xmlGrid)) {
       reserved.add(row);
       return row;
     }
   }
-  const row = sheet.rawRows.length + reserved.size + 1;
+  const row = last + reserved.size + 1;
   reserved.add(row);
   return row;
 };
@@ -160,18 +221,26 @@ const excludedStyledWrite = (
   column: number,
   value: string | number | null,
   styleSourceRow: number,
-): ZipCellWrite => ({
-  row,
-  column,
-  value: excludedNumberValue(column, value),
-  styleSourceRow,
-  styleSourceColumn: column,
-  // Не шукаємо «канонічний» стиль по аркушу: у шаблоні Виключених
-  // нижні рядки часто жовті, і тоді нова підстава фарбується жовтим.
-  copyNeighborStyle: false,
-  heightSourceRow: styleSourceRow,
-  wrapText: typeof value === "string" && value.includes("\n"),
-});
+): ZipCellWrite => {
+  const next =
+    column === 5 && value != null && value !== ""
+      ? formatExcludedPositionDates(value) || value
+      : value;
+  return {
+    row,
+    column,
+    value: excludedNumberValue(column, next),
+    styleSourceRow,
+    styleSourceColumn: column,
+    // Не шукаємо «канонічний» стиль по аркушу: у шаблоні Виключених
+    // нижні рядки часто жовті, і тоді нова підстава фарбується жовтим.
+    copyNeighborStyle: false,
+    heightSourceRow: styleSourceRow,
+    wrapText:
+      column === 5 ||
+      (typeof next === "string" && next.includes("\n")),
+  };
+};
 
 const timesheetHistoryDayMarks = (
   op: EjoosSyncOp,
@@ -227,6 +296,22 @@ const timesheetStyledWrite = (
 };
 
 const TIMESHEET_STYLE_LAST_COLUMN = 40;
+
+/** Існуючі дати прийняття посади у Виключених: кожна з нового рядка, рано→пізно. */
+export async function applyExcludedPositionDatesPresentation(input: {
+  file: Blob;
+  ejoos: ExcelWorkbookSnapshot;
+}): Promise<Blob> {
+  const excluded = findSheet(input.ejoos, /виключен/i);
+  if (!excluded) return input.file;
+  const writes = collectExcludedPositionDateWrites(excluded.rawRows);
+  if (!writes.length) return input.file;
+  return applyInlineStringWritesToWorkbook(
+    input.file,
+    excluded.sheetName,
+    writes,
+  );
+}
 
 /** Після xlsx-populate: перенести `s=` зайнятого рядка на новий історичний. */
 export async function copyTimesheetRowStylesWithZip(
@@ -295,9 +380,8 @@ const findArrivalCloseColumns = (sheet: ExcelSheetSnapshot) => {
 };
 
 const excludedDestinationValue = (op: EjoosSyncOp) =>
-  formatExcludedDestinationText(
-    op.payload.documentsDest || op.payload.destination || "",
-  ) || null;
+  formatExcludedDestination(op.payload.documentsDest || op.payload.changeText) ||
+  null;
 
 const excludedPatchValues = (
   op: EjoosSyncOp,
@@ -347,6 +431,15 @@ export async function applyExcludeTransfersWithZip(input: {
     ? findArrivalCloseColumns(arrivals)
     : null;
   const reservedTimesheetRows = new Set<number>();
+  const writtenTimesheetByPerson = new Map<string, number[]>();
+  const timesheetXmlGrid = await loadTimesheetGridFromFile(
+    ejoos.file,
+    timesheet.sheetName,
+  );
+  const timesheetGrid = mergeTimesheetGrids(
+    timesheet.rawRows,
+    timesheetXmlGrid,
+  );
   let excludedRow = nextExcludedRow(excluded);
   const excludedStyleSourceRow = findExcludedStyleSourceRow(
     excluded,
@@ -387,15 +480,31 @@ export async function applyExcludeTransfersWithZip(input: {
           ),
         );
       }
+      const currentDates =
+        oosRow > 0
+          ? oos.rawRows[oosRow - 1]?.[4]
+          : excluded.rawRows[existingExcludedRow - 1]?.[4];
+      const formattedDates = formatExcludedPositionDates(currentDates);
+      if (formattedDates) {
+        excludedWrites.push(
+          excludedStyledWrite(
+            existingExcludedRow,
+            5,
+            formattedDates,
+            existingExcludedRow,
+          ),
+        );
+      }
     } else {
       const targetRow = excludedRow++;
       if (oosRow > 0) {
         for (const [fromColumn, toColumn] of OOS_TO_EXCLUDED_BASE) {
+          const raw = valueOf(oos.rawRows[oosRow - 1]?.[fromColumn - 1]);
           excludedWrites.push(
             excludedStyledWrite(
               targetRow,
               toColumn,
-              valueOf(oos.rawRows[oosRow - 1]?.[fromColumn - 1]),
+              toColumn === 5 ? formatExcludedPositionDates(raw) || raw : raw,
               excludedStyleSourceRow,
             ),
           );
@@ -413,120 +522,106 @@ export async function applyExcludeTransfersWithZip(input: {
       }
     }
 
-    const sourceTimesheetRow = Number(op.payload.timesheetExcelRow || 0);
-    if (sourceTimesheetRow > 0) {
-      const targetRow = nextTimesheetHistoryRow(
-        timesheet,
-        sourceTimesheetRow,
-        reservedTimesheetRows,
+    const timesheetName = op.payload.fromName || op.fullName;
+    const personTimesheetKey = `${personId || ""}|${nameKey(timesheetName)}`;
+    const existingTimesheetRows = uniqueExcelRows([
+      ...findTimesheetPersonRowsInGrid(
+        timesheetGrid,
+        personId,
+        timesheetName,
+      ),
+      ...(writtenTimesheetByPerson.get(personTimesheetKey) ?? []),
+    ]);
+    const plannedKeep = Number(op.payload.timesheetExcelRow || 0);
+    const isClosedHistoryRow = (row: number) =>
+      timesheetRowHasDeparture(timesheet, row) ||
+      timesheetGridHasDeparture(timesheetGrid, row);
+    const openTimesheetRows = existingTimesheetRows.filter(
+      (row) => !isClosedHistoryRow(row),
+    );
+    let timesheetKeepRow = pickTimesheetKeepRow(
+      openTimesheetRows,
+      () => true,
+      plannedKeep && openTimesheetRows.includes(plannedKeep) ? plannedKeep : 0,
+    );
+    if (!timesheetKeepRow && !openTimesheetRows.length) {
+      timesheetKeepRow = pickTimesheetKeepRow(
+        existingTimesheetRows,
+        isClosedHistoryRow,
+        plannedKeep,
       );
-      const styleDayColumn = (() => {
-        for (let day = 1; day <= 31; day += 1) {
-          const mark = cellText(timesheet, sourceTimesheetRow, 8 + day);
-          if (mark === "+" || /вибув/iu.test(mark)) return 8 + day;
-        }
-        return 9;
-      })();
-      for (let column = 1; column <= 40; column += 1) {
+    }
+    const writePlan = excludeWritePlan(op.payload);
+    if (!timesheetKeepRow && writePlan.replaceInPlace && plannedKeep > 0) {
+      timesheetKeepRow = plannedKeep;
+    }
+    const { days, presentDays } = timesheetHistoryDayMarks(
+      op,
+      plan,
+      formatTimesheetTransferMark(op.payload),
+    );
+    const timesheetCellValue = (row: number, column: number) => {
+      const fromRaw = valueOf(timesheet.rawRows[row - 1]?.[column - 1]);
+      if (fromRaw != null && String(fromRaw).trim() !== "") return fromRaw;
+      return valueOf(timesheetGrid[row - 1]?.[column - 1]);
+    };
+    const copyTimesheetRow = (sourceRow: number, targetRow: number) => {
+      for (let column = 1; column <= TIMESHEET_STYLE_LAST_COLUMN; column += 1) {
         timesheetWrites.push(
           timesheetStyledWrite(
             targetRow,
             column,
-            valueOf(timesheet.rawRows[sourceTimesheetRow - 1]?.[column - 1]),
-            sourceTimesheetRow,
-            column <= 8 ? column : styleDayColumn,
+            timesheetCellValue(sourceRow, column),
+            sourceRow,
+            column,
           ),
         );
       }
-      const { days, presentDays } = timesheetHistoryDayMarks(
-        op,
-        plan,
-        formatTimesheetTransferMark(op.payload),
-      );
-      for (const { day, value } of days) {
-        timesheetWrites.push(
-          timesheetStyledWrite(
-            targetRow,
-            8 + day,
-            value,
-            sourceTimesheetRow,
-            styleDayColumn,
-          ),
-        );
+    };
+    const clearTimesheetOccupant = (row: number) => {
+      for (const column of [6, 7, 8, 40]) {
         timesheetWrites.push({
-          row: sourceTimesheetRow,
-          column: 8 + day,
+          row,
+          column,
           value: null,
-          styleSourceRow: sourceTimesheetRow,
-          styleSourceColumn: styleDayColumn,
+          styleSourceRow: row,
+          styleSourceColumn: column,
           copyNeighborStyle: false,
           keepNeighborStyle: true,
         });
       }
-      timesheetWrites.push(
-        timesheetStyledWrite(
-          targetRow,
-          40,
-          presentDays,
-          sourceTimesheetRow,
-          40,
-        ),
-      );
+      for (let day = 1; day <= 31; day += 1) {
+        timesheetWrites.push({
+          row,
+          column: 8 + day,
+          value: null,
+          styleSourceRow: row,
+          styleSourceColumn: 9,
+          copyNeighborStyle: false,
+          keepNeighborStyle: true,
+        });
+      }
+    };
+    const writeHistoryOnRow = (targetRow: number, styleRow: number) => {
+      const styleDayColumn = (() => {
+        for (let day = 1; day <= 31; day += 1) {
+          const mark = cellText(timesheet, styleRow, 8 + day);
+          if (mark === "+" || /вибув/iu.test(mark)) return 8 + day;
+        }
+        return 9;
+      })();
       if (op.payload.fromRank || op.rank) {
         timesheetWrites.push(
           timesheetStyledWrite(
             targetRow,
             6,
             op.payload.fromRank || op.rank,
-            sourceTimesheetRow,
+            styleRow,
             6,
           ),
         );
       }
-      if (op.payload.fromName || op.fullName) {
-        timesheetWrites.push(
-          timesheetStyledWrite(
-            targetRow,
-            7,
-            op.payload.fromName || op.fullName,
-            sourceTimesheetRow,
-            7,
-          ),
-        );
-      }
-      if (personId && !cellText(timesheet, sourceTimesheetRow, 8)) {
-        timesheetWrites.push(
-          timesheetStyledWrite(targetRow, 8, personId, sourceTimesheetRow, 8),
-        );
-      }
-      for (const column of [6, 7, 8]) {
-        timesheetWrites.push({
-          row: sourceTimesheetRow,
-          column,
-          value: null,
-          styleSourceRow: sourceTimesheetRow,
-          styleSourceColumn: column,
-          copyNeighborStyle: false,
-          keepNeighborStyle: true,
-        });
-      }
-    } else if (excludeWritePlan(op.payload).createTimesheetHistory) {
-      const styleRow = findTimesheetStyleRow(timesheet);
-      const targetRow = nextTimesheetHistoryRow(
-        timesheet,
-        styleRow,
-        reservedTimesheetRows,
-      );
-      const styleDayColumn = 9;
       timesheetWrites.push(
-        timesheetStyledWrite(targetRow, 2, positionIndex || null, styleRow, 2),
-        timesheetStyledWrite(
-          targetRow,
-          6,
-          op.payload.fromRank || op.rank || null,
-          styleRow,
-          6,
-        ),
         timesheetStyledWrite(
           targetRow,
           7,
@@ -536,11 +631,11 @@ export async function applyExcludeTransfersWithZip(input: {
         ),
         timesheetStyledWrite(targetRow, 8, personId || null, styleRow, 8),
       );
-      const { days, presentDays } = timesheetHistoryDayMarks(
-        op,
-        plan,
-        formatTimesheetTransferMark(op.payload),
-      );
+      if (positionIndex && !cellText(timesheet, targetRow, 2)) {
+        timesheetWrites.push(
+          timesheetStyledWrite(targetRow, 2, positionIndex, styleRow, 2),
+        );
+      }
       for (const { day, value } of days) {
         timesheetWrites.push(
           timesheetStyledWrite(targetRow, 8 + day, value, styleRow, styleDayColumn),
@@ -549,6 +644,62 @@ export async function applyExcludeTransfersWithZip(input: {
       timesheetWrites.push(
         timesheetStyledWrite(targetRow, 40, presentDays, styleRow, 40),
       );
+    };
+    const sourceRow = timesheetKeepRow || plannedKeep;
+    if (writePlan.replaceInPlace && sourceRow > 0) {
+      writeHistoryOnRow(sourceRow, sourceRow);
+      timesheetKeepRow = sourceRow;
+    } else if (sourceRow > 0) {
+      // Навіть якщо план сказав «новий рядок» (createHistory) — копіюємо
+      // від фактичного штатного рядка вниз по роті, а не від R7 шаблону.
+      timesheetKeepRow = nextTimesheetHistoryRow(
+        timesheet,
+        sourceRow,
+        reservedTimesheetRows,
+        timesheetGrid,
+      );
+      copyTimesheetRow(sourceRow, timesheetKeepRow);
+      writeHistoryOnRow(timesheetKeepRow, sourceRow);
+      clearTimesheetOccupant(sourceRow);
+    } else if (writePlan.createTimesheetHistory) {
+      const styleRow = findTimesheetStyleRow(timesheet);
+      timesheetKeepRow = nextTimesheetHistoryRow(
+        timesheet,
+        styleRow,
+        reservedTimesheetRows,
+        timesheetGrid,
+      );
+      writeHistoryOnRow(timesheetKeepRow, styleRow);
+    }
+    if (timesheetKeepRow > 0) {
+      writtenTimesheetByPerson.set(personTimesheetKey, [timesheetKeepRow]);
+      reservedTimesheetRows.add(timesheetKeepRow);
+    }
+    for (const row of existingTimesheetRows) {
+      if (row === timesheetKeepRow) continue;
+      if (isClosedHistoryRow(row)) continue;
+      for (const column of [6, 7, 8, 40]) {
+        timesheetWrites.push({
+          row,
+          column,
+          value: null,
+          styleSourceRow: row,
+          styleSourceColumn: column,
+          copyNeighborStyle: false,
+          keepNeighborStyle: true,
+        });
+      }
+      for (let day = 1; day <= 31; day += 1) {
+        timesheetWrites.push({
+          row,
+          column: 8 + day,
+          value: null,
+          styleSourceRow: row,
+          styleSourceColumn: 9,
+          copyNeighborStyle: false,
+          keepNeighborStyle: true,
+        });
+      }
     }
 
     const shpoRow = Number(op.payload.shpoExcelRow || 0);

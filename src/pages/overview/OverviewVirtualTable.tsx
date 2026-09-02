@@ -1,4 +1,5 @@
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Chip, IconButton } from "@/components/sci/SciPrimitives";
 import { InfoOutlinedIcon, MoreHorizOutlinedIcon, PersonOutlinedIcon } from "@/components/sci/icons";
 import {
@@ -10,6 +11,7 @@ import {
 import type { BackendPersonnelOverviewRow } from "../../api";
 import { openPersonnelInNewTab } from "../../app/navigation";
 import { resolveOverviewPhoto } from "./overviewPhotos";
+import { overviewPersonMatchKey } from "./overviewPersonnelAssets";
 
 export type OverviewPersonDocumentSummary = {
   count: number;
@@ -21,7 +23,9 @@ const overviewDocumentPresence = (
   documentsByExternalId?: Record<string, OverviewPersonDocumentSummary>,
 ) => {
   const count =
-    (row.externalId && documentsByExternalId?.[row.externalId]?.count) || 0;
+    (row.externalId && documentsByExternalId?.[row.externalId]?.count) ||
+    documentsByExternalId?.[overviewPersonMatchKey(row.name)]?.count ||
+    0;
   return count > 0 ? "Є" : "Немає";
 };
 
@@ -30,7 +34,9 @@ const overviewDocumentChipLabel = (
   documentsByExternalId?: Record<string, OverviewPersonDocumentSummary>,
 ) => {
   const summary =
-    (row.externalId && documentsByExternalId?.[row.externalId]) || null;
+    (row.externalId && documentsByExternalId?.[row.externalId]) ||
+    documentsByExternalId?.[overviewPersonMatchKey(row.name)] ||
+    null;
   if (!summary?.count) return "Немає";
   return summary.count > 1 ? `Є · ${summary.count}` : "Є";
 };
@@ -66,6 +72,8 @@ export type OverviewQuestionnaireTarget = {
   hasQuestionnaire: boolean;
 };
 
+const PHOTO_HOVER_SIZE = 220;
+
 function OverviewPersonPhoto({
   row,
   photos,
@@ -76,14 +84,61 @@ function OverviewPersonPhoto({
   onNeedPhoto?: (row: BackendPersonnelOverviewRow) => void;
 }) {
   const photo = resolveOverviewPhoto(row, photos);
+  const thumbRef = useRef<HTMLSpanElement>(null);
+  const [preview, setPreview] = useState<{
+    src: string;
+    top: number;
+    left: number;
+  } | null>(null);
+
   useEffect(() => {
     if (!photo) onNeedPhoto?.(row);
   }, [onNeedPhoto, photo, row]);
 
-  return photo ? (
-    <img alt="" src={photo} />
-  ) : (
-    <PersonOutlinedIcon fontSize="small" />
+  useEffect(() => {
+    if (!preview) return;
+    const hide = () => setPreview(null);
+    window.addEventListener("scroll", hide, true);
+    return () => window.removeEventListener("scroll", hide, true);
+  }, [preview]);
+
+  const showPreview = () => {
+    if (!photo || !thumbRef.current) return;
+    const rect = thumbRef.current.getBoundingClientRect();
+    const left = Math.min(
+      rect.right + 10,
+      window.innerWidth - PHOTO_HOVER_SIZE - 12,
+    );
+    const top = Math.min(
+      Math.max(12, rect.top + rect.height / 2 - PHOTO_HOVER_SIZE / 2),
+      window.innerHeight - PHOTO_HOVER_SIZE - 12,
+    );
+    setPreview({ src: photo, top, left });
+  };
+
+  return (
+    <>
+      <span
+        ref={thumbRef}
+        className="overview-avatar"
+        aria-hidden
+        onMouseEnter={showPreview}
+        onMouseLeave={() => setPreview(null)}
+      >
+        {photo ? <img alt="" src={photo} /> : <PersonOutlinedIcon fontSize="small" />}
+      </span>
+      {preview
+        ? createPortal(
+            <div
+              className="overview-photo-hover"
+              style={{ top: preview.top, left: preview.left }}
+            >
+              <img alt="" src={preview.src} />
+            </div>,
+            document.body,
+          )
+        : null}
+    </>
   );
 }
 
@@ -92,7 +147,6 @@ export function OverviewVirtualTable({
   photos,
   questionnaireByExternalId,
   documentsByExternalId,
-  onOpenPersonnel,
   onOpenQuestionnaire,
   onNeedPhoto,
   onExport,
@@ -102,7 +156,6 @@ export function OverviewVirtualTable({
   photos: Record<string, string>;
   questionnaireByExternalId?: Record<string, true>;
   documentsByExternalId?: Record<string, OverviewPersonDocumentSummary>;
-  onOpenPersonnel?: (target: OverviewPersonTarget) => void;
   onOpenQuestionnaire?: (target: OverviewQuestionnaireTarget) => void;
   onNeedPhoto?: (row: BackendPersonnelOverviewRow) => void;
   onExport?: (
@@ -111,7 +164,7 @@ export function OverviewVirtualTable({
   emptyMessage?: string;
 }) {
   const openPerson = (row: BackendPersonnelOverviewRow) => {
-    onOpenPersonnel?.({
+    openPersonnelInNewTab({
       rowId: row.id,
       externalId: row.externalId,
     });
@@ -120,7 +173,8 @@ export function OverviewVirtualTable({
   const openQuestionnaire = (row: BackendPersonnelOverviewRow) => {
     if (!row.externalId) return;
     const hasQuestionnaire = Boolean(
-      questionnaireByExternalId?.[row.externalId],
+      questionnaireByExternalId?.[row.externalId] ||
+        questionnaireByExternalId?.[overviewPersonMatchKey(row.name)],
     );
     if (onOpenQuestionnaire) {
       onOpenQuestionnaire({
@@ -150,13 +204,11 @@ export function OverviewVirtualTable({
             className="overview-person-cell"
             onClick={() => openPerson(row.original)}
           >
-            <span className="overview-avatar" aria-hidden>
-              <OverviewPersonPhoto
-                row={row.original}
-                photos={photos}
-                onNeedPhoto={onNeedPhoto}
-              />
-            </span>
+            <OverviewPersonPhoto
+              row={row.original}
+              photos={photos}
+              onNeedPhoto={onNeedPhoto}
+            />
             <span>
               <strong>{row.original.name}</strong>
             </span>
@@ -199,19 +251,20 @@ export function OverviewVirtualTable({
         header: "Анкета",
         size: 130,
         accessorFn: (row) =>
-          row.externalId && questionnaireByExternalId?.[row.externalId]
+          questionnaireByExternalId?.[row.externalId] ||
+          questionnaireByExternalId?.[overviewPersonMatchKey(row.name)]
             ? "Є"
             : "Немає",
         Cell: ({ row }) => {
           const hasQuestionnaire = Boolean(
-            row.original.externalId &&
-              questionnaireByExternalId?.[row.original.externalId],
+            questionnaireByExternalId?.[row.original.externalId] ||
+              questionnaireByExternalId?.[overviewPersonMatchKey(row.original.name)],
           );
           const label = hasQuestionnaire ? "Є" : "Немає";
           return (
             <button
               type="button"
-              className="overview-chip-button"
+              className="overview-chip-button overview-questionnaire-hit"
               aria-label={
                 hasQuestionnaire
                   ? `Відкрити анкету: ${row.original.name}`
@@ -328,7 +381,6 @@ export function OverviewVirtualTable({
     [
       documentsByExternalId,
       onNeedPhoto,
-      onOpenPersonnel,
       onOpenQuestionnaire,
       photos,
       questionnaireByExternalId,
@@ -342,8 +394,12 @@ export function OverviewVirtualTable({
     exportLabel: "Експорт",
     copyLabel: "Копіювати",
     enableCopyText: true,
-    globalFilterPlaceholder: "Пошук по особовому складу",
+    enableGlobalFilter: false,
     getRowId: (row) => row.id,
+    getTdProps: ({ columnId }) =>
+      columnId === "questionnaire"
+        ? { className: "overview-questionnaire-cell" }
+        : undefined,
     onExport,
     initialState: {
       pagination: {

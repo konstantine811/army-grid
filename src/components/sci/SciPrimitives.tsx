@@ -639,6 +639,12 @@ export function DialogContentBox({ children, sx, style }: { children?: ReactNode
 
 export { DialogContentBox as DialogContent };
 
-export function DialogActions({ children }: { children?: ReactNode }) {
-  return <DialogFooter>{children}</DialogFooter>;
+export function DialogActions({
+  children,
+  className,
+}: {
+  children?: ReactNode;
+  className?: string;
+}) {
+  return <DialogFooter className={className}>{children}</DialogFooter>;
 }

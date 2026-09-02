@@ -151,6 +151,7 @@ export type EjoosTimesheetPersonScan = {
   plusDays: number[];
   /** 1-based day -> нормалізована позначка (або «вибув»). */
   dayCodes: string[];
+  departureText?: string;
 };
 
 export type EjoosShpoRow = {
@@ -187,6 +188,8 @@ export type EjoosExcludedRow = {
   positionIndex: string;
   orderNumber: string;
   orderDate: string;
+  destination: string;
+  note: string;
 };
 
 export const parsePbShPeople = (workbook: ExcelWorkbookSnapshot): PbShPerson[] => {
@@ -299,7 +302,12 @@ export const parsePbMovements = (workbook: ExcelWorkbookSnapshot): PbMovement[] 
   const statusCol = findCol(headers, /^статус$/);
   const prevIdxCol = findCol(headers, /індекс.*попер|попер.*індекс/);
   const nextIdxCol = findCol(headers, /індекс.*як|яка зміна.*індекс|індекси посад \(яка/);
-  const changeCol = findCol(headers, /яка зміна/, /попер/);
+  const changeCol = (() => {
+    for (const [key, index] of headers.entries()) {
+      if (/яка зміна/.test(key) && !/індекс/.test(key)) return index;
+    }
+    return findCol(headers, /попер/);
+  })();
   const destCol = findCol(
     headers,
     /^куди(?:\s|$)/,
@@ -400,10 +408,12 @@ export const parseEjoosTimesheetDay = (
     const row = sheet.rawRows[i];
     const positionIndex = norm(row?.[1]);
     const fullName = norm(row?.[6]);
-    if (!positionIndex || !/^\d/.test(positionIndex)) continue;
+    const personId = normId(row?.[7]);
+    if (!positionIndex && !fullName && !personId) continue;
+    if (positionIndex && !/^\d/.test(positionIndex)) continue;
     rows.push({
       excelRow: i + 1,
-      personId: normId(row?.[7]),
+      personId,
       fullName,
       rank: norm(row?.[5]),
       positionIndex,
@@ -423,17 +433,21 @@ export const parseEjoosTimesheetPeople = (
     const positionIndex = norm(row?.[1]);
     const fullName = norm(row?.[6]);
     const personId = normId(row?.[7]);
-    if (!positionIndex || !/^\d/.test(positionIndex)) continue;
     if (!fullName && !personId) continue;
+    if (positionIndex && !/^\d/.test(positionIndex)) continue;
     const plusDays: number[] = [];
     const dayCodes: string[] = [];
     let hasDepartureText = false;
     let firstDepartureDay = 0;
+    let departureText = "";
     for (let day = 1; day <= 31; day += 1) {
       const value = row?.[8 + (day - 1)];
       if (isTimesheetDepartureMark(value)) {
         hasDepartureText = true;
-        if (!firstDepartureDay) firstDepartureDay = day;
+        if (!firstDepartureDay) {
+          firstDepartureDay = day;
+          departureText = norm(value);
+        }
         dayCodes[day] = "вибув";
         continue;
       }
@@ -449,6 +463,7 @@ export const parseEjoosTimesheetPeople = (
       positionIndex,
       hasDepartureText,
       firstDepartureDay,
+      departureText,
       plusDays,
       dayCodes,
     });
@@ -562,6 +577,8 @@ export const parseEjoosExcluded = (
       positionIndex: norm(row?.[3]) || norm(row?.[4]),
       orderDate: norm(row?.[28]) || norm(row?.[10]),
       orderNumber: norm(row?.[29]) || norm(row?.[11]),
+      destination: norm(row?.[30]),
+      note: norm(row?.[31]),
     });
   }
   return rows;

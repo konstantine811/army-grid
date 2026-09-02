@@ -107,3 +107,66 @@ describe("OOS duplicate checks", () => {
     expect(warn?.severity).toBe("warn");
   });
 });
+
+describe("live roster prefers the active timesheet episode", () => {
+  const blank = (width: number) => Array.from({ length: width }, () => "");
+  const widthOf = (rows: Array<Array<string | number | null>>) =>
+    Math.max(8, ...rows.map((row) => row.length));
+
+  const workbookSheet = (
+    sheetName: string,
+    rawRows: Array<Array<string | number | null>>,
+  ): ExcelSheetSnapshot =>
+    ({
+      sheetIndex: 0,
+      sheetName,
+      rawRows,
+      headerRows: [],
+      rows: [],
+      columnCount: widthOf(rawRows),
+      columnIndexes: [],
+      dataStartRow: 6,
+    }) as ExcelSheetSnapshot;
+
+  it("does not let a later history row overwrite today's +", () => {
+    const shpoRow = blank(8);
+    shpoRow[0] = "2103200";
+    shpoRow[6] = "ПЕТРЕНКО";
+    shpoRow[7] = "111";
+
+    const active = blank(40);
+    active[1] = "2103200";
+    active[6] = "ПЕТРЕНКО";
+    active[7] = "111";
+    active[32] = "+";
+
+    const history = blank(40);
+    history[1] = "2103200";
+    history[6] = "ІВАНОВ";
+    history[7] = "222";
+    history[28] = "вибув у частину";
+
+    const workbook = {
+      file: new File([], "ejoos.xlsx"),
+      fileName: "ejoos.xlsx",
+      sheetName: "1. ШПО",
+      headerRows: [],
+      rows: [],
+      columnCount: 40,
+      columnIndexes: [],
+      dataStartRow: 6,
+      sheets: [
+        workbookSheet("1. ШПО", [[], [], [], [], [], [], shpoRow]),
+        workbookSheet("6. Табель", [[], [], [], [], [], [], active, history]),
+      ],
+    } as ExcelWorkbookSnapshot;
+
+    const view = buildEjoosLiveView({
+      workbook,
+      asOfDate: "25.08.2026",
+    });
+    const petrenko = view.roster.find((row) => row.personId === "111");
+    expect(petrenko?.dayCode).toBe("+");
+    expect(view.counts.onDutyToday).toBe(1);
+  });
+});

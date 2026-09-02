@@ -8,7 +8,7 @@ import {
   timesheetMarkFromArchive,
   timesheetTransferMarkForDay,
 } from "./ejoosTimesheetText";
-import { excludeWritePlan } from "./ejoosExcludePolicy";
+import { excludeWritePlan, positionCloseWritesExcluded } from "./ejoosExcludePolicy";
 import { personOpsBlockApply } from "./ejoosOpRequirements";
 import type { ExcelWorkbookSnapshot } from "../../excelRoundTrip";
 
@@ -27,7 +27,13 @@ const staffEpisodeTimesheetDetail = (
     ? `; коди відсутності на історичному рядку R${payload.historyTimesheetExcelRow}`
     : "";
   if (!from) return "";
-  return `Табель ${index || "штатний рядок"}: до ${from} «-», з ${from} «+». Коди відсутності на цей епізод не переносимо${history}`;
+  const twoEpisodes =
+    payload.returningToStaffIndex === "1" ||
+    Boolean(payload.historyTimesheetExcelRow) ||
+    Boolean(payload.previousTimesheetExcelRow);
+  return twoEpisodes
+    ? `Два епізоди Табеля: історичний «вибув» лишаємо; новий ${index || "штатний рядок"} — до ${from} «-», з ${from} «+»${history}`
+    : `Табель ${index || "штатний рядок"}: до ${from} «-», з ${from} «+». Коди відсутності на цей епізод не переносимо${history}`;
 };
 
 export type PersonChangeCategory =
@@ -135,6 +141,11 @@ const normKey = (value: string) =>
     .trim();
 
 const personKey = (op: EjoosSyncOp) => {
+  // Дубль Табеля групуємо за ПІБ: у хвості аркуша кілька осіб можуть мати
+  // один битий Excel-ID, і тоді всі ops зліпаються в одну картку.
+  if (op.payload.type === "DUPLICATE_TAB_ROW" && op.fullName.trim()) {
+    return `name:${normKey(op.fullName)}`;
+  }
   // ID є первинним ключем: ПІБ у РУХ, archive та ЕЖООС може відрізнятися
   // через помилку або інший варіант написання по батькові.
   if (op.personId.trim()) return `id:${op.personId.trim()}`;
@@ -144,11 +155,11 @@ const personKey = (op: EjoosSyncOp) => {
 };
 
 /**
- * Позначка помилки даних лише інформує про написання ПІБ і не повинна
- * впливати на статус особи чи блокувати застосування реальних операцій.
+ * Позначка помилки даних / очікування наступного кроку лише інформує
+ * і не повинна блокувати застосування реальних операцій (ПОСАДА тощо).
  */
 const actionableOps = (ops: EjoosSyncOp[]) => {
-  const actionable = ops.filter((op) => op.kind !== "data_mismatch");
+  const actionable = ops.filter((op) => !isInformationalOp(op));
   return actionable.length ? actionable : ops;
 };
 
@@ -358,16 +369,36 @@ export const buildSheetImpacts = (ops: EjoosSyncOp[]): SheetImpactItem[] => {
     setImpact(
       map,
       "excluded",
-      "append",
-      `Новий рядок: ${who || "—"} · інд. ${idx} → ${dest} · дата ${date}`,
+      exclude.payload.excludedExcelRow ? "skip" : "append",
+      exclude.payload.excludedExcelRow
+        ? `Рядок уже є (R${exclude.payload.excludedExcelRow}) — не дублюємо`
+        : `Новий рядок: ${who || "—"} · інд. ${idx} → ${dest} · дата ${date}`,
     );
+    if (exclude.payload.clearExcludedExcelRow || exclude.payload.clearExcludedExcelRows) {
+      const stale = String(
+        exclude.payload.clearExcludedExcelRows ||
+          exclude.payload.clearExcludedExcelRow ||
+          "",
+      );
+      setImpact(
+        map,
+        "excluded",
+        "clear",
+        `Прибрати попередні рядки Виключені R${stale.replaceAll(",", ", R")} — лишаємо чинне ПЕРЕВ`,
+        stale ? `R${stale.split(",")[0]}` : undefined,
+      );
+    }
     setImpact(
       map,
       "timesheet",
-      "history",
-      excludeWritePlan(exclude.payload).createTimesheetHistory
+      excludeWritePlan(exclude.payload).replaceInPlace
+        ? "edit"
+        : "history",
+      excludeWritePlan(exclude.payload).replaceInPlace
+        ? `Замінити наявний рядок Табеля (R${exclude.payload.timesheetExcelRow || "—"}) — новий не створювати`
+        : excludeWritePlan(exclude.payload).createTimesheetHistory
         ? `Новий історичний рядок: «+» з ${exclude.payload.timesheetActiveFrom || "дати постановки"} до вибуття ${date}; у день вибуття «${departPhrase}» (посаду прибрано, до/у за підрозділом), далі −; чужий рядок ${idx} не чіпаємо`
-        : `Копія рядка з +${exclude.payload.timesheetActiveFrom ? ` з ${exclude.payload.timesheetActiveFrom}` : ""} до дня вибуття ${date}; у день вибуття «${departPhrase}» (посаду прибрано, до/у за підрозділом), далі −; особу з активного рядка прибрати`,
+        : `Копія рядка вниз у межах роти з R${exclude.payload.timesheetExcelRow || "—"}: +${exclude.payload.timesheetActiveFrom ? ` з ${exclude.payload.timesheetActiveFrom}` : ""} до вибуття ${date}; у день вибуття «${departPhrase}»; штат лишає індекс / ВОС / тариф, особу й дні прибираємо`,
       exclude.payload.timesheetExcelRow
         ? `R${exclude.payload.timesheetExcelRow}`
         : undefined,
@@ -430,7 +461,13 @@ export const buildSheetImpacts = (ops: EjoosSyncOp[]): SheetImpactItem[] => {
         "timesheet",
         "edit",
         op.payload.clearStalePerson === "1"
-          ? op.payload.type === "DUPLICATE_TAB_AFTER_CANCEL"
+          ? op.payload.type === "DUPLICATE_TAB_ROW"
+            ? `Прибрати дубль R${op.payload.excelRow || "—"}${
+                op.payload.keepTimesheetExcelRow
+                  ? `; лишається R${op.payload.keepTimesheetExcelRow}`
+                  : ""
+              }`
+          : op.payload.type === "DUPLICATE_TAB_AFTER_CANCEL"
             ? `Прибрати дубль Табеля після скасованого переведення (R${op.payload.excelRow || "—"})`
             : `Прибрати ПІБ/ID зі штатного рядка ${op.positionIndex || "—"}; історичний рядок з вибуттям лишити`
           : op.payload.restorePerson === "1"
@@ -451,6 +488,22 @@ export const buildSheetImpacts = (ops: EjoosSyncOp[]): SheetImpactItem[] => {
             ? `R${op.payload.timesheetExcelRow}`
             : undefined,
       );
+      if (op.payload.clearExcludedExcelRow || op.payload.clearExcludedExcelRows) {
+        const stale = String(
+          op.payload.clearExcludedExcelRows ||
+            op.payload.clearExcludedExcelRow ||
+            "",
+        );
+        setImpact(
+          map,
+          "excluded",
+          "clear",
+          op.payload.type === "CLEAR_STALE_EXCLUSION_DUPLICATE"
+            ? `Прибрати застарілі рядки Виключені R${stale.replaceAll(",", ", R")} — лишаємо чинне ПЕРЕВ`
+            : `Прибрати хибний рядок внутрішньої ПОСАДИ 1ПБ R${stale.replaceAll(",", ", R")}`,
+          stale ? `R${stale.split(",")[0]}` : undefined,
+        );
+      }
     } else if (op.kind === "shpo_occupant") {
       setImpact(
         map,
@@ -491,7 +544,8 @@ export const buildSheetImpacts = (ops: EjoosSyncOp[]): SheetImpactItem[] => {
       }
     } else if (op.kind === "position_change") {
       const closesOldPosition = op.payload.closeOldPosition === "1";
-      if (closesOldPosition) {
+      const writesExcluded = positionCloseWritesExcluded(op.payload);
+      if (writesExcluded) {
         setImpact(
           map,
           "excluded",
@@ -539,15 +593,17 @@ export const buildSheetImpacts = (ops: EjoosSyncOp[]): SheetImpactItem[] => {
         setImpact(
           map,
           "timesheet",
-          closesOldPosition ? "history" : "edit",
+          writesExcluded ? "history" : "edit",
           op.payload.returningFromDisposition === "1"
             ? `Штатний рядок ${op.payload.nextIndex || op.positionIndex}: на початку місяця коди відсутності (СЗЧ), з фактичного повернення «+»${
                 op.payload.timesheetAbsenceSpans
                   ? ` (${formatArchiveSpanSummary(op.payload.timesheetAbsenceSpans)})`
                   : ""
               }`
-            : closesOldPosition
+            : writesExcluded
             ? `Закрити рядок ${op.payload.previousIndex} з датою вибуття та поставити на ${op.payload.nextIndex || op.positionIndex} з ${op.payload.orderDate || "дати наказу"}`
+            : closesOldPosition
+              ? `Один рядок ${op.payload.nextIndex || op.positionIndex}; старий індекс ${op.payload.previousIndex} звільнити без «вибув» у Виключених`
             : op.payload.timesheetPreserveHistory === "1"
               ? `Старий рядок ${op.payload.nextIndex || op.positionIndex} з вибуттям лишити як історію; новий активний з ${op.payload.timesheetActiveFrom || op.payload.orderDate || "дати наказу"}`
               : op.payload.transferCancelOrder || op.payload.transferCancelDate
@@ -663,15 +719,17 @@ export const buildSheetImpacts = (ops: EjoosSyncOp[]): SheetImpactItem[] => {
         op.payload.needsAbsenceRecord === "1" ? "append" : "skip",
         op.payload.needsAbsenceRecord === "1"
           ? `Додати ${op.payload.absenceType || "відсутність"} · ${op.payload.absenceDate || "дата з archive"}`
-          : `Чинний запис уже є: ${op.payload.absenceType || "відсутність"}`,
+          : `Чинний запис уже є: ${op.payload.absenceType || "відсутність"}${op.personId ? `; гарантувати ID ${op.personId}` : ""}`,
       );
       setImpact(
         map,
         "timesheet",
         op.payload.timesheetFound === "true" ? "edit" : "skip",
-        op.payload.timesheetFound === "true"
-          ? "Закрити штатний рядок і зберегти історію розпорядження"
-          : "Штатного рядка немає — Табель не змінюємо",
+        op.payload.keepOpenSzchTimesheet === "1"
+          ? `Один рядок, 01–зріз ${op.payload.absenceCode || "СЗЧ"}; 10.08 не писати «вибув у розпорядження»`
+          : op.payload.timesheetFound === "true"
+            ? "Закрити штатний рядок і зберегти історію розпорядження"
+            : "Штатного рядка немає — Табель не змінюємо",
       );
     } else if (op.kind === "data_mismatch" || op.payload.mismatchKind === "ARCHIVE_RETURN_SH_STILL_ABSENT") {
       const rankIssue = op.payload.mismatchKind === "RANK";
@@ -920,9 +978,11 @@ const describeWillDo = (ops: EjoosSyncOp[]): string[] => {
       payload.needsAbsenceRecord === "1"
         ? `5. Тимчасово відсутні: додати ${payload.absenceType || "відсутність"}${payload.absenceDate ? ` з ${payload.absenceDate}` : ""}`
         : "5. Тимчасово відсутні: чинний запис уже є",
-      payload.timesheetFound === "true"
-        ? "6. Табель: закрити штатний рядок і записати розпорядження"
-        : "6. Табель: без змін (штатного рядка немає)",
+      payload.keepOpenSzchTimesheet === "1"
+        ? `6. Табель: один рядок 01–зріз ${payload.absenceCode || "СЗЧ"}; не писати «вибув у розпорядження»`
+        : payload.timesheetFound === "true"
+          ? "6. Табель: закрити штатний рядок і записати розпорядження"
+          : "6. Табель: без змін (штатного рядка немає)",
       "3. Виключені: без змін",
     ];
   }
@@ -953,7 +1013,9 @@ const describeWillDo = (ops: EjoosSyncOp[]): string[] => {
             ].filter(Boolean)),
       excludeWritePlan(exclude.payload).createTimesheetHistory
         ? `6. Табель: новий історичний рядок ${exclude.payload.timesheetActiveFrom || "з постановки"}–${exclude.payload.excludeDate || "вибуття"} (чужий штатний рядок не чіпаємо)`
-        : `6. Табель: закрити активний епізод вибуттям ${exclude.payload.excludeDate || "?"} (+ … −)`,
+        : excludeWritePlan(exclude.payload).replaceInPlace
+          ? `6. Табель: закрити активний епізод вибуттям ${exclude.payload.excludeDate || "?"} (+ … −)`
+          : `6. Табель: перенести рядок вниз у межах роти (вибуття ${exclude.payload.excludeDate || "?"}); на штаті лишаються індекс, ВОС, тарифний план`,
       exclude.payload.shpoExcelRow
         ? exclude.payload.occupiedPositionIndex &&
           exclude.payload.occupiedPositionIndex !==
@@ -979,7 +1041,7 @@ const describeWillDo = (ops: EjoosSyncOp[]): string[] => {
     ];
   }
   const placement = ops.find((op) => op.kind === "position_change");
-  if (placement?.payload.closeOldPosition === "1") {
+  if (placement && positionCloseWritesExcluded(placement.payload)) {
     const step =
       placement.payload.chainStep && placement.payload.chainTotal
         ? `Крок ${placement.payload.chainStep} з ${placement.payload.chainTotal}: `
@@ -1008,6 +1070,8 @@ const describeWillDo = (ops: EjoosSyncOp[]): string[] => {
           : "2. ООС: додати активну картку",
       restoreAfterCancel
         ? `6. Табель: лишити вибуття ${placement.payload.cancelledTransferDate || "04.08"} як історію; новий активний з ${placement.payload.timesheetActiveFrom || placement.payload.transferCancelDate || "дати скасування"}`
+        : placement.payload.returningFromDisposition === "1"
+          ? `6. Табель: поставити на штатний рядок ${placement.payload.nextIndex || placement.positionIndex} з ${placement.payload.timesheetActiveFrom || placement.payload.orderDate || "дати наказу"}; другий рядок не створюємо`
         : placement.payload.isTempArrivalPlacement === "1"
           ? `6. Табель: старий рядок з вибуттям лишити як історію; новий активний з ${placement.payload.timesheetActiveFrom || placement.payload.orderDate || "дати наказу"}`
         : placement.payload.cancelledTransferOrder
@@ -1197,7 +1261,15 @@ export const buildTimesheetPreview = (
     runs: collapseTimesheetRuns(days),
     note: rankOnly
       ? "Дні без змін — оновлюється лише звання."
-      : undefined,
+      : ops.some(
+            (op) =>
+              op.kind === "position_change" &&
+              (op.payload.returningToStaffIndex === "1" ||
+                Boolean(op.payload.historyTimesheetExcelRow) ||
+                Boolean(op.payload.previousTimesheetExcelRow)),
+          )
+        ? "Нижче — новий активний рядок. Історичний епізод з «вибув» лишається окремим рядком."
+        : undefined,
     departDay: departDay || undefined,
     departPhrase: departDay && departMark ? departMark : undefined,
   };
@@ -1445,7 +1517,12 @@ export const personChangesFromOps = (
     const idKey = [...groups.keys()].find((key) => {
       if (!key.startsWith("id:")) return false;
       const idOps = groups.get(key);
-      return idOps?.some(
+      if (!idOps?.length) return false;
+      const namesInId = new Set(
+        idOps.map((op) => normKey(op.fullName)).filter(Boolean),
+      );
+      if (namesInId.size > 1) return false;
+      return idOps.some(
         (op) => op.fullName && normKey(op.fullName) === normKey(name),
       );
     });
@@ -1515,11 +1592,11 @@ export const personChangesFromOps = (
 export const groupOpsIntoPersonChanges = (
   plan: EjoosSyncPlan,
   pb?: ExcelWorkbookSnapshot | null,
+  statusRules = readOperatorSettings().statusRules,
 ): EjoosDiffSession => {
   const people = personChangesFromOps(plan.ops, plan.timesheetDay);
 
   const shPeople = pb ? parsePbShPeople(pb) : [];
-  const statusRules = readOperatorSettings().statusRules;
   let onDuty = 0;
   shPeople.forEach((person) => {
     const mapped = mapPbStatusToEjoosWithRules(person.status, statusRules);
@@ -1610,12 +1687,18 @@ export const transferCancelledHasWorkbookWrites = (op: EjoosSyncOp) => {
   );
 };
 
-/** ПІБ / ID / звання або перегляд без запису в книгу. */
-export const isInformationalOp = (op: EjoosSyncOp) =>
-  op.kind === "data_mismatch" ||
-  (op.kind === "other_manual" &&
-    op.payload.type === "TRANSFER_CANCELLED" &&
-    !transferCancelledHasWorkbookWrites(op));
+/** ПІБ / ID / звання, ПРИБУВ, «зачекати крок» або перегляд без запису в книгу. */
+export const isInformationalOp = (op: EjoosSyncOp) => {
+  if (op.kind === "data_mismatch" || op.kind === "arrival") return true;
+  if (op.kind !== "other_manual") return false;
+  if (
+    op.payload.type === "TRANSFER_SCOPE_UNCLEAR" ||
+    op.payload.transferScope === "unclear"
+  ) {
+    return false;
+  }
+  return !transferCancelledHasWorkbookWrites(op);
+};
 
 const WORKBOOK_APPLY_KINDS = new Set<EjoosOpKind>([
   "timesheet_day",

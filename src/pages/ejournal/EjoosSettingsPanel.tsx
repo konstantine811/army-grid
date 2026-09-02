@@ -24,6 +24,7 @@ import {
 } from "./ejoosStatusMap";
 import { useEjoosWorkspace } from "./ejoosWorkspaceState";
 import { api } from "../../api";
+import { formatApiDateTime } from "../../shared/format";
 
 const CONFIDENCE_OPTIONS: EjoosStatusConfidence[] = [
   "high",
@@ -197,7 +198,7 @@ export function EjoosSettingsPanel() {
           <span>
             осіб
             {normStats?.syncedAt
-              ? ` · ${new Date(normStats.syncedAt).toLocaleString("uk-UA")}`
+              ? ` · ${formatApiDateTime(normStats.syncedAt)}`
               : live?.current
                 ? " · синхронізується після seed/apply"
                 : ""}

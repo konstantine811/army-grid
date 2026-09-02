@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { api } from "../../../api";
 import {
   ANKETA_COLUMNS,
   isAnketaColumnReadonly,
@@ -6,10 +7,21 @@ import {
   type AnketaRow,
   type AnketaSheetSnapshot,
 } from "../anketaSheet";
-import { upsertAnketaCellEdit, countAnketaEdits } from "../anketaEdits";
 import {
+  bulkWriteAnketaCellEdits,
+  upsertAnketaCellEdit,
+  countAnketaEdits,
+} from "../anketaEdits";
+import {
+  ANKETA_ABSENT_QUESTIONNAIRE_VALUE,
   anketaCellA1,
   anketaGapSkipKey,
+  anketaRowHasQuestionnairePdf,
+  applyAbsentQuestionnaireClearsToRows,
+  applyAbsentQuestionnaireFillsToRows,
+  buildAbsentQuestionnaireAnketaRows,
+  collectAbsentQuestionnaireCellClears,
+  collectAbsentQuestionnaireCellFills,
   findNextAnketaEmptyCell,
   findNextAnketaPersonEmptyCell,
   listAnketaEmptyCells,
@@ -19,11 +31,14 @@ import {
   updateAnketaRowCell,
   type AnketaEmptyCell,
 } from "../anketaGaps";
+import { loadAnketaMissingNames } from "../anketaMissingList";
+import { expandAnketaNameKeySet } from "../anketaPersonMatch";
 
 type UseAnketaGapSearchOptions = {
   rows: AnketaRow[];
   gapColumnKeys: AnketaColumnKey[];
   missingQuestionnaireNames: Set<string>;
+  setMissingQuestionnaireNames: (keys: Set<string>) => void;
   appsScriptUrl: string;
   canEdit?: boolean;
   persistSnapshot: (
@@ -41,6 +56,7 @@ export function useAnketaGapSearch({
   rows,
   gapColumnKeys,
   missingQuestionnaireNames,
+  setMissingQuestionnaireNames,
   appsScriptUrl,
   canEdit = true,
   persistSnapshot,
@@ -57,6 +73,7 @@ export function useAnketaGapSearch({
   const [deferredGapKeys, setDeferredGapKeys] = useState<string[]>([]);
   const [personPanelOpen, setPersonPanelOpen] = useState(false);
   const [emptySearchActive, setEmptySearchActive] = useState(false);
+  const [isFillingAbsent, setIsFillingAbsent] = useState(false);
   const suppressCellBlurSaveRef = useRef(false);
 
   const deferredGapKeySet = useMemo(
@@ -328,10 +345,139 @@ export function useAnketaGapSearch({
     );
   };
 
+  const fillAbsentQuestionnaireCells = async () => {
+    if (!canEdit) {
+      setMessage("Немає права редагувати анкетні дані.");
+      return;
+    }
+    if (!rows.length) {
+      setMessage("Спочатку завантажте анкетні дані.");
+      return;
+    }
+    if (!gapColumnKeys.length) {
+      setMessage("Оберіть хоча б одну колонку — запис лише у вибрані.");
+      setGapColumnsOpen(true);
+      return;
+    }
+
+    setIsFillingAbsent(true);
+    setMessage("Шукаю осіб без анкет…");
+    try {
+      const [missingList, questionnaires] = await Promise.all([
+        loadAnketaMissingNames().catch(() => ({ names: [] as string[] })),
+        api.listPersonQuestionnaires().catch(() => []),
+      ]);
+      const missingKeys = expandAnketaNameKeySet([
+        ...missingQuestionnaireNames,
+        ...missingList.names,
+      ]);
+      if (missingKeys.size) setMissingQuestionnaireNames(missingKeys);
+
+      const hasPdf = (row: AnketaRow) =>
+        anketaRowHasQuestionnairePdf(row, questionnaires);
+      const fills = collectAbsentQuestionnaireCellFills(
+        rows,
+        gapColumnKeys,
+        missingKeys,
+        hasPdf,
+      );
+      const clears = collectAbsentQuestionnaireCellClears(
+        rows,
+        gapColumnKeys,
+        hasPdf,
+      );
+      const newRows = buildAbsentQuestionnaireAnketaRows(
+        rows,
+        missingList.names,
+        gapColumnKeys,
+      ).filter((row) => !hasPdf(row));
+      if (!fills.length && !newRows.length && !clears.length) {
+        setMessage(
+          "Немає порожніх вибраних комірок у осіб без PDF-анкети, і «дані відсутні» знімати теж ніде.",
+        );
+        return;
+      }
+
+      setMessage(
+        `Пишу «${ANKETA_ABSENT_QUESTIONNAIRE_VALUE}»… ${fills.length} комірок${
+          clears.length ? ` · знімаю: ${clears.length}` : ""
+        }${newRows.length ? ` · нових рядків: ${newRows.length}` : ""}`,
+      );
+
+      persistSnapshot((current) => ({
+        ...current,
+        rows: [
+          ...applyAbsentQuestionnaireClearsToRows(
+            applyAbsentQuestionnaireFillsToRows(current.rows, fills),
+            clears,
+          ),
+          ...newRows,
+        ],
+      }));
+
+      const newRowEdits = newRows.flatMap((row) => {
+        const base = {
+          rowNumber: row.__rowNumber,
+          externalId: row.externalId,
+          fullName: row.fullName,
+        };
+        return [
+          { ...base, columnId: "fullName" as const, value: row.fullName },
+          ...gapColumnKeys
+            .filter((key) => !isAnketaColumnReadonly(key))
+            .map((columnId) => ({
+              ...base,
+              columnId,
+              value: ANKETA_ABSENT_QUESTIONNAIRE_VALUE,
+            })),
+        ];
+      });
+
+      const result = await bulkWriteAnketaCellEdits([
+        ...fills.map((fill) => ({
+          rowNumber: fill.rowNumber,
+          columnId: fill.columnId,
+          value: ANKETA_ABSENT_QUESTIONNAIRE_VALUE,
+          externalId: fill.externalId,
+          fullName: fill.fullName,
+        })),
+        ...clears.map((clear) => ({
+          rowNumber: clear.rowNumber,
+          columnId: clear.columnId,
+          value: "",
+          externalId: clear.externalId,
+          fullName: clear.fullName,
+        })),
+        ...newRowEdits,
+      ]);
+      setEditsCount(countAnketaEdits(result.edits));
+      const persons =
+        new Set([
+          ...fills.map((fill) => fill.rowId),
+          ...clears.map((clear) => clear.rowId),
+        ]).size + newRows.length;
+      const syncNote = result.serverSynced
+        ? "збережено в БД"
+        : `локально: ок${result.serverError ? ` · сервер: ${result.serverError}` : ""}`;
+      setMessage(
+        `Без анкет · «${ANKETA_ABSENT_QUESTIONNAIRE_VALUE}»: ${fills.length} комірок · знято (є анкета): ${clears.length} · додано рядків: ${newRows.length} · осіб: ${persons} · ${syncNote}.`,
+      );
+    } catch (error) {
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "Не вдалося записати «дані відсутні».",
+      );
+    } finally {
+      setIsFillingAbsent(false);
+    }
+  };
+
   return {
     focusedEmpty,
     focusEpoch,
     emptySearchActive,
+    isFillingAbsent,
     deferredGapKeys,
     personPanelOpen,
     setPersonPanelOpen,
@@ -344,5 +490,6 @@ export function useAnketaGapSearch({
     cancelCellEdit,
     patchCell,
     goToEmptyCell,
+    fillAbsentQuestionnaireCells,
   };
 }

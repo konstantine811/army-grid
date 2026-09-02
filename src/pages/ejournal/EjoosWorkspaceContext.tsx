@@ -16,6 +16,7 @@ import {
   EJOOS_SYNC_READ_OPTIONS,
   readWorkbookSnapshot,
 } from "../../excelRoundTrip";
+import { readEjoosWorkbookSnapshot } from "./ejoosTimesheetPersonRows";
 import {
   applyConfirmedEjoosOps,
   base64ToFile,
@@ -24,7 +25,6 @@ import {
   downloadTextFile,
   fileToBase64,
 } from "./ejoosSyncApply";
-import { appendEjoosChangeHistoryOnExport } from "./ejoosChangeHistorySheet";
 import {
   graftWorkbookStyles,
   sanitizeEjoosWorkbookBlob,
@@ -39,9 +39,9 @@ import {
   acceptAllReady,
   collectedAcceptedOps,
   collectedWritableAcceptedOps,
-  groupOpsIntoPersonChanges,
   personIsInformationalOnly,
   personCanEnterApplyQueue,
+  isWorkbookApplyOp,
   mergePersonDecisions,
   patchPersonOpPayload,
   dismissPersonFromSession,
@@ -52,12 +52,11 @@ import {
 } from "./ejoosPersonDiff";
 import { personOpsBlockApply } from "./ejoosOpRequirements";
 import {
-  buildEjoosSyncPlan,
   buildProtocolText,
   collectProcessedMovementKeys,
-  MONTH_ROLLOVER_BLOCK_MESSAGE,
   planBlocksWorkbookApply,
   resolveJournalTimesheetDay,
+  workbookApplyBlockMessage,
 } from "./ejoosSyncPlan";
 import { buildNormalizedSnapshotFromWorkbook } from "./ejoosNormalized";
 import {
@@ -65,6 +64,8 @@ import {
   replaceEjoosTabInUrl,
   type EjoosWorkspaceTab,
 } from "../../app/navigation";
+import { readOperatorSettings } from "./ejoosStatusMap";
+import { runHeavyJob } from "../../workers/runHeavyJob";
 import {
   assertEjoosWorkbook,
   assertPbWorkbook,
@@ -160,7 +161,7 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
       full.fileBase64,
       full.sourceFileName || `ЕЖООС_v${full.version}.xlsx`,
     );
-    const snapshot = await readWorkbookSnapshot(file, EJOOS_SYNC_READ_OPTIONS);
+    const snapshot = await readEjoosWorkbookSnapshot(file);
     setEjoosSnapshot(snapshot);
     return snapshot;
   }, [ejoosSnapshot, live, refreshLive]);
@@ -208,7 +209,7 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
     setIsLoading(true);
     setError("");
     try {
-      const snapshot = await readWorkbookSnapshot(file, EJOOS_SYNC_READ_OPTIONS);
+      const snapshot = await readEjoosWorkbookSnapshot(file);
       assertEjoosWorkbook(snapshot);
       setEjoosSnapshot(snapshot);
       setSession(null);
@@ -267,7 +268,7 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
     setIsLoading(true);
     setError("");
     try {
-      const snapshot = await readWorkbookSnapshot(file, EJOOS_SYNC_READ_OPTIONS);
+      const snapshot = await readEjoosWorkbookSnapshot(file);
       assertEjoosWorkbook(snapshot);
       setEjoosSnapshot(snapshot);
       setSession(null);
@@ -361,16 +362,26 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
     });
   }, [live, ejoosSnapshot, ensureEjoosSnapshot]);
 
+  const sourceAsOfOverrideRef = useRef("");
+
   const rebuildSessionFromSnapshots = useCallback(
-    (
+    async (
       ejoos: ExcelWorkbookSnapshot,
       pb: ExcelWorkbookSnapshot,
       versions?: BackendEjournalLiveVersion[] | null,
+      sourceAsOfDate?: string,
     ) => {
-      const plan = buildEjoosSyncPlan(ejoos, pb, {
-        processedMovementKeys: collectProcessedMovementKeys(versions ?? undefined),
+      const asOf = sourceAsOfDate ?? sourceAsOfOverrideRef.current;
+      return runHeavyJob({
+        type: "ejoosSession",
+        ejoos,
+        pb,
+        processedMovementKeys: [
+          ...collectProcessedMovementKeys(versions ?? undefined),
+        ],
+        sourceAsOfDate: asOf || undefined,
+        statusRules: readOperatorSettings().statusRules,
       });
-      return groupOpsIntoPersonChanges(plan, pb);
     },
     [],
   );
@@ -379,7 +390,7 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
     async (pb: ExcelWorkbookSnapshot) => {
       const ejoos = await ensureEjoosSnapshot();
       assertEjoosWorkbook(ejoos);
-      const nextSession = rebuildSessionFromSnapshots(
+      const nextSession = await rebuildSessionFromSnapshots(
         ejoos,
         pb,
         live?.versions,
@@ -533,7 +544,10 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  const rebuildOperations = async () => {
+  const rebuildOperations = async (sourceAsOfDate?: string) => {
+    if (sourceAsOfDate !== undefined) {
+      sourceAsOfOverrideRef.current = sourceAsOfDate;
+    }
     if (!pbSnapshot) {
       setError("Немає відкритого 1ПБ для аналізу");
       return;
@@ -550,10 +564,10 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
         full.fileBase64,
         full.sourceFileName || `ЕЖООС_v${full.version}.xlsx`,
       );
-      const snapshot = await readWorkbookSnapshot(file, EJOOS_SYNC_READ_OPTIONS);
+      const snapshot = await readEjoosWorkbookSnapshot(file);
       assertEjoosWorkbook(snapshot);
       setEjoosSnapshot(snapshot);
-      const nextSession = rebuildSessionFromSnapshots(
+      const nextSession = await rebuildSessionFromSnapshots(
         snapshot,
         pbSnapshot,
         state.versions,
@@ -682,10 +696,6 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
       ejoos: ejoosSnapshot,
       plan: workingSession.plan,
       ops,
-      history: {
-        version: live.current.version + 1,
-        appliedAt: new Date().toISOString(),
-      },
     });
     const protocolText = buildProtocolText(workingSession.plan, ops, {
       actor: "operator",
@@ -709,10 +719,7 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
     const state = await refreshLive();
     let normalizedWarning = "";
     const localAppliedFile = base64ToFile(fileBase64, result.fileName);
-    const nextEjoosSnapshot = await readWorkbookSnapshot(
-      localAppliedFile,
-      EJOOS_SYNC_READ_OPTIONS,
-    );
+    const nextEjoosSnapshot = await readEjoosWorkbookSnapshot(localAppliedFile);
     setEjoosSnapshot(nextEjoosSnapshot);
     try {
       await syncNormalizedFromSnapshot(nextEjoosSnapshot, {
@@ -747,19 +754,48 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
     };
   };
 
-  const applyAccepted = async () => {
+  const applyAccepted = async (personIds?: string[]) => {
     if (!session || !ejoosSnapshot || !live?.current) {
       setError("Немає сесії змін або канонічного ЕЖООС");
       return;
     }
     if (planBlocksWorkbookApply(session.plan)) {
-      setError(MONTH_ROLLOVER_BLOCK_MESSAGE);
+      setError(workbookApplyBlockMessage(session.plan));
       return;
     }
-    const accepted = collectedAcceptedOps(session);
-    const ops = collectedWritableAcceptedOps(session);
-    if (!accepted.length) {
+    const forceIds = new Set(personIds ?? []);
+    const queuedAcceptedPeople = session.people.filter(
+      (person) =>
+        person.decision === "accepted" || forceIds.has(person.id),
+    );
+    const applicablePeople = queuedAcceptedPeople.filter(personCanEnterApplyQueue);
+    const skippedBlockedPeople = queuedAcceptedPeople.filter(
+      (person) =>
+        !personCanEnterApplyQueue(person) &&
+        !personIsInformationalOnly(person.ops),
+    );
+    const applicableIds = new Set(applicablePeople.map((person) => person.id));
+    const applicableSession: EjoosDiffSession = {
+      ...session,
+      people: session.people.map((person) =>
+        applicableIds.has(person.id)
+          ? { ...person, decision: "accepted" as const }
+          : { ...person, decision: "pending" as const },
+      ),
+    };
+    const accepted = collectedAcceptedOps(applicableSession);
+    const ops = collectedWritableAcceptedOps(applicableSession);
+    if (!queuedAcceptedPeople.length) {
       setError("Немає людей у черзі застосування");
+      return;
+    }
+    if (!accepted.length) {
+      setError(
+        `Масове застосування заблоковано, доки не уточнено дані: ${skippedBlockedPeople
+          .slice(0, 4)
+          .map((person) => person.fullName)
+          .join(", ")}${skippedBlockedPeople.length > 4 ? "…" : ""}`,
+      );
       return;
     }
     if (!ops.length) {
@@ -769,7 +805,7 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
       );
       return;
     }
-    const missingDest = session.people.filter(
+    const missingDest = applicableSession.people.filter(
       (person) =>
         person.decision === "accepted" &&
         person.ops.some(
@@ -786,21 +822,6 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
       );
       return;
     }
-    const blockedPeople = session.people.filter(
-      (person) =>
-        person.decision === "accepted" &&
-        !personIsInformationalOnly(person.ops) &&
-        !personCanEnterApplyQueue(person),
-    );
-    if (blockedPeople.length) {
-      setError(
-        `Масове застосування заблоковано, доки не уточнено дані: ${blockedPeople
-          .slice(0, 4)
-          .map((person) => person.fullName)
-          .join(", ")}${blockedPeople.length > 4 ? "…" : ""}`,
-      );
-      return;
-    }
     if (personOpsBlockApply(ops)) {
       setError(
         "У черзі є неповне переведення, немає наказу/«куди вибув», або відкритий СЗЧ суперечить новій постановці.",
@@ -810,9 +831,7 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
     setIsLoading(true);
     setError("");
     try {
-      const queuedPeople = session.people.filter(
-        (person) => person.decision === "accepted",
-      ).length;
+      const queuedPeople = applicablePeople.length;
       const skippedNotes = accepted.length - ops.length;
       const { saved, normalizedWarning, nextEjoosSnapshot, liveVersions } =
         await runApplyOps(
@@ -822,15 +841,29 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
             (skippedNotes
               ? ` · пропущено ${skippedNotes} позначок даних`
               : ""),
-        );
+      );
       if (pbSnapshot && nextEjoosSnapshot) {
+        const completedIds = new Set([
+          ...applicablePeople.map((person) => person.id),
+          ...queuedAcceptedPeople
+            .filter(personIsInformationalOnly)
+            .map((person) => person.id),
+        ]);
+        const previousForMerge: EjoosDiffSession = {
+          ...session,
+          people: session.people.map((person) =>
+            completedIds.has(person.id)
+              ? { ...person, decision: "pending" as const }
+              : person,
+          ),
+        };
         const rebuilt = mergePersonDecisions(
-          rebuildSessionFromSnapshots(
+          await rebuildSessionFromSnapshots(
             nextEjoosSnapshot,
             pbSnapshot,
             liveVersions,
           ),
-          session,
+          previousForMerge,
         );
         setSession(rebuilt);
       } else {
@@ -841,6 +874,12 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
         `Записано ЕЖООС v${saved.version}. Застосовано ${ops.length} змін з черги.` +
           (skippedNotes
             ? ` Позначки даних (${skippedNotes}) пропущено — їх виправляють у джерелах.`
+            : "") +
+          (skippedBlockedPeople.length
+            ? ` Не застосовано ${skippedBlockedPeople.length} неготових: ${skippedBlockedPeople
+                .slice(0, 4)
+                .map((person) => person.fullName)
+                .join(", ")}${skippedBlockedPeople.length > 4 ? "…" : ""}.`
             : "") +
           (pbSnapshot && nextEjoosSnapshot ? " Операції перераховано." : "") +
           ` Файл не качається — експорт з вкладки «Експорт».${normalizedWarning}`,
@@ -858,7 +897,7 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
       return;
     }
     if (planBlocksWorkbookApply(session.plan)) {
-      setError(MONTH_ROLLOVER_BLOCK_MESSAGE);
+      setError(workbookApplyBlockMessage(session.plan));
       return;
     }
     const person = session.people.find((item) => item.id === personChangeId);
@@ -903,20 +942,34 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
       return;
     }
 
+    if (personOpsBlockApply(ops)) {
+      setError(
+        "У цій картці є неповне переведення або суперечливий статус. Спочатку уточніть дані.",
+      );
+      return;
+    }
+    const applyOps = ops.filter(isWorkbookApplyOp);
+    if (!applyOps.length) {
+      setError(
+        `Немає змін для запису в ЕЖООС по «${person.fullName}». Нотатки без apply не підтверджуються окремо.`,
+      );
+      return;
+    }
+
     setIsLoading(true);
     setError("");
     try {
       const { saved, normalizedWarning, nextEjoosSnapshot, liveVersions } =
         await runApplyOps(
           nextSession,
-          ops,
-          `${person.fullName} · ${ops.length} ops`,
+          applyOps,
+          `${person.fullName} · ${applyOps.length} ops`,
         );
       // План залежить від стану ЕЖООС: після змін по ХУБАЄВУ конфлікт АТРАХОВА
       // має зникнути одразу, без перезавантаження сторінки.
       if (pbSnapshot && nextEjoosSnapshot) {
         const rebuilt = mergePersonDecisions(
-          rebuildSessionFromSnapshots(
+          await rebuildSessionFromSnapshots(
             nextEjoosSnapshot,
             pbSnapshot,
             liveVersions,
@@ -1126,13 +1179,7 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
         targetFile.fileBase64,
         targetFile.sourceFileName || `ЕЖООС_v${targetMeta.version}.xlsx`,
       );
-      const withHistory = await appendEjoosChangeHistoryOnExport(
-        targetBlob,
-        live?.versions ?? [],
-        targetMeta.version,
-        { mode: "rebuild" },
-      );
-      const fileBase64 = await blobToBase64(withHistory);
+      const fileBase64 = await blobToBase64(targetBlob);
 
       const saved = await api.rollbackEjournalLive({
         targetVersionId: versionId,
@@ -1147,14 +1194,14 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
         full.fileBase64,
         full.sourceFileName || `ЕЖООС_v${full.version}.xlsx`,
       );
-      const snapshot = await readWorkbookSnapshot(file, EJOOS_SYNC_READ_OPTIONS);
+      const snapshot = await readEjoosWorkbookSnapshot(file);
       assertEjoosWorkbook(snapshot);
       setEjoosSnapshot(snapshot);
 
       let analysisNote = "";
       let nextTab: EjoosWorkspaceTab = "history";
       if (pbSnapshot) {
-        const nextSession = rebuildSessionFromSnapshots(
+        const nextSession = await rebuildSessionFromSnapshots(
           snapshot,
           pbSnapshot,
           state.versions,

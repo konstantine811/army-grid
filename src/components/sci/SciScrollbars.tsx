@@ -2,6 +2,7 @@ import { useEffect } from "react";
 
 const SCROLL_SELECTOR = [
   ".personnel-list",
+  ".overview-page",
   ".overview-table-body",
   ".person-card-scroll",
   ".sci-data-table-wrap",
@@ -162,8 +163,13 @@ export function SciScrollbars() {
 
     const startTransitionLoop = () => {
       if (transitionFrame) return;
+      const startedAt = performance.now();
       const tick = () => {
         updateAll();
+        if (performance.now() - startedAt > 400) {
+          stopTransitionLoop();
+          return;
+        }
         transitionFrame = window.requestAnimationFrame(tick);
       };
       transitionFrame = window.requestAnimationFrame(tick);
@@ -183,8 +189,6 @@ export function SciScrollbars() {
     observer.observe(document.body, {
       childList: true,
       subtree: true,
-      attributes: true,
-      attributeFilter: ["class"],
     });
     window.addEventListener("resize", scheduleUpdate);
     window.addEventListener("scroll", scheduleUpdate, true);

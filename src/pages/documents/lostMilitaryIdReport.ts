@@ -15,6 +15,8 @@ import {
   toUkrainianInstrumentalPosition,
   toUkrainianInstrumentalRank,
 } from "./lostMilitaryIdCases";
+import { toUkrainianDativePosition } from "./form12Report";
+import { capitalizeReportPosition } from "./reportPosition";
 
 export const lostMilitaryIdWorkflowSteps = [
   { key: "document", title: "Заповнили рапорт" },
@@ -54,6 +56,8 @@ export type LostMilitaryIdFields = {
   investigatorFullName: string;
   investigatorRank: string;
   investigatorPosition: string;
+  investigatorPersonId: string;
+  investigatorManual: boolean;
   reportDate: string;
   orderNumber: string;
   orderDate: string;
@@ -144,7 +148,24 @@ export const declinedPerson = (fields: LostMilitaryIdFields) => {
     rankGenitive: toUkrainianGenitiveRank(fields.rank) || fields.rank.trim(),
     positionInstrumental:
       toUkrainianInstrumentalPosition(fields.staffPosition) ||
-      fields.staffPosition.trim(),
+      capitalizeReportPosition(fields.staffPosition),
+  };
+};
+
+export const investigatorFromPersonnelRow = (
+  row: EjournalPreviewRow | null,
+) => {
+  const summary = buildPersonSummary(row);
+  const name = summary.name !== "Особа не вибрана" ? summary.name : "";
+  const position = getPersonFullPositionTitle(row);
+  return {
+    investigatorFullName: name,
+    investigatorRank: summary.rank || "",
+    investigatorPosition:
+      toUkrainianDativePosition(position) || capitalizeReportPosition(position),
+    investigatorPersonId: summary.externalId || "",
+    investigatorManual: false,
+    investigatorDativeManual: "",
   };
 };
 
@@ -159,7 +180,7 @@ export const declinedInvestigator = (fields: LostMilitaryIdFields) => {
     rankDative:
       toUkrainianDativeRank(fields.investigatorRank) ||
       fields.investigatorRank.trim(),
-    position: fields.investigatorPosition.trim(),
+    position: capitalizeReportPosition(fields.investigatorPosition),
   };
 };
 
@@ -353,7 +374,7 @@ export const buildLostMilitaryIdPersonCard = (fields: LostMilitaryIdFields) => {
   const unit = fields.militaryUnit.trim() || DEFAULT_UNIT;
   return [
     `${person.nominative}, ${fields.rank.trim() || "______"}, ${
-      fields.staffPosition.trim() || "______"
+      capitalizeReportPosition(fields.staffPosition) || "______"
     } військової частини ${unit}.`,
     fields.enlistedDate.trim()
       ? `В ЗСУ з ${fields.enlistedDate}. До списків частини ${unit} зарахований ${fields.enlistedDate}${
@@ -418,7 +439,7 @@ export const createLostMilitaryIdFields = (
     militaryUnit: DEFAULT_UNIT,
     fullName,
     rank: summary.rank || "",
-    staffPosition,
+    staffPosition: capitalizeReportPosition(staffPosition),
     unitLabel: pickPersonnel(row, ["підрозділ"]) || "",
     lossDate: "",
     isExactDate: false,
@@ -434,6 +455,8 @@ export const createLostMilitaryIdFields = (
     investigatorFullName: "",
     investigatorRank: "",
     investigatorPosition: "",
+    investigatorPersonId: "",
+    investigatorManual: false,
     reportDate: formatUaDate(new Date()),
     orderNumber: "",
     orderDate: "",
@@ -483,6 +506,16 @@ export const mergeLostMilitaryIdFields = (
     isExactDate: Boolean(next.isExactDate ?? defaults.isExactDate),
     searchConducted: Boolean(next.searchConducted ?? defaults.searchConducted),
     editManually: Boolean(next.editManually ?? defaults.editManually),
+    investigatorManual:
+      typeof next.investigatorManual === "boolean"
+        ? next.investigatorManual
+        : Boolean(
+            String(next.investigatorFullName ?? "").trim() &&
+              !String(next.investigatorPersonId ?? "").trim(),
+          ),
+    investigatorPersonId: String(
+      next.investigatorPersonId ?? defaults.investigatorPersonId ?? "",
+    ),
     circumstanceKind:
       next.circumstanceKind === "custom" || next.circumstanceKind === "movement"
         ? next.circumstanceKind
@@ -499,6 +532,8 @@ export const mergeLostMilitaryIdFields = (
         ? merged.signatories
         : [],
     fullName,
+    staffPosition: capitalizeReportPosition(merged.staffPosition),
+    investigatorPosition: capitalizeReportPosition(merged.investigatorPosition),
     folderName:
       !currentFolder ||
       (/втрата військового квитка/i.test(currentFolder) &&

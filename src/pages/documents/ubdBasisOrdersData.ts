@@ -1,5 +1,15 @@
 /** Номери БР полкові (з файлів УБД/БР/*.docx). Автогенер. */
-export type UbdBasisOrderOption = { number: string; date: string };
+export type UbdBasisOrderOption = {
+  number: string;
+  date: string;
+  /** Локація / район дії. Якщо немає — БР підставляється лише за датою. */
+  location?: string;
+  /** Початок дії на локації (якщо немає — дата БР). */
+  validFrom?: string;
+  /** Кінець дії на локації (якщо немає — до наступного БР там само або відкрито). */
+  validTo?: string;
+  note?: string;
+};
 
 export const UBD_BASIS_ORDER_OPTIONS: UbdBasisOrderOption[] = [
   { number: "4862/ОКП/294/дск", date: "01.02.2026" },

@@ -1,6 +1,7 @@
 import JSZip from "jszip";
 import type { Form6ReportFields } from "./form6Report";
-import { toUkrainianGenitiveFullName } from "./form6Report";
+import { form6BasisLineForWord, toUkrainianGenitiveFullName } from "./form6Report";
+import { capitalizeReportPosition } from "./reportPosition";
 import { formatGivenSurname } from "./ubdRestoreReport";
 import { stripRedColorInWordZip } from "./wordXml";
 
@@ -188,10 +189,13 @@ const replaceParagraphTexts = (
     if (next === joined) return paragraph;
     const escaped = escapeXml(next);
     let used = false;
-    return paragraph.replace(/<w:t\b[^>]*>[^<]*<\/w:t>/g, (run) => {
+    return paragraph.replace(/<w:t\b([^>]*)>[^<]*<\/w:t>/g, (run, attrs: string) => {
       if (used) return run.replace(/>[^<]*</, "><");
       used = true;
-      return run.replace(/>[^<]*</, `>${escaped}<`);
+      const nextAttrs = /xml:space=/.test(attrs)
+        ? attrs.replace(/xml:space="[^"]*"/, 'xml:space="preserve"')
+        : `${attrs} xml:space="preserve"`;
+      return `<w:t${nextAttrs}>${escaped}</w:t>`;
     });
   });
 
@@ -245,7 +249,7 @@ export const createForm6WordBlob = async (fields: Form6ReportFields) => {
     return text
       .replaceAll(SAMPLE.personLine, personLine)
       .replaceAll(SAMPLE.commander, withFallback(fields.commander, SAMPLE.commander))
-      .replaceAll(SAMPLE.position, withFallback(fields.staffPosition))
+      .replaceAll(SAMPLE.position, withFallback(capitalizeReportPosition(fields.staffPosition)))
       .replaceAll(SAMPLE.birthDate, withFallback(fields.birthDate))
       .replaceAll(SAMPLE.idDocument, withFallback(fields.idDocument))
       .replaceAll(SAMPLE.rnokpp, withFallback(fields.rnokpp))
@@ -253,7 +257,7 @@ export const createForm6WordBlob = async (fields: Form6ReportFields) => {
       .replaceAll(SAMPLE.phone, withFallback(fields.phone))
       .replaceAll(SAMPLE.period, periodText(fields.taskPeriod))
       .replaceAll(SAMPLE.place, placeText(fields.taskPlace))
-      .replaceAll(SAMPLE.basis, `Підстава: ${withFallback(fields.basis)}`)
+      .replaceAll(SAMPLE.basis, form6BasisLineForWord(fields.basis))
       .replaceAll(SAMPLE.genitiveName, genitiveName);
   });
 

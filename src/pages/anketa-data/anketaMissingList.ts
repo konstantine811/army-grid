@@ -1,4 +1,7 @@
-import { normalizeAnketaNameKey } from "./anketaPersonMatch";
+import {
+  anketaNameKeyVariants,
+  normalizeAnketaNameKey,
+} from "./anketaPersonMatch";
 import type { AnketaRow } from "./anketaSheet";
 
 /** Google Sheet «Відсутні анкети» — ПІБ без анкетних даних (сторінка анкетних даних). */
@@ -163,6 +166,8 @@ export const isAnketaRowMissingQuestionnaire = (
   excludeNameKeys: Set<string> | null | undefined,
 ) => {
   if (!excludeNameKeys?.size) return false;
-  const key = normalizeAnketaNameKey(row.fullName);
-  return Boolean(key && excludeNameKeys.has(key));
+  for (const key of anketaNameKeyVariants(row.fullName)) {
+    if (excludeNameKeys.has(key)) return true;
+  }
+  return false;
 };

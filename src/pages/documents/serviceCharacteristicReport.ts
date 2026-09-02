@@ -3,6 +3,7 @@ import {
   buildPersonSummary,
   getPersonFullPositionTitle,
 } from "../personnel/personnelUtils";
+import { capitalizeReportPosition } from "./reportPosition";
 
 export type ServiceCharacteristicSignatory = {
   blockType: "SIGNER" | "APPROVAL";
@@ -96,7 +97,7 @@ export const createServiceCharacteristicFields = (
     lastName,
     firstName,
     patronymic,
-    staffPosition,
+    staffPosition: capitalizeReportPosition(staffPosition),
     introParagraph: buildIntroParagraph(rank, firstName, lastName),
     professionalParagraph: DEFAULT_PROFESSIONAL,
     combatParagraph: DEFAULT_COMBAT,
@@ -147,7 +148,9 @@ export const mergeServiceCharacteristicFields = (
     lastName,
     firstName,
     patronymic,
-    staffPosition: pick(defaults.staffPosition, merged.staffPosition),
+    staffPosition: capitalizeReportPosition(
+      pick(defaults.staffPosition, merged.staffPosition),
+    ),
     introParagraph: shouldRefreshIntro
       ? buildIntroParagraph(rank, firstName, lastName)
       : savedIntro,

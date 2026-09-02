@@ -9,6 +9,7 @@ import {
   cellValueToOosText,
   createOosRowResolver,
   findNextEmptyOosDataRow,
+  OOS_NO_EMPTY_ROW_MESSAGE,
   findOosStyleSourceRow,
   formatOosRelativesText,
   isJammedOosHistory,
@@ -17,6 +18,7 @@ import {
   oosIdentityFromOp,
   isOosWrapColumn,
   mergeOosHistoryValue,
+  filterOosStaffHistoryIndexes,
   OOS_DATA_COLUMNS,
   OOS_HISTORY_COLUMNS,
   OOS_RANK_ORDER_COLUMNS,
@@ -176,7 +178,7 @@ export async function applyOosHistoryPresentation(input: {
     allocateEmpty: () => {
       const row = findNextEmptyOosDataRow(
         (scanRow, column) => cellAt(oos, scanRow, column),
-        { lastRow: oos.rawRows.length + 30, reserved },
+        { lastRow: oos.rawRows.length, reserved, allowAppend: true },
       );
       if (row) reserved.add(row);
       return row;
@@ -193,7 +195,12 @@ export async function applyOosHistoryPresentation(input: {
   const targetRows = new Set<number>();
   for (const op of touchOps) {
     const row = resolveRow(op);
-    if (!row) continue;
+    if (!row) {
+      if (shouldCreateOosRow(op)) {
+        throw new Error(OOS_NO_EMPTY_ROW_MESSAGE);
+      }
+      continue;
+    }
     rowByOpId.set(op.id, row);
     targetRows.add(row);
   }
@@ -229,7 +236,9 @@ export async function applyOosHistoryPresentation(input: {
     const rank = op.payload.nextRank || op.rank;
     const fullName = op.payload.nextName || op.fullName;
     const personId = op.payload.nextPersonId || op.personId;
-    const nextIndex = op.payload.nextIndex || op.positionIndex;
+    const nextIndex = filterOosStaffHistoryIndexes(
+      op.payload.nextIndex || op.positionIndex,
+    );
     const appointment = op.payload.orderDate || input.plan.timesheetDayLabel;
     const excludedSourceRow = excludedSourceRowOf(op);
     const rowWasEmpty =
@@ -274,14 +283,18 @@ export async function applyOosHistoryPresentation(input: {
         return mergeOosHistoryValue(
           sourceValue(op, row, 4),
           appendHistory
-            ? op.payload.oosHistoryIndexes || nextIndex
+            ? filterOosStaffHistoryIndexes(
+                op.payload.oosHistoryIndexes || nextIndex,
+              )
             : "",
         );
       }
       if (column === 5) {
         const historyDates = appendHistory
           ? op.payload.oosHistoryDates ||
-            (op.payload.oosHistoryIndexes || nextIndex || "")
+            (filterOosStaffHistoryIndexes(
+              op.payload.oosHistoryIndexes || nextIndex || "",
+            ) || "")
               .split("\n")
               .filter(Boolean)
               .map(() => appointment)
@@ -433,12 +446,28 @@ export async function applyRankLabelsWithZip(input: {
 }): Promise<Blob> {
   const rankOps = input.ops.filter((op) => op.kind === "rank_change");
   if (!rankOps.length) return input.file;
+  const excludedKeys = new Set(
+    input.ops
+      .filter((op) => op.kind === "exclude_transfer")
+      .flatMap((op) =>
+        [op.personId, op.payload.fromPersonId, op.fullName, op.payload.fromName]
+          .map((value) => String(value || "").trim().toLocaleLowerCase("uk-UA"))
+          .filter(Boolean),
+      ),
+  );
+  const personIsExcluded = (op: EjoosSyncOp) =>
+    [op.personId, op.fullName]
+      .map((value) => String(value || "").trim().toLocaleLowerCase("uk-UA"))
+      .some((key) => key && excludedKeys.has(key));
 
   const shpoWrites: ZipCellWrite[] = [];
   const timesheetWrites: ZipCellWrite[] = [];
   for (const op of rankOps) {
     const rank = op.payload.nextRank || op.rank;
     if (!rank) continue;
+    // Виключення вже записало нове звання в «Виключені» й історичний Табель.
+    // Штатний рядок після вибуття лишається без особи — звання туди не повертаємо.
+    if (personIsExcluded(op)) continue;
     const shpoRow = Number(op.payload.shpoExcelRow || 0);
     const timesheetRow = Number(op.payload.timesheetExcelRow || 0);
     if (shpoRow > 0) {

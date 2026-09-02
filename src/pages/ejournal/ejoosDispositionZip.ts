@@ -9,6 +9,7 @@ import {
   type EjoosSyncOp,
   type EjoosSyncPlan,
 } from "./ejoosSyncPlan";
+import { canonicalName } from "./ejoosIdentity";
 import {
   dayFromOrderLabel,
   formatTimesheetDeparture,
@@ -152,13 +153,31 @@ type DispositionContext = {
   reservedTimesheetRows: Set<number>;
 };
 
+const occupantMatchesOp = (
+  sheet: ExcelSheetSnapshot,
+  row: number,
+  nameCol: number,
+  idCol: number,
+  op: EjoosSyncOp,
+) => {
+  const currentId = textAt(sheet, row, idCol);
+  const currentName = textAt(sheet, row, nameCol);
+  if (!currentId && !currentName) return false;
+  if (op.personId && currentId && currentId === op.personId) return true;
+  return Boolean(
+    op.fullName &&
+      currentName &&
+      canonicalName(currentName) === canonicalName(op.fullName),
+  );
+};
+
 const collectWrites = (op: EjoosSyncOp, ctx: DispositionContext) => {
   const { plan, shpo, absent, timesheet } = ctx;
   const shpoWrites = ctx.shpoWrites;
   const absentWrites = ctx.absentWrites;
   const timesheetWrites = ctx.timesheetWrites;
   const oldShpoRow = Number(op.payload.shpoExcelRow || 0);
-  if (oldShpoRow > 0) {
+  if (oldShpoRow > 0 && occupantMatchesOp(shpo, oldShpoRow, 7, 8, op)) {
     for (const column of [6, 7, 8, 18]) {
       shpoWrites.push({ row: oldShpoRow, column, value: null });
     }
@@ -223,8 +242,101 @@ const collectWrites = (op: EjoosSyncOp, ctx: DispositionContext) => {
     }
   }
 
+  const absenceExcelRow = Number(op.payload.absenceExcelRow || 0);
+  if (absenceExcelRow > 0 && op.personId) {
+    const currentId = textAt(absent, absenceExcelRow, 3);
+    if (!currentId || currentId !== op.personId) {
+      absentWrites.push({
+        row: absenceExcelRow,
+        column: 3,
+        value: op.personId,
+        styleSourceRow: 6,
+      });
+    }
+  }
+
   const sourceTimesheetRow = Number(op.payload.timesheetExcelRow || 0);
   if (sourceTimesheetRow > 0) {
+    const lastDay = Math.min(31, plan.timesheetDay);
+    const absenceCode = op.payload.absenceCode || statusMark;
+    const absenceSpans = parseTimesheetAbsenceSpans(
+      op.payload.timesheetAbsenceSpans || "",
+    );
+    const journalId =
+      op.personId ||
+      personIdFromShpo(parseEjoosShpo(shpo), {
+        fullName: op.fullName,
+        positionIndex: op.positionIndex || op.payload.previousIndex,
+        personId: op.personId,
+      });
+    const paintOpenSzch = (row: number, styleSourceRow: number) => {
+      for (let day = 1; day <= lastDay; day += 1) {
+        const fromSpan = absenceSpans.length
+          ? timesheetMarkFromArchive(day, {
+              activeFromDay: 1,
+              lastDay,
+              spans: absenceSpans,
+              fillBeforeActive: true,
+            })
+          : null;
+        const value = fromSpan || absenceCode;
+        timesheetWrites.push({
+          row,
+          column: 8 + day,
+          value,
+          styleSourceRow,
+        });
+      }
+      if (journalId) {
+        timesheetWrites.push({
+          row,
+          column: 8,
+          value: journalId,
+          styleSourceRow,
+        });
+      }
+    };
+
+    const keepOpenSzch = op.payload.keepOpenSzchTimesheet === "1";
+    if (keepOpenSzch) {
+      const vacateStaff = op.payload.vacateTimesheetStaffSlot === "1";
+      if (vacateStaff) {
+        const historyRow = nextTimesheetRow(
+          timesheet,
+          sourceTimesheetRow,
+          ctx.reservedTimesheetRows,
+        );
+        for (let column = 1; column <= 40; column += 1) {
+          timesheetWrites.push({
+            row: historyRow,
+            column,
+            value: valueOf(
+              timesheet.rawRows[sourceTimesheetRow - 1]?.[column - 1],
+            ),
+            styleSourceRow: sourceTimesheetRow,
+          });
+        }
+        paintOpenSzch(historyRow, sourceTimesheetRow);
+        for (let day = 1; day <= lastDay; day += 1) {
+          timesheetWrites.push({
+            row: sourceTimesheetRow,
+            column: 8 + day,
+            value: null,
+          });
+        }
+        for (const column of [6, 7, 8]) {
+          timesheetWrites.push({
+            row: sourceTimesheetRow,
+            column,
+            value: null,
+          });
+        }
+      } else {
+        paintOpenSzch(sourceTimesheetRow, sourceTimesheetRow);
+      }
+      return;
+    }
+
     const historyRow = nextTimesheetRow(
       timesheet,
       sourceTimesheetRow,
@@ -241,11 +353,6 @@ const collectWrites = (op: EjoosSyncOp, ctx: DispositionContext) => {
       });
     }
     const orderDay = dayFromOrderLabel(op.payload.orderDate);
-    const lastDay = Math.min(31, plan.timesheetDay);
-    const absenceCode = op.payload.absenceCode || statusMark;
-    const absenceSpans = parseTimesheetAbsenceSpans(
-      op.payload.timesheetAbsenceSpans || "",
-    );
     const departMark = [
       formatTimesheetDeparture(place),
       op.payload.orderNumber ? `наказ №${op.payload.orderNumber}` : "",
@@ -285,16 +392,11 @@ const collectWrites = (op: EjoosSyncOp, ctx: DispositionContext) => {
         value: null,
       });
     }
-    const personId = personIdFromShpo(parseEjoosShpo(shpo), {
-      fullName: op.fullName,
-      positionIndex: op.positionIndex || op.payload.previousIndex,
-      personId: op.personId,
-    });
-    if (personId && !textAt(timesheet, sourceTimesheetRow, 8)) {
+    if (journalId && !textAt(timesheet, sourceTimesheetRow, 8)) {
       timesheetWrites.push({
         row: historyRow,
         column: 8,
-        value: personId,
+        value: journalId,
         styleSourceRow: sourceTimesheetRow,
       });
     }
@@ -309,9 +411,10 @@ const collectWrites = (op: EjoosSyncOp, ctx: DispositionContext) => {
 };
 
 /**
- * Виведення в розпорядження: звільняємо штатну позицію в ШПО й додаємо особу
- * до блоку «у розпорядженні», за потреби відкриваємо запис відсутності та
- * закриваємо штатний рядок Табеля. ООС і Виключені не змінюються.
+ * Виведення в розпорядження: звільняємо штатну позицію в ШПО, лише якщо там
+ * досі ця особа (фінальний sh wins), і додаємо її до блоку «у розпорядженні».
+ * Відкритий СЗЧ у Табелі фарбуємо на місці без «вибув у розпорядження».
+ * ООС і Виключені не змінюються.
  */
 export async function applyDispositionWithZip(input: {
   ejoos: ExcelWorkbookSnapshot;

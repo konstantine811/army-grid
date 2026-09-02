@@ -18,10 +18,12 @@ import {
   personIsInformationalOnly,
 } from "./ejoosPersonDiff";
 import { formatTimesheetTransferMark } from "./ejoosExcludedColumns";
+import { positionCloseWritesExcluded } from "./ejoosExcludePolicy";
 import { buildSheetRowPreviews } from "./ejoosSheetRowPreview";
 import { timesheetOpNeedsManualCode } from "./ejoosOpRequirements";
 import { EJOOS_TIMESHEET_CODES } from "./ejoosRules";
 import { dayFromOrderLabel } from "./ejoosTimesheetText";
+import { formatApiDateTime } from "../../shared/format";
 
 export type PersonChangeCardMode = "review" | "history";
 
@@ -66,11 +68,7 @@ const severityLabel = (severity: PersonChange["severity"]) => {
   return "Конфлікт";
 };
 
-const formatAppliedAt = (iso: string) => {
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return iso;
-  return date.toLocaleString("uk-UA");
-};
+const formatAppliedAt = (iso: string) => formatApiDateTime(iso);
 
 export const PersonChangeRow = memo(function PersonChangeRow({
   person,
@@ -288,7 +286,8 @@ export function PersonChangeCard({
       person.ops.find((op) => op.kind === "move_to_disposition") ||
       person.ops.find(
         (op) =>
-          op.kind === "position_change" && op.payload.closeOldPosition === "1",
+          op.kind === "position_change" &&
+          positionCloseWritesExcluded(op.payload),
       );
     const phrase =
       phraseFromPreview ||

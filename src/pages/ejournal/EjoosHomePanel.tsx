@@ -1,6 +1,7 @@
 import { Box, Button, Stack, Typography } from "@/components/sci/SciPrimitives";
 import { CloudUploadOutlinedIcon } from "@/components/sci/icons";
 import { FileDownloadOutlinedIcon } from "@/components/sci/icons";
+import { formatApiDateTime } from "../../shared/format";
 import { useEjoosWorkspace } from "./ejoosWorkspaceState";
 
 export function EjoosHomePanel() {
@@ -41,7 +42,7 @@ export function EjoosHomePanel() {
                 {current.sha256.slice(0, 10)}…
               </span>
               <span>
-                {new Date(current.createdAt).toLocaleString("uk-UA")}
+                {formatApiDateTime(current.createdAt)}
               </span>
             </>
           ) : (
@@ -66,7 +67,7 @@ export function EjoosHomePanel() {
             <>
               <strong>{pbCurrent.sourceFileName || "у БД"}</strong>
               <span>
-                {new Date(pbCurrent.createdAt).toLocaleString("uk-UA")}
+                {formatApiDateTime(pbCurrent.createdAt)}
               </span>
               <span>Збережено на сервері — відкрийте для аналізу</span>
             </>
