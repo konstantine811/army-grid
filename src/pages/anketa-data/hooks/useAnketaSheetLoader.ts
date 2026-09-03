@@ -17,15 +17,21 @@ import {
   addMissingEjoosPeopleToCachedAnketa,
   formatAddMissingEjoosPeopleReport,
 } from "../anketaEjoosPeople";
+import { readWorkbookSnapshot } from "../../../excelRoundTrip";
+import {
+  formatAnketaMilitaryIdMergeReport,
+  mergeVkMilitaryIdToAnketa,
+} from "../anketaMilitaryIdImport";
 import {
   formatAnketaBulkMergeReport,
   mergeCachedAnketaToPersonnel,
 } from "../anketaPersonMerge";
 import {
-  buildStaffSheetEnrichmentEntries,
   formatStaffSheetEnrichmentReport,
   pushPersonnelEnrichmentToStaffSheet,
+  pushStaffSheetAnketaToGoogle,
 } from "../staffSheetEnrichment";
+import { runStaffSheetEnrichmentHeavy } from "../runStaffSheetHeavyJobs";
 import {
   downloadEnrichedStaffSheetExcel,
   formatStaffSheetEnrichmentReport as formatStaffExportReport,
@@ -36,6 +42,8 @@ import {
   loadStaffSheetImport,
 } from "../staffSheetImport";
 import { loadStaffSheetEnrichmentContext } from "../staffSheetEnrichmentContext";
+import { loadStaffSheetVkIndex } from "../staffSheetMilitaryIdMerge";
+import { STAFF_SHEET_ENRICHMENT_VALUE_INDEX } from "../../excel-fill/staffSheet";
 
 export function useAnketaSheetLoader() {
   const [snapshot, setSnapshot] = useState<AnketaSheetSnapshot | null>(null);
@@ -61,6 +69,7 @@ export function useAnketaSheetLoader() {
   const [staffSheetSource, setStaffSheetSource] = useState<"file" | "">("");
   const [staffSheetPersonCount, setStaffSheetPersonCount] = useState(0);
   const [isImportingStaffSheet, setIsImportingStaffSheet] = useState(false);
+  const [isImportingVkMilitaryIds, setIsImportingVkMilitaryIds] = useState(false);
 
   const applyStaffSheetImportMeta = (imported: {
     fileName: string;
@@ -237,20 +246,38 @@ export function useAnketaSheetLoader() {
 
       setMessage("Зіставляю з анкетами…");
       const context = await loadStaffSheetEnrichmentContext();
-      const entries = buildStaffSheetEnrichmentEntries({
+      const entries = await runStaffSheetEnrichmentHeavy({
         rosterRows: context.rosterRows,
-        mergedPersonnelRows: context.mergedPersonnelRows,
+        personnelIndex: context.personnelIndex,
         anketaRows: context.anketaRows,
         questionnaires: context.questionnaires,
+        vkIndex: await loadStaffSheetVkIndex(),
       });
       const report = {
         rows: entries.length,
+        totalPositions: context.rosterRows.length,
         anketaYes: entries.filter((entry) => entry.values[0] === "так").length,
+        withMilitaryId: entries.filter((entry) =>
+          Boolean(
+            String(
+              entry.values[STAFF_SHEET_ENRICHMENT_VALUE_INDEX.militaryId] ?? "",
+            ).trim(),
+          ),
+        ).length,
+        militaryIdFromVk: 0,
         withBirthDate: entries.filter((entry) =>
-          Boolean(String(entry.values[1] ?? "").trim()),
+          Boolean(
+            String(
+              entry.values[STAFF_SHEET_ENRICHMENT_VALUE_INDEX.birthDate] ?? "",
+            ).trim(),
+          ),
         ).length,
         withInn: entries.filter(
-          (entry) => entry.values[4]?.replace(/\D/g, "").length === 10,
+          (entry) =>
+            entry.values[STAFF_SHEET_ENRICHMENT_VALUE_INDEX.inn]?.replace(
+              /\D/g,
+              "",
+            ).length === 10,
         ).length,
       };
 
@@ -265,6 +292,30 @@ export function useAnketaSheetLoader() {
       );
     } finally {
       setIsImportingStaffSheet(false);
+    }
+  };
+
+  const pushStaffSheetAnketa = async () => {
+    setIsPushingStaffSheet(true);
+    try {
+      let phase = "";
+      const report = await pushStaffSheetAnketaToGoogle({
+        onProgress: (nextPhase) => {
+          phase = nextPhase;
+          setMessage(nextPhase);
+        },
+      });
+      setMessage(
+        `${phase || "Google Sheet «Штатка»"} · анкета так: ${report.anketaYes} з ${report.rows}.`,
+      );
+    } catch (error) {
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "Не вдалося оновити колонку «Анкета» в Google Sheet «Штатка».",
+      );
+    } finally {
+      setIsPushingStaffSheet(false);
     }
   };
 
@@ -316,6 +367,41 @@ export function useAnketaSheetLoader() {
     }
   };
 
+  const importVkMilitaryIdsFile = async (file: File | undefined) => {
+    if (!file) return;
+    setIsImportingVkMilitaryIds(true);
+    setMessage(`Читаю «${file.name}»…`);
+    try {
+      const workbook = await readWorkbookSnapshot(file);
+      let lastProgressAt = 0;
+      const report = await mergeVkMilitaryIdToAnketa(workbook, {
+        onProgress: (done, total) => {
+          const now = Date.now();
+          if (done !== total && now - lastProgressAt < 250) return;
+          lastProgressAt = now;
+          setMessage(`Військові квитки · ${done}/${total}`);
+        },
+      });
+      const refreshed = await loadAnketaSheetPreferCache({
+        mergeEdits: mergeWithEdits,
+      });
+      setSnapshot(refreshed);
+      const edits = await loadAnketaEdits();
+      setEditsCount(countAnketaEdits(edits));
+      setMessage(
+        `Військові квитки · ${formatAnketaMilitaryIdMergeReport(report)}.`,
+      );
+    } catch (error) {
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "Не вдалося імпортувати військові квитки.",
+      );
+    } finally {
+      setIsImportingVkMilitaryIds(false);
+    }
+  };
+
   useEffect(() => {
     void loadFromGoogle();
     void loadStaffSheetImport().then((imported) => {
@@ -349,12 +435,12 @@ export function useAnketaSheetLoader() {
     setAppsScriptUrl,
     missingQuestionnaireNames,
     setMissingQuestionnaireNames,
-    setMissingQuestionnaireNames,
     isMergingPersonnel,
     isAddingFromEjoos,
     isPushingStaffSheet,
     isDownloadingStaffSheet,
     isImportingStaffSheet,
+    isImportingVkMilitaryIds,
     staffSheetImportName,
     staffSheetImportedAt,
     staffSheetSource,
@@ -366,7 +452,9 @@ export function useAnketaSheetLoader() {
     mergeToPersonnel,
     addMissingFromEjoos,
     pushStaffSheetEnrichment,
+    pushStaffSheetAnketa,
     downloadStaffSheetExcel,
     importStaffSheetFile,
+    importVkMilitaryIdsFile,
   };
 }

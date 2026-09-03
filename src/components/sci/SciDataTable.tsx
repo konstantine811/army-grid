@@ -41,10 +41,16 @@ export type MRT_ColumnDef<TData> = {
 
 export type SciDataTableExportContext<TData> = {
   rows: TData[];
+  allRows?: TData[];
   columns: Array<{
     id: string;
     label: string;
     value: (row: TData) => string;
+  }>;
+  filters?: Array<{
+    id: string;
+    label: string;
+    values: string[];
   }>;
 };
 
@@ -75,9 +81,13 @@ type SciTableOptions<TData> = {
   enableGlobalFilter?: boolean;
   globalFilterPlaceholder?: string;
   exportLabel?: string;
+  secondaryExportLabel?: string;
   copyLabel?: string;
   enableCopyText?: boolean;
   onExport?: (
+    context: SciDataTableExportContext<TData>,
+  ) => void | Promise<void>;
+  onSecondaryExport?: (
     context: SciDataTableExportContext<TData>,
   ) => void | Promise<void>;
   emptyMessage?: string;
@@ -156,6 +166,7 @@ export function MaterialReactTable<TData>({
     Record<string, SciDataTablePin | "off">
   >({});
   const [openMenu, setOpenMenu] = useState<string | null>(null);
+  const [columnMenuQuery, setColumnMenuQuery] = useState("");
   const [sorting, setSorting] = useState<ColumnSortState | null>(null);
   const [copyState, setCopyState] = useState<"idle" | "copied" | "error">(
     "idle",
@@ -187,6 +198,13 @@ export function MaterialReactTable<TData>({
     const rest = visible.filter((column) => !column.pin);
     return [...left, ...rest, ...right];
   }, [columnVisibility, pinnedColumns]);
+  const columnMenuColumns = useMemo(() => {
+    const query = normalizeFilter(columnMenuQuery);
+    if (!query) return preparedColumns;
+    return preparedColumns.filter((column) =>
+      normalizeFilter(column.label).includes(query),
+    );
+  }, [columnMenuQuery, preparedColumns]);
   const pinnedOffsets = useMemo(
     () => calculatePinnedOffsets(visibleColumns),
     [visibleColumns],
@@ -218,39 +236,22 @@ export function MaterialReactTable<TData>({
     }
   }, [filteredRows, preparedColumns, sorting]);
   const facetedFilterOptions = useMemo(() => {
-    const rowCount = table.data.length;
     const facetMenuId = openMenu?.startsWith("facet:")
       ? openMenu.slice("facet:".length)
       : null;
 
-    // На великих таблицях рахуємо опції лише для відкритого фільтра (O(rows), не O(rows×cols)).
-    if (rowCount > 300) {
-      if (!facetMenuId) return {};
-      return {
-        [facetMenuId]: getFacetedColumnOptions(
-          table.data,
-          preparedColumns,
-          facetMenuId,
-          deferredGlobalFilter,
-          columnFilters,
-          columnRangeFilters,
-        ),
-      };
-    }
-
-    return Object.fromEntries(
-      preparedColumns.map((column) => [
-        column.columnId,
-        getFacetedColumnOptions(
-          table.data,
-          preparedColumns,
-          column.columnId,
-          deferredGlobalFilter,
-          columnFilters,
-          columnRangeFilters,
-        ),
-      ]),
-    );
+    // Опції потрібні лише відкритому фільтру. Не рахуємо всі колонки на кожен рендер.
+    if (!facetMenuId) return {};
+    return {
+      [facetMenuId]: getFacetedColumnOptions(
+        table.data,
+        preparedColumns,
+        facetMenuId,
+        deferredGlobalFilter,
+        columnFilters,
+        columnRangeFilters,
+      ),
+    };
   }, [
     columnFilters,
     columnRangeFilters,
@@ -397,10 +398,45 @@ export function MaterialReactTable<TData>({
         })),
     [columnVisibility, preparedColumns],
   );
+  const activeExportFilters = useMemo(() => {
+    const labels = new Map(
+      preparedColumns.map((column) => [column.columnId, column.label]),
+    );
+    const filters: NonNullable<
+      SciDataTableExportContext<TData>["filters"]
+    > = [];
+    for (const [id, values] of Object.entries(columnFilters)) {
+      if (!values.length) continue;
+      filters.push({ id, label: labels.get(id) ?? id, values });
+    }
+    for (const [id, range] of Object.entries(columnRangeFilters)) {
+      const values = [
+        range.min ? `від ${range.min}` : "",
+        range.max ? `до ${range.max}` : "",
+      ].filter(Boolean);
+      if (values.length) {
+        filters.push({ id, label: labels.get(id) ?? id, values });
+      }
+    }
+    if (deferredGlobalFilter.trim()) {
+      filters.push({
+        id: "search",
+        label: "Пошук",
+        values: [deferredGlobalFilter.trim()],
+      });
+    }
+    return filters;
+  }, [
+    columnFilters,
+    columnRangeFilters,
+    deferredGlobalFilter,
+    preparedColumns,
+  ]);
   const showToolbar =
     table.enableGlobalFilter !== false ||
     table.enableColumnVisibility !== false ||
     Boolean(table.onExport) ||
+    Boolean(table.onSecondaryExport) ||
     table.enableCopyText === true;
   const hasColumnFilters =
     table.enableColumnFilters !== false &&
@@ -492,11 +528,29 @@ export function MaterialReactTable<TData>({
               onClick={() =>
                 void table.onExport?.({
                   rows: filteredRows,
+                  allRows: table.data,
                   columns: visibleExportColumns,
+                  filters: activeExportFilters,
                 })
               }
             >
               {table.exportLabel ?? "Експорт"}
+            </button>
+          ) : null}
+          {table.onSecondaryExport ? (
+            <button
+              type="button"
+              className="sci-data-table-export"
+              onClick={() =>
+                void table.onSecondaryExport?.({
+                  rows: filteredRows,
+                  allRows: table.data,
+                  columns: visibleExportColumns,
+                  filters: activeExportFilters,
+                })
+              }
+            >
+              {table.secondaryExportLabel ?? "Експорт важливих колонок"}
             </button>
           ) : null}
           {table.enableColumnVisibility !== false ? (
@@ -509,7 +563,15 @@ export function MaterialReactTable<TData>({
                 triggerClassName="sci-data-table-columns-trigger"
                 contentClassName="sci-data-table-columns-menu"
               >
-                {preparedColumns.map((column) => (
+                <input
+                  className="sci-data-table-facet-search"
+                  value={columnMenuQuery}
+                  onChange={(event) => setColumnMenuQuery(event.target.value)}
+                  onKeyDown={(event) => event.stopPropagation()}
+                  placeholder="Знайти колонку…"
+                  aria-label="Пошук колонки"
+                />
+                {columnMenuColumns.map((column) => (
                   <label key={column.columnId}>
                     <input
                       type="checkbox"
@@ -525,6 +587,11 @@ export function MaterialReactTable<TData>({
                     <span>{column.label}</span>
                   </label>
                 ))}
+                {columnMenuColumns.length === 0 ? (
+                  <span className="sci-data-table-columns-empty">
+                    Колонок не знайдено
+                  </span>
+                ) : null}
               </TableSelectMenu>
             </div>
           ) : null}
@@ -930,7 +997,11 @@ function TableSelectMenu({
       <SelectTrigger
         className={triggerClassName ?? "sci-data-table-facet-trigger"}
       >
-        {trigger}
+        <span className="sci-data-table-select-caption" title={
+          typeof trigger === "string" ? trigger : undefined
+        }>
+          {trigger}
+        </span>
       </SelectTrigger>
       <SelectContent
         className={
@@ -968,7 +1039,7 @@ function ColumnFacetFilter({
 }) {
   const [optionQuery, setOptionQuery] = useState("");
   const selectedSet = new Set(selected);
-  const caption = selected.length ? `Обрано: ${selected.length}` : "Фільтр";
+  const caption = selected.length ? selected.join(", ") : "Фільтр";
   const monthGroups = useMemo(() => buildFacetMonthGroups(options), [options]);
   const query = normalizeFilter(optionQuery);
   const filteredOptions = options.filter((option) =>

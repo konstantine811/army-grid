@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
 import {
   Alert,
   Box,
@@ -8,7 +8,10 @@ import {
 } from "@/components/sci/SciPrimitives";
 import {
   ArrowRightOutlinedIcon,
+  FileDownloadOutlinedIcon,
+  FileUploadOutlinedIcon,
   SkipNextOutlinedIcon,
+  SyncAltOutlinedIcon,
 } from "@/components/sci/icons";
 import type { SciDataTableExportContext } from "@/components/sci/SciDataTable";
 import {
@@ -28,6 +31,7 @@ import { useAnketaGapColumnsMenu } from "./hooks/useAnketaGapColumnsMenu";
 import { useAnketaGapSearch } from "./hooks/useAnketaGapSearch";
 import { useAnketaSheetLoader } from "./hooks/useAnketaSheetLoader";
 import { useAuth } from "../../auth/AuthProvider";
+import { loadPersonnelIndexForAnketa } from "./anketaPersonMatch";
 
 export function AnketaDataPage() {
   const { canEditArea } = useAuth();
@@ -49,6 +53,12 @@ export function AnketaDataPage() {
     setGapColumnsOpen: gapColumns.setGapColumnsOpen,
     gapColumnsOpen: gapColumns.gapColumnsOpen,
   });
+
+  useEffect(() => {
+    void loadPersonnelIndexForAnketa().catch(() => {
+      /* прогрів кешу для картки / пошуку порожніх */
+    });
+  }, []);
 
   const exportTable = async (
     context: SciDataTableExportContext<AnketaRow>,
@@ -209,6 +219,64 @@ export function AnketaDataPage() {
               </span>
             </Button>
           </div>
+          <div className="anketa-toolbar-group" aria-label="Штатка">
+            <Button
+              variant="contained"
+              disabled={!canEdit || sheet.isDownloadingStaffSheet}
+              startIcon={<FileDownloadOutlinedIcon />}
+              onClick={() => void sheet.downloadStaffSheetExcel()}
+              title="Повна «Штатка» з усіма рядками та колонкою «Анкета» — для ручного перенесення в Google"
+            >
+              <span className="anketa-label-full">
+                {sheet.isDownloadingStaffSheet
+                  ? "Формую…"
+                  : "Штатка для Google"}
+              </span>
+              <span className="anketa-label-short" aria-hidden="true">
+                {sheet.isDownloadingStaffSheet ? "…" : "↓ Штатка"}
+              </span>
+            </Button>
+            <Button
+              variant="outlined"
+              disabled={!canEdit || sheet.isPushingStaffSheet || !sheet.staffSheetImportName}
+              startIcon={<SyncAltOutlinedIcon />}
+              onClick={() => void sheet.pushStaffSheetAnketa()}
+              title="Записати «так» у колонку «Анкета» Google «Штатки» (потрібен Apps Script і права редактора)"
+            >
+              <span className="anketa-label-full">→ Google Штатка: Анкета</span>
+              <span className="anketa-label-short" aria-hidden="true">
+                G Анкета
+              </span>
+            </Button>
+          </div>
+          <div className="anketa-toolbar-group" aria-label="Імпорт">
+            <Button
+              component="label"
+              variant="outlined"
+              disabled={
+                !canEdit ||
+                sheet.isLoading ||
+                sheet.isImportingVkMilitaryIds ||
+                !sheet.rows.length
+              }
+              startIcon={<FileUploadOutlinedIcon />}
+              title="Заповнити колонки «Військовий квиток» і «РНОКПП» з файлу ВК ТПВ ДОВІДКИ за ПІБ"
+            >
+              {sheet.isImportingVkMilitaryIds
+                ? "ВК…"
+                : "Імпорт Військові квитки"}
+              <input
+                hidden
+                type="file"
+                accept=".xlsx,.xlsm"
+                disabled={!canEdit}
+                onChange={(event) => {
+                  void sheet.importVkMilitaryIdsFile(event.target.files?.[0]);
+                  event.target.value = "";
+                }}
+              />
+            </Button>
+          </div>
         </div>
       </header>
 
@@ -218,7 +286,8 @@ export function AnketaDataPage() {
       sheet.isAddingFromEjoos ||
       sheet.isPushingStaffSheet ||
       sheet.isDownloadingStaffSheet ||
-      sheet.isImportingStaffSheet ? (
+      sheet.isImportingStaffSheet ||
+      sheet.isImportingVkMilitaryIds ? (
         <LinearProgress sx={{ mb: 1 }} />
       ) : null}
 

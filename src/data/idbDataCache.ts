@@ -82,6 +82,7 @@ export const CacheKeys = {
   rosterLatest: "personnel:roster:latest",
   anketaCreatedPersonnel: "personnel:anketa-created:v1",
   staffSheetImport: "anketa:staff-sheet-import",
+  staffSheetVkIndex: "anketa:staff-sheet-vk-index",
   overview: "personnel:overview",
   documentsAll: "personnel:documents:all",
   questionnairesMeta: "personnel:questionnaires:meta",

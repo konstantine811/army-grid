@@ -1,5 +1,6 @@
 import type { EjournalPreviewRow } from "../ejournal/ejournalTypes";
 import { readRosterColumnValue } from "../excel-fill/rosterSourceSnapshot";
+import type { StaffSheetEnrichmentEntry } from "./staffSheetEnrichment";
 
 export const STAFF_SHEET_PREVIEW_COLUMNS = [
   { number: 1, label: "№" },
@@ -37,3 +38,32 @@ export const buildStaffSheetPreviewRows = (
         readRosterColumnValue(row, column.number).trim(),
       ),
     }));
+
+/** Підставляє зіставлені з ОС/анкетами значення (кол. 10, 16–19) у preview. */
+const ENRICHMENT_PREVIEW_CELLS: Array<[cellIndex: number, valueIndex: number]> =
+  [
+    [4, 0],
+    [5, 1],
+    [6, 2],
+    [7, 3],
+    [8, 4],
+  ];
+
+export const buildStaffSheetPreviewRowsWithEnrichment = (
+  rows: EjournalPreviewRow[],
+  entries: StaffSheetEnrichmentEntry[],
+): StaffSheetPreviewRow[] => {
+  const byRow = new Map(
+    entries.map((entry) => [entry.excelRowNumber, entry.values]),
+  );
+  return buildStaffSheetPreviewRows(rows).map((row) => {
+    const values = byRow.get(row.excelRowNumber);
+    if (!values) return row;
+    const cells = [...row.cells];
+    for (const [cellIndex, valueIndex] of ENRICHMENT_PREVIEW_CELLS) {
+      const next = String(values[valueIndex] ?? "").trim();
+      if (next) cells[cellIndex] = next;
+    }
+    return { ...row, cells };
+  });
+};

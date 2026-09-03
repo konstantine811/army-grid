@@ -124,6 +124,39 @@ describe("personHasWorkbookApplyOps typing smoke", () => {
   });
 });
 
+describe("БЕЗВІСТИ → РОЗПОРЯДЖ person card", () => {
+  it("keeps OOS and open БЕЗВІСТИ, paints timesheet with ЗБ without вибув", () => {
+    const people = personChangesFromOps(
+      [
+        op({
+          kind: "move_to_disposition",
+          class: "ready",
+          personId: "21810",
+          fullName: "АЛЬОХІН Віктор Олександрович",
+          positionIndex: "2103455",
+          payload: {
+            previousIndex: "2103455",
+            orderDate: "12.08.2026",
+            remainsInOos: "true",
+            timesheetFound: "true",
+            keepOpenSzchTimesheet: "1",
+            absenceCode: "ЗБ",
+            absenceType: "БЕЗВІСТИ",
+          },
+        }),
+      ],
+      25,
+    );
+    expect(people[0].ejoosWillDo.join("\n")).toMatch(/01–зріз ЗБ/i);
+    expect(people[0].ejoosWillDo.join("\n")).toMatch(/БЕЗВІСТИ лишається відкритим/i);
+    expect(people[0].ejoosWillDo.join("\n")).toMatch(/Виключені: без змін/);
+    expect(
+      people[0].sheetImpacts.find((item) => item.sheetKey === "timesheet")
+        ?.detail,
+    ).toMatch(/12\.08\.2026 не писати «вибув у розпорядження»/i);
+  });
+});
+
 describe("СЗЧ → РОЗПОРЯДЖ person card", () => {
   it("keeps OOS and open СЗЧ, paints timesheet without вибув", () => {
     const people = personChangesFromOps(

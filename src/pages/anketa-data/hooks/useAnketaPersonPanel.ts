@@ -33,6 +33,9 @@ export function useAnketaPersonPanel(
   const [ambiguousMatches, setAmbiguousMatches] = useState<AnketaPersonnelMatch[]>(
     [],
   );
+  const [similarMatches, setSimilarMatches] = useState<AnketaPersonnelMatch[]>(
+    [],
+  );
   const [matchStatus, setMatchStatus] = useState<"idle" | "loading" | "ready">(
     "idle",
   );
@@ -60,6 +63,7 @@ export function useAnketaPersonPanel(
     setPanelRowId(anketaRowId);
     setMatch(null);
     setAmbiguousMatches([]);
+    setSimilarMatches([]);
     setMatchedAnketaRowId("");
     setMatchStatus(anketaRowId ? "loading" : "idle");
     setAttachmentExternalId("");
@@ -94,8 +98,14 @@ export function useAnketaPersonPanel(
           loadPersonQuestionnaireForRow(personMatch.row, hints),
         ]);
         if (epoch !== attachmentsEpochRef.current) return null;
-        setPhotoData(photoResult.photoData);
-        setQuestionnaire(questionnaireResult.questionnaire);
+        const anketaName = String(row.fullName ?? "").trim();
+        const questionnaire = questionnaireResult.questionnaire;
+        const questionnaireOk =
+          !questionnaire?.fileName ||
+          !anketaName ||
+          questionnaireFileMatchesPerson(questionnaire.fileName, [anketaName]);
+        setPhotoData(questionnaireOk ? photoResult.photoData : "");
+        setQuestionnaire(questionnaireOk ? questionnaire : null);
         const resolvedExternalId =
           questionnaireResult.resolvedExternalId ||
           photoResult.resolvedExternalId ||
@@ -165,10 +175,11 @@ export function useAnketaPersonPanel(
   const displayName =
     anketaRow?.fullName?.trim() || match?.summary.name || "Службовець";
   const exportFileName = useMemo(() => {
+    const anketaName = anketaRow?.fullName?.trim() || "";
     const stored = String(questionnaire?.fileName ?? "").trim();
     if (
       stored &&
-      questionnaireFileMatchesPerson(stored, [displayName])
+      questionnaireFileMatchesPerson(stored, [anketaName, displayName])
     ) {
       return stored;
     }
@@ -176,7 +187,7 @@ export function useAnketaPersonPanel(
       displayName,
       match?.summary.callSign ?? "",
     );
-  }, [displayName, match?.summary.callSign, questionnaire?.fileName]);
+  }, [anketaRow?.fullName, displayName, match?.summary.callSign, questionnaire?.fileName]);
 
   const shareSource = useMemo<QuestionnairePdfSource | null>(() => {
     if (!questionnaire?.fileData) return null;
@@ -229,14 +240,16 @@ export function useAnketaPersonPanel(
     const rowId = anketaRow.__rowId;
     setMatch(null);
     setAmbiguousMatches([]);
+    setSimilarMatches([]);
     setMatchedAnketaRowId("");
     setMatchStatus("loading");
-    void loadPersonnelIndexForAnketa({ force: true })
+    void loadPersonnelIndexForAnketa()
       .then((index) => {
         if (cancelled) return;
         const result = matchAnketaRowToPersonnelDetailed(anketaRow, index);
         setMatch(result.match);
         setAmbiguousMatches(result.ambiguous);
+        setSimilarMatches(result.similar);
         setMatchedAnketaRowId(rowId);
         setMatchStatus("ready");
       })
@@ -244,6 +257,7 @@ export function useAnketaPersonPanel(
         if (cancelled) return;
         setMatch(null);
         setAmbiguousMatches([]);
+        setSimilarMatches([]);
         setMatchedAnketaRowId(rowId);
         setMatchStatus("ready");
       });
@@ -290,9 +304,30 @@ export function useAnketaPersonPanel(
         return;
       }
       shouldAutoOpenPreviewRef.current = false;
+      const name = anketaRow.fullName?.trim() || match.summary.name;
+      const fileName =
+        String(result.questionnaire.fileName ?? "").trim() ||
+        buildQuestionnaireExportFileName(name, match.summary.callSign ?? "");
+      if (
+        result.questionnaire.fileName &&
+        !questionnaireFileMatchesPerson(fileName, [anketaRow.fullName])
+      ) {
+        return;
+      }
+      if (result.questionnaire.fileData) {
+        const nextUrl = dataUrlToObjectUrl(result.questionnaire.fileData);
+        setPreviewTitle(`Анкета · ${name} · ${fileName}`);
+        setPreviewUrl((current) => {
+          if (current) revokeQuestionnairePreviewUrl(current);
+          previewUrlRef.current = nextUrl;
+          return nextUrl;
+        });
+        setPreviewOpen(true);
+        return;
+      }
       void openPreviewForExternalId(
         result.resolvedExternalId,
-        anketaRow.fullName?.trim() || match.summary.name,
+        name,
         match.summary.callSign ?? "",
         result.questionnaire?.fileName,
       );
@@ -432,6 +467,7 @@ export function useAnketaPersonPanel(
   return {
     match,
     ambiguousMatches,
+    similarMatches,
     matchStatus,
     isMerging,
     photoData,

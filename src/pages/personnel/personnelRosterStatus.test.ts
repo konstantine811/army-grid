@@ -59,5 +59,14 @@ describe("classifyOverviewStatusFromRoster", () => {
     ).toBe("MEDICAL");
     expect(classifyOverviewStatusFromRoster("Відпустка").status).toBe("LEAVE");
     expect(classifyOverviewStatusFromRoster("в строю").status).toBe("ON_DUTY");
+    expect(classifyOverviewStatusFromRoster("в строю").statusLabel).toBe(
+      "в строю",
+    );
+    expect(
+      classifyOverviewStatusFromRoster("Новоприбулий").statusLabel,
+    ).toBe("Новоприбулий");
+    expect(
+      classifyOverviewStatusFromRoster("лікування після поранення").statusLabel,
+    ).toBe("лікування після поранення");
   });
 });

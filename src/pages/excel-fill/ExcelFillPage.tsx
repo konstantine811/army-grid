@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Box, Button, Stack, Typography } from "@/components/sci/SciPrimitives";
+import { Box, Button, Stack, TextField, Typography } from "@/components/sci/SciPrimitives";
 import type { EjournalPreviewRow } from "../ejournal/ejournalTypes";
 import {
   FileDownloadOutlinedIcon,
@@ -9,6 +9,7 @@ import {
 import { api } from "../../api";
 import { CacheKeys, readDataCache } from "../../data/idbDataCache";
 import { loadSharedRosterLatest } from "../../data/sharedAppData";
+import { STAFF_SHEET_SYNCED_EVENT } from "../../data/staffSheetAutoSync";
 import {
   type CellValue,
   type ExcelSheetSnapshot,
@@ -30,19 +31,40 @@ import {
 } from "./positionsVozFill";
 import {
   mapRosterLatestToPreviewRows,
+  readRosterColumnValue,
   rosterLatestToSourceSnapshot,
-  rosterRowsToSourceSnapshot,
 } from "./rosterSourceSnapshot";
 import {
-  loadStaffSheetImport,
+  importStaffSheetFromGoogle,
+  rosterLatestToStaffSheetImportSnapshot,
+  formatStaffSheetImportSummary,
   type StaffSheetImportSnapshot,
 } from "../anketa-data/staffSheetImport";
 import {
   buildStaffSheetPreviewRows,
+  buildStaffSheetPreviewRowsWithEnrichment,
   STAFF_SHEET_PREVIEW_COLUMNS,
 } from "../anketa-data/staffSheetPreview";
+import {
+  formatStaffSheetEnrichmentReport,
+  type StaffSheetEnrichmentEntry,
+  type StaffSheetEnrichmentReport,
+} from "../anketa-data/staffSheetEnrichment";
+import { runStaffSheetEnrichmentHeavy } from "../anketa-data/runStaffSheetHeavyJobs";
+import { loadStaffSheetEnrichmentContext } from "../anketa-data/staffSheetEnrichmentContext";
+import { downloadEnrichedStaffSheetExcel } from "../anketa-data/staffSheetEnrichedExport";
+import {
+  STAFF_SHEET_ENRICHMENT_VALUE_INDEX,
+} from "./staffSheet";
+import {
+  formatStaffSheetMilitaryIdMergeReport,
+  importStaffSheetVkFile,
+  loadStaffSheetVkCache,
+  loadStaffSheetVkIndex,
+  type StaffSheetVkCache,
+} from "../anketa-data/staffSheetMilitaryIdMerge";
 
-type ActiveRosterSourceKind = "upload" | "staff-import" | "personnel";
+type ActiveRosterSourceKind = "upload" | "personnel";
 
 type ActiveRosterSource = {
   kind: ActiveRosterSourceKind;
@@ -807,6 +829,16 @@ export function ExcelFillPage() {
   );
   const [staffSheetImport, setStaffSheetImport] =
     useState<StaffSheetImportSnapshot | null>(null);
+  const [staffEnrichmentEntries, setStaffEnrichmentEntries] = useState<
+    StaffSheetEnrichmentEntry[]
+  >([]);
+  const [staffEnrichmentReport, setStaffEnrichmentReport] =
+    useState<StaffSheetEnrichmentReport | null>(null);
+  const [isStaffSheetBusy, setIsStaffSheetBusy] = useState(false);
+  const [staffVkCache, setStaffVkCache] = useState<StaffSheetVkCache | null>(
+    null,
+  );
+  const [isImportingStaffVk, setIsImportingStaffVk] = useState(false);
   const [target, setTarget] = useState<ExcelWorkbookSnapshot | null>(null);
   const [positionsTemplate, setPositionsTemplate] =
     useState<ExcelWorkbookSnapshot | null>(null);
@@ -842,23 +874,6 @@ export function ExcelFillPage() {
       });
     }
 
-    if (staffSheetImport?.rows.length) {
-      const snapshot = rosterRowsToSourceSnapshot(
-        staffSheetImport.rows,
-        staffSheetImport.fileName,
-      );
-      if (snapshot) {
-        candidates.push({
-          kind: "staff-import",
-          snapshot,
-          label: staffSheetImport.fileName,
-          importedAt: staffSheetImport.importedAt,
-          loadedAt: staffSheetImport.importedAt,
-          freshnessAt: Date.parse(staffSheetImport.importedAt) || 0,
-        });
-      }
-    }
-
     if (rosterSource) {
       candidates.push({
         kind: "personnel",
@@ -876,15 +891,7 @@ export function ExcelFillPage() {
     const upload = candidates.find((item) => item.kind === "upload");
     if (upload) return upload;
 
-    // Інакше — найновіший імпорт. При однаковому часі — Штатка (кращі колонки з .xlsx).
-    return [...candidates].sort((left, right) => {
-      if (right.freshnessAt !== left.freshnessAt) {
-        return right.freshnessAt - left.freshnessAt;
-      }
-      if (left.kind === "staff-import") return -1;
-      if (right.kind === "staff-import") return 1;
-      return 0;
-    })[0];
+    return candidates[0] ?? null;
   }, [
     rosterImportedAt,
     rosterLabel,
@@ -892,7 +899,6 @@ export function ExcelFillPage() {
     rosterSource,
     sourceUpload,
     sourceUploadLoadedAt,
-    staffSheetImport,
   ]);
 
   const source = activeRosterSource?.snapshot ?? null;
@@ -927,31 +933,18 @@ export function ExcelFillPage() {
     [morningReportBase],
   );
   const staffSheetPreviewMeta = useMemo(() => {
-    if (activeRosterSource?.kind === "staff-import" && staffSheetImport?.rows.length) {
-      return {
-        source: "import" as const,
-        label: staffSheetImport.fileName,
-        detail: staffSheetImport.sheetName,
-        timestamp: staffSheetImport.importedAt,
-        rows: buildStaffSheetPreviewRows(staffSheetImport.rows),
-      };
-    }
+    const previewFrom = (rows: EjournalPreviewRow[]) =>
+      staffEnrichmentEntries.length
+        ? buildStaffSheetPreviewRowsWithEnrichment(rows, staffEnrichmentEntries)
+        : buildStaffSheetPreviewRows(rows);
+
     if (rosterPreviewRows.length) {
       return {
         source: "personnel" as const,
         label: rosterLabel || "Загальний список",
         detail: "БД персоналу / Google «Штатка»",
         timestamp: rosterImportedAt,
-        rows: buildStaffSheetPreviewRows(rosterPreviewRows),
-      };
-    }
-    if (staffSheetImport?.rows.length) {
-      return {
-        source: "import" as const,
-        label: staffSheetImport.fileName,
-        detail: staffSheetImport.sheetName,
-        timestamp: staffSheetImport.importedAt,
-        rows: buildStaffSheetPreviewRows(staffSheetImport.rows),
+        rows: previewFrom(rosterPreviewRows),
       };
     }
     return {
@@ -961,22 +954,14 @@ export function ExcelFillPage() {
       timestamp: null as string | null,
       rows: [],
     };
-  }, [
-    activeRosterSource?.kind,
-    staffSheetImport,
-    rosterPreviewRows,
-    rosterLabel,
-    rosterImportedAt,
-  ]);
+  }, [rosterImportedAt, rosterLabel, rosterPreviewRows, staffEnrichmentEntries]);
   const staffSheetPreviewRows = staffSheetPreviewMeta.rows;
   const morningSourceMeta = useMemo(() => {
     if (!activeRosterSource) return null;
     const kindLabel =
       activeRosterSource.kind === "upload"
         ? "Excel-файл на цій сторінці"
-        : activeRosterSource.kind === "staff-import"
-          ? "імпорт Штатки з Анкетних даних"
-          : "БД персоналу";
+        : "БД персоналу / Google «Штатка»";
     return {
       label: activeRosterSource.label,
       importedAt: activeRosterSource.importedAt,
@@ -995,10 +980,165 @@ export function ExcelFillPage() {
   }, []);
 
   useEffect(() => {
-    void loadStaffSheetImport().then((imported) => {
-      if (imported) setStaffSheetImport(imported);
-    });
+    const onSynced = () => {
+      void loadSourceFromPersonnel(true);
+    };
+    window.addEventListener(STAFF_SHEET_SYNCED_EVENT, onSynced);
+    return () => window.removeEventListener(STAFF_SHEET_SYNCED_EVENT, onSynced);
   }, []);
+
+  useEffect(() => {
+    void loadStaffSheetVkCache().then(setStaffVkCache);
+  }, []);
+
+  const refreshStaffEnrichment = async (
+    rosterRows?: EjournalPreviewRow[],
+    options?: { manageBusy?: boolean },
+  ): Promise<StaffSheetEnrichmentReport | null> => {
+    const manageBusy = options?.manageBusy !== false;
+    if (manageBusy) setIsStaffSheetBusy(true);
+    try {
+      setMessage("Зіставляю Штатку з особовим складом і анкетами…");
+      const [context, vkIndex] = await Promise.all([
+        loadStaffSheetEnrichmentContext(),
+        loadStaffSheetVkIndex(),
+      ]);
+      const rows = rosterRows?.length ? rosterRows : context.rosterRows;
+      const entries = await runStaffSheetEnrichmentHeavy({
+        rosterRows: rows,
+        personnelIndex: context.personnelIndex,
+        anketaRows: context.anketaRows,
+        questionnaires: context.questionnaires,
+        vkIndex,
+      });
+      const report: StaffSheetEnrichmentReport = {
+        rows: entries.length,
+        totalPositions: rows.length,
+        anketaYes: entries.filter((entry) => entry.values[0] === "так").length,
+        withMilitaryId: entries.filter((entry) =>
+          Boolean(
+            String(
+              entry.values[STAFF_SHEET_ENRICHMENT_VALUE_INDEX.militaryId] ?? "",
+            ).trim(),
+          ),
+        ).length,
+        militaryIdFromVk: entries.filter((entry) => {
+          const rosterRow = rows.find(
+            (row) => Number(row.__rowNumber) === entry.excelRowNumber,
+          );
+          if (!rosterRow) return false;
+          const hadValue = readRosterColumnValue(rosterRow, 11).trim().length > 0;
+          const mergedValue = String(
+            entry.values[STAFF_SHEET_ENRICHMENT_VALUE_INDEX.militaryId] ?? "",
+          ).trim();
+          return !hadValue && mergedValue.length > 0;
+        }).length,
+        withBirthDate: entries.filter((entry) =>
+          Boolean(
+            String(
+              entry.values[STAFF_SHEET_ENRICHMENT_VALUE_INDEX.birthDate] ?? "",
+            ).trim(),
+          ),
+        ).length,
+        withInn: entries.filter(
+          (entry) =>
+            entry.values[STAFF_SHEET_ENRICHMENT_VALUE_INDEX.inn]?.replace(
+              /\D/g,
+              "",
+            ).length === 10,
+        ).length,
+      };
+      setStaffEnrichmentEntries(entries);
+      setStaffEnrichmentReport(report);
+      setMessage(`Зіставлення: ${formatStaffSheetEnrichmentReport(report)}`);
+      return report;
+    } catch (error) {
+      setStaffEnrichmentEntries([]);
+      setStaffEnrichmentReport(null);
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "Не вдалося зіставити Штатку з особовим складом.",
+      );
+      return null;
+    } finally {
+      if (manageBusy) setIsStaffSheetBusy(false);
+    }
+  };
+
+  const syncStaffSheetFromGoogle = async () => {
+    setIsStaffSheetBusy(true);
+    try {
+      setMessage("Завантажую «Штатку» з Google Sheets у БД…");
+      const imported = await importStaffSheetFromGoogle();
+      setStaffSheetImport(imported);
+      await loadSourceFromPersonnel(true);
+      const report = await refreshStaffEnrichment(imported.rows, {
+        manageBusy: false,
+      });
+      setMessage(
+        report
+          ? `Оновлено з Google Sheets: ${formatStaffSheetImportSummary(imported)} · ${formatStaffSheetEnrichmentReport(report)}.`
+          : `Оновлено з Google Sheets: ${formatStaffSheetImportSummary(imported)}.`,
+      );
+    } catch (error) {
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "Не вдалося оновити «Штатку» з Google Sheets.",
+      );
+    } finally {
+      setIsStaffSheetBusy(false);
+    }
+  };
+
+  const exportEnrichedStaffSheet = async () => {
+    setIsStaffSheetBusy(true);
+    try {
+      const report = await downloadEnrichedStaffSheetExcel({
+        onProgress: (phase) => setMessage(phase),
+      });
+      setStaffEnrichmentReport(report);
+      setMessage(
+        `Завантажено Excel · ${formatStaffSheetEnrichmentReport(report)}`,
+      );
+    } catch (error) {
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "Не вдалося сформувати Excel «Штатка».",
+      );
+    } finally {
+      setIsStaffSheetBusy(false);
+    }
+  };
+
+  const importStaffVkWorkbook = async (file: File | undefined) => {
+    if (!file) return;
+    setIsImportingStaffVk(true);
+    try {
+      setMessage("Імпортую ВК ТПВ ДОВІДКИ…");
+      const context = await loadStaffSheetEnrichmentContext();
+      const { index, report } = await importStaffSheetVkFile(
+        file,
+        context.rosterRows,
+      );
+      const cache = await loadStaffSheetVkCache();
+      setStaffVkCache(cache);
+      await refreshStaffEnrichment(context.rosterRows, { manageBusy: false });
+      setMessage(
+        `ВК ТПВ ДОВІДКИ · ${file.name} · ${formatStaffSheetMilitaryIdMergeReport(report)} · у кеші ${index.size} ПІБ.`,
+      );
+    } catch (error) {
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "Не вдалося імпортувати ВК ТПВ ДОВІДКИ.",
+      );
+    } finally {
+      setIsImportingStaffVk(false);
+    }
+  };
 
   const applyRosterLatest = (
     latest: NonNullable<Awaited<ReturnType<typeof api.getLatestPersonnelRoster>>>,
@@ -1006,6 +1146,7 @@ export function ExcelFillPage() {
   ) => {
     const snapshot = rosterLatestToSourceSnapshot(latest);
     const rows = mapRosterLatestToPreviewRows(latest);
+    const staffSnapshot = rosterLatestToStaffSheetImportSnapshot(latest);
     setRosterSource(snapshot);
     setSourceUpload(null);
     setSourceUploadLoadedAt(null);
@@ -1014,11 +1155,15 @@ export function ExcelFillPage() {
     setRosterLabel(latest.sourceFileName || latest.importName || "Загальний список");
     setRosterImportedAt(latest.createdAt || null);
     setRosterLoadedAt(new Date().toISOString());
+    if (staffSnapshot) {
+      setStaffSheetImport(staffSnapshot);
+      void refreshStaffEnrichment(staffSnapshot.rows, { manageBusy: false });
+    }
     if (snapshot) {
       setMessage(
         fromCache
           ? `Кеш персоналу: ${rows.length} рядків · оновлюю з БД…`
-          : `Джерело з персоналу: ${rows.length} рядків · ${latest.sourceFileName || latest.importName}.`,
+          : `Джерело з БД: ${rows.length} рядків · ${latest.sourceFileName || latest.importName}.`,
       );
     }
   };
@@ -1045,7 +1190,7 @@ export function ExcelFillPage() {
         setRosterImportedAt(null);
         setRosterLoadedAt(null);
         setMessage(
-          "У БД немає «Загального списку». Імпортуйте «Штатку» на «Анкетні дані».",
+          "У БД немає «Загального списку». Оновіть «Штатку» з Google Sheets в Особовому складі.",
         );
         return;
       }
@@ -1298,27 +1443,33 @@ export function ExcelFillPage() {
         <section className="panel">
           <div className="panel-heading">1. Джерело · персонал</div>
           <Typography variant="body2" color="text.secondary">
-            Ранковий звіт бере найсвіжіше: імпорт «Штатки» з Анкетних даних, БД
-            або Excel на цій сторінці. Зараз:{" "}
+            Ранковий звіт бере дані з БД (Google «Штатка»). Зараз:{" "}
             {morningSourceMeta
               ? `${morningSourceMeta.kindLabel} · ${morningSourceMeta.label} · ${formatSourceTimestamp(morningSourceMeta.importedAt || morningSourceMeta.loadedAt) ?? "—"}`
-              : "немає даних — імпортуйте «Штатку» на «Анкетні дані»"}.
+              : "немає даних — оновіть «Штатку» з Google Sheets в Особовому складі"}.
           </Typography>
           <Stack direction="row" spacing={1} sx={{ mt: 2, alignItems: "center", flexWrap: "wrap" }}>
             <Button
               variant="outlined"
               disabled={isBusy}
               onClick={() => void loadSourceFromPersonnel(true)}
-              title="Перечитати вже збережене в БД"
+              title="Перечитати збережене в БД"
             >
-              З БД
+              Оновити з БД
+            </Button>
+            <Button
+              variant="contained"
+              disabled={isStaffSheetBusy}
+              startIcon={<SyncAltOutlinedIcon />}
+              onClick={() => void syncStaffSheetFromGoogle()}
+              title="Завантажити «Штатку» з Google Sheets у БД (через gviz, без прав редактора)"
+            >
+              Оновити з Google Sheet
             </Button>
             <Typography variant="body2">
               {rosterSource
-                ? `${rosterRowCount} рядків · ${rosterLabel}`
-                : staffSheetImport
-                  ? `${staffSheetImport.personCount || staffSheetImport.rows.length} · ${staffSheetImport.fileName}`
-                  : "Дані не завантажено"}
+                ? `Штатка · ${rosterRowCount} рядків · ${formatSourceTimestamp(rosterImportedAt) ?? "—"}`
+                : "Дані не завантажено"}
             </Typography>
           </Stack>
           {rosterSource ? (
@@ -1344,6 +1495,80 @@ export function ExcelFillPage() {
             <Typography variant="body2" color="text.secondary">
               {sourceUpload?.fileName ?? "файл не вибрано"}
             </Typography>
+          </Stack>
+        </section>
+
+        <section className="panel excel-fill-staff-panel">
+          <div className="panel-heading">Штатка · Анкета</div>
+          <Typography variant="body2" color="text.secondary">
+            Зіставлення «Загального списку» з БД з особовим складом і анкетами.
+            У колонку «Анкета» ставиться «так», якщо для людини є анкета або
+            PDF-анкета в системі. «Військовий квиток» можна доповнити з файлу
+            ВК ТПВ ДОВІДКИ (колонка ВК№) — лише в порожні комірки Штатки.
+          </Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+            1. «Імпорт ВК ТПВ» (за потреби) → 2. «Зіставити з ОС» → 3. «Скачати
+            Штатку для Google» → 4. у Excel скопіюйте потрібні колонки → 5.
+            вставте в Google «Штатку» тим, у кого є доступ.
+          </Typography>
+          <Stack
+            direction="row"
+            spacing={1}
+            sx={{ mt: 2, alignItems: "center", flexWrap: "wrap" }}
+          >
+            <Button
+              variant="outlined"
+              disabled={isStaffSheetBusy || isImportingStaffVk}
+              component="label"
+              startIcon={<FileUploadOutlinedIcon />}
+              title="Імпорт ВК ТПВ ДОВІДКИ — доповнити колонку «Військовий квиток» у Штатці за ПІБ"
+            >
+              {isImportingStaffVk ? "ВК…" : "Імпорт ВК ТПВ"}
+              <input
+                hidden
+                type="file"
+                accept=".xlsx,.xlsm"
+                disabled={isStaffSheetBusy || isImportingStaffVk}
+                onChange={(event) => {
+                  void importStaffVkWorkbook(event.target.files?.[0]);
+                  event.target.value = "";
+                }}
+              />
+            </Button>
+            <Button
+              variant="outlined"
+              disabled={isStaffSheetBusy || !rosterPreviewRows.length}
+              onClick={() => void refreshStaffEnrichment()}
+            >
+              Зіставити з ОС
+            </Button>
+            <Button
+              variant="contained"
+              disabled={isStaffSheetBusy}
+              startIcon={<FileDownloadOutlinedIcon />}
+              onClick={() => void exportEnrichedStaffSheet()}
+              title="Повна «Штатка» з усіма рядками для ручного перенесення в Google"
+            >
+              Скачати Штатку для Google
+            </Button>
+          </Stack>
+          <Stack spacing={0.5} sx={{ mt: 1.5 }}>
+            <Typography variant="body2">
+              {rosterPreviewRows.length
+                ? `Штатка · ${formatSourceTimestamp(rosterImportedAt) ?? "—"}`
+                : "Штатку ще не завантажено з БД"}
+            </Typography>
+            {staffEnrichmentReport ? (
+              <Typography variant="body2" color="text.secondary">
+                {formatStaffSheetEnrichmentReport(staffEnrichmentReport)}
+              </Typography>
+            ) : null}
+            {staffVkCache ? (
+              <Typography variant="body2" color="text.secondary">
+                ВК ТПВ: {staffVkCache.fileName} ·{" "}
+                {formatSourceTimestamp(staffVkCache.importedAt) ?? "—"}
+              </Typography>
+            ) : null}
           </Stack>
         </section>
 
@@ -1390,7 +1615,7 @@ export function ExcelFillPage() {
                   ) : null}
                 </>
               ) : (
-                "Джерело не завантажено — імпортуйте «Штатку» на «Анкетні дані» або Excel."
+                "Джерело не завантажено — імпортуйте «Штатку» або Excel."
               )}
             </Typography>
             <Typography variant="body2" color="text.secondary">
@@ -1613,10 +1838,8 @@ export function ExcelFillPage() {
         </div>
         <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
           {staffSheetPreviewMeta.source === "personnel"
-            ? `Джерело: ${staffSheetPreviewMeta.label} · ${staffSheetPreviewRows.length} осіб з ПІБ (до 300).`
-            : staffSheetPreviewMeta.source === "import"
-              ? `Імпорт з Анкетних даних «${staffSheetPreviewMeta.detail}» · ${staffSheetPreviewRows.length} осіб (до 300).`
-              : "Імпортуйте «Штатку» на «Анкетні дані»."}
+            ? `Джерело: ${staffSheetPreviewMeta.label} · ${staffEnrichmentReport?.totalPositions ?? rosterPreviewRows.length} позицій · ${staffSheetPreviewRows.length} з ПІБ (до 300)${staffEnrichmentReport ? ` · анкета так: ${staffEnrichmentReport.anketaYes}` : ""}.`
+            : "Оновіть «Штатку» з Google Sheets в Особовому складі."}
           {staffSheetPreviewMeta.timestamp ? (
             <>
               {" "}
@@ -1647,7 +1870,7 @@ export function ExcelFillPage() {
               {!staffSheetPreviewRows.length ? (
                 <tr>
                   <td colSpan={STAFF_SHEET_PREVIEW_COLUMNS.length + 1}>
-                    Імпортуйте «Штатку» на «Анкетні дані» або натисніть «З БД».
+                    Імпортуйте «Штатку» вище або натисніть «З БД».
                   </td>
                 </tr>
               ) : null}

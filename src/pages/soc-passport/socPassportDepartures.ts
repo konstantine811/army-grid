@@ -208,6 +208,7 @@ export type SzchRuhResult = {
   periodFromLabel: string | null;
   totalMovements: number;
   skippedBeforePeriod: number;
+  skippedAfterPeriod: number;
   skippedNoDate: number;
 };
 
@@ -1208,7 +1209,7 @@ const isSzchMovementText = (...parts: string[]) => {
  */
 export const buildSzchFromRuh = (
   workbook: ExcelWorkbookSnapshot,
-  options?: { sinceDate?: string | null },
+  options?: { sinceDate?: string | null; untilDate?: string | null },
 ): SzchRuhResult => {
   const hasRuh = workbook.sheets.some((sheet) => /^рух$/i.test(sheet.sheetName));
   if (!hasRuh) {
@@ -1233,8 +1234,11 @@ export const buildSzchFromRuh = (
       ? DEFAULT_DEPARTURES_SINCE
       : options.sinceDate;
   const since = sinceRaw ? parseCellDate(sinceRaw) : null;
+  const untilRaw = options?.untilDate ?? null;
+  const until = untilRaw ? parseCellDate(untilRaw) : null;
 
   let skippedBeforePeriod = 0;
+  let skippedAfterPeriod = 0;
   let skippedNoDate = 0;
   const people: SzchPerson[] = [];
   const seen = new Set<string>();
@@ -1260,6 +1264,16 @@ export const buildSzchFromRuh = (
       }
       if (eventDate.getTime() < since.getTime()) {
         skippedBeforePeriod += 1;
+        continue;
+      }
+    }
+    if (until) {
+      if (!eventDate) {
+        skippedNoDate += 1;
+        continue;
+      }
+      if (eventDate.getTime() > until.getTime()) {
+        skippedAfterPeriod += 1;
         continue;
       }
     }
@@ -1322,10 +1336,167 @@ export const buildSzchFromRuh = (
       : null,
     totalMovements: movements.length,
     skippedBeforePeriod,
+    skippedAfterPeriod,
     skippedNoDate,
   };
   logSzchFromRuh(result, workbook.fileName);
   return result;
+};
+
+const mergeSzchPeople = (primary: SzchPerson[], extra: SzchPerson[]) => {
+  const merged = [...primary];
+  const seen = new Set(
+    primary.map(
+      (person) =>
+        person.personId ||
+        normalizeLooseText(person.fullName) ||
+        String(person.excelRow),
+    ),
+  );
+  for (const person of extra) {
+    const key =
+      person.personId ||
+      normalizeLooseText(person.fullName) ||
+      String(person.excelRow);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(person);
+  }
+  merged.sort((a, b) => {
+    const byDate = a.orderDate.localeCompare(b.orderDate, "uk");
+    if (byDate !== 0) return byDate;
+    return a.fullName.localeCompare(b.fullName, "uk");
+  });
+  return merged;
+};
+
+export const buildSzchFromArchive = (
+  workbook: ExcelWorkbookSnapshot,
+  options?: { sinceDate?: string | null; untilDate?: string | null },
+): Pick<SzchRuhResult, "people" | "skippedBeforePeriod" | "skippedAfterPeriod" | "skippedNoDate"> => {
+  const hasArchive = workbook.sheets.some((sheet) =>
+    /^archive$/i.test(sheet.sheetName),
+  );
+  if (!hasArchive) {
+    return {
+      people: [],
+      skippedBeforePeriod: 0,
+      skippedAfterPeriod: 0,
+      skippedNoDate: 0,
+    };
+  }
+
+  const periods = parsePbArchive(workbook);
+  const sinceRaw =
+    options?.sinceDate === undefined
+      ? DEFAULT_DEPARTURES_SINCE
+      : options.sinceDate;
+  const since = sinceRaw ? parseCellDate(sinceRaw) : null;
+  const untilRaw = options?.untilDate ?? null;
+  const until = untilRaw ? parseCellDate(untilRaw) : null;
+
+  let skippedBeforePeriod = 0;
+  let skippedAfterPeriod = 0;
+  let skippedNoDate = 0;
+  const people: SzchPerson[] = [];
+  const seen = new Set<string>();
+
+  for (const period of periods) {
+    if (!isSzchMovementText(period.absenceType, period.place)) continue;
+
+    const eventDate =
+      parseCellDate(period.orderDate) || parseCellDate(period.departDate);
+    if (since) {
+      if (!eventDate) {
+        skippedNoDate += 1;
+        continue;
+      }
+      if (eventDate.getTime() < since.getTime()) {
+        skippedBeforePeriod += 1;
+        continue;
+      }
+    }
+    if (until) {
+      if (!eventDate) {
+        skippedNoDate += 1;
+        continue;
+      }
+      if (eventDate.getTime() > until.getTime()) {
+        skippedAfterPeriod += 1;
+        continue;
+      }
+    }
+
+    const dedupeKey =
+      period.personId ||
+      normalizeLooseText(period.fullName) ||
+      String(period.excelRow);
+    if (seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
+
+    const rankGroup = classifyRankGroup(period.rank);
+    people.push({
+      excelRow: period.excelRow,
+      rank: period.rank,
+      rankGroup,
+      rankGroupLabel: RANK_GROUP_LABELS[rankGroup],
+      fullName: period.fullName,
+      personId: period.personId,
+      movementNumber: period.periodNumber,
+      type: period.absenceType,
+      status: "",
+      destination: period.place,
+      note: "",
+      orderDate: period.orderDate || period.departDate,
+      matchNote: "archive",
+    });
+  }
+
+  return {
+    people,
+    skippedBeforePeriod,
+    skippedAfterPeriod,
+    skippedNoDate,
+  };
+};
+
+/** Унікальні особи з СЗЧ за календарний рік (1ПБ · Рух + archive). */
+export const buildSzchYearSummary = (
+  workbook: ExcelWorkbookSnapshot,
+  options?: { year?: number },
+): SzchRuhResult => {
+  const year = options?.year ?? new Date().getFullYear();
+  const sinceDate = `01.01.${year}`;
+  const untilDate = `31.12.${year}`;
+  const rangeOptions = { sinceDate, untilDate };
+
+  let ruh: SzchRuhResult | null = null;
+  try {
+    ruh = buildSzchFromRuh(workbook, rangeOptions);
+  } catch {
+    ruh = null;
+  }
+
+  const archive = buildSzchFromArchive(workbook, rangeOptions);
+  const people = mergeSzchPeople(ruh?.people ?? [], archive.people);
+  const sourceSheet = ruh ? "Рух + archive" : "archive";
+
+  return {
+    sourceSheet,
+    people,
+    totals: {
+      all: people.length,
+      byRank: rankBreakdownOf(people),
+    },
+    periodFrom: sinceDate,
+    periodFromLabel: `за ${year} рік · унікальні особи (дата наказу в Рух / archive)`,
+    totalMovements: (ruh?.totalMovements ?? 0) + archive.people.length,
+    skippedBeforePeriod:
+      (ruh?.skippedBeforePeriod ?? 0) + archive.skippedBeforePeriod,
+    skippedAfterPeriod:
+      (ruh?.skippedAfterPeriod ?? 0) + archive.skippedAfterPeriod,
+    skippedNoDate: (ruh?.skippedNoDate ?? 0) + archive.skippedNoDate,
+  };
 };
 
 export const logSzchFromRuh = (result: SzchRuhResult, fileName?: string) => {

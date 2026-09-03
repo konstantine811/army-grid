@@ -9,7 +9,7 @@ import {
   type EjoosSyncOp,
   type EjoosSyncPlan,
 } from "./ejoosSyncPlan";
-import { canonicalName } from "./ejoosIdentity";
+import { canonicalName, normId } from "./ejoosIdentity";
 import {
   dayFromOrderLabel,
   formatTimesheetDeparture,
@@ -42,6 +42,87 @@ const findSheet = (book: ExcelWorkbookSnapshot, pattern: RegExp) =>
 
 const textAt = (sheet: ExcelSheetSnapshot, row: number, column: number) =>
   String(valueOf(sheet.rawRows[row - 1]?.[column - 1]) ?? "").trim();
+
+const findStaffTimesheetRow = (
+  sheet: ExcelSheetSnapshot,
+  op: EjoosSyncOp,
+) => {
+  const previousIndex = op.payload.previousIndex || op.positionIndex || "";
+  const id = normId(op.personId);
+  const name = canonicalName(op.fullName);
+  for (let row = 7; row <= sheet.rawRows.length; row += 1) {
+    const index = textAt(sheet, row, 2);
+    const rowId = normId(textAt(sheet, row, 8));
+    const rowName = canonicalName(textAt(sheet, row, 7));
+    const onStaffIndex =
+      Boolean(previousIndex && index === previousIndex) ||
+      /^\d{5,}$/.test(index);
+    if (!onStaffIndex) continue;
+    if (id && rowId && id === rowId) return row;
+    if (name && rowName && (rowName === name || rowName.includes(name))) {
+      return row;
+    }
+    if (previousIndex && index === previousIndex) return row;
+  }
+  return 0;
+};
+
+const findTimesheetStyleRow = (sheet: ExcelSheetSnapshot) => {
+  for (let row = 7; row <= sheet.rawRows.length; row += 1) {
+    if (textAt(sheet, row, 2) || textAt(sheet, row, 7)) return row;
+  }
+  return 7;
+};
+
+/** Якщо індексу немає в Табелі — вставляємо новий рядок після найближчого штатного. */
+const findOrAllocateStaffIndexRow = (
+  sheet: ExcelSheetSnapshot,
+  staffIndex: string,
+  reserved: Set<number>,
+) => {
+  if (!staffIndex) return 0;
+  for (let row = 7; row <= sheet.rawRows.length; row += 1) {
+    if (textAt(sheet, row, 2) === staffIndex) return row;
+  }
+  let anchor = findTimesheetStyleRow(sheet);
+  for (let row = 7; row <= sheet.rawRows.length; row += 1) {
+    const idx = textAt(sheet, row, 2);
+    if (!/^\d{5,}$/.test(idx)) continue;
+    if (Number(idx) <= Number(staffIndex)) anchor = row;
+  }
+  return nextTimesheetRow(sheet, anchor, reserved);
+};
+
+const writeStaffTimesheetIdentity = (
+  writes: ZipCellWrite[],
+  sheet: ExcelSheetSnapshot,
+  targetRow: number,
+  styleRow: number,
+  op: EjoosSyncOp,
+) => {
+  const staffIndex =
+    op.payload.timesheetStaffIndex ||
+    op.payload.previousIndex ||
+    op.positionIndex ||
+    "";
+  const entries: Array<[number, string | null]> = [
+    [2, staffIndex || null],
+    [6, op.rank || null],
+    [7, op.fullName || null],
+    [8, op.personId || null],
+  ];
+  for (const [column, value] of entries) {
+    if (!value) continue;
+    if (column === 2 || !textAt(sheet, targetRow, column)) {
+      writes.push({
+        row: targetRow,
+        column,
+        value,
+        styleSourceRow: styleRow,
+      });
+    }
+  }
+};
 
 const dispositionTarget = (
   sheet: ExcelSheetSnapshot,
@@ -255,8 +336,38 @@ const collectWrites = (op: EjoosSyncOp, ctx: DispositionContext) => {
     }
   }
 
-  const sourceTimesheetRow = Number(op.payload.timesheetExcelRow || 0);
+  const sourceTimesheetRow =
+    Number(op.payload.timesheetExcelRow || 0) ||
+    findStaffTimesheetRow(timesheet, op) ||
+    (op.payload.timesheetCreateRow === "1"
+      ? findOrAllocateStaffIndexRow(
+          timesheet,
+          op.payload.timesheetStaffIndex ||
+            op.payload.previousIndex ||
+            op.positionIndex ||
+            "",
+          ctx.reservedTimesheetRows,
+        )
+      : 0);
   if (sourceTimesheetRow > 0) {
+    ctx.reservedTimesheetRows.add(sourceTimesheetRow);
+    const styleRow =
+      findStaffTimesheetRow(timesheet, op) === sourceTimesheetRow
+        ? sourceTimesheetRow
+        : findTimesheetStyleRow(timesheet);
+    if (
+      op.payload.timesheetCreateRow === "1" ||
+      op.payload.restorePerson === "1" ||
+      !textAt(timesheet, sourceTimesheetRow, 7)
+    ) {
+      writeStaffTimesheetIdentity(
+        timesheetWrites,
+        timesheet,
+        sourceTimesheetRow,
+        styleRow,
+        op,
+      );
+    }
     const lastDay = Math.min(31, plan.timesheetDay);
     const absenceCode = op.payload.absenceCode || statusMark;
     const absenceSpans = parseTimesheetAbsenceSpans(

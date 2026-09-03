@@ -8,6 +8,8 @@ import {
   collectAbsentQuestionnaireCellClears,
   collectAbsentQuestionnaireCellFills,
   countAnketaBlankFieldPersons,
+  findNextAnketaEmptyCell,
+  findNextAnketaPersonEmptyCell,
   listAnketaEmptyCells,
 } from "./anketaGaps";
 import { createEmptyAnketaRow } from "./anketaSheet";
@@ -194,5 +196,45 @@ describe("countAnketaBlankFieldPersons", () => {
     expect(stats.personsFullyBlank).toBe(1);
     expect(stats.personsWithBlankFields).toBe(2);
     expect(stats.blankCells).toBe(3);
+  });
+});
+
+describe("findNextAnketaEmptyCell walks from the current cell", () => {
+  it("returns the next empty cell without wrapping when one remains", () => {
+    const first = person("ПЕРШИЙ", { rnokpp: "", education: "середня" });
+    first.__rowId = "r1";
+    first.__rowNumber = 2;
+    const second = person("ДРУГИЙ", { rnokpp: "111", education: "" });
+    second.__rowId = "r2";
+    second.__rowNumber = 3;
+
+    const current = listAnketaEmptyCells([first, second], ["rnokpp", "education"])[0];
+    const next = findNextAnketaEmptyCell(
+      [first, second],
+      current,
+      ["rnokpp", "education"],
+    );
+
+    expect(next?.rowId).toBe("r2");
+    expect(next?.columnId).toBe("education");
+  });
+
+  it("jumps to the next person and skips the rest of the current row", () => {
+    const first = person("ПЕРШИЙ", { rnokpp: "", education: "" });
+    first.__rowId = "r1";
+    first.__rowNumber = 2;
+    const second = person("ДРУГИЙ", { rnokpp: "", education: "" });
+    second.__rowId = "r2";
+    second.__rowNumber = 3;
+
+    const current = listAnketaEmptyCells([first, second], ["rnokpp", "education"])[0];
+    const next = findNextAnketaPersonEmptyCell(
+      [first, second],
+      current,
+      ["rnokpp", "education"],
+    );
+
+    expect(next?.rowId).toBe("r2");
+    expect(next?.columnId).toBe("rnokpp");
   });
 });

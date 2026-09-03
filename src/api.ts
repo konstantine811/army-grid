@@ -377,6 +377,8 @@ export type BackendPersonnelOverviewRow = {
   /** Статус з колонки «Статус» у Штатці (не ЕЖООС). */
   staffStatus?: OverviewStatus | string
   staffStatusLabel?: string
+  /** Значення всіх колонок Штатки для перемикання в «Колонки». */
+  staffSheetColumns?: Record<string, string>
 }
 
 export type BackendPersonnelOverview = {

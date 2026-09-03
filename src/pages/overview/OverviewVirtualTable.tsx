@@ -10,8 +10,14 @@ import {
 } from "@/components/sci/SciDataTable";
 import type { BackendPersonnelOverviewRow } from "../../api";
 import { openPersonnelInNewTab } from "../../app/navigation";
+import { OVERVIEW_STAFF_COLUMN_HEADERS } from "./overviewStaffColumns";
+import {
+  buildOverviewStaffSheetColumnDefs,
+  DEFAULT_OVERVIEW_STAFF_COLUMN_VISIBILITY,
+} from "./overviewStaffSheetColumns";
 import { resolveOverviewPhoto } from "./overviewPhotos";
 import { overviewPersonMatchKey } from "./overviewPersonnelAssets";
+import { overviewStatusFilterLabel } from "./overviewRosterMerge";
 
 export type OverviewPersonDocumentSummary = {
   count: number;
@@ -150,6 +156,7 @@ export function OverviewVirtualTable({
   onOpenQuestionnaire,
   onNeedPhoto,
   onExport,
+  onImportantExport,
   emptyMessage = "Немає записів за поточними фільтрами.",
 }: {
   rows: BackendPersonnelOverviewRow[];
@@ -161,8 +168,14 @@ export function OverviewVirtualTable({
   onExport?: (
     context: SciDataTableExportContext<BackendPersonnelOverviewRow>,
   ) => void | Promise<void>;
+  onImportantExport?: (
+    context: SciDataTableExportContext<BackendPersonnelOverviewRow>,
+  ) => void | Promise<void>;
   emptyMessage?: string;
 }) {
+  const photosRef = useRef(photos);
+  photosRef.current = photos;
+
   const openPerson = (row: BackendPersonnelOverviewRow) => {
     openPersonnelInNewTab({
       rowId: row.id,
@@ -189,11 +202,16 @@ export function OverviewVirtualTable({
     openPersonnelInNewTab({ rowId: row.id, externalId: row.externalId });
   };
 
+  const rowNumberById = useMemo(
+    () => new Map(rows.map((row, index) => [row.id, index + 1])),
+    [rows],
+  );
+
   const columns = useMemo<Array<MRT_ColumnDef<BackendPersonnelOverviewRow>>>(
     () => [
       {
         id: "person",
-        header: "ПІБ",
+        header: OVERVIEW_STAFF_COLUMN_HEADERS.name,
         size: 360,
         pin: "left",
         accessorFn: (row) => row.name,
@@ -206,7 +224,7 @@ export function OverviewVirtualTable({
           >
             <OverviewPersonPhoto
               row={row.original}
-              photos={photos}
+              photos={photosRef.current}
               onNeedPhoto={onNeedPhoto}
             />
             <span>
@@ -216,27 +234,35 @@ export function OverviewVirtualTable({
         ),
       },
       {
+        id: "rowNumber",
+        header: "№",
+        size: 80,
+        enableColumnFilter: false,
+        accessorFn: (row) => String(rowNumberById.get(row.id) ?? ""),
+      },
+      {
         accessorKey: "unit",
-        header: "Підрозділ",
+        header: OVERVIEW_STAFF_COLUMN_HEADERS.unit,
         size: 240,
       },
       {
         accessorKey: "rank",
-        header: "Звання",
+        header: OVERVIEW_STAFF_COLUMN_HEADERS.rank,
         size: 180,
       },
       {
         accessorKey: "positionTitle",
-        header: "Посада",
+        header: OVERVIEW_STAFF_COLUMN_HEADERS.positionTitle,
         size: 280,
         accessorFn: (row) => row.positionTitle?.trim() || "—",
         exportValue: (row) => row.positionTitle?.trim() || "",
       },
       {
         id: "status",
-        header: "Поточний статус",
+        header: OVERVIEW_STAFF_COLUMN_HEADERS.status,
         size: 220,
-        accessorFn: (row) => row.statusLabel,
+        accessorFn: overviewStatusFilterLabel,
+        exportValue: (row) => row.statusLabel,
         Cell: ({ row }) => (
           <Chip
             className={`overview-status-chip tone-${overviewStatusTone(row.original.status)}`}
@@ -248,7 +274,7 @@ export function OverviewVirtualTable({
       },
       {
         id: "questionnaire",
-        header: "Анкета",
+        header: OVERVIEW_STAFF_COLUMN_HEADERS.questionnaire,
         size: 130,
         accessorFn: (row) =>
           questionnaireByExternalId?.[row.externalId] ||
@@ -319,30 +345,31 @@ export function OverviewVirtualTable({
       },
       {
         accessorKey: "fighterDirection",
-        header: "Напрямок",
+        header: OVERVIEW_STAFF_COLUMN_HEADERS.fighterDirection,
         size: 190,
       },
       {
         accessorKey: "fighterExitDate",
-        header: "Дата виходу",
+        header: OVERVIEW_STAFF_COLUMN_HEADERS.fighterExitDate,
         size: 150,
       },
       {
         accessorKey: "fighterReturnDate",
-        header: "Дата повернення",
-        size: 160,
+        header: OVERVIEW_STAFF_COLUMN_HEADERS.fighterReturnDate,
+        size: 220,
       },
       {
         accessorKey: "fighterTotalDays",
-        header: "Днів",
+        header: OVERVIEW_STAFF_COLUMN_HEADERS.fighterTotalDays,
         size: 110,
         filterVariant: "number-range",
       },
       {
         accessorKey: "fighterStatus",
-        header: "Статус бійців",
+        header: OVERVIEW_STAFF_COLUMN_HEADERS.fighterStatus,
         size: 150,
       },
+      ...buildOverviewStaffSheetColumnDefs(),
       {
         accessorKey: "updatedAt",
         header: "Оновлено",
@@ -382,8 +409,8 @@ export function OverviewVirtualTable({
       documentsByExternalId,
       onNeedPhoto,
       onOpenQuestionnaire,
-      photos,
       questionnaireByExternalId,
+      rowNumberById,
     ],
   );
 
@@ -401,10 +428,13 @@ export function OverviewVirtualTable({
         ? { className: "overview-questionnaire-cell" }
         : undefined,
     onExport,
+    onSecondaryExport: onImportantExport,
+    secondaryExportLabel: "Експорт важливих колонок",
     initialState: {
       pagination: {
         pageSize: 1000,
       },
+      columnVisibility: DEFAULT_OVERVIEW_STAFF_COLUMN_VISIBILITY,
       columnPinning: {
         left: ["person"],
         right: ["actions"],

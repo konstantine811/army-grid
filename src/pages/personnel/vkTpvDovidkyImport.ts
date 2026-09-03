@@ -54,14 +54,32 @@ const cellText = (value: unknown): string => {
   return String(value).replace(/\s+/g, " ").trim();
 };
 
+const MILITARY_ID_PREFIXES = "АГ|УН|АВ|МО|ГГ|НК|СО|AB";
+
 export const extractMilitaryIdFromText = (value: string): string => {
   const text = String(value ?? "").replace(/\s+/g, " ").trim();
   if (!text) return "";
-  const match = text.match(/(АГ|УН|АВ)\s*(\d[\d\s]*)/iu);
+
+  const tpvMatch = text.match(/ТПВ\s*№?\s*(\d[\d\s]*)/iu);
+  if (tpvMatch?.[1]) {
+    const digits = tpvMatch[1].replace(/\s+/g, "");
+    if (digits) return `ТПВ №${digits}`;
+  }
+
+  const match = text.match(
+    new RegExp(`(${MILITARY_ID_PREFIXES})\\s*(\\d[\\d\\s]*)`, "iu"),
+  );
   if (!match?.[2]) return "";
   const digits = match[2].replace(/\s+/g, "");
   if (!digits) return "";
-  return `${match[1].toUpperCase()} ${digits}`;
+  return `${match[1]!.toUpperCase()} ${digits}`;
+};
+
+/** Якщо в тексті є номер ВК — повертає лише його; інакше сирий текст. */
+export const normalizeMilitaryIdCellValue = (value: string): string => {
+  const extracted = extractMilitaryIdFromText(value);
+  if (extracted) return extracted;
+  return String(value ?? "").trim();
 };
 
 export const extractRnokppFromText = (value: string): string => {
@@ -130,7 +148,9 @@ const findVkColumnIndex = (headerRow: unknown[]) => {
 const parseStandardSheet = (
   sheetName: string,
   rows: unknown[][],
+  options?: { requireData?: boolean },
 ): VkTpvDovidkyRecord[] => {
+  const requireData = options?.requireData !== false;
   const headerIndex = findHeaderRowIndex(rows);
   if (headerIndex < 0) return [];
 
@@ -159,7 +179,7 @@ const parseStandardSheet = (
       extractRnokppFromText(fromInnCol) ||
       extractRnokppFromText(fromCinka) ||
       fromRow.rnokpp;
-    if (!militaryId && !rnokpp) continue;
+    if (requireData && !militaryId && !rnokpp) continue;
 
     records.push({
       fullName,
@@ -172,7 +192,11 @@ const parseStandardSheet = (
   return records;
 };
 
-const parseVidutniSheet = (rows: unknown[][]): VkTpvDovidkyRecord[] => {
+const parseVidutniSheet = (
+  rows: unknown[][],
+  options?: { requireData?: boolean },
+): VkTpvDovidkyRecord[] => {
+  const requireData = options?.requireData !== false;
   const records: VkTpvDovidkyRecord[] = [];
   for (const row of rows) {
     const fullName = cellText(row[4]);
@@ -181,7 +205,7 @@ const parseVidutniSheet = (rows: unknown[][]): VkTpvDovidkyRecord[] => {
     const rnokppCol = cellText(row[14]);
     const rnokpp = extractRnokppFromText(rnokppCol) || fromRow.rnokpp;
     const militaryId = fromRow.militaryId;
-    if (!militaryId && !rnokpp) continue;
+    if (requireData && !militaryId && !rnokpp) continue;
     records.push({
       fullName,
       nameKey: normalizeAnketaNameKey(fullName),
@@ -191,6 +215,65 @@ const parseVidutniSheet = (rows: unknown[][]): VkTpvDovidkyRecord[] => {
     });
   }
   return records;
+};
+
+export type VkTpvDovidkyNameEntry = {
+  fullName: string;
+  nameKey: string;
+  militaryId: string;
+  rnokpp: string;
+  sourceSheet: string;
+};
+
+export const buildVkTpvDovidkyNameIndex = (
+  snapshot: ExcelWorkbookSnapshot,
+): Map<string, VkTpvDovidkyNameEntry> => {
+  const merged = new Map<string, VkTpvDovidkyNameEntry>();
+
+  for (const sheet of snapshot.sheets) {
+    const sheetName = sheet.sheetName.trim();
+    if (
+      !VK_TPV_DOVIDKY_SHEET_NAMES.some(
+        (name) =>
+          name.toLocaleLowerCase("uk-UA") ===
+          sheetName.toLocaleLowerCase("uk-UA"),
+      )
+    ) {
+      continue;
+    }
+
+    const rows = (sheet.rawRows?.length
+      ? sheet.rawRows
+      : [
+          ...sheet.headerRows,
+          ...sheet.rows.map((row) => row.values),
+        ]) as unknown[][];
+    const parsed =
+      sheetName.toLocaleLowerCase("uk-UA") === "відсутні"
+        ? parseVidutniSheet(rows, { requireData: false })
+        : parseStandardSheet(sheetName, rows, { requireData: false });
+
+    for (const record of parsed) {
+      const existing = merged.get(record.nameKey);
+      if (!existing) {
+        merged.set(record.nameKey, {
+          fullName: record.fullName,
+          nameKey: record.nameKey,
+          militaryId: record.militaryId,
+          rnokpp: record.rnokpp,
+          sourceSheet: record.sourceSheet,
+        });
+        continue;
+      }
+      merged.set(record.nameKey, {
+        ...existing,
+        militaryId: existing.militaryId || record.militaryId,
+        rnokpp: existing.rnokpp || record.rnokpp,
+      });
+    }
+  }
+
+  return merged;
 };
 
 export const parseVkTpvDovidkyWorkbook = (
@@ -252,13 +335,12 @@ export const formatVkTpvDovidkyMergeReport = (report: VkTpvDovidkyMergeReport) =
   return parts.join(" · ");
 };
 
-export const mergeVkTpvDovidkyWorkbook = async (
-  snapshot: ExcelWorkbookSnapshot,
+export const mergeVkTpvDovidkyRecords = async (
+  records: VkTpvDovidkyRecord[],
   options?: {
     onProgress?: (done: number, total: number) => void;
   },
 ): Promise<VkTpvDovidkyMergeReport> => {
-  const records = parseVkTpvDovidkyWorkbook(snapshot);
   const report: VkTpvDovidkyMergeReport = {
     parsed: records.length,
     matchedPersonnel: 0,
@@ -379,4 +461,14 @@ export const mergeVkTpvDovidkyWorkbook = async (
   }
 
   return report;
+};
+
+export const mergeVkTpvDovidkyWorkbook = async (
+  snapshot: ExcelWorkbookSnapshot,
+  options?: {
+    onProgress?: (done: number, total: number) => void;
+  },
+): Promise<VkTpvDovidkyMergeReport> => {
+  const records = parseVkTpvDovidkyWorkbook(snapshot);
+  return mergeVkTpvDovidkyRecords(records, options);
 };

@@ -715,18 +715,31 @@ export const buildSheetImpacts = (ops: EjoosSyncOp[]): SheetImpactItem[] => {
       );
       setImpact(
         map,
+        "excluded",
+        "skip",
+        "Не зачіпається — не зовнішнє вибуття",
+      );
+      setImpact(
+        map,
         "absents",
         op.payload.needsAbsenceRecord === "1" ? "append" : "skip",
         op.payload.needsAbsenceRecord === "1"
           ? `Додати ${op.payload.absenceType || "відсутність"} · ${op.payload.absenceDate || "дата з archive"}`
-          : `Чинний запис уже є: ${op.payload.absenceType || "відсутність"}${op.personId ? `; гарантувати ID ${op.personId}` : ""}`,
+          : /безвіст/i.test(op.payload.absenceType || "")
+            ? `БЕЗВІСТИ лишається відкритим${op.personId ? `; ID ${op.personId}` : ""}`
+            : `Чинний запис уже є: ${op.payload.absenceType || "відсутність"}${op.personId ? `; гарантувати ID ${op.personId}` : ""}`,
       );
       setImpact(
         map,
         "timesheet",
-        op.payload.timesheetFound === "true" ? "edit" : "skip",
-        op.payload.keepOpenSzchTimesheet === "1"
-          ? `Один рядок, 01–зріз ${op.payload.absenceCode || "СЗЧ"}; 10.08 не писати «вибув у розпорядження»`
+        op.payload.timesheetFound === "true" ||
+          op.payload.keepOpenSzchTimesheet === "1"
+          ? "edit"
+          : "skip",
+        op.payload.timesheetCreateRow === "1"
+          ? `Додати рядок на ${op.payload.timesheetStaffIndex || op.payload.previousIndex || op.positionIndex || "—"} · 01–зріз ${op.payload.absenceCode || "СЗЧ"}`
+          : op.payload.keepOpenSzchTimesheet === "1"
+          ? `Один рядок, 01–зріз ${op.payload.absenceCode || "СЗЧ"}; ${op.payload.orderDate || "дату розпорядження"} не писати «вибув у розпорядження»`
           : op.payload.timesheetFound === "true"
             ? "Закрити штатний рядок і зберегти історію розпорядження"
             : "Штатного рядка немає — Табель не змінюємо",
@@ -977,9 +990,13 @@ const describeWillDo = (ops: EjoosSyncOp[]): string[] => {
         : "2. ООС: без змін (активного запису немає)",
       payload.needsAbsenceRecord === "1"
         ? `5. Тимчасово відсутні: додати ${payload.absenceType || "відсутність"}${payload.absenceDate ? ` з ${payload.absenceDate}` : ""}`
-        : "5. Тимчасово відсутні: чинний запис уже є",
+        : /безвіст/i.test(payload.absenceType || "")
+          ? "5. Тимчасово відсутні: БЕЗВІСТИ лишається відкритим"
+          : "5. Тимчасово відсутні: чинний запис уже є",
       payload.keepOpenSzchTimesheet === "1"
-        ? `6. Табель: один рядок 01–зріз ${payload.absenceCode || "СЗЧ"}; не писати «вибув у розпорядження»`
+        ? payload.timesheetCreateRow === "1"
+          ? `6. Табель: додати рядок на ${payload.timesheetStaffIndex || payload.previousIndex || "—"} · 01–зріз ${payload.absenceCode || "СЗЧ"}`
+          : `6. Табель: один рядок 01–зріз ${payload.absenceCode || "СЗЧ"}; ${payload.orderDate || "дату розпорядження"} не писати «вибув у розпорядження»`
         : payload.timesheetFound === "true"
           ? "6. Табель: закрити штатний рядок і записати розпорядження"
           : "6. Табель: без змін (штатного рядка немає)",

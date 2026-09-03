@@ -24,9 +24,16 @@ export const staffSheetEditUrl = () =>
 const APPS_SCRIPT_STORAGE_KEY = "army-grid:staff-sheet-apps-script-url";
 const LAST_SYNC_STORAGE_KEY = "army-grid:staff-sheet-roster-sync-at";
 
-/** Kyiv local hours for automatic morning / evening roster sync. */
+/** Kyiv local hours for automatic morning / lunch / evening roster sync. */
 export const STAFF_SHEET_SYNC_MORNING_HOUR = 7;
+export const STAFF_SHEET_SYNC_LUNCH_HOUR = 13;
 export const STAFF_SHEET_SYNC_EVENING_HOUR = 18;
+
+export const STAFF_SHEET_SYNC_HOURS_KYIV = [
+  STAFF_SHEET_SYNC_MORNING_HOUR,
+  STAFF_SHEET_SYNC_LUNCH_HOUR,
+  STAFF_SHEET_SYNC_EVENING_HOUR,
+] as const;
 
 export const staffSheetGvizUrls = (gid = STAFF_SHEET_GID) => {
   const query = `tqx=out:json&gid=${gid}`;
@@ -92,8 +99,16 @@ export const STAFF_SHEET_PUSH_COLUMN_NUMBERS = [
   ...STAFF_SHEET_ROSTER_COLUMNS,
 ] as number[];
 
-/** Колонки для доповнення з анкет / ООС: Анкета, дата, рік, вік, ІПН. */
-export const STAFF_SHEET_ENRICHMENT_COLUMNS = [10, 16, 17, 18, 19] as const;
+/** Колонки для доповнення з анкет / ООС / ВК ТПВ: Анкета, ВК, дата, рік, вік, ІПН. */
+export const STAFF_SHEET_ENRICHMENT_COLUMNS = [10, 11, 16, 17, 18, 19] as const;
+export const STAFF_SHEET_ENRICHMENT_VALUE_INDEX = {
+  anketa: 0,
+  militaryId: 1,
+  birthDate: 2,
+  birthYear: 3,
+  fullYears: 4,
+  inn: 5,
+} as const;
 export const STAFF_SHEET_ENRICHMENT_START_ROW = 2;
 export const staffSheetBirthDateColumn = 16;
 
@@ -150,7 +165,11 @@ export const STAFF_SHEET_EXPORT_COLUMN_NUMBERS = Object.keys(
 
 export const pushStaffSheetEnrichmentToGoogle = async (
   entries: Array<{ excelRowNumber: number; values: string[] }>,
-  options?: { sheetId?: string; gid?: string },
+  options?: {
+    sheetId?: string;
+    gid?: string;
+    columns?: readonly number[];
+  },
 ) => {
   const endpoint = readStaffAppsScriptUrl();
   if (!endpoint) {
@@ -162,6 +181,10 @@ export const pushStaffSheetEnrichmentToGoogle = async (
     throw new Error("Немає рядків для оновлення Google Sheet.");
   }
 
+  const columns = options?.columns ?? STAFF_SHEET_ENRICHMENT_COLUMNS;
+  const numberColumns = columns.filter((column) => [17, 18, 19].includes(column));
+  const textColumns = columns.filter((column) => [10, 11, 16].includes(column));
+
   const response = await fetch(endpoint, {
     method: "POST",
     headers: { "Content-Type": "text/plain;charset=utf-8" },
@@ -171,12 +194,11 @@ export const pushStaffSheetEnrichmentToGoogle = async (
       mode: "bulkColumns",
       startRow: STAFF_SHEET_ENRICHMENT_START_ROW,
       rowNumbers: entries.map((entry) => entry.excelRowNumber),
-      columns: [...STAFF_SHEET_ENRICHMENT_COLUMNS],
+      columns: [...columns],
       values: entries.map((entry) => entry.values),
-      // 17=рік, 18=вік — числовий формат; скинути червоний фон від «дати».
-      numberColumns: [17, 18, 19],
-      textColumns: [10, 16],
-      clearBackground: true,
+      numberColumns,
+      textColumns,
+      clearBackground: columns.some((column) => [16, 17, 18, 19].includes(column)),
       clearAfterRow: false,
     }),
   });
@@ -281,7 +303,13 @@ const formatSheetCell = (value: unknown): string => {
 };
 
 const looksLikePersonName = (value: string) => {
-  const text = value.trim();
+  const text = value
+    .trim()
+    .replace(
+      /\s*\(\s*\d{1,2}\.\d{1,2}\.\d{4}\s*(?:р\.?\s*н\.?)?\s*\)\s*$/iu,
+      "",
+    )
+    .trim();
   if (text.length < 5 || text.length > 80) return false;
   if (/\d/.test(text)) return false;
   const parts = text.split(/\s+/).filter(Boolean);
@@ -331,7 +359,7 @@ const looksLikeHeaderRow = (row: string[]) => {
   );
 };
 
-const FIGHTER_STATUS_FALLBACK_HEADERS = [
+export const FIGHTER_STATUS_FALLBACK_HEADERS = [
   "Підрозділ",
   "Напрямок",
   "Посада згідно штату (коротка)",
@@ -464,6 +492,8 @@ export const buildStaffSheetRosterImportPayload = (
     source: "apps-script" | "gviz";
     sourceLabel: string;
     fighterStatusTable?: string[][] | null;
+    /** Експорт: зберегти рядки підрозділів / порожні позиції, не лише ПІБ. */
+    includeAllRows?: boolean;
   },
 ): StaffSheetRosterImportPayload => {
   if (!table.length) {
@@ -585,7 +615,13 @@ export const buildStaffSheetRosterImportPayload = (
   if (detectedPibIndex >= 0) {
     pibColumnIndex = detectedPibIndex;
   }
-  const statusColumnIndex = detectStatusColumnIndex(dataRows);
+  const mappedStatusColumnIndex = rosterColumns.findIndex(
+    (column) => column.rosterColumn === 21,
+  );
+  const statusColumnIndex =
+    mappedStatusColumnIndex >= 0
+      ? mappedStatusColumnIndex
+      : detectStatusColumnIndex(dataRows);
 
   // У «Штатці» рядок 1 — заголовок; дані з рядка 2 навіть якщо gviz
   // «з’їв» заголовки в labels.
@@ -607,18 +643,31 @@ export const buildStaffSheetRosterImportPayload = (
         (pibColumnIndex >= 0
           ? formatSheetCell(cells[pibColumnIndex])
           : values.column_14 || values.піб || "") || "";
-      if (!looksLikePersonName(fullName)) {
+      const hasFullName = looksLikePersonName(fullName);
+      const isStaffPosition = [5, 8, 13].some((columnNumber) =>
+        Boolean(values[`column_${columnNumber}`]?.trim()),
+      );
+      const hasAnyContent = cells.some((cell) => formatSheetCell(cell).trim());
+      if (meta.includeAllRows) {
+        if (!hasAnyContent) return null;
+      } else if (!hasFullName && !isStaffPosition) {
         return null;
       }
-      values.column_14 = fullName;
-      values.піб = fullName;
-      values.ПІБ = fullName;
+      if (hasFullName) {
+        values.column_14 = fullName;
+        values.піб = fullName;
+        values.ПІБ = fullName;
+      }
 
-      const status = pickStatusFromRow(
-        cells.map((cell) => formatSheetCell(cell)),
-        statusColumnIndex,
-        pibColumnIndex,
-      );
+      const formattedCells = cells.map((cell) => formatSheetCell(cell));
+      const status =
+        mappedStatusColumnIndex >= 0
+          ? formattedCells[mappedStatusColumnIndex] ?? ""
+          : pickStatusFromRow(
+              formattedCells,
+              statusColumnIndex,
+              pibColumnIndex,
+            );
       if (status) {
         values.column_21 = status;
         values.статус = status;
@@ -643,10 +692,9 @@ export const buildStaffSheetRosterImportPayload = (
         }
       }
 
-      const statusAddition = findFighterStatusAddition(
-        values,
-        fighterStatusAdditions,
-      );
+      const statusAddition = hasFullName
+        ? findFighterStatusAddition(values, fighterStatusAdditions)
+        : null;
       if (statusAddition) {
         fighterStatusMatched += 1;
         Object.entries(statusAddition).forEach(([key, value]) => {
@@ -693,7 +741,7 @@ export const buildStaffSheetRosterImportPayload = (
         rows,
       },
     ],
-    personCount: rows.length,
+    personCount: rows.filter((row) => Boolean(row.values.column_14)).length,
     fighterStatusCount: fighterStatusAdditions.size,
     fighterStatusMatched,
     source: meta.source,
@@ -883,13 +931,15 @@ const isLikelyRosterStatusValue = (value: string) => {
     text.includes("відком") ||
     text.includes("відрядж") ||
     text.includes("сзч") ||
+    text.includes("ліку") ||
     text.includes("лікарн") ||
+    text.includes("шпит") ||
+    text.includes("загиб") ||
+    text.includes("помер") ||
     text.includes("відпустк") ||
     text.includes("звільнен") ||
     text.includes("полон") ||
-    text.includes("300") ||
-    text.includes("200") ||
-    text.includes("500") ||
+    /(?:^|\D)(?:200|300|500)(?:\D|$)/.test(text) ||
     text.includes("тцк") ||
     text.includes("без віс")
   );
@@ -977,10 +1027,16 @@ const pullTableViaGviz = async (gid: string): Promise<string[][]> => {
   throw lastError ?? new Error("Не вдалося прочитати «Штатку» з Google.");
 };
 
+export const pullStaffSheetGvizRosterTable = async (): Promise<string[][]> => {
+  try {
+    return await pullTableViaGviz(STAFF_SHEET_ROSTER_GID);
+  } catch {
+    return pullTableViaGviz(STAFF_SHEET_GID);
+  }
+};
+
 const pullAllTablesViaGviz = async (): Promise<PulledStaffTables> => {
-  const rosterTable = await pullTableViaGviz(STAFF_SHEET_ROSTER_GID).catch(() =>
-    pullTableViaGviz(STAFF_SHEET_GID),
-  );
+  const rosterTable = await pullStaffSheetGvizRosterTable();
   let fighterStatusTable: string[][] | null = null;
   try {
     fighterStatusTable = await pullTableViaGviz(
@@ -993,15 +1049,21 @@ const pullAllTablesViaGviz = async (): Promise<PulledStaffTables> => {
 };
 
 export const pullStaffSheetRosterImportPayload =
-  async (): Promise<StaffSheetRosterImportPayload> => {
+  async (options?: {
+    source?: "auto" | "gviz";
+  }): Promise<StaffSheetRosterImportPayload> => {
     let tables: PulledStaffTables;
-    try {
-      tables = await pullAllTablesViaAppsScript();
-    } catch (error) {
-      if (error instanceof Error && error.message !== "NO_APPS_SCRIPT") {
-        console.warn("Staff sheet Apps Script pull failed, trying gviz", error);
-      }
+    if (options?.source === "gviz") {
       tables = await pullAllTablesViaGviz();
+    } else {
+      try {
+        tables = await pullAllTablesViaAppsScript();
+      } catch (error) {
+        if (error instanceof Error && error.message !== "NO_APPS_SCRIPT") {
+          console.warn("Staff sheet Apps Script pull failed, trying gviz", error);
+        }
+        tables = await pullAllTablesViaGviz();
+      }
     }
 
     return buildStaffSheetRosterImportPayload(tables.rosterTable, {
@@ -1123,21 +1185,13 @@ const kyivWallTimeToUtc = (
 
 export const getLatestStaffSheetSyncSlot = (now = new Date()): Date => {
   const parts = kyivParts(now);
-  const morning = kyivWallTimeToUtc(
-    parts.year,
-    parts.month,
-    parts.day,
-    STAFF_SHEET_SYNC_MORNING_HOUR,
-  );
-  const evening = kyivWallTimeToUtc(
-    parts.year,
-    parts.month,
-    parts.day,
-    STAFF_SHEET_SYNC_EVENING_HOUR,
-  );
+  const passedToday = STAFF_SHEET_SYNC_HOURS_KYIV.map((hour) =>
+    kyivWallTimeToUtc(parts.year, parts.month, parts.day, hour),
+  ).filter((slot) => slot.getTime() <= now.getTime());
 
-  if (now.getTime() >= evening.getTime()) return evening;
-  if (now.getTime() >= morning.getTime()) return morning;
+  if (passedToday.length) {
+    return passedToday[passedToday.length - 1]!;
+  }
 
   const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
   const y = kyivParts(yesterday);

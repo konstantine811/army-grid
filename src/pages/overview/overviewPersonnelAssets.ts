@@ -8,6 +8,10 @@ import { CacheKeys, readDataCache } from "../../data/idbDataCache";
 import { loadSharedEjournalImports } from "../../data/sharedAppData";
 import type { DbPreviewState, EjournalPreviewRow } from "../ejournal/ejournalTypes";
 import {
+  loadAnketaCreatedPersonnel,
+  mergeAnketaCreatedRowsIntoPreview,
+} from "../anketa-data/anketaPersonnelRosterCreate";
+import {
   collectPersonAttachmentLookupIds,
   parseOrphanAttachmentIdentityId,
   personNameMatchesOrphanNameKey,
@@ -141,7 +145,11 @@ export const loadPersonnelRowsForOverview = async (
       sheetRowsCacheKey(sheet),
     );
     const preview = cachedPreview ?? (await loadAllEjournalSheetRows(sheet));
-    return mergeRosterRowsIntoPreview(preview, rosterRows);
+    const createdRows = await loadAnketaCreatedPersonnel();
+    return mergeAnketaCreatedRowsIntoPreview(
+      mergeRosterRowsIntoPreview(preview, rosterRows),
+      createdRows,
+    );
   } catch {
     return rosterRows;
   }

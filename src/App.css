@@ -591,6 +591,13 @@
   color: var(--text-secondary);
 }
 
+.sci-data-table-columns-empty {
+  display: block;
+  padding: 12px 4px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
 .sci-data-table-columns summary {
   padding: 7px 10px;
   color: var(--text-secondary);
@@ -764,6 +771,13 @@
 .sci-data-table-facet-trigger[data-state="open"] {
   border-color: var(--color-green);
   box-shadow: 0 0 0 1px rgba(0, 255, 90, 0.32);
+}
+
+.sci-data-table-select-caption {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .sci-data-table-facet-menu {
@@ -1162,14 +1176,16 @@
   display: flex;
   flex-wrap: nowrap;
   gap: 8px;
-  align-items: end;
+  align-items: stretch;
   flex: 0 0 auto;
 }
 
 .overview-toolbar .overview-search {
   flex: 2 1 0;
+  align-self: stretch;
   width: 0;
   min-width: 0;
+  min-height: 0;
 }
 
 .overview-toolbar .overview-filter {
@@ -1193,8 +1209,10 @@
   display: grid;
   grid-template-columns: 22px minmax(0, 1fr) auto;
   align-items: center;
-  min-height: 32px;
-  padding: 0 10px;
+  box-sizing: border-box;
+  height: 100%;
+  min-height: 0;
+  padding: 6px 10px;
   color: #aaa493;
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 5px;
@@ -1203,8 +1221,6 @@
 
 .overview-search.is-multiline {
   align-items: start;
-  padding-top: 8px;
-  padding-bottom: 8px;
 }
 
 .overview-search input,
@@ -1215,14 +1231,16 @@
   background: transparent;
   border: 0;
   outline: 0;
-  resize: vertical;
+  resize: none;
   font: inherit;
   line-height: 1.35;
 }
 
 .overview-search textarea {
-  min-height: 1.35em;
-  max-height: 9.5em;
+  height: 100%;
+  min-height: 0;
+  max-height: none;
+  overflow: auto;
 }
 
 .overview-search-clear {
@@ -10777,6 +10795,29 @@ select:focus,
   flex-wrap: wrap;
   gap: 8px;
   margin-top: 12px;
+}
+
+.anketa-person-similar-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.anketa-person-similar-item {
+  border: 1px solid var(--border-soft, rgba(255, 255, 255, 0.12));
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  padding: 8px 10px;
+  text-align: left;
+}
+
+.anketa-person-similar-item:hover {
+  border-color: var(--accent, #7cffb2);
+  background: rgba(124, 255, 178, 0.08);
 }
 
 .anketa-data-table-wrap {

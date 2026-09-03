@@ -10,7 +10,7 @@ import {
   PictureAsPdfOutlinedIcon,
 } from "@/components/sci/icons";
 import { FloatingQuestionnairePreview } from "../personnel/FloatingQuestionnairePreview";
-import { matchLabel } from "./anketaPersonMatch";
+import { matchLabel, anketaPersonnelNamesMatch } from "./anketaPersonMatch";
 import type { AnketaColumnKey, AnketaRow } from "./anketaSheet";
 import type { AnketaEmptyCell } from "./anketaGaps";
 import {
@@ -57,6 +57,9 @@ export function AnketaPersonSidePanel({
   onMessage,
 }: AnketaPersonSidePanelProps) {
   const panel = useAnketaPersonPanel(anketaRow, onMessage);
+  const nameMismatch =
+    Boolean(panel.match) &&
+    !anketaPersonnelNamesMatch(anketaRow.fullName, panel.match?.summary.name);
 
   const rowGaps = useMemo(() => {
     if (!anketaRow) return [];
@@ -123,27 +126,101 @@ export function AnketaPersonSidePanel({
             <Typography variant="caption" color="text.secondary">
               {panel.matchStatus === "loading"
                 ? "Шукаю в особовому складі…"
+                : nameMismatch
+                  ? "Знайдено запис з іншим ПІБ — PDF і фото не показуємо"
                 : panel.match
                   ? `Знайдено в ООС · ${matchLabel(panel.match.matchBy)}`
                   : panel.ambiguousMatches.length > 1
-                    ? `Знайдено ${panel.ambiguousMatches.length} осіб з таким ПІБ — додайте ID або дату народження в анкеті`
-                    : "У кеші особового складу не знайдено"}
+                    ? `Знайдено ${panel.ambiguousMatches.length} осіб з таким ПІБ — уточніть ID і дату народження в анкеті`
+                    : panel.ambiguousMatches.length === 1
+                      ? "Є кілька збігів за ПІБ — додайте ID і дату народження"
+                    : panel.similarMatches.length
+                      ? "Точного збігу немає — нижче схожі за прізвищем + імʼям"
+                      : "У кеші особового складу не знайдено"}
             </Typography>
+            {panel.similarMatches.length && !panel.match ? (
+              <div className="anketa-person-similar-list">
+                <Typography variant="caption" color="text.secondary" component="div">
+                  Можливо це інша особа або інше написання ПІБ:
+                </Typography>
+                {panel.similarMatches.slice(0, 6).map((item) => (
+                  <button
+                    key={item.summary.externalId || item.row.__dbRowId}
+                    type="button"
+                    className="anketa-person-similar-item"
+                    onClick={() => {
+                      const target = {
+                        rowId: item.row.__dbRowId,
+                        externalId: item.summary.externalId,
+                      };
+                      try {
+                        window.localStorage.setItem(
+                          "army-grid:focus-personnel",
+                          JSON.stringify(target),
+                        );
+                      } catch {
+                        /* ignore */
+                      }
+                      window.open(
+                        buildPersonnelRoute(target),
+                        "_blank",
+                        "noopener,noreferrer",
+                      );
+                    }}
+                  >
+                    {[
+                      item.summary.name,
+                      item.summary.rank,
+                      item.summary.rnokpp,
+                      item.summary.birthDate,
+                    ]
+                      .filter(Boolean)
+                      .join(" · ")}
+                  </button>
+                ))}
+              </div>
+            ) : null}
             {panel.ambiguousMatches.length > 1 ? (
-              <Typography variant="caption" color="text.secondary" component="div">
-                {panel.ambiguousMatches
-                  .slice(0, 4)
-                  .map((item) =>
-                    [
+              <div className="anketa-person-similar-list">
+                <Typography variant="caption" color="text.secondary" component="div">
+                  Кілька осіб з таким ПІБ — оберіть або уточніть ID / дату народження:
+                </Typography>
+                {panel.ambiguousMatches.slice(0, 6).map((item) => (
+                  <button
+                    key={item.summary.externalId || item.row.__dbRowId}
+                    type="button"
+                    className="anketa-person-similar-item"
+                    onClick={() => {
+                      const target = {
+                        rowId: item.row.__dbRowId,
+                        externalId: item.summary.externalId,
+                      };
+                      try {
+                        window.localStorage.setItem(
+                          "army-grid:focus-personnel",
+                          JSON.stringify(target),
+                        );
+                      } catch {
+                        /* ignore */
+                      }
+                      window.open(
+                        buildPersonnelRoute(target),
+                        "_blank",
+                        "noopener,noreferrer",
+                      );
+                    }}
+                  >
+                    {[
+                      item.summary.name,
                       item.summary.rank,
                       item.summary.birthDate,
                       item.summary.externalId,
                     ]
                       .filter(Boolean)
-                      .join(" · "),
-                  )
-                  .join(" / ")}
-              </Typography>
+                      .join(" · ")}
+                  </button>
+                ))}
+              </div>
             ) : null}
           </div>
         </div>

@@ -11,8 +11,10 @@ import {
 import {
   buildPersonIdentityFingerprint,
   classifyOverviewStatusFromRoster,
+  getPersonDisplayName,
   getPersonExternalId,
   getPersonFullPositionTitle,
+  isLikelyPersonnelRow,
   isUnstablePersonExternalId,
   resolvePersonIdentityKey,
   resolvePersonRankTitle,
@@ -20,13 +22,16 @@ import {
 } from "../personnel/personnelUtils";
 import {
   getRosterPersonName,
+  getRosterUnit,
   getRosterValue,
-  isNovaRosterRow,
+  isPersonnelInStaffRoster,
 } from "../personnel/personnelRosterMerge";
+import { readRosterColumnValue } from "../excel-fill/rosterSourceSnapshot";
 import {
   getRosterFighterStatusOverviewFields,
   normalizeRosterMatchText,
 } from "../personnel/fighterStatusImport";
+import { buildStaffSheetColumnsRecord } from "./overviewStaffSheetColumns";
 
 const normalizeRosterText = normalizeRosterMatchText;
 
@@ -59,6 +64,7 @@ export const rosterBattalionLabel = (
   if (fromPerson) return fromPerson;
   const fromRow = (
     getRosterValue(row, ["батальйон"]) ||
+    readRosterColumnValue(row, 1) ||
     String(row.column_1 ?? "").trim() ||
     String(row.battalion ?? "").trim() ||
     String(row.A ?? "").trim()
@@ -70,11 +76,6 @@ export const rosterBattalionLabel = (
   return fromRow;
 };
 
-const isNovaExtractedPerson = (
-  person: { battalion?: string } | undefined,
-  row: EjournalPreviewRow,
-) => rosterBattalionLabel(person, row) === "нова" || isNovaRosterRow(row);
-
 const sortBattalionLabels = (labels: string[]) =>
   [...labels].sort((left, right) => {
     if (left === "нова") return -1;
@@ -83,6 +84,25 @@ const sortBattalionLabels = (labels: string[]) =>
     if (right === "стара") return 1;
     return left.localeCompare(right, "uk", { numeric: true, sensitivity: "base" });
   });
+
+/** Google Sheets може зберігати роту об'єднаною коміркою — заповнюємо її для рядків посад нижче. */
+export const fillDownRosterUnitRows = (
+  rows: EjournalPreviewRow[],
+): EjournalPreviewRow[] => {
+  let currentUnit = "";
+  return rows.map((row) => {
+    const unit = readRosterColumnValue(row, 2).trim();
+    if (unit) {
+      currentUnit = unit;
+      return row;
+    }
+    const isPositionRow = [5, 8, 13, 14].some((columnNumber) =>
+      readRosterColumnValue(row, columnNumber).trim(),
+    );
+    if (!currentUnit || !isPositionRow) return row;
+    return { ...row, column_2: currentUnit };
+  });
+};
 
 /** Посади / люди зі Штатки. `battalion = ALL` — усі пункти, не лише «нова». */
 export const summarizeStaffFromRoster = (
@@ -134,6 +154,7 @@ export const rosterRowToOverviewRow = (
   options: {
     requireName?: boolean;
     inNovaStaff?: boolean;
+    inStaff?: boolean;
     name?: string;
     battalion?: string;
   } = {},
@@ -164,10 +185,7 @@ export const rosterRowToOverviewRow = (
     externalId: identityKey || fallbackKey,
     name: displayName,
     rank: resolvePersonRankTitle(rosterRow) || getRosterValue(rosterRow, ["звання"]),
-    unit:
-      getRosterValue(rosterRow, ["перебування"]) ||
-      getRosterValue(rosterRow, ["підрозділ"]) ||
-      "—",
+    unit: getRosterUnit(rosterRow) || "—",
     status: staffStatus.staffStatus,
     statusLabel: staffStatus.staffStatusLabel,
     positionTitle: getPersonFullPositionTitle(rosterRow),
@@ -176,13 +194,99 @@ export const rosterRowToOverviewRow = (
     plannedReturn: null,
     place: "",
     updatedAt: "",
-    inStaff: true,
+    inStaff: options.inStaff !== false,
     inNovaStaff: options.inNovaStaff === true,
     battalion: options.battalion,
     fromEjoos: false,
     ...staffStatus,
     ...getRosterFighterStatusOverviewFields(rosterRow),
+    staffSheetColumns: buildStaffSheetColumnsRecord(rosterRow),
   };
+};
+
+/** Список Огляду в режимі «Штатка» — напряму з рядків Штатки, без злиття з ООС. */
+export const buildStaffOverviewRowsFromRoster = (
+  rosterRows: EjournalPreviewRow[],
+  rosterLabels: Record<string, string> = {},
+  columns?: Array<{ key: string; letter?: string; originalIndex?: number }>,
+  battalion: string = "ALL",
+): BackendPersonnelOverviewRow[] => {
+  if (!rosterRows.length) return [];
+
+  const namedNovaRows = namedNovaRowsFromRoster(rosterRows, columns);
+  const extracted = extractBchsAwayPeopleFromDbRows(rosterRows, columns);
+  const result: BackendPersonnelOverviewRow[] = [];
+
+  rosterRows.forEach((row, index) => {
+    const person = extracted[index];
+    const battalionLabel = rosterBattalionLabel(person, row);
+    if (!battalionLabel) return;
+    if (battalion !== "ALL" && battalionLabel !== battalion) return;
+
+    const name =
+      getRosterPersonName(row) || String(person?.fullName ?? "").trim();
+    if (!name) return;
+
+    const overviewRow = rosterRowToOverviewRow(row, rosterLabels, {
+      requireName: true,
+      inNovaStaff: namedNovaRows.has(row),
+      name,
+      battalion: battalionLabel,
+    });
+    if (overviewRow) result.push(overviewRow);
+  });
+
+  return result;
+};
+
+/** Режим «Штатка» в Огляді: усі зведені картки, які видно в Особовому складі. */
+export const buildStaffOverviewRowsFromPersonnel = (
+  personnelRows: EjournalPreviewRow[],
+  rosterLabels: Record<string, string> = {},
+  battalion: string = "ALL",
+): BackendPersonnelOverviewRow[] => {
+  const result: BackendPersonnelOverviewRow[] = [];
+
+  for (const row of personnelRows) {
+    if (!isLikelyPersonnelRow(row)) continue;
+    const inStaff = isPersonnelInStaffRoster(row);
+    const battalionLabel = rosterBattalionLabel(undefined, row);
+    if (battalion !== "ALL" && battalionLabel !== battalion) continue;
+
+    const overviewRow = rosterRowToOverviewRow(row, rosterLabels, {
+      requireName: true,
+      inStaff,
+      inNovaStaff: battalionLabel === "нова",
+      name: getPersonDisplayName(row),
+      battalion: battalionLabel,
+    });
+    if (overviewRow) result.push(overviewRow);
+  }
+
+  return result;
+};
+
+/** Унікальні підрозділи зі Штатки (col 2) для фільтра Огляду. */
+export const collectRosterUnitOptions = (
+  rosterRows: EjournalPreviewRow[],
+  columns?: Array<{ key: string; letter?: string; originalIndex?: number }>,
+  battalion: string = "ALL",
+): string[] => {
+  if (!rosterRows.length) return [];
+
+  const extracted = extractBchsAwayPeopleFromDbRows(rosterRows, columns);
+  const units = new Set<string>();
+  rosterRows.forEach((row, index) => {
+    const person = extracted[index];
+    const label = rosterBattalionLabel(person, row);
+    if (!label) return;
+    if (battalion !== "ALL" && label !== battalion) return;
+    const unit = getRosterUnit(row);
+    if (unit) units.add(unit);
+  });
+  return [...units].sort((a, b) =>
+    a.localeCompare(b, "uk", { numeric: true, sensitivity: "base" }),
+  );
 };
 
 export const buildOverviewMetrics = (rows: BackendPersonnelOverviewRow[]) => ({
@@ -199,6 +303,19 @@ export const buildOverviewMetrics = (rows: BackendPersonnelOverviewRow[]) => ({
       ),
   ).length,
 });
+
+/** Єдині назви категорій у табличному фільтрі, незалежно від тексту в штатці. */
+export const overviewStatusFilterLabel = (
+  row: BackendPersonnelOverviewRow,
+) => {
+  if (row.status === "MEDICAL") return "Лікування";
+  if (row.status === "LEAVE") return "Відпустка";
+  if (row.status === "BUSINESS_TRIP") return "Відрядження";
+  if (row.status === "AWOL") return "СЗЧ";
+  if (row.status === "MISSING") return "Безвісти";
+  if (row.status === "CAPTIVITY") return "Полон";
+  return row.statusLabel;
+};
 
 export const mergeRosterRowsIntoOverview = (
   overview: BackendPersonnelOverview,
@@ -293,6 +410,7 @@ export const mergeRosterRowsIntoOverview = (
     } catch {
       positionTitle = "";
     }
+    const rosterUnit = getRosterUnit(rosterRow);
     return {
       ...row,
       externalId,
@@ -300,10 +418,12 @@ export const mergeRosterRowsIntoOverview = (
       inNovaStaff: namedNovaRows.has(rosterRow),
       battalion: battalionByRow.get(rosterRow) ?? "",
       fromEjoos: true,
+      ...(rosterUnit ? { unit: rosterUnit } : {}),
       ...(rosterRank ? { rank: rosterRank } : {}),
       ...(positionTitle ? { positionTitle } : {}),
       ...applyStaffRosterStatus(rosterRow, rosterLabels),
       ...getRosterFighterStatusOverviewFields(rosterRow),
+      staffSheetColumns: buildStaffSheetColumnsRecord(rosterRow),
     };
   });
 

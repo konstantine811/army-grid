@@ -52,6 +52,7 @@ export const ANKETA_MISSING_VALUE_PRESETS = [
   "не застосовується",
   "уточнюється",
   "в процесі виготовлення",
+  "відсутній",
 ] as const;
 
 export type AnketaMissingValuePreset =
@@ -346,11 +347,16 @@ export const applyAbsentQuestionnaireClearsToRows = (
   });
 };
 
-export const listAnketaEmptyCells = (
-  rows: AnketaRow[],
+type AnketaGapWalkContext = {
+  allowed: Set<AnketaColumnKey> | null;
+  skip: Set<string> | null;
+  excludeNameKeys: Set<string> | null;
+};
+
+const makeGapWalkContext = (
   columnKeys?: Iterable<AnketaColumnKey> | null,
   options?: AnketaGapSearchOptions,
-): AnketaEmptyCell[] => {
+): AnketaGapWalkContext | null => {
   const allowed = columnKeys
     ? new Set(
         [...columnKeys].filter((key) =>
@@ -358,32 +364,84 @@ export const listAnketaEmptyCells = (
         ),
       )
     : null;
-  if (allowed && allowed.size === 0) return [];
-  const skip = options?.skipKeys ? new Set([...options.skipKeys]) : null;
-  const excludeNameKeys = options?.excludeNameKeys ?? null;
+  if (allowed && allowed.size === 0) return null;
+  return {
+    allowed,
+    skip: options?.skipKeys ? new Set([...options.skipKeys]) : null,
+    excludeNameKeys: options?.excludeNameKeys ?? null,
+  };
+};
 
+const rowParticipatesInGapSearch = (
+  row: AnketaRow,
+  ctx: AnketaGapWalkContext,
+) => {
+  if (isAnketaRowMissingQuestionnaire(row, ctx.excludeNameKeys)) return false;
+  if (isAnketaRowMarkedAbsentQuestionnaire(row, ctx.allowed)) return false;
+  return true;
+};
+
+const visitEmptyCellsInRow = (
+  row: AnketaRow,
+  ctx: AnketaGapWalkContext,
+  afterColumnIndex: number | null,
+  onGap: (gap: AnketaEmptyCell) => boolean,
+) => {
+  for (let columnIndex = 0; columnIndex < ANKETA_COLUMNS.length; columnIndex += 1) {
+    if (afterColumnIndex != null && columnIndex <= afterColumnIndex) continue;
+    const column = ANKETA_COLUMNS[columnIndex];
+    if (!column || isAnketaColumnReadonly(column.key)) continue;
+    if (ctx.allowed && !ctx.allowed.has(column.key)) continue;
+    if (String(row[column.key] ?? "").trim()) continue;
+    const key = `${row.__rowId}:${column.key}`;
+    if (ctx.skip?.has(key)) continue;
+    const stop = onGap({
+      rowId: row.__rowId,
+      columnId: column.key,
+      rowNumber: row.__rowNumber,
+      columnIndex,
+      header: column.header,
+      a1: anketaCellA1(row.__rowNumber, columnIndex),
+    });
+    if (stop) return true;
+  }
+  return false;
+};
+
+export const listAnketaEmptyCells = (
+  rows: AnketaRow[],
+  columnKeys?: Iterable<AnketaColumnKey> | null,
+  options?: AnketaGapSearchOptions,
+): AnketaEmptyCell[] => {
+  const ctx = makeGapWalkContext(columnKeys, options);
+  if (!ctx) return [];
   const gaps: AnketaEmptyCell[] = [];
   for (const row of rows) {
-    if (isAnketaRowMissingQuestionnaire(row, excludeNameKeys)) continue;
-    if (isAnketaRowMarkedAbsentQuestionnaire(row, allowed)) continue;
-    ANKETA_COLUMNS.forEach((column, columnIndex) => {
-      if (isAnketaColumnReadonly(column.key)) return;
-      if (allowed && !allowed.has(column.key)) return;
-      const value = String(row[column.key] ?? "").trim();
-      if (value) return;
-      const key = `${row.__rowId}:${column.key}`;
-      if (skip?.has(key)) return;
-      gaps.push({
-        rowId: row.__rowId,
-        columnId: column.key,
-        rowNumber: row.__rowNumber,
-        columnIndex,
-        header: column.header,
-        a1: anketaCellA1(row.__rowNumber, columnIndex),
-      });
+    if (!rowParticipatesInGapSearch(row, ctx)) continue;
+    visitEmptyCellsInRow(row, ctx, null, (gap) => {
+      gaps.push(gap);
+      return false;
     });
   }
   return gaps;
+};
+
+export const countAnketaEmptyCells = (
+  rows: AnketaRow[],
+  columnKeys?: Iterable<AnketaColumnKey> | null,
+  options?: AnketaGapSearchOptions,
+) => {
+  const ctx = makeGapWalkContext(columnKeys, options);
+  if (!ctx) return 0;
+  let count = 0;
+  for (const row of rows) {
+    if (!rowParticipatesInGapSearch(row, ctx)) continue;
+    visitEmptyCellsInRow(row, ctx, null, () => {
+      count += 1;
+      return false;
+    });
+  }
+  return count;
 };
 
 export type AnketaGapStats = {
@@ -443,11 +501,22 @@ export const summarizeAnketaGaps = (
   options?: Pick<AnketaGapSearchOptions, "excludeNameKeys">,
 ): AnketaGapStats => {
   const keys = columnKeys ? [...new Set(columnKeys)] : [];
-  const gaps = listAnketaEmptyCells(rows, keys, options);
-  const personIds = new Set(gaps.map((gap) => gap.rowId));
+  const ctx = makeGapWalkContext(keys, options);
+  const personIds = new Set<string>();
+  let emptyCells = 0;
+  if (ctx) {
+    for (const row of rows) {
+      if (!rowParticipatesInGapSearch(row, ctx)) continue;
+      visitEmptyCellsInRow(row, ctx, null, (gap) => {
+        emptyCells += 1;
+        personIds.add(gap.rowId);
+        return false;
+      });
+    }
+  }
   const blanks = countAnketaBlankFieldPersons(rows, keys);
   return {
-    emptyCells: gaps.length,
+    emptyCells,
     personsWithGaps: personIds.size,
     personsWithBlankFields: blanks.personsWithBlankFields,
     personsFullyBlank: blanks.personsFullyBlank,
@@ -460,31 +529,47 @@ export const summarizeAnketaGaps = (
 export const anketaGapSkipKey = (gap: Pick<AnketaEmptyCell, "rowId" | "columnId">) =>
   `${gap.rowId}:${gap.columnId}`;
 
+const scanEmptyCellsFrom = (
+  rows: AnketaRow[],
+  ctx: AnketaGapWalkContext,
+  startRowIndex: number,
+  startAfterColumnIndex: number | null,
+  accept: (gap: AnketaEmptyCell) => boolean,
+): AnketaEmptyCell | null => {
+  for (let index = startRowIndex; index < rows.length; index += 1) {
+    const row = rows[index];
+    if (!row || !rowParticipatesInGapSearch(row, ctx)) continue;
+    const after = index === startRowIndex ? startAfterColumnIndex : null;
+    let found: AnketaEmptyCell | null = null;
+    visitEmptyCellsInRow(row, ctx, after, (gap) => {
+      if (!accept(gap)) return false;
+      found = gap;
+      return true;
+    });
+    if (found) return found;
+  }
+  return null;
+};
+
 export const findNextAnketaEmptyCell = (
   rows: AnketaRow[],
   current: AnketaEmptyCell | null,
   columnKeys?: Iterable<AnketaColumnKey> | null,
   options?: AnketaGapSearchOptions,
 ): AnketaEmptyCell | null => {
-  const gaps = listAnketaEmptyCells(rows, columnKeys, options);
-  if (!gaps.length) return null;
-  if (!current) return gaps[0] ?? null;
-
-  const currentIndex = gaps.findIndex(
-    (gap) =>
-      gap.rowId === current.rowId && gap.columnId === current.columnId,
-  );
-  if (currentIndex < 0) {
-    // Current was skipped/filled — take first gap after current position in sheet order.
-    const after = gaps.find(
-      (gap) =>
-        gap.rowNumber > current.rowNumber ||
-        (gap.rowNumber === current.rowNumber &&
-          gap.columnIndex > current.columnIndex),
-    );
-    return after ?? gaps[0] ?? null;
+  const ctx = makeGapWalkContext(columnKeys, options);
+  if (!ctx) return null;
+  if (!current) {
+    return scanEmptyCellsFrom(rows, ctx, 0, null, () => true);
   }
-  return gaps[currentIndex + 1] ?? gaps[0] ?? null;
+
+  const startIndex = rows.findIndex((row) => row.__rowId === current.rowId);
+  const fromRow = startIndex < 0 ? 0 : startIndex;
+  const afterColumn = startIndex < 0 ? null : current.columnIndex;
+  return (
+    scanEmptyCellsFrom(rows, ctx, fromRow, afterColumn, () => true) ??
+    scanEmptyCellsFrom(rows, ctx, 0, null, () => true)
+  );
 };
 
 /** First empty cell of the next person (skips remaining gaps of the current row). */
@@ -494,25 +579,18 @@ export const findNextAnketaPersonEmptyCell = (
   columnKeys?: Iterable<AnketaColumnKey> | null,
   options?: AnketaGapSearchOptions,
 ): AnketaEmptyCell | null => {
-  const gaps = listAnketaEmptyCells(rows, columnKeys, options);
-  if (!gaps.length) return null;
-  if (!current) return gaps[0] ?? null;
+  const ctx = makeGapWalkContext(columnKeys, options);
+  if (!ctx) return null;
+  if (!current) {
+    return scanEmptyCellsFrom(rows, ctx, 0, null, () => true);
+  }
 
-  const currentIndex = gaps.findIndex(
-    (gap) =>
-      gap.rowId === current.rowId && gap.columnId === current.columnId,
+  const startIndex = rows.findIndex((row) => row.__rowId === current.rowId);
+  const fromRow = startIndex < 0 ? 0 : startIndex + 1;
+  return (
+    scanEmptyCellsFrom(rows, ctx, fromRow, null, (gap) => gap.rowId !== current.rowId) ??
+    scanEmptyCellsFrom(rows, ctx, 0, null, (gap) => gap.rowId !== current.rowId)
   );
-  const startFrom = currentIndex >= 0 ? currentIndex + 1 : 0;
-
-  for (let index = startFrom; index < gaps.length; index += 1) {
-    const gap = gaps[index];
-    if (gap && gap.rowId !== current.rowId) return gap;
-  }
-  for (let index = 0; index < startFrom; index += 1) {
-    const gap = gaps[index];
-    if (gap && gap.rowId !== current.rowId) return gap;
-  }
-  return null;
 };
 
 /** All empty-cell skip keys for one person (to defer the whole row). */

@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useDeferredValue,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import writeXlsxFile, { type SheetData } from "write-excel-file/browser";
 import {
   Alert,
@@ -12,7 +19,6 @@ import {
   Typography,
 } from "@/components/sci/SciPrimitives";
 import { BusinessCenterOutlinedIcon } from "@/components/sci/icons";
-import { CalendarMonthOutlinedIcon } from "@/components/sci/icons";
 import { LocalHospitalOutlinedIcon } from "@/components/sci/icons";
 import { BeachAccessOutlinedIcon } from "@/components/sci/icons";
 import { PersonOutlinedIcon } from "@/components/sci/icons";
@@ -34,6 +40,7 @@ import {
   readDataCache,
 } from "../../data/idbDataCache";
 import { loadSharedRosterLatest } from "../../data/sharedAppData";
+import { STAFF_SHEET_SYNCED_EVENT } from "../../data/staffSheetAutoSync";
 import {
   createStoredZipBlob,
   dataUrlToUint8Array,
@@ -67,28 +74,23 @@ import {
 import { loadPersonnelOverviewInBatches } from "./overviewBatchLoad";
 import {
   buildOverviewMetrics,
+  buildStaffOverviewRowsFromPersonnel,
+  buildStaffOverviewRowsFromRoster,
+  fillDownRosterUnitRows,
   summarizeStaffFromRoster,
 } from "./overviewRosterMerge";
+import {
+  buildImportantOverviewExportFileName,
+  buildImportantOverviewExportSheets,
+  buildOverviewExportSheetData,
+  buildOverviewExportSheetOptions,
+} from "./overviewExport";
 import { runHeavyJob } from "../../workers/runHeavyJob";
 import { buildOverviewSideStats } from "./overviewSideStats";
+import { pullStaffSheetRosterImportPayload } from "../excel-fill/staffSheet";
+import { loadPbWorkbookFromDb } from "../ejournal/loadEjournalWorkbooksFromDb";
+import { parsePbArchive } from "../ejournal/ejoosParsers";
 import type { SciDataTableExportContext } from "@/components/sci/SciDataTable";
-
-const STATUS_FILTERS = [
-  { value: "ALL", label: "Усі статуси" },
-  { value: "ON_DUTY", label: "На службі" },
-  { value: "BUSINESS_TRIP", label: "Відрядження" },
-  { value: "LEAVE", label: "Відпустка" },
-  { value: "MEDICAL", label: "Лікування" },
-  { value: "AWOL", label: "СЗЧ" },
-  { value: "MISSING", label: "Безвісти / втрати" },
-] as const;
-
-const PERIOD_FILTERS = [
-  { value: "ALL", label: "Увесь період" },
-  { value: "7", label: "Останні 7 днів" },
-  { value: "30", label: "Останні 30 днів" },
-  { value: "90", label: "Останні 90 днів" },
-] as const;
 
 const SOURCE_FILTERS = [
   { value: "staff", label: "Штатка" },
@@ -121,17 +123,30 @@ const withStaffOverviewStatus = (
 
 const rosterRowsFromLatest = (latest: BackendPersonnelRosterLatest | null) => {
   if (!latest?.sheet) return [] as EjournalPreviewRow[];
-  return latest.rows.map((row) => ({
-    __dbRowId: row.id,
-    __rowNumber: row.excelRowNumber,
-    ...(row.values && typeof row.values === "object" && !Array.isArray(row.values)
-      ? row.values
-      : {}),
-  })) as EjournalPreviewRow[];
+  return fillDownRosterUnitRows(
+    latest.rows.map((row) => ({
+      __dbRowId: row.id,
+      __rowNumber: row.excelRowNumber,
+      ...(row.values &&
+      typeof row.values === "object" &&
+      !Array.isArray(row.values)
+        ? row.values
+        : {}),
+    })) as EjournalPreviewRow[],
+  );
 };
 
-const rosterSourceLabel = (latest: BackendPersonnelRosterLatest | null) =>
-  latest?.sourceFileName?.trim() || latest?.importName?.trim() || "Штатка";
+const rosterUpdatedAtFromLatest = (
+  latest: BackendPersonnelRosterLatest | null,
+) => latest?.createdAt?.trim() || null;
+
+const formatSourceTimestamp = (iso: string | null | undefined) =>
+  iso ? new Date(iso).toLocaleString("uk-UA") : null;
+
+const formatStaffSourceLabel = (updatedAt: string | null) => {
+  const stamp = formatSourceTimestamp(updatedAt);
+  return stamp ? `Штатка · ${stamp}` : "Штатка";
+};
 
 const rosterColumnsFromLatest = (latest: BackendPersonnelRosterLatest | null) =>
   parseDbColumns(latest?.sheet?.columns);
@@ -142,7 +157,7 @@ const loadLatestPersonnelRosterRows = async (force = false) => {
     rows: rosterRowsFromLatest(latest),
     labels: rosterLabelsFromLatest(latest),
     columns: rosterColumnsFromLatest(latest),
-    label: rosterSourceLabel(latest),
+    updatedAt: rosterUpdatedAtFromLatest(latest),
   };
 };
 
@@ -175,11 +190,7 @@ export function OverviewPage() {
   >({});
   const [query, setQuery] = useState("");
   const [source, setSource] = useState<OverviewSourceFilter>("staff");
-  const [battalion, setBattalion] = useState("ALL");
-  const [rosterLabel, setRosterLabel] = useState("Штатка");
-  const [unit, setUnit] = useState("ALL");
-  const [status, setStatus] = useState("ALL");
-  const [period, setPeriod] = useState("30");
+  const [rosterUpdatedAt, setRosterUpdatedAt] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [message, setMessage] = useState(`API: ${api.baseUrl}`);
   const rosterRowsRef = useRef<EjournalPreviewRow[]>([]);
@@ -187,9 +198,11 @@ export function OverviewPage() {
   const rosterColumnsRef = useRef<
     Array<{ key: string; letter?: string; originalIndex?: number }>
   >([]);
+  const rosterLabelsRef = useRef<Record<string, string>>({});
   const photosRef = useRef<Record<string, string>>({});
   const requestedPhotoKeysRef = useRef(new Set<string>());
   const [rosterEpoch, setRosterEpoch] = useState(0);
+  const [personnelEpoch, setPersonnelEpoch] = useState(0);
   photosRef.current = photos;
 
   const load = async (
@@ -210,24 +223,25 @@ export function OverviewPage() {
           originalIndex?: number;
         }> = [],
         fromCache = false,
+        skipRosterMerge = false,
       ) => {
         let mergedOverview = overview;
-        try {
-          mergedOverview = await runHeavyJob({
-            type: "mergeOverview",
-            overview,
-            rosterRows,
-            rosterLabels,
-            columns: rosterColumns,
-          });
-        } catch {
-          mergedOverview = overview;
+        if (!skipRosterMerge) {
+          try {
+            mergedOverview = await runHeavyJob({
+              type: "mergeOverview",
+              overview,
+              rosterRows,
+              rosterLabels,
+              columns: rosterColumns,
+            });
+          } catch {
+            mergedOverview = overview;
+          }
         }
         if (!alive()) return mergedOverview;
         rosterRowsRef.current = rosterRows;
-        if (!personnelRowsRef.current.length) {
-          personnelRowsRef.current = rosterRows;
-        }
+        rosterLabelsRef.current = rosterLabels;
         rosterColumnsRef.current = rosterColumns;
         setRosterEpoch((value) => value + 1);
         setData(mergedOverview);
@@ -290,14 +304,12 @@ export function OverviewPage() {
           }
         };
 
-        personnelRowsRef.current = nextRosterRows;
-        paintAssets(nextRosterRows);
-
         const personnelRows = await loadPersonnelRowsForOverview(nextRosterRows);
         if (!alive() || seq !== assetsSeq) return;
         personnelRowsRef.current = personnelRows.length
           ? personnelRows
           : nextRosterRows;
+        setPersonnelEpoch((value) => value + 1);
         paintAssets(personnelRowsRef.current);
       };
 
@@ -316,8 +328,8 @@ export function OverviewPage() {
         rosterRows = rosterRowsFromLatest(cachedRoster);
         rosterLabels = rosterLabelsFromLatest(cachedRoster);
         rosterColumns = rosterColumnsFromLatest(cachedRoster);
-        if (cachedRoster) setRosterLabel(rosterSourceLabel(cachedRoster));
-        const painted = await applyOverview(
+        if (cachedRoster) setRosterUpdatedAt(rosterUpdatedAtFromLatest(cachedRoster));
+        await applyOverview(
           cachedOverview,
           rosterRows,
           rosterLabels,
@@ -325,7 +337,6 @@ export function OverviewPage() {
           true,
         );
         setIsLoading(false);
-        void applyPersonnelAssets(painted.rows, rosterRows);
       }
       const paintedFromCache = Boolean(cachedOverview);
 
@@ -334,7 +345,7 @@ export function OverviewPage() {
           rosterRows = result.rows;
           rosterLabels = result.labels;
           rosterColumns = result.columns;
-          setRosterLabel(result.label);
+          setRosterUpdatedAt(result.updatedAt);
           return result.rows;
         })
         .catch(() => rosterRows);
@@ -353,6 +364,7 @@ export function OverviewPage() {
                     rosterLabels,
                     rosterColumns,
                     !meta.complete,
+                    true,
                   );
                   if (meta.complete) return;
                   setMessage(
@@ -392,32 +404,52 @@ export function OverviewPage() {
     };
   }, []);
 
-  const nameQueries = useMemo(() => parseOverviewNameQueries(query), [query]);
+  useEffect(() => {
+    const onSynced = () => {
+      void load(undefined, { force: true });
+    };
+    window.addEventListener(STAFF_SHEET_SYNCED_EVENT, onSynced);
+    return () => window.removeEventListener(STAFF_SHEET_SYNCED_EVENT, onSynced);
+  }, []);
+
+  const deferredQuery = useDeferredValue(query);
+  const nameQueries = useMemo(
+    () => parseOverviewNameQueries(deferredQuery),
+    [deferredQuery],
+  );
   const isNameListSearch = nameQueries.length > 1;
+
+  const personnelOverviewRows = useMemo(() => {
+    if (!personnelRowsRef.current.length) {
+      return [] as BackendPersonnelOverviewRow[];
+    }
+    return buildStaffOverviewRowsFromPersonnel(
+      personnelRowsRef.current,
+      rosterLabelsRef.current,
+    ).map(withStaffOverviewStatus);
+  }, [personnelEpoch, rosterEpoch]);
 
   const sourceRows = useMemo(() => {
     if (!data) return [] as BackendPersonnelOverviewRow[];
+    if (source === "staff" && personnelOverviewRows.length) {
+      return personnelOverviewRows;
+    }
     const rows =
       source === "staff"
-        ? data.rows.filter((row) => {
-            if (!row.inStaff) return false;
-            if (battalion === "ALL") return true;
-            return (row.battalion || "") === battalion;
-          })
+        ? data.rows.filter((row) => row.inStaff)
         : source === "ejoos"
           ? data.rows.filter((row) => row.fromEjoos)
           : data.rows;
     return source === "staff" ? rows.map(withStaffOverviewStatus) : rows;
-  }, [battalion, data, source]);
+  }, [data, personnelOverviewRows, source]);
 
   const staffSummary = useMemo(
     () =>
       summarizeStaffFromRoster(
         rosterRowsRef.current,
         rosterColumnsRef.current,
-        battalion,
       ),
-    [battalion, rosterEpoch],
+    [rosterEpoch],
   );
 
   /** Pasted FIO list looks through every loaded person, not only the current source. */
@@ -429,31 +461,8 @@ export function OverviewPage() {
     );
   }, [data, isNameListSearch, sourceRows]);
 
-  const sourceUnits = useMemo(
-    () =>
-      [...new Set(sourceRows.map((row) => row.unit).filter(Boolean))].sort((a, b) =>
-        a.localeCompare(b, "uk", { numeric: true, sensitivity: "base" }),
-      ),
-    [sourceRows],
-  );
-
-  const metrics = useMemo(() => buildOverviewMetrics(sourceRows), [sourceRows]);
-
   const filteredRows = useMemo(() => {
-    const maxDays = period === "ALL" ? null : Number(period);
-
     return nameSearchRows.filter((row) => {
-      if (unit !== "ALL" && row.unit !== unit) return false;
-      if (status !== "ALL" && row.status !== status) return false;
-      if (
-        !isNameListSearch &&
-        source !== "staff" &&
-        maxDays != null &&
-        row.status !== "ON_DUTY" &&
-        (row.days == null || row.days > maxDays)
-      ) {
-        return false;
-      }
       if (!nameQueries.length) return true;
 
       if (isNameListSearch) {
@@ -492,12 +501,17 @@ export function OverviewPage() {
     documentsByExternalId,
     isNameListSearch,
     nameQueries,
-    period,
     source,
     nameSearchRows,
-    status,
-    unit,
   ]);
+
+  const metrics = useMemo(() => {
+    const metricRows =
+      source === "staff"
+        ? filteredRows.filter((row) => row.inStaff)
+        : filteredRows;
+    return buildOverviewMetrics(metricRows);
+  }, [filteredRows, source]);
 
   const sideStats = useMemo(
     () => buildOverviewSideStats(filteredRows, data),
@@ -518,7 +532,7 @@ export function OverviewPage() {
     return { matched, missing, total: nameQueries.length };
   }, [isNameListSearch, nameQueries, nameSearchRows]);
 
-  const openQuestionnaire = async (target: OverviewQuestionnaireTarget) => {
+  const openQuestionnaire = useCallback(async (target: OverviewQuestionnaireTarget) => {
     if (!target.externalId) return;
     if (!target.hasQuestionnaire) {
       openPersonnelInNewTab({
@@ -545,7 +559,7 @@ export function OverviewPage() {
           : "Не вдалося відкрити анкету.",
       );
     }
-  };
+  }, [questionnaireSourceIdByExternalId]);
 
   const onNeedPhoto = useCallback((row: BackendPersonnelOverviewRow) => {
     if (resolveOverviewPhoto(row, photosRef.current)) return;
@@ -605,23 +619,15 @@ export function OverviewPage() {
       (column) => column.id === "questionnaire",
     );
 
-    const sheetData: SheetData = [
-        visibleColumns.map((column) => ({
-          value: column.label,
-          fontWeight: "bold" as const,
-          align: "center" as const,
-          alignVertical: "center" as const,
-        })),
-        ...context.rows.map((row) =>
-          visibleColumns.map((column) => ({
-            value: column.value(row),
-            alignVertical: "center" as const,
-            wrap: true,
-          })),
-        ),
-      ];
+    const sheetData: SheetData = buildOverviewExportSheetData(context, {
+      activeFilters: context.filters,
+    });
 
-    await writeXlsxFile(sheetData).toFile(
+    await writeXlsxFile(
+      sheetData,
+      buildOverviewExportSheetOptions(context),
+      { fontFamily: "Arial", fontSize: 10 },
+    ).toFile(
       `Огляд особового складу ${exportedAt}.xlsx`,
     );
 
@@ -662,6 +668,74 @@ export function OverviewPage() {
     }
     setMessage(
       `Експортовано таблицю: ${context.rows.length} рядків · анкет у ZIP: ${files.length}.`,
+    );
+  };
+
+  const exportImportantOverviewColumns = async (
+    context: SciDataTableExportContext<BackendPersonnelOverviewRow>,
+  ) => {
+    const exportedAt = new Date();
+    let exportRows = context.allRows ?? context.rows;
+    let exportRosterRows = rosterRowsRef.current;
+    let archivePeriods: ReturnType<typeof parsePbArchive> = [];
+    try {
+      setMessage("Оновлюю «Загальний список» і archive 1ПБ для експорту…");
+      const payload = await pullStaffSheetRosterImportPayload({
+        source: "gviz",
+      });
+      const sourceSheet = payload.sheets[0];
+      if (sourceSheet) {
+        exportRosterRows = fillDownRosterUnitRows(
+          sourceSheet.rows.map((row, index) => ({
+            __dbRowId: `google:${row.excelRowNumber || index + 2}`,
+            __rowNumber: row.excelRowNumber,
+            ...row.values,
+          })),
+        );
+        const rosterLabels = Object.fromEntries(
+          sourceSheet.columns.map((column) => [column.key, column.label]),
+        );
+        const freshRows = buildStaffOverviewRowsFromRoster(
+          exportRosterRows,
+          rosterLabels,
+          sourceSheet.columns,
+        ).map(withStaffOverviewStatus);
+        if (freshRows.length) exportRows = freshRows;
+      }
+    } catch (error) {
+      console.warn(
+        "[Огляд] Не вдалося оновити Google перед експортом, використовую поточні дані",
+        error,
+      );
+    }
+    try {
+      const pbWorkbook = await loadPbWorkbookFromDb();
+      archivePeriods = pbWorkbook ? parsePbArchive(pbWorkbook) : [];
+    } catch (error) {
+      console.warn(
+        "[Огляд] Не вдалося прочитати archive поточного 1ПБ",
+        error,
+      );
+    }
+    const sheets = buildImportantOverviewExportSheets(
+      exportRows,
+      { activeFilters: context.filters },
+      exportRows,
+      exportRosterRows,
+      archivePeriods,
+    );
+
+    await writeXlsxFile(sheets, {
+      fontFamily: "Arial",
+      fontSize: 10,
+    }).toFile(
+      buildImportantOverviewExportFileName(
+        { activeFilters: context.filters },
+        exportedAt,
+      ),
+    );
+    setMessage(
+      `Експортовано важливі колонки: ${context.rows.length} рядків.`,
     );
   };
 
@@ -735,7 +809,7 @@ export function OverviewPage() {
           <SearchOutlinedIcon fontSize="small" />
           <textarea
             value={query}
-            rows={isNameListSearch ? Math.min(6, nameQueries.length + 1) : 1}
+            rows={1}
             onChange={(event) => setQuery(event.target.value)}
             placeholder="ПІБ або список (по одному в рядок) — Ctrl+V"
             spellCheck={false}
@@ -760,95 +834,17 @@ export function OverviewPage() {
           onChange={(event) => {
             const next = event.target.value as OverviewSourceFilter;
             setSource(next);
-            setUnit("ALL");
-            setBattalion("ALL");
           }}
         >
           {SOURCE_FILTERS.map((item) => (
             <MenuItem key={item.value} value={item.value}>
               {item.value === "staff"
-                ? rosterLabel === "Штатка"
-                  ? "Штатка"
-                  : `Штатка · ${rosterLabel}`
+                ? formatStaffSourceLabel(rosterUpdatedAt)
                 : item.value === "ejoos"
                   ? data?.importName
                     ? `ЕЖООС · ${data.importName}`
                     : "ЕЖООС"
                   : item.label}
-            </MenuItem>
-          ))}
-        </TextField>
-        {source === "staff" ? (
-          <TextField
-            select
-            size="small"
-            className="overview-filter"
-            label="Батальйон"
-            value={
-              battalion === "ALL" || staffSummary.battalions.includes(battalion)
-                ? battalion
-                : "ALL"
-            }
-            onChange={(event) => setBattalion(event.target.value)}
-          >
-            <MenuItem value="ALL">Усі</MenuItem>
-            {staffSummary.battalions.map((item) => (
-              <MenuItem key={item} value={item}>
-                {item}
-              </MenuItem>
-            ))}
-          </TextField>
-        ) : null}
-        <TextField
-          select
-          size="small"
-          className="overview-filter"
-          label="Підрозділ"
-          value={unit}
-          onChange={(event) => setUnit(event.target.value)}
-        >
-          <MenuItem value="ALL">Усі підрозділи</MenuItem>
-          {sourceUnits.map((item) => (
-            <MenuItem key={item} value={item}>
-              {item}
-            </MenuItem>
-          ))}
-        </TextField>
-        <TextField
-          select
-          size="small"
-          className="overview-filter"
-          label="Статус"
-          value={status}
-          onChange={(event) => setStatus(event.target.value)}
-        >
-          {STATUS_FILTERS.map((item) => (
-            <MenuItem key={item.value} value={item.value}>
-              {item.label}
-            </MenuItem>
-          ))}
-        </TextField>
-        <TextField
-          select
-          size="small"
-          className="overview-filter"
-          label="Період"
-          value={period}
-          onChange={(event) => setPeriod(event.target.value)}
-          slotProps={{
-            input: {
-              startAdornment: (
-                <CalendarMonthOutlinedIcon
-                  fontSize="small"
-                  sx={{ mr: 1, color: "text.secondary" }}
-                />
-              ),
-            },
-          }}
-        >
-          {PERIOD_FILTERS.map((item) => (
-            <MenuItem key={item.value} value={item.value}>
-              {item.label}
             </MenuItem>
           ))}
         </TextField>
@@ -874,13 +870,16 @@ export function OverviewPage() {
           onNeedPhoto={onNeedPhoto}
           questionnaireByExternalId={questionnaireByExternalId}
           documentsByExternalId={documentsByExternalId}
-            onOpenQuestionnaire={(target) => void openQuestionnaire(target)}
+          onOpenQuestionnaire={openQuestionnaire}
           emptyMessage={
             isLoading && !data
               ? "Завантаження огляду..."
               : "Немає записів за поточними фільтрами."
           }
           onExport={(context) => void exportOverviewTable(context)}
+          onImportantExport={(context) =>
+            void exportImportantOverviewColumns(context)
+          }
         />
         <footer className="overview-table-footer">
           <span>

@@ -1,16 +1,29 @@
 import { api, type BackendPersonQuestionnaireMeta } from "../../api";
+import { loadSharedRosterLatest } from "../../data/sharedAppData";
 import type { EjournalPreviewRow } from "../ejournal/ejournalTypes";
+import { readRosterColumnValue } from "../excel-fill/rosterSourceSnapshot";
+import { runStaffSheetRosterImportHeavy } from "./runStaffSheetHeavyJobs";
 import {
-  readRosterColumnValue,
-} from "../excel-fill/rosterSourceSnapshot";
+  pullStaffSheetGvizRosterTable,
+  STAFF_SHEET_ID,
+} from "../excel-fill/staffSheet";
 import {
   applyAnketaEditsToRows,
   loadAnketaEdits,
 } from "./anketaEdits";
-import { loadPersonnelRowsForAnketa, normalizeAnketaNameKey } from "./anketaPersonMatch";
+import {
+  loadPersonnelIndexForAnketa,
+  normalizeAnketaNameKey,
+  resolvePersonnelRowForStaffRoster,
+  type AnketaPersonnelIndex,
+} from "./anketaPersonMatch";
 import { loadAnketaSheetPreferCache, type AnketaRow } from "./anketaSheet";
 import { getPersonExternalId } from "../personnel/personnelUtils";
-import { loadStaffSheetImport } from "./staffSheetImport";
+import {
+  loadStaffSheetImport,
+  rosterLatestToStaffSheetImportSnapshot,
+  rosterRowsFromStaffSheetPayload,
+} from "./staffSheetImport";
 
 const sortRosterRows = (rows: EjournalPreviewRow[]) =>
   [...rows].sort(
@@ -19,44 +32,101 @@ const sortRosterRows = (rows: EjournalPreviewRow[]) =>
   );
 
 export type StaffSheetEnrichmentContext = {
-  /** Усі рядки імпортованої «Штатки» в порядку Excel. */
+  /** Усі рядки «Штатки» в порядку Excel. */
   rosterRows: EjournalPreviewRow[];
-  /** ООС + roster для полів, яких немає в штатці. */
-  mergedPersonnelRows: EjournalPreviewRow[];
+  personnelIndex: AnketaPersonnelIndex;
   anketaRows: AnketaRow[];
   questionnaires: BackendPersonQuestionnaireMeta[];
   importFileName: string;
 };
 
+const loadAnketaContext = async () => {
+  const [anketaSnapshot, anketaEdits, questionnaires] = await Promise.all([
+    loadAnketaSheetPreferCache(),
+    loadAnketaEdits(),
+    api.listPersonQuestionnaires().catch(() => []),
+  ]);
+  return {
+    anketaRows: applyAnketaEditsToRows(
+      anketaSnapshot?.rows ?? [],
+      anketaEdits,
+    ),
+    questionnaires,
+  };
+};
+
+/** Повна «Штатка» з Google gviz — усі рядки (підрозділи, вакансії) для експорту. */
+export const loadStaffSheetExportRosterRows = async (): Promise<{
+  rosterRows: EjournalPreviewRow[];
+  importFileName: string;
+}> => {
+  const table = await pullStaffSheetGvizRosterTable();
+  const payload = await runStaffSheetRosterImportHeavy(table, {
+    source: "gviz",
+    sourceLabel: `Штатка (gviz) · ${STAFF_SHEET_ID}`,
+    includeAllRows: true,
+  });
+  return {
+    rosterRows: sortRosterRows(rosterRowsFromStaffSheetPayload(payload)),
+    importFileName: "Штатка з Google",
+  };
+};
+
 export const loadStaffSheetEnrichmentContext =
   async (): Promise<StaffSheetEnrichmentContext> => {
-    const [importedStaffSheet, mergedPersonnelRows, anketaSnapshot, anketaEdits, questionnaires] =
-      await Promise.all([
-        loadStaffSheetImport(),
-        loadPersonnelRowsForAnketa(),
-        loadAnketaSheetPreferCache(),
-        loadAnketaEdits(),
-        api.listPersonQuestionnaires().catch(() => []),
-      ]);
+    const [
+      latestRoster,
+      importedStaffSheet,
+      personnelIndex,
+      anketaContext,
+    ] = await Promise.all([
+      loadSharedRosterLatest(),
+      loadStaffSheetImport(),
+      loadPersonnelIndexForAnketa(),
+      loadAnketaContext(),
+    ]);
 
-    const rosterRows = sortRosterRows(importedStaffSheet?.rows ?? []);
+    const fromDb = rosterLatestToStaffSheetImportSnapshot(latestRoster);
+    const snapshot = fromDb ?? importedStaffSheet;
+    let rosterRows = sortRosterRows(snapshot?.rows ?? []);
+    let importFileName = snapshot?.fileName ?? "";
+    if (!rosterRows.length) {
+      const fresh = await loadStaffSheetExportRosterRows();
+      rosterRows = fresh.rosterRows;
+      importFileName = fresh.importFileName;
+    }
     if (!rosterRows.length) {
       throw new Error(
-        "Спочатку імпортуйте «Штатку» (.xlsx) кнопкою «Імпорт Штатки» на цій сторінці.",
+        "Немає «Штатки». Оновіть з Google Sheets в Особовому складі або перевірте доступ до таблиці.",
       );
     }
 
-    const anketaRows = applyAnketaEditsToRows(
-      anketaSnapshot?.rows ?? [],
-      anketaEdits,
-    );
-
     return {
       rosterRows,
-      mergedPersonnelRows,
-      anketaRows,
-      questionnaires,
-      importFileName: importedStaffSheet?.fileName ?? "",
+      personnelIndex,
+      anketaRows: anketaContext.anketaRows,
+      questionnaires: anketaContext.questionnaires,
+      importFileName,
+    };
+  };
+
+/** Контекст для експорту: свіжа gviz-«Штатка» з усіма рядками + індекс ООС. */
+export const loadStaffSheetExportContext =
+  async (): Promise<StaffSheetEnrichmentContext> => {
+    const [exportRoster, personnelIndex, anketaContext] = await Promise.all([
+      loadStaffSheetExportRosterRows(),
+      loadPersonnelIndexForAnketa(),
+      loadAnketaContext(),
+    ]);
+    if (!exportRoster.rosterRows.length) {
+      throw new Error("Google «Штатка» порожня або недоступна.");
+    }
+    return {
+      rosterRows: exportRoster.rosterRows,
+      personnelIndex,
+      anketaRows: anketaContext.anketaRows,
+      questionnaires: anketaContext.questionnaires,
+      importFileName: exportRoster.importFileName,
     };
   };
 
@@ -81,3 +151,8 @@ export const findMergedPersonnelRow = (
   );
   return byName ?? rosterRow;
 };
+
+export const resolveStaffSheetPersonnelRow = (
+  rosterRow: EjournalPreviewRow,
+  personnelIndex: AnketaPersonnelIndex,
+) => resolvePersonnelRowForStaffRoster(rosterRow, personnelIndex);

@@ -3,6 +3,7 @@ import {
   CacheKeys,
   fetchWithCache,
   jsonChanged,
+  readDataCache,
 } from "../../data/idbDataCache";
 import type {
   EjournalPreviewRow,
@@ -11,11 +12,12 @@ import {
   buildPersonSummary,
   findEjournalPersonnelSheet,
   getPersonExternalId,
+  isLikelyPersonnelRow,
   loadAllEjournalSheetRows,
   normalizePersonBirthKey,
 } from "../personnel/personnelUtils";
 import { mergeRosterRowsIntoPreview } from "../personnel/personnelRosterMerge";
-import { mapRosterLatestToPreviewRows } from "../excel-fill/rosterSourceSnapshot";
+import { mapRosterLatestToPreviewRows, readRosterColumnValue } from "../excel-fill/rosterSourceSnapshot";
 import type { AnketaRow } from "./anketaSheet";
 
 export const normalizeAnketaNameKey = (value: unknown) =>
@@ -69,18 +71,49 @@ type PersonnelIndex = {
   byRnokpp: Map<string, AnketaPersonnelMatch>;
   byNameBirth: Map<string, AnketaPersonnelMatch>;
   byName: Map<string, AnketaPersonnelMatch[]>;
+  /** Прізвище + імʼя (без по батькові) — для підказок, не для автозвʼязку. */
+  byShortName: Map<string, AnketaPersonnelMatch[]>;
+};
+
+export type AnketaPersonnelIndex = PersonnelIndex;
+
+export const anketaPersonnelNamesMatch = (
+  anketaFullName: unknown,
+  personnelName: unknown,
+) => {
+  const left = normalizeAnketaNameKey(anketaFullName);
+  const right = normalizeAnketaNameKey(personnelName);
+  return Boolean(left && right && left === right);
+};
+
+const shortNameKeyFromFull = (nameKey: string) => {
+  const parts = nameKey.split(" ").filter(Boolean);
+  return parts.length >= 2 ? `${parts[0]} ${parts[1]}` : nameKey;
 };
 
 let cachedIndex: PersonnelIndex | null = null;
 let cachedIndexAt = 0;
+
+const pushNameList = (
+  map: Map<string, AnketaPersonnelMatch[]>,
+  key: string,
+  match: AnketaPersonnelMatch,
+) => {
+  if (!key) return;
+  const list = map.get(key) ?? [];
+  list.push(match);
+  map.set(key, list);
+};
 
 const buildPersonnelIndex = (rows: EjournalPreviewRow[]): PersonnelIndex => {
   const byExternalId = new Map<string, AnketaPersonnelMatch>();
   const byRnokpp = new Map<string, AnketaPersonnelMatch>();
   const byNameBirth = new Map<string, AnketaPersonnelMatch>();
   const byName = new Map<string, AnketaPersonnelMatch[]>();
+  const byShortName = new Map<string, AnketaPersonnelMatch[]>();
 
   for (const row of rows) {
+    if (!isLikelyPersonnelRow(row)) continue;
     const summary = buildPersonSummary(row);
     const base = { row, summary, matchBy: "name" as const };
     const spreadsheetId = getPersonExternalId(row).trim();
@@ -98,8 +131,13 @@ const buildPersonnelIndex = (rows: EjournalPreviewRow[]): PersonnelIndex => {
       byExternalId.set(normalizeAnketaExternalIdKey(summary.externalId), match);
     }
     const rnokpp = summary.rnokpp.trim();
+    const rnokppDigits = rnokpp.replace(/\D/g, "");
     if (rnokpp) {
-      byRnokpp.set(rnokpp, { ...base, matchBy: "rnokpp" });
+      const match = { ...base, matchBy: "rnokpp" as const };
+      byRnokpp.set(rnokpp, match);
+      if (rnokppDigits.length >= 8) {
+        byRnokpp.set(rnokppDigits, match);
+      }
     }
     const nameKey = normalizeNameKey(summary.name);
     if (!nameKey || nameKey === "особа не вибрана") continue;
@@ -110,16 +148,56 @@ const buildPersonnelIndex = (rows: EjournalPreviewRow[]): PersonnelIndex => {
         matchBy: "nameBirth",
       });
     }
-    const list = byName.get(nameKey) ?? [];
-    list.push({ ...base, matchBy: "name" });
-    byName.set(nameKey, list);
+    pushNameList(byName, nameKey, { ...base, matchBy: "name" });
+    pushNameList(byShortName, shortNameKeyFromFull(nameKey), {
+      ...base,
+      matchBy: "name",
+    });
   }
 
-  return { byExternalId, byRnokpp, byNameBirth, byName };
+  return { byExternalId, byRnokpp, byNameBirth, byName, byShortName };
 };
 
+const appendAnketaCreatedRows = (
+  rows: EjournalPreviewRow[],
+  created: EjournalPreviewRow[],
+): EjournalPreviewRow[] => {
+  if (!created.length) return rows;
+
+  const used = new Set<string>();
+  for (const row of rows) {
+    const summary = buildPersonSummary(row);
+    const name = normalizeNameKey(summary.name);
+    const birth = normalizePersonBirthKey(summary.birthDate);
+    const id = normalizeAnketaExternalIdKey(getPersonExternalId(row) || summary.externalId);
+    if (id) used.add(`id:${id}`);
+    if (name && birth) used.add(`nb:${name}|${birth}`);
+    if (name) used.add(`name:${name}`);
+  }
+
+  const extras: EjournalPreviewRow[] = [];
+  for (const row of created) {
+    if (!isLikelyPersonnelRow(row)) continue;
+    const summary = buildPersonSummary(row);
+    const name = normalizeNameKey(summary.name);
+    const birth = normalizePersonBirthKey(summary.birthDate);
+    const id = normalizeAnketaExternalIdKey(getPersonExternalId(row) || summary.externalId);
+    const marks = [
+      id ? `id:${id}` : "",
+      name && birth ? `nb:${name}|${birth}` : "",
+      name ? `name:${name}` : "",
+    ].filter(Boolean);
+    if (marks.some((mark) => used.has(mark))) continue;
+    extras.push(row);
+    marks.forEach((mark) => used.add(mark));
+  }
+
+  return extras.length ? [...rows, ...extras] : rows;
+};
+
+/** Той самий склад, що на сторінці «Особовий склад»: останній ООС + штатка + додані з анкет. */
 const loadMergedPersonnelRows = async (): Promise<EjournalPreviewRow[]> => {
-  const [imports, latestRoster] = await Promise.all([
+  const [imports, latestRoster, created] = await Promise.all([
     fetchWithCache<BackendEjournalImport[]>({
       key: CacheKeys.ejournalImports,
       fetcher: () => api.listEjournalImports(),
@@ -130,49 +208,26 @@ const loadMergedPersonnelRows = async (): Promise<EjournalPreviewRow[]> => {
       fetcher: () => api.getLatestPersonnelRoster(),
       isChanged: jsonChanged,
     }).catch(() => null),
+    readDataCache<EjournalPreviewRow[]>(CacheKeys.anketaCreatedPersonnel).then(
+      (stored) => (Array.isArray(stored) ? stored : []),
+    ),
   ]);
 
   const rosterRows = mapRosterLatestToPreviewRows(latestRoster);
-  const orderedImports = [...imports].sort(
-    (left, right) =>
-      new Date(left.updatedAt).getTime() - new Date(right.updatedAt).getTime(),
-  );
-  // Повна історія може містити десятки великих імпортів. Для доповнення
-  // достатньо найближчих версій; найновіша картка все одно має пріоритет.
-  const oosSheets = orderedImports
-    .map((item) => findEjournalPersonnelSheet([item]))
-    .filter((sheet): sheet is NonNullable<typeof sheet> => Boolean(sheet))
-    .slice(-8);
+  const sheet = findEjournalPersonnelSheet(imports);
+  const preview = sheet
+    ? await loadAllEjournalSheetRows(sheet).catch(() => null)
+    : null;
 
-  if (!oosSheets.length) {
-    return rosterRows.length
-      ? mergeRosterRowsIntoPreview({ rows: [] }, rosterRows)
-      : [];
+  if (!preview?.rows?.length && !rosterRows.length && !created.length) {
+    return [];
   }
 
-  // Історичні ООС потрібні для «Виключені»: у найновішому ООС людини вже може не бути.
-  // Імпорти йдуть від старого до нового, тому новіша картка перезаписує старішу.
-  const previews = await Promise.all(
-    oosSheets.map((sheet) => loadAllEjournalSheetRows(sheet).catch(() => null)),
+  const withRoster = mergeRosterRowsIntoPreview(
+    { rows: preview?.rows ?? [] },
+    rosterRows,
   );
-  const uniqueRows = new Map<string, EjournalPreviewRow>();
-  let fallbackIndex = 0;
-  for (const preview of previews) {
-    for (const row of preview?.rows ?? []) {
-      const summary = buildPersonSummary(row);
-      const id = getPersonExternalId(row).trim();
-      const nameKey = normalizeNameKey(summary.name);
-      const birthKey = normalizePersonBirthKey(summary.birthDate);
-      const key =
-        (id && `id:${id}`) ||
-        (nameKey && birthKey && `name-birth:${nameKey}|${birthKey}`) ||
-        (nameKey && `name:${nameKey}`) ||
-        `row:${fallbackIndex++}`;
-      uniqueRows.set(key, row);
-    }
-  }
-  const oosRows = [...uniqueRows.values()];
-  return mergeRosterRowsIntoPreview({ rows: oosRows }, rosterRows);
+  return appendAnketaCreatedRows(withRoster, created);
 };
 
 export const loadPersonnelIndexForAnketa = async (options?: {
@@ -193,9 +248,139 @@ export const loadPersonnelIndexForAnketa = async (options?: {
 export const loadPersonnelRowsForAnketa = async (): Promise<EjournalPreviewRow[]> =>
   loadMergedPersonnelRows();
 
+/** Швидкий пошук рядка ООС для зіставлення зі Штаткою (без лінійного .find). */
+export const resolvePersonnelRowForStaffRoster = (
+  rosterRow: EjournalPreviewRow,
+  index: PersonnelIndex,
+): EjournalPreviewRow => {
+  const externalId = getPersonExternalId(rosterRow).trim();
+  if (externalId) {
+    const byId =
+      index.byExternalId.get(externalId) ??
+      index.byExternalId.get(normalizeAnketaExternalIdKey(externalId));
+    if (byId) return byId.row;
+  }
+
+  const nameKey = normalizeAnketaNameKey(readRosterColumnValue(rosterRow, 14));
+  if (nameKey) {
+    const matches = index.byName.get(nameKey);
+    if (matches?.length === 1) return matches[0]!.row;
+  }
+
+  return rosterRow;
+};
+
 export type AnketaPersonnelMatchResult = {
   match: AnketaPersonnelMatch | null;
   ambiguous: AnketaPersonnelMatch[];
+  /** Схожі за прізвищем + імʼям (інше по батькові / написання). */
+  similar: AnketaPersonnelMatch[];
+};
+
+const dedupePersonnelMatches = (items: AnketaPersonnelMatch[]) => {
+  const seen = new Set<string>();
+  const result: AnketaPersonnelMatch[] = [];
+  for (const item of items) {
+    const key =
+      String(item.row.__dbRowId ?? "") ||
+      item.summary.externalId ||
+      normalizeNameKey(item.summary.name);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    result.push(item);
+  }
+  return result;
+};
+
+const personnelExternalIdKeys = (match: AnketaPersonnelMatch) => {
+  const keys = new Set<string>();
+  const spreadsheetId = getPersonExternalId(match.row).trim();
+  if (spreadsheetId) {
+    keys.add(spreadsheetId);
+    keys.add(normalizeAnketaExternalIdKey(spreadsheetId));
+  }
+  const summaryId = String(match.summary.externalId ?? "").trim();
+  if (summaryId) {
+    keys.add(summaryId);
+    keys.add(normalizeAnketaExternalIdKey(summaryId));
+  }
+  return keys;
+};
+
+const disambiguateNameMatches = (
+  anketaRow: AnketaRow,
+  candidates: AnketaPersonnelMatch[],
+): AnketaPersonnelMatchResult => {
+  const unique = dedupePersonnelMatches(candidates);
+  if (!unique.length) {
+    return { match: null, ambiguous: [], similar: [] };
+  }
+  if (unique.length === 1) {
+    return {
+      match: { ...unique[0]!, matchBy: "name" },
+      ambiguous: [],
+      similar: [],
+    };
+  }
+
+  const externalId = normalizeAnketaExternalIdKey(anketaRow.externalId);
+  const birthKey = normalizePersonBirthKey(String(anketaRow.birthDate ?? ""));
+
+  const matchesExternalId = (item: AnketaPersonnelMatch) =>
+    externalId ? personnelExternalIdKeys(item).has(externalId) : false;
+
+  const matchesBirth = (item: AnketaPersonnelMatch) =>
+    birthKey
+      ? normalizePersonBirthKey(item.summary.birthDate) === birthKey
+      : false;
+
+  if (externalId && birthKey) {
+    const byBoth = unique.filter(
+      (item) => matchesExternalId(item) && matchesBirth(item),
+    );
+    if (byBoth.length === 1) {
+      return {
+        match: { ...byBoth[0]!, matchBy: "nameBirth" },
+        ambiguous: [],
+        similar: [],
+      };
+    }
+    return {
+      match: null,
+      ambiguous: byBoth.length > 1 ? byBoth : unique,
+      similar: [],
+    };
+  }
+
+  if (externalId) {
+    const byId = unique.filter(matchesExternalId);
+    if (byId.length === 1) {
+      return {
+        match: { ...byId[0]!, matchBy: "externalId" },
+        ambiguous: [],
+        similar: [],
+      };
+    }
+    if (byId.length > 1) {
+      return { match: null, ambiguous: byId, similar: [] };
+    }
+  }
+
+  if (birthKey) {
+    const byBirth = unique.filter(matchesBirth);
+    if (byBirth.length === 1) {
+      return {
+        match: { ...byBirth[0]!, matchBy: "nameBirth" },
+        ambiguous: [],
+        similar: [],
+      };
+    }
+    if (byBirth.length > 1) {
+      return { match: null, ambiguous: byBirth, similar: [] };
+    }
+  }
+
+  return { match: null, ambiguous: unique, similar: [] };
 };
 
 export const matchAnketaRowToPersonnelDetailed = (
@@ -203,38 +388,45 @@ export const matchAnketaRowToPersonnelDetailed = (
   index: PersonnelIndex | null,
 ): AnketaPersonnelMatchResult => {
   if (!anketaRow || !index) {
-    return { match: null, ambiguous: [] };
-  }
-
-  const externalId = String(anketaRow.externalId ?? "").trim();
-  if (externalId) {
-    const hit = index.byExternalId.get(externalId);
-    if (hit) return { match: hit, ambiguous: [] };
-  }
-
-  const rnokpp = String(anketaRow.rnokpp ?? "").trim();
-  if (rnokpp) {
-    const hit = index.byRnokpp.get(rnokpp);
-    if (hit) return { match: hit, ambiguous: [] };
+    return { match: null, ambiguous: [], similar: [] };
   }
 
   const nameKey = normalizeNameKey(anketaRow.fullName);
-  if (!nameKey) return { match: null, ambiguous: [] };
+  const shortKey = nameKey ? shortNameKeyFromFull(nameKey) : "";
+  const similarFallback =
+    shortKey && shortKey !== nameKey
+      ? dedupePersonnelMatches(index.byShortName.get(shortKey) ?? [])
+      : [];
 
-  const birthKey = normalizePersonBirthKey(String(anketaRow.birthDate ?? ""));
-  if (birthKey) {
-    const hit = index.byNameBirth.get(`${nameKey}|${birthKey}`);
-    if (hit) return { match: hit, ambiguous: [] };
+  if (nameKey) {
+    const byName = index.byName.get(nameKey) ?? [];
+    if (byName.length) {
+      const byNameResult = disambiguateNameMatches(anketaRow, byName);
+      if (byNameResult.match || byNameResult.ambiguous.length) {
+        return byNameResult;
+      }
+    }
+
+    const birthKey = normalizePersonBirthKey(String(anketaRow.birthDate ?? ""));
+    if (birthKey) {
+      const hit = index.byNameBirth.get(`${nameKey}|${birthKey}`);
+      if (hit) {
+        return { match: hit, ambiguous: [], similar: [] };
+      }
+    }
   }
 
-  const byName = index.byName.get(nameKey) ?? [];
-  if (byName.length === 1) {
-    return { match: byName[0] ?? null, ambiguous: [] };
+  const rnokpp = String(anketaRow.rnokpp ?? "")
+    .replace(/\D/g, "")
+    .trim();
+  if (rnokpp.length >= 8) {
+    const hit = index.byRnokpp.get(rnokpp);
+    if (hit && anketaPersonnelNamesMatch(anketaRow.fullName, hit.summary.name)) {
+      return { match: hit, ambiguous: [], similar: [] };
+    }
   }
-  if (byName.length > 1) {
-    return { match: null, ambiguous: byName };
-  }
-  return { match: null, ambiguous: [] };
+
+  return { match: null, ambiguous: [], similar: similarFallback };
 };
 
 export const matchAnketaRowToPersonnel = (

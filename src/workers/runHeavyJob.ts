@@ -1,4 +1,4 @@
-import { runHeavyJobSync, type HeavyJob, type HeavyJobResult } from "./heavyJobs";
+import { runHeavyJobMaybeAsync, runHeavyJobSync, type HeavyJob, type HeavyJobResult } from "./heavyJobs";
 import type { ExcelWorkbookSnapshot } from "../excelRoundTrip";
 
 type WorkerResponse = {
@@ -22,6 +22,12 @@ const toWorkerJob = <T extends HeavyJob>(job: T): T => {
       ...job,
       ejoos: dropWorkbookFile(job.ejoos),
       pb: dropWorkbookFile(job.pb),
+    };
+  }
+  if (job.type === "staffSheetVkIndex" || job.type === "parseVkTpvDovidky") {
+    return {
+      ...job,
+      snapshot: dropWorkbookFile(job.snapshot),
     };
   }
   return job;
@@ -51,7 +57,7 @@ export const runHeavyJob = <T extends HeavyJob>(
 ): Promise<HeavyJobResult[T["type"]]> => {
   const target = getWorker();
   if (!target) {
-    return Promise.resolve(runHeavyJobSync(job));
+    return runHeavyJobMaybeAsync(job) as Promise<HeavyJobResult[T["type"]]>;
   }
 
   return new Promise((resolve, reject) => {
@@ -70,11 +76,11 @@ export const runHeavyJob = <T extends HeavyJob>(
       target.postMessage({ id, job: toWorkerJob(job) });
     } catch {
       target.removeEventListener("message", onMessage);
-      try {
-        resolve(runHeavyJobSync(job));
-      } catch (error) {
-        reject(error instanceof Error ? error : new Error(String(error)));
-      }
+      void runHeavyJobMaybeAsync(job)
+        .then((result) => resolve(result as HeavyJobResult[T["type"]]))
+        .catch((error) =>
+          reject(error instanceof Error ? error : new Error(String(error))),
+        );
     }
   });
 };

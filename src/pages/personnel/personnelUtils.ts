@@ -1093,27 +1093,35 @@ export const resolvePersonRosterStatus = (
 
 /** Категорія огляду з тексту колонки «Статус» у Штатці. */
 export const classifyOverviewStatusFromRoster = (status: string) => {
-  const normalized = String(status ?? "")
-    .replace(/[ʼ’']/g, "")
+  const displayed = String(status ?? "")
     .replace(/\s+/g, " ")
-    .trim()
+    .trim();
+  const normalized = displayed
+    .replace(/[ʼ’']/g, "")
     .toLocaleLowerCase("uk-UA");
   if (normalized.includes("відряд")) {
-    return { status: "BUSINESS_TRIP", statusLabel: "Відрядження" };
+    return { status: "BUSINESS_TRIP", statusLabel: displayed || "Відрядження" };
   }
   if (normalized.includes("відпуст")) {
-    return { status: "LEAVE", statusLabel: "Відпустка" };
+    return { status: "LEAVE", statusLabel: displayed || "Відпустка" };
   }
   if (normalized.includes("ліку") || normalized.includes("шпит")) {
-    return { status: "MEDICAL", statusLabel: "Лікування" };
+    return { status: "MEDICAL", statusLabel: displayed || "Лікування" };
   }
   if (normalized.includes("сзч")) {
-    return { status: "AWOL", statusLabel: "СЗЧ" };
+    return { status: "AWOL", statusLabel: displayed || "СЗЧ" };
   }
   if (normalized.includes("безв") || normalized.includes("зник")) {
-    return { status: "MISSING", statusLabel: "Безвісти" };
+    return { status: "MISSING", statusLabel: displayed || "Безвісти" };
   }
-  return { status: "ON_DUTY", statusLabel: "На службі" };
+  if (
+    normalized.includes("загиб") ||
+    normalized.includes("помер") ||
+    /(?:^|\D)200(?:\D|$)/.test(normalized)
+  ) {
+    return { status: "DEAD", statusLabel: displayed || "Загиблі" };
+  }
+  return { status: "ON_DUTY", statusLabel: displayed || "На службі" };
 };
 
 export const buildPersonSummary = (row: EjournalPreviewRow | null) => {

@@ -3417,6 +3417,14 @@ export const buildEjoosSyncPlan = (
   const timesheetDispositionRows = scanRows(timesheetSheet, DISPOSITION_RE);
   const shpoSzchRows = scanRows(shpoSheet, ABSENCE_STATUS_RE);
   const timesheetSzchRows = scanRows(timesheetSheet, ABSENCE_STATUS_RE);
+  /** Штатний рядок Табеля не є блоком розпорядження, навіть якщо в клітинці дня є «вибув у розпорядження». */
+  const isTimesheetStaffPositionRow = (excelRow: number) => {
+    const scan = timesheetScanByRow.get(excelRow);
+    return Boolean(scan?.positionIndex && isPositionIndex(scan.positionIndex));
+  };
+  const timesheetDispositionStaffRows = timesheetDispositionRows.filter(
+    (row) => !isTimesheetStaffPositionRow(row.excelRow),
+  );
   const personInTextRows = (event: PbMovement, rows: SheetScanRow[]) => {
     const id = normId(event.personId);
     if (id && rows.some((row) => row.ids.has(id))) return true;
@@ -3764,7 +3772,7 @@ export const buildEjoosSyncPlan = (
       const dispositionInShpo = personInTextRows(event, shpoDispositionRows);
       const dispositionInTimesheet = personInTextRows(
         event,
-        timesheetDispositionRows,
+        timesheetDispositionStaffRows,
       );
       const szchReflectedElsewhere =
         personInTextRows(event, shpoSzchRows) ||
@@ -3783,24 +3791,44 @@ export const buildEjoosSyncPlan = (
       // Стан у РУХ (СЗЧ / БЕЗВІСТИ) головніший за випадковий останній період
       // архіву: інакше в блок розпорядження потрапляє «ЛІКУВАННЯ» чи службовий
       // рядок «ВНЕСЕННЯ ДАНИХ».
-      const activeArchivePeriod = isDispositionAbsenceStatus(event.status)
-        ? (openArchivePeriods.find((period) =>
-            isDispositionAbsenceStatus(period.absenceType),
-          ) ?? openArchivePeriods[0])
-        : openArchivePeriods[0];
+      const activeArchivePeriod =
+        openArchivePeriods.find((period) =>
+          isDispositionAbsenceStatus(period.absenceType),
+        ) ?? openArchivePeriods[0];
       const timesheetRow =
         activeTimesheetRowOf(
           event.personId,
           event.fullName,
           event.previousIndex,
-        ) || timesheetRowByCanonicalName(event.fullName);
+        ) ||
+        timesheetRowByCanonicalName(event.fullName) ||
+        (event.previousIndex
+          ? (() => {
+              const scan = staffIndexTimesheetForPerson(
+                event.personId,
+                event.fullName,
+                event.previousIndex,
+              );
+              if (!scan) return null;
+              return (
+                ejoosDays.find((row) => row.excelRow === scan.excelRow) ?? {
+                  excelRow: scan.excelRow,
+                  personId: scan.personId || event.personId,
+                  fullName: scan.fullName || event.fullName,
+                  rank: scan.rank || event.rank,
+                  positionIndex: scan.positionIndex || event.previousIndex,
+                  dayValue: "",
+                }
+              );
+            })()
+          : null);
       // Рядок особи в ШПО/Табелі може бути вже в блоці розпорядження — тоді
       // його не чіпаємо. Закривати треба лише штатний рядок.
       const shpoDispositionExcelRows = new Set(
         shpoDispositionRows.map((row) => row.excelRow),
       );
       const timesheetDispositionExcelRows = new Set(
-        timesheetDispositionRows.map((row) => row.excelRow),
+        timesheetDispositionStaffRows.map((row) => row.excelRow),
       );
       const personShpoRow =
         (event.personId && shpoPersonById.get(event.personId)) ||
@@ -3815,10 +3843,20 @@ export const buildEjoosSyncPlan = (
             ? personShpoRow
             : null;
       const staffTimesheetRow =
-        timesheetRow &&
-        !timesheetDispositionExcelRows.has(timesheetRow.excelRow)
+        (timesheetRow &&
+        (!timesheetDispositionExcelRows.has(timesheetRow.excelRow) ||
+          isTimesheetStaffPositionRow(timesheetRow.excelRow))
           ? timesheetRow
-          : null;
+          : null) ||
+        (event.previousIndex &&
+        dayByIndex.get(event.previousIndex) &&
+        (isVacantStaffRow(dayByIndex.get(event.previousIndex)!) ||
+          isSamePerson(
+            { personId: event.personId, fullName: event.fullName },
+            dayByIndex.get(event.previousIndex)!,
+          ))
+          ? dayByIndex.get(event.previousIndex)!
+          : null);
 
       // РОЗПОРЯДЖ не є виключенням зі списків частини: ООС та СЗЧ
       // зберігаються, а до «3. Виключені» особа не переноситься.
@@ -3878,40 +3916,71 @@ export const buildEjoosSyncPlan = (
         return;
       }
 
-      // Стан буває напів-проведений: у Виключених запис уже є, а в Табелі
-      // особа досі «+» на штатній посаді й немає запису відсутності.
-      // Єдине правильне місце для СЗЧ/БЕЗВІСТИ — «5. Тимчасово відсутні»:
-      // згадка в тексті Табеля запису не заміняє.
-      const needsAbsenceRecord = hasSzchContext && !szchRemains;
+      // Запис у «5. Тимчасово відсутні» веде sync з archive (absent_upsert),
+      // не move_to_disposition — інакше дубль «ДОДАТИ РЯДОК» поверх archive.
+      const openAbsentRow = ejoosAbsents.find(
+        (row) =>
+          (samePerson(row.personId, row.fullName) ||
+            (event.fullName &&
+              row.fullName &&
+              canonicalName(row.fullName) ===
+                canonicalName(event.fullName))) &&
+          !row.actualReturn,
+      );
       const needsTimesheetClose = Boolean(staffTimesheetRow);
-      const keepOpenSzchTimesheet = Boolean(hasSzchContext || szchRemains);
+      const keepOpenAbsenceTimesheet = Boolean(
+        hasSzchContext || szchRemains || openAbsentRow,
+      );
+      const timesheetNeedsCreate =
+        keepOpenAbsenceTimesheet &&
+        !staffTimesheetRow &&
+        Boolean(event.previousIndex);
+      const dispositionAbsenceHint =
+        (openAbsentRow?.ground &&
+        isDispositionAbsenceStatus(openAbsentRow.ground)
+          ? norm(openAbsentRow.ground)
+          : "") ||
+        activeArchivePeriod?.absenceType ||
+        event.status ||
+        "";
+      const keepTimesheetRowInPlace = /безвіст/i.test(dispositionAbsenceHint);
       const indexTimesheet = event.previousIndex
         ? dayByIndex.get(event.previousIndex)
         : undefined;
       const vacateTimesheetStaffSlot =
-        keepOpenSzchTimesheet &&
+        keepOpenAbsenceTimesheet &&
+        !keepTimesheetRowInPlace &&
         Boolean(
           staffTimesheetRow &&
             indexTimesheet &&
             staffTimesheetRow.excelRow === indexTimesheet.excelRow,
         );
       const canMoveToDisposition = Boolean(
-        staffShpoRow || needsTimesheetClose || needsAbsenceRecord,
+        staffShpoRow || needsTimesheetClose || timesheetNeedsCreate,
       );
       if (canMoveToDisposition) {
-        const absenceStatus = isDispositionAbsenceStatus(event.status)
-          ? norm(event.status)
-          : activeArchivePeriod?.absenceType || event.status || "РОЗПОРЯДЖЕННЯ";
+        const absenceStatus =
+          (openAbsentRow?.ground &&
+          isDispositionAbsenceStatus(openAbsentRow.ground)
+            ? norm(openAbsentRow.ground)
+            : "") ||
+          (isDispositionAbsenceStatus(event.status)
+            ? norm(event.status)
+            : "") ||
+          activeArchivePeriod?.absenceType ||
+          event.status ||
+          "РОЗПОРЯДЖЕННЯ";
         const mappedAbsence = mapStatus(absenceStatus);
-        const openAbsentRow = ejoosAbsents.find(
-          (row) =>
-            (samePerson(row.personId, row.fullName) ||
-              (event.fullName &&
-                row.fullName &&
-                canonicalName(row.fullName) ===
-                  canonicalName(event.fullName))) &&
-            !row.actualReturn,
-        );
+        const absenceCode =
+          mappedAbsence.timesheetCode ||
+          (/безвіст/iu.test(absenceStatus) ? "ЗБ" : "") ||
+          (/сзч|самовіл/iu.test(absenceStatus) ? "СЗЧ" : "") ||
+          absenceStatus;
+        const openAbsenceLabel = /безвіст/iu.test(absenceStatus)
+          ? "БЕЗВІСТИ"
+          : /сзч|самовіл/iu.test(absenceStatus)
+            ? "СЗЧ"
+            : "";
         ops.push({
           id: opId([
             "move-to-disposition",
@@ -3919,8 +3988,7 @@ export const buildEjoosSyncPlan = (
           ]),
           kind: "move_to_disposition",
           // Без даних архіву запис відсутності заповнити нічим.
-          class:
-            needsAbsenceRecord && !activeArchivePeriod ? "needs_input" : "ready",
+          class: "ready",
           sheet: "ШПО → розпорядження / Тимчасово відсутні / Табель",
           personId: event.personId || staffShpoRow?.personId || "",
           fullName: event.fullName || staffShpoRow?.fullName || "",
@@ -3930,24 +3998,31 @@ export const buildEjoosSyncPlan = (
           after: [
             event.destination || event.changeText || "у розпорядження",
             absenceStatus,
-            keepOpenSzchTimesheet
-              ? `Табель 01–${String(timesheetDay).padStart(2, "0")} ${mappedAbsence.timesheetCode || "СЗЧ"}`
+            keepOpenAbsenceTimesheet
+              ? `Табель 01–${String(timesheetDay).padStart(2, "0")} ${absenceCode}`
               : "",
-            needsAbsenceRecord && !activeArchivePeriod
-              ? "немає даних архіву для запису відсутності — перевірити"
-              : "",
-            !keepOpenSzchTimesheet &&
+            openAbsentRow || szchRemains
+              ? `${openAbsenceLabel || "відсутність"} лишається відкритою`
+              : hasSzchContext
+                ? "відсутність додасть sync з archive"
+                : "",
+            !keepOpenAbsenceTimesheet &&
             !staffTimesheetRow &&
+            !timesheetNeedsCreate &&
             !dispositionInTimesheet
               ? "штатний рядок Табеля не знайдено — перевірити"
-              : "",
+              : timesheetNeedsCreate
+                ? `додати рядок на ${event.previousIndex} з ${absenceCode}`
+                : "",
             !remainsInOos ? "в ООС активного запису немає" : "",
           ]
             .filter(Boolean)
             .join(" · "),
           sourceRef: `Рух!R${event.excelRow} №${event.movementNumber}`,
-          why: keepOpenSzchTimesheet
-            ? "СЗЧ → РОЗПОРЯДЖ: звільнити ШПО (фінальний sh wins), ООС і відкритий СЗЧ лишити, Табель один рядок СЗЧ без «вибув у розпорядження». Виключені не змінюються."
+          why: keepOpenAbsenceTimesheet
+            ? openAbsenceLabel === "БЕЗВІСТИ"
+              ? "БЕЗВІСТИ → РОЗПОРЯДЖ: звільнити ШПО (фінальний sh wins), ООС і відкритий БЕЗВІСТИ лишити, Табель один рядок ЗБ без «вибув у розпорядження». Виключені не змінюються."
+              : "СЗЧ → РОЗПОРЯДЖ: звільнити ШПО (фінальний sh wins), ООС і відкритий СЗЧ лишити, Табель один рядок СЗЧ без «вибув у розпорядження». Виключені не змінюються."
             : "РОЗПОРЯДЖ звільняє стару штатну посаду, але залишає особу в ООС. Виключені не змінюються.",
           confidence: activeArchivePeriod ? "high" : "review",
           payload: {
@@ -3962,17 +4037,28 @@ export const buildEjoosSyncPlan = (
             timesheetExcelRow: String(staffTimesheetRow?.excelRow || ""),
             skipShpoDisposition: dispositionInShpo ? "1" : "",
             absenceExcelRow: String(openAbsentRow?.excelRow || ""),
-            needsAbsenceRecord: needsAbsenceRecord ? "1" : "",
+            needsAbsenceRecord: "",
             absenceType: absenceStatus,
-            absenceCode: mappedAbsence.timesheetCode || absenceStatus,
+            absenceCode,
             absenceDate: activeArchivePeriod?.departDate || "",
             absencePlace: activeArchivePeriod?.place || "",
             absenceOrderNumber: activeArchivePeriod?.orderNumber || "",
             absenceOrderDate: activeArchivePeriod?.orderDate || "",
             plannedReturn: activeArchivePeriod?.plannedReturn || "",
             remainsInOos: String(remainsInOos),
-            timesheetFound: String(Boolean(staffTimesheetRow)),
-            keepOpenSzchTimesheet: keepOpenSzchTimesheet ? "1" : "",
+            timesheetFound: String(
+              Boolean(staffTimesheetRow) || timesheetNeedsCreate,
+            ),
+            timesheetCreateRow: timesheetNeedsCreate ? "1" : "",
+            timesheetStaffIndex: event.previousIndex || "",
+            restorePerson:
+              staffTimesheetRow &&
+              isVacantStaffRow(staffTimesheetRow) &&
+              !staffTimesheetRow.fullName &&
+              !staffTimesheetRow.personId
+                ? "1"
+                : "",
+            keepOpenSzchTimesheet: keepOpenAbsenceTimesheet ? "1" : "",
             vacateTimesheetStaffSlot: vacateTimesheetStaffSlot ? "1" : "",
             hasSzchContext: String(hasSzchContext),
             szchRemains: String(szchRemains),
@@ -3987,7 +4073,7 @@ export const buildEjoosSyncPlan = (
             ),
           },
           movementKey: createMovementKey(event),
-          checkedDefault: !(needsAbsenceRecord && !activeArchivePeriod),
+          checkedDefault: true,
         });
         return;
       }

@@ -17,7 +17,7 @@ import {
   type EjoosSyncPlan,
 } from "./ejoosSyncPlan";
 import { DEFAULT_STATUS_RULES } from "./ejoosRules";
-import { isInformationalOp, isWorkbookApplyOp } from "./ejoosPersonDiff";
+import { isInformationalOp, isWorkbookApplyOp, personChangesFromOps } from "./ejoosPersonDiff";
 import { personOpsBlockApply } from "./ejoosOpRequirements";
 
 const XLSX_MIME =
@@ -1835,5 +1835,304 @@ describe("БЕЗВІСТИ does not write Виключені", () => {
       processedMovementKeys: [],
     });
     expectNoExclude(plan.ops);
+  }, 30_000);
+});
+
+describe("БЕЗВІСТИ → РОЗПОРЯДЖ keeps OOS and one ЗБ timesheet row", () => {
+  const person = {
+    name: "АЛЬОХІН Віктор Олександрович",
+    id: "21810",
+    index: "2103455",
+    rank: "солдат",
+    bezvestiDate: "30.07.2026",
+    dispositionDate: "12.08.2026",
+  };
+
+  const buildAliokhin = async (opts: {
+    openAbsentRow: boolean;
+    badDepartureOnDay12?: boolean;
+    missingTimesheet?: boolean;
+  }) => {
+    const XlsxPopulate = await loadPopulate();
+    const pbWorkbook = await XlsxPopulate.fromBlankAsync();
+    const sh = pbWorkbook.sheet(0);
+    sh.name("sh");
+    const archive = pbWorkbook.addSheet("archive");
+    const ruh = pbWorkbook.addSheet("Рух");
+    sh.cell(1, 1).value("ID");
+    sh.cell(1, 2).value("ПІБ");
+    sh.cell(1, 3).value("Звання");
+    sh.cell(1, 4).value("Індекс посади");
+    sh.cell(1, 5).value("Посада");
+    sh.cell(1, 6).value("Статус");
+    sh.cell(2, 1).value(person.id);
+    sh.cell(2, 2).value(person.name);
+    sh.cell(2, 3).value(person.rank);
+    sh.cell(2, 4).value(person.index);
+    sh.cell(2, 5).value("Стрілець");
+    sh.cell(2, 6).value("БЕЗВІСТИ");
+    archive.cell(1, 1).value("№ з/п");
+    archive.cell(1, 2).value("ID");
+    archive.cell(1, 3).value("Прізвище");
+    archive.cell(1, 4).value("Звання");
+    archive.cell(1, 5).value("Вид вибуття");
+    archive.cell(1, 6).value("З якої дати");
+    archive.cell(1, 7).value("Куди вибув");
+    archive.cell(1, 8).value("Номер наказу вибуття");
+    archive.cell(1, 9).value("Дата наказу вибуття");
+    archive.cell(1, 11).value("Дата прибуття");
+    archive.cell(2, 1).value(1);
+    archive.cell(2, 2).value(person.id);
+    archive.cell(2, 3).value(person.name);
+    archive.cell(2, 4).value(person.rank);
+    archive.cell(2, 5).value("БЕЗВІСТИ");
+    archive.cell(2, 6).value(person.bezvestiDate);
+    archive.cell(2, 9).value(person.bezvestiDate);
+    const ruhHeaders = [
+      "№",
+      "Тип",
+      "Статус",
+      "",
+      "ID",
+      "Звання",
+      "ПІБ",
+      "Індекс попередній",
+      "Індекс який",
+      "Яка зміна",
+      "Куди",
+      "",
+      "",
+      "",
+      "Підстава №",
+      "Підстава дата",
+      "",
+      "Примітка",
+      "Наказ",
+      "Дата",
+    ];
+    ruhHeaders.forEach((header, index) => ruh.cell(1, index + 1).value(header));
+    ruh.cell(2, 1).value("200");
+    ruh.cell(2, 2).value("БЕЗВІСТИ");
+    ruh.cell(2, 3).value("БЕЗВІСТИ");
+    ruh.cell(2, 5).value(person.id);
+    ruh.cell(2, 6).value(person.rank);
+    ruh.cell(2, 7).value(person.name);
+    ruh.cell(2, 8).value(person.index);
+    ruh.cell(2, 11).value("БЕЗВІСТИ");
+    ruh.cell(2, 19).value("200");
+    ruh.cell(2, 20).value(person.bezvestiDate);
+    ruh.cell(3, 1).value("231");
+    ruh.cell(3, 2).value("РОЗПОРЯДЖ");
+    ruh.cell(3, 3).value("РОЗПОРЯДЖ");
+    ruh.cell(3, 5).value(person.id);
+    ruh.cell(3, 6).value(person.rank);
+    ruh.cell(3, 7).value(person.name);
+    ruh.cell(3, 8).value(person.index);
+    ruh.cell(3, 10).value(
+      ", який знаходиться у розпорядженні командира військової частини А4862",
+    );
+    ruh.cell(3, 19).value("231");
+    ruh.cell(3, 20).value(person.dispositionDate);
+    const pb = await snapshotOf(
+      (await pbWorkbook.outputAsync("blob")) as Blob,
+      "1ПБ_25082026.xlsx",
+    );
+
+    const ejoosWorkbook = await XlsxPopulate.fromBlankAsync();
+    const shpo = ejoosWorkbook.sheet(0);
+    shpo.name("1. ШПО");
+    const oos = ejoosWorkbook.addSheet("2. ООС");
+    const excluded = ejoosWorkbook.addSheet("3. Виключені");
+    excluded.cell(1, 1).value("3. Виключені");
+    ejoosWorkbook.addSheet("4. Тимчасово прибулі");
+    const absents = ejoosWorkbook.addSheet("5. Тимчасово відсутні");
+    absents.cell(1, 1).value("5. Тимчасово відсутні");
+    const timesheet = ejoosWorkbook.addSheet("6. Табель");
+    shpo.cell(1, 1).value("1. ШПО");
+    shpo.cell(7, 1).value(person.index);
+    shpo.cell(7, 6).value(person.rank);
+    shpo.cell(7, 7).value(person.name);
+    shpo.cell(7, 8).value(person.id);
+    oos.cell(1, 1).value("2. ООС");
+    oos.cell(6, 1).value(person.rank);
+    oos.cell(6, 2).value(person.name);
+    oos.cell(6, 3).value(person.id);
+    oos.cell(6, 4).value(person.index);
+    if (opts.openAbsentRow) {
+      absents.cell(6, 2).value(person.name);
+      absents.cell(6, 3).value(person.id);
+      absents.cell(6, 5).value("БЕЗВІСТИ");
+      absents.cell(6, 7).value(person.bezvestiDate);
+    }
+    timesheet.cell(1, 1).value("6. Табель");
+    timesheet.cell(2, 9).value("Серпень 2026 р.");
+    if (!opts.missingTimesheet) {
+      timesheet.cell(7, 2).value(person.index);
+      timesheet.cell(7, 6).value(person.rank);
+      timesheet.cell(7, 7).value(person.name);
+      timesheet.cell(7, 8).value(person.id);
+      for (let day = 1; day <= 25; day += 1) {
+        timesheet.cell(7, 8 + day).value("ЗБ");
+      }
+      if (opts.badDepartureOnDay12) {
+        timesheet
+          .cell(7, 8 + 12)
+          .value("вибув у розпорядження командира в/ч А4862 наказ №231 від 12.08.2026");
+      }
+    }
+    const ejoos = await snapshotOf(
+      (await ejoosWorkbook.outputAsync("blob")) as Blob,
+      "ЄЖООС_станом_на_25-08-2026.xlsx",
+    );
+    return { ejoos, pb };
+  };
+
+  const expectAliokhinDisposition = (ops: EjoosSyncOp[]) => {
+    const personOps = ops.filter(
+      (op) => op.personId === person.id || /альохін/i.test(op.fullName),
+    );
+    expect(personOps.some((op) => op.kind === "exclude_transfer")).toBe(false);
+    const disposition = personOps.find((op) => op.kind === "move_to_disposition");
+    expect(disposition).toBeDefined();
+    expect(disposition?.payload.needsAbsenceRecord).not.toBe("1");
+    expect(disposition?.payload.keepOpenSzchTimesheet).toBe("1");
+    expect(disposition?.payload.timesheetFound).toBe("true");
+    expect(disposition?.payload.timesheetCreateRow === "1" ||
+      disposition?.payload.timesheetExcelRow).toBeTruthy();
+    expect(disposition?.payload.absenceCode).toBe("ЗБ");
+    expect(disposition?.payload.remainsInOos).toBe("true");
+    expect(disposition?.why).toMatch(/БЕЗВІСТИ.*РОЗПОРЯДЖ/i);
+    expect(disposition?.after).toMatch(/ЗБ/);
+    expect(disposition?.after).not.toMatch(/вибув у розпорядження/i);
+
+    const people = personChangesFromOps(
+      disposition ? [disposition] : [],
+      25,
+    );
+    expect(people).toHaveLength(1);
+    const impacts = people[0].sheetImpacts;
+    expect(
+      impacts.find((item) => item.sheetKey === "absents")?.effect,
+    ).toBe("skip");
+    expect(
+      impacts.find((item) => item.sheetKey === "absents")?.detail,
+    ).toMatch(/БЕЗВІСТИ лишається відкритим/i);
+    expect(
+      impacts.find((item) => item.sheetKey === "excluded")?.effect,
+    ).toMatch(/skip|untouched/);
+    expect(
+      impacts.find((item) => item.sheetKey === "timesheet")?.effect,
+    ).toBe("edit");
+    expect(
+      impacts.find((item) => item.sheetKey === "timesheet")?.detail,
+    ).toMatch(
+      disposition?.payload.timesheetCreateRow === "1"
+        ? /Додати рядок на .*01–зріз ЗБ/i
+        : /01–зріз ЗБ.*12\.08\.2026 не писати «вибув у розпорядження»/i,
+    );
+    expect(people[0].ejoosWillDo.join("\n")).toMatch(/БЕЗВІСТИ лишається відкритим/i);
+    expect(people[0].ejoosWillDo.join("\n")).toMatch(/01–зріз ЗБ/i);
+  };
+
+  it("plans disposition without duplicate absent append when БЕЗВІСТИ row exists", async () => {
+    const { ejoos, pb } = await buildAliokhin({ openAbsentRow: true });
+    const plan = buildEjoosSyncPlan(ejoos, pb, {
+      statusRules: DEFAULT_STATUS_RULES,
+      processedMovementKeys: [],
+    });
+    expectAliokhinDisposition(plan.ops);
+  }, 30_000);
+
+  it("plans disposition from archive БЕЗВІСТИ when absent row is not in ЄЖООС yet", async () => {
+    const { ejoos, pb } = await buildAliokhin({ openAbsentRow: false });
+    const plan = buildEjoosSyncPlan(ejoos, pb, {
+      statusRules: DEFAULT_STATUS_RULES,
+      processedMovementKeys: [],
+    });
+    expectAliokhinDisposition(plan.ops);
+    expect(
+      plan.ops.some(
+        (op) =>
+          op.personId === person.id &&
+          op.kind === "absent_upsert" &&
+          /безвіст/i.test(op.payload.absenceType || ""),
+      ),
+    ).toBe(true);
+  }, 30_000);
+
+  it("still finds staff timesheet row when day 12 wrongly has вибув у розпорядження", async () => {
+    const { ejoos, pb } = await buildAliokhin({
+      openAbsentRow: false,
+      badDepartureOnDay12: true,
+    });
+    const plan = buildEjoosSyncPlan(ejoos, pb, {
+      statusRules: DEFAULT_STATUS_RULES,
+      processedMovementKeys: [],
+    });
+    expectAliokhinDisposition(plan.ops);
+  }, 30_000);
+
+  it("apply paints ЗБ over mistaken вибув у розпорядження on day 12", async () => {
+    const { ejoos, pb } = await buildAliokhin({
+      openAbsentRow: true,
+      badDepartureOnDay12: true,
+    });
+    const plan = buildEjoosSyncPlan(ejoos, pb, {
+      statusRules: DEFAULT_STATUS_RULES,
+      processedMovementKeys: [],
+    });
+    const disposition = plan.ops.find(
+      (op) =>
+        op.personId === person.id && op.kind === "move_to_disposition",
+    );
+    expect(disposition).toBeDefined();
+    const { blob } = await applyConfirmedEjoosOps({
+      ejoos,
+      plan,
+      ops: disposition ? [disposition] : [],
+    });
+    const after = await readWorkbookSnapshot(
+      new File([blob], "ЄЖООС_станом_на_25-08-2026.xlsx", { type: XLSX_MIME }),
+      EJOOS_SYNC_READ_OPTIONS,
+    );
+    const ts = after.sheets.find((sheet) => /табель/i.test(sheet.sheetName));
+    const row = ts?.rawRows?.[6];
+    expect(String(row?.[8 + 12 - 1] ?? "")).toBe("ЗБ");
+    expect(String(row?.[8 + 12 - 1] ?? "")).not.toMatch(/вибув/i);
+  }, 30_000);
+
+  it("creates a timesheet row when ALIOKHIN is missing from Табель entirely", async () => {
+    const { ejoos, pb } = await buildAliokhin({
+      openAbsentRow: true,
+      missingTimesheet: true,
+    });
+    const plan = buildEjoosSyncPlan(ejoos, pb, {
+      statusRules: DEFAULT_STATUS_RULES,
+      processedMovementKeys: [],
+    });
+    const disposition = plan.ops.find(
+      (op) =>
+        op.personId === person.id && op.kind === "move_to_disposition",
+    );
+    expect(disposition?.payload.timesheetCreateRow).toBe("1");
+    expect(disposition?.payload.timesheetStaffIndex).toBe(person.index);
+    expectAliokhinDisposition(plan.ops);
+
+    const { blob } = await applyConfirmedEjoosOps({
+      ejoos,
+      plan,
+      ops: disposition ? [disposition] : [],
+    });
+    const after = await readWorkbookSnapshot(
+      new File([blob], "ЄЖООС_станом_на_25-08-2026.xlsx", { type: XLSX_MIME }),
+      EJOOS_SYNC_READ_OPTIONS,
+    );
+    const ts = after.sheets.find((sheet) => /табель/i.test(sheet.sheetName));
+    const match = (ts?.rawRows ?? []).find((row) =>
+      /альохін/i.test(String(row?.[6] ?? "")),
+    );
+    expect(match).toBeDefined();
+    expect(String(match?.[1] ?? "")).toBe(person.index);
+    expect(String(match?.[8 + 12 - 1] ?? "")).toBe("ЗБ");
   }, 30_000);
 });

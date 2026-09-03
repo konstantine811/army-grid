@@ -1,3 +1,4 @@
+import type { BackendEjournalImportSheet } from "../../api";
 import { valueToDisplay } from "../../excelRoundTrip";
 import { readRosterColumnValue } from "../excel-fill/rosterSourceSnapshot";
 import type { DbPreviewState, EjournalPreviewRow } from "../ejournal/ejournalTypes";
@@ -35,6 +36,10 @@ export const getRosterValue = (row: EjournalPreviewRow, keyParts: string[]) => {
     ? valueToDisplay(row[key] as Parameters<typeof valueToDisplay>[0]).trim()
     : "";
 };
+
+/** Підрозділ зі Штатки (col 2), не «місце перебування» / «в якому підрозділі». */
+export const getRosterUnit = (row: EjournalPreviewRow) =>
+  readRosterColumnValue(row, 2).trim();
 
 /** ПІБ зі Штатки: іменована колонка, col 14 (N) або col 13, якщо макет зсунутий. */
 export const getRosterPersonName = (row: EjournalPreviewRow) => {
@@ -293,4 +298,37 @@ export const mergeRosterRowsIntoPreview = (
     });
 
   return [...mergedRows, ...rosterOnlyRows];
+};
+
+const ROSTER_ONLY_SHEET_STUB: BackendEjournalImportSheet = {
+  id: "roster-only",
+  batchId: "roster-only",
+  name: "1.ОС Загальний список · Штатка",
+  sheetIndex: 0,
+  columnCount: 0,
+  rowCount: 0,
+  createdAt: "",
+  updatedAt: "",
+};
+
+/** Картки лише зі Штатки, коли в БД ще немає імпорту ЕЖООС. */
+export const buildRosterOnlyPreviewState = (
+  rosterRows: EjournalPreviewRow[],
+  sheet: BackendEjournalImportSheet | null | undefined = null,
+): DbPreviewState | null => {
+  if (!rosterRows.length) return null;
+  const rows = mergeRosterRowsIntoPreview({ rows: [] }, rosterRows);
+  if (!rows.length) return null;
+  const activeSheet = sheet ?? {
+    ...ROSTER_ONLY_SHEET_STUB,
+    rowCount: rows.length,
+  };
+  return {
+    sheet: activeSheet,
+    columns: [],
+    rows,
+    total: rows.length,
+    offset: 0,
+    limit: rows.length,
+  };
 };

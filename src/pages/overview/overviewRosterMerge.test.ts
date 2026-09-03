@@ -1,9 +1,15 @@
 import { describe, expect, it } from "vitest";
 import type { BackendPersonnelOverview } from "../../api";
 import type { EjournalPreviewRow } from "../ejournal/ejournalTypes";
-import { getRosterPersonName, isNovaRosterRow } from "../personnel/personnelRosterMerge";
+import { getRosterPersonName, getRosterUnit, isNovaRosterRow } from "../personnel/personnelRosterMerge";
 import {
+  buildStaffOverviewRowsFromPersonnel,
+  buildStaffOverviewRowsFromRoster,
+  collectRosterUnitOptions,
+  fillDownRosterUnitRows,
   mergeRosterRowsIntoOverview,
+  overviewStatusFilterLabel,
+  rosterRowToOverviewRow,
   summarizeNovaStaffFromRoster,
   summarizeStaffFromRoster,
 } from "./overviewRosterMerge";
@@ -81,6 +87,183 @@ describe("isNovaRosterRow", () => {
   });
 });
 
+describe("getRosterUnit", () => {
+  it("reads підрозділ from column 2, not місце перебування", () => {
+    expect(
+      getRosterUnit({
+        column_2: "2 піхотна рота",
+        column_31: "в/ч А1363",
+        column_29: "AB339559",
+      } as EjournalPreviewRow),
+    ).toBe("2 піхотна рота");
+  });
+});
+
+describe("collectRosterUnitOptions", () => {
+  it("returns unique staff units for the selected battalion", () => {
+    const rosterRows = [
+      { column_1: "нова", column_2: "1 піхотна рота", column_14: "КОВАЛЬ" },
+      { column_1: "нова", column_2: "2 піхотна рота", column_14: "ПЕТРЕНКО" },
+      { column_1: "нова", column_2: "2 піхотна рота" },
+      { column_1: "стара", column_2: "Штаб", column_14: "СИДОРЕНКО" },
+    ] as EjournalPreviewRow[];
+
+    expect(collectRosterUnitOptions(rosterRows)).toEqual([
+      "1 піхотна рота",
+      "2 піхотна рота",
+      "Штаб",
+    ]);
+    expect(collectRosterUnitOptions(rosterRows, undefined, "нова")).toEqual([
+      "1 піхотна рота",
+      "2 піхотна рота",
+    ]);
+  });
+});
+
+describe("rosterRowToOverviewRow", () => {
+  it("uses column 2 for unit", () => {
+    const row = rosterRowToOverviewRow(
+      {
+        column_1: "нова",
+        column_2: "Мінометний взвод",
+        column_14: "КОВАЛЬ Іван",
+        column_31: "3765688",
+      } as EjournalPreviewRow,
+      {},
+      { inNovaStaff: true, battalion: "нова" },
+    );
+    expect(row?.unit).toBe("Мінометний взвод");
+  });
+});
+
+describe("buildStaffOverviewRowsFromRoster", () => {
+  it("builds overview rows directly from staff roster without ejoos merge", () => {
+    const rosterRows = [
+      {
+        __dbRowId: "r1",
+        column_1: "нова",
+        column_2: "2 піхотна рота",
+        column_13: "солдат",
+        column_14: "КОВАЛЬ Іван Петрович",
+        column_21: "В строю",
+      },
+      {
+        __dbRowId: "r2",
+        column_1: "нова",
+        column_2: "2 піхотна рота",
+        column_14: "",
+      },
+    ] as EjournalPreviewRow[];
+
+    const rows = buildStaffOverviewRowsFromRoster(rosterRows);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.name).toBe("КОВАЛЬ Іван Петрович");
+    expect(rows[0]?.unit).toBe("2 піхотна рота");
+    expect(rows[0]?.fromEjoos).toBe(false);
+    expect(rows[0]?.statusLabel).toBe("В строю");
+  });
+});
+
+describe("fillDownRosterUnitRows", () => {
+  it("inherits a merged Google Sheet unit for following position rows", () => {
+    const rows = fillDownRosterUnitRows([
+      {
+        __dbRowId: "1",
+        column_2: "2 піхотна рота",
+        column_5: "Командир",
+        column_14: "Іванов Іван",
+      },
+      {
+        __dbRowId: "2",
+        column_2: "",
+        column_5: "Стрілець",
+        column_14: "Петренко Петро",
+      },
+      {
+        __dbRowId: "3",
+        column_2: "",
+        column_5: "Кулеметник",
+        column_14: "",
+      },
+      {
+        __dbRowId: "4",
+        column_2: "3 піхотна рота",
+        column_5: "Командир",
+      },
+    ] as EjournalPreviewRow[]);
+
+    expect(rows.map((row) => row.column_2)).toEqual([
+      "2 піхотна рота",
+      "2 піхотна рота",
+      "2 піхотна рота",
+      "3 піхотна рота",
+    ]);
+  });
+});
+
+describe("buildStaffOverviewRowsFromPersonnel", () => {
+  it("uses the same merged in-staff cards as Особовий склад", () => {
+    const personnelRows = [
+      {
+        __dbRowId: "oos-1",
+        прізвище: "КОВАЛЬ Іван Петрович",
+        звання: "старший солдат",
+        roster__column_1: "нова",
+        roster__column_2: "2 піхотна рота",
+        roster__column_13: "солдат",
+        roster__column_14: "КОВАЛЬ Іван Петрович (зі штатки)",
+        roster__column_21: "В строю",
+      },
+      {
+        __dbRowId: "oos-2",
+        прізвище: "ПЕТРЕНКО Олег Іванович",
+      },
+    ] as EjournalPreviewRow[];
+
+    const rows = buildStaffOverviewRowsFromPersonnel(personnelRows);
+
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({
+      name: "КОВАЛЬ Іван Петрович",
+      rank: "старший солдат",
+      unit: "2 піхотна рота",
+      battalion: "нова",
+      inStaff: true,
+    });
+    expect(rows[1]).toMatchObject({
+      name: "ПЕТРЕНКО Олег Іванович",
+      inStaff: false,
+    });
+  });
+});
+
+describe("overviewStatusFilterLabel", () => {
+  it("groups all medical wording variants under Лікування", () => {
+    const rows = [
+      { status: "MEDICAL", statusLabel: "Лікування" },
+      { status: "MEDICAL", statusLabel: "На лікуванні" },
+      { status: "MEDICAL", statusLabel: "лікування після поранення" },
+      { status: "ON_DUTY", statusLabel: "В строю" },
+    ] as never[];
+
+    expect(rows.map(overviewStatusFilterLabel)).toEqual([
+      "Лікування",
+      "Лікування",
+      "Лікування",
+      "В строю",
+    ]);
+  });
+
+  it("keeps the original label for general on-duty statuses", () => {
+    expect(
+      overviewStatusFilterLabel({
+        status: "ON_DUTY",
+        statusLabel: "Новоприбулий",
+      } as never),
+    ).toBe("Новоприбулий");
+  });
+});
+
 describe("mergeRosterRowsIntoOverview", () => {
   it("counts named nova roster rows in staff and skips empty ПІБ", () => {
     const overview = emptyOverview([
@@ -124,6 +307,26 @@ describe("mergeRosterRowsIntoOverview", () => {
       merged.rows.find((row) => row.name === "ПЕТРЕНКО Олег Іванович")?.battalion,
     ).toBe("стара");
     expect(merged.rows.filter((row) => row.inStaff)).toHaveLength(2);
+  });
+
+  it("overwrites ejoos unit with roster column 2", () => {
+    const overview = emptyOverview([
+      ejoosRow("КОВАЛЬ Іван Петрович", "2103001"),
+    ]);
+    const rosterRows = [
+      {
+        __dbRowId: "r1",
+        column_1: "нова",
+        column_2: "2 піхотна рота",
+        column_14: "КОВАЛЬ Іван Петрович",
+        column_31: "в/ч А1363",
+      },
+    ] as EjournalPreviewRow[];
+
+    const merged = mergeRosterRowsIntoOverview(overview, rosterRows);
+    expect(merged.rows[0]?.unit).toBe("2 піхотна рота");
+    expect(merged.units).toContain("2 піхотна рота");
+    expect(merged.units).not.toContain("в/ч А1363");
   });
 
   it("summarizes all battalions when not limited to нова", () => {

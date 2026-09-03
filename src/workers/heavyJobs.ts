@@ -1,6 +1,5 @@
-import type {
-  BackendPersonnelOverview,
-} from "../api";
+import type { BackendPersonnelOverview, BackendPersonQuestionnaireMeta } from "../api";
+import type { AnketaRow } from "../pages/anketa-data/anketaSheet";
 import type { BchsPersonnelAwayPerson } from "../pages/bchs/bchsTypes";
 import {
   extractBchsAwayPeopleFromDbRows,
@@ -15,6 +14,26 @@ import type { EjoosDiffSession } from "../pages/ejournal/ejoosPersonDiff";
 import type { EjoosStatusRule } from "../pages/ejournal/ejoosRules";
 import { mergeRosterRowsIntoOverview } from "../pages/overview/overviewRosterMerge";
 import { mergeRosterRowsIntoPreview } from "../pages/personnel/personnelRosterMerge";
+import {
+  buildStaffSheetEnrichmentEntries,
+  type StaffSheetEnrichmentEntry,
+} from "../pages/anketa-data/staffSheetEnrichment";
+import { writeStaffSheetExportWorkbook } from "../pages/anketa-data/staffSheetExportWorkbook";
+import {
+  buildStaffSheetRosterImportPayload,
+  type StaffSheetRosterImportPayload,
+} from "../pages/excel-fill/staffSheet";
+import {
+  deserializePersonnelIndex,
+  vkEntriesToIndex,
+  type SerializedPersonnelIndex,
+} from "./staffSheetWorkerSerialize";
+import {
+  buildVkTpvDovidkyNameIndex,
+  parseVkTpvDovidkyWorkbook,
+  type VkTpvDovidkyNameEntry,
+  type VkTpvDovidkyRecord,
+} from "../pages/personnel/vkTpvDovidkyImport";
 
 export type HeavyJob =
   | {
@@ -49,6 +68,38 @@ export type HeavyJob =
       statusRules: EjoosStatusRule[];
       processedMovementKeys?: string[];
       sourceAsOfDate?: string;
+    }
+  | {
+      type: "staffSheetEnrichment";
+      rosterRows: EjournalPreviewRow[];
+      personnelIndex: SerializedPersonnelIndex;
+      anketaRows: AnketaRow[];
+      questionnaires: BackendPersonQuestionnaireMeta[];
+      vkEntries: VkTpvDovidkyNameEntry[];
+    }
+  | {
+      type: "staffSheetVkIndex";
+      snapshot: ExcelWorkbookSnapshot;
+    }
+  | {
+      type: "parseVkTpvDovidky";
+      snapshot: ExcelWorkbookSnapshot;
+    }
+  | {
+      type: "staffSheetRosterImport";
+      table: string[][];
+      meta: {
+        source: "apps-script" | "gviz";
+        sourceLabel: string;
+        fighterStatusTable?: string[][] | null;
+        includeAllRows?: boolean;
+      };
+    }
+  | {
+      type: "staffSheetExportWorkbook";
+      rosterRows: EjournalPreviewRow[];
+      entries: StaffSheetEnrichmentEntry[];
+      templateData: ArrayBuffer;
     };
 
 export type HeavyJobResult = {
@@ -60,6 +111,11 @@ export type HeavyJobResult = {
   mergePersonnel: EjournalPreviewRow[];
   ejoosSyncPlan: EjoosSyncPlan;
   ejoosSession: EjoosDiffSession;
+  staffSheetEnrichment: StaffSheetEnrichmentEntry[];
+  staffSheetVkIndex: VkTpvDovidkyNameEntry[];
+  parseVkTpvDovidky: VkTpvDovidkyRecord[];
+  staffSheetRosterImport: StaffSheetRosterImportPayload;
+  staffSheetExportWorkbook: ArrayBuffer;
 };
 
 export const runHeavyJobSync = <T extends HeavyJob>(
@@ -103,9 +159,35 @@ export const runHeavyJobSync = <T extends HeavyJob>(
         job.statusRules,
       ) as HeavyJobResult[T["type"]];
     }
+    case "staffSheetEnrichment":
+      return buildStaffSheetEnrichmentEntries({
+        rosterRows: job.rosterRows,
+        personnelIndex: deserializePersonnelIndex(job.personnelIndex),
+        anketaRows: job.anketaRows,
+        questionnaires: job.questionnaires,
+        vkIndex: vkEntriesToIndex(job.vkEntries),
+      }) as HeavyJobResult[T["type"]];
+    case "staffSheetVkIndex":
+      return [...buildVkTpvDovidkyNameIndex(job.snapshot).values()] as HeavyJobResult[T["type"]];
+    case "parseVkTpvDovidky":
+      return parseVkTpvDovidkyWorkbook(job.snapshot) as HeavyJobResult[T["type"]];
+    case "staffSheetRosterImport":
+      return buildStaffSheetRosterImportPayload(job.table, job.meta) as HeavyJobResult[T["type"]];
     default: {
       const neverJob: never = job;
       throw new Error(`Unknown heavy job: ${(neverJob as HeavyJob).type}`);
     }
   }
+};
+
+export const runHeavyJobMaybeAsync = async (
+  job: HeavyJob,
+): Promise<unknown> => {
+  if (job.type === "staffSheetExportWorkbook") {
+    return writeStaffSheetExportWorkbook(job.rosterRows, job.entries, {
+      templateData: job.templateData,
+      download: false,
+    });
+  }
+  return runHeavyJobSync(job);
 };
