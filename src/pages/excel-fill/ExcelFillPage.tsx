@@ -35,6 +35,7 @@ import {
   rosterLatestToSourceSnapshot,
 } from "./rosterSourceSnapshot";
 import {
+  importStaffSheetFromFile,
   importStaffSheetFromGoogle,
   rosterLatestToStaffSheetImportSnapshot,
   formatStaffSheetImportSummary,
@@ -1092,6 +1093,33 @@ export function ExcelFillPage() {
     }
   };
 
+  const importStaffSheetFile = async (file: File | undefined) => {
+    if (!file) return;
+    setIsStaffSheetBusy(true);
+    try {
+      setMessage(`Імпортую «${file.name}»…`);
+      const imported = await importStaffSheetFromFile(file);
+      setStaffSheetImport(imported);
+      await loadSourceFromPersonnel(true);
+      const report = await refreshStaffEnrichment(imported.rows, {
+        manageBusy: false,
+      });
+      setMessage(
+        report
+          ? `Імпортовано «Штатку»: ${formatStaffSheetImportSummary(imported)} · ${formatStaffSheetEnrichmentReport(report)}. Далі — «Доповнити Штатку (Анкета + ВК)».`
+          : `Імпортовано «Штатку»: ${formatStaffSheetImportSummary(imported)}.`,
+      );
+    } catch (error) {
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "Не вдалося імпортувати файл «Штатка».",
+      );
+    } finally {
+      setIsStaffSheetBusy(false);
+    }
+  };
+
   const exportEnrichedStaffSheet = async () => {
     setIsStaffSheetBusy(true);
     try {
@@ -1100,7 +1128,7 @@ export function ExcelFillPage() {
       });
       setStaffEnrichmentReport(report);
       setMessage(
-        `Завантажено Excel · ${formatStaffSheetEnrichmentReport(report)}`,
+        `Завантажено «Штатку» · лише «Анкета» + «Військовий квиток» · ${formatStaffSheetEnrichmentReport(report)}`,
       );
     } catch (error) {
       setMessage(
@@ -1507,15 +1535,34 @@ export function ExcelFillPage() {
             ВК ТПВ ДОВІДКИ (колонка ВК№) — лише в порожні комірки Штатки.
           </Typography>
           <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-            1. «Імпорт ВК ТПВ» (за потреби) → 2. «Зіставити з ОС» → 3. «Скачати
-            Штатку для Google» → 4. у Excel скопіюйте потрібні колонки → 5.
-            вставте в Google «Штатку» тим, у кого є доступ.
+            1. «Імпорт Штатки (.xlsx)» — ваш файл з Google · 2. «Імпорт ВК ТПВ»
+            (за потреби) · 3. «Зіставити з ОС» · 4. «Доповнити Штатку (Анкета +
+            ВК)» — той самий файл з колонками J і K.
           </Typography>
           <Stack
             direction="row"
             spacing={1}
             sx={{ mt: 2, alignItems: "center", flexWrap: "wrap" }}
           >
+            <Button
+              variant="contained"
+              disabled={isStaffSheetBusy}
+              component="label"
+              startIcon={<FileUploadOutlinedIcon />}
+              title="Завантажити вашу «Штатку» (.xlsx) — збережеться для доповнення «Анкета» та «Військовий квиток»"
+            >
+              Імпорт Штатки (.xlsx)
+              <input
+                hidden
+                type="file"
+                accept=".xlsx,.xlsm"
+                disabled={isStaffSheetBusy}
+                onChange={(event) => {
+                  void importStaffSheetFile(event.target.files?.[0]);
+                  event.target.value = "";
+                }}
+              />
+            </Button>
             <Button
               variant="outlined"
               disabled={isStaffSheetBusy || isImportingStaffVk}
@@ -1547,16 +1594,18 @@ export function ExcelFillPage() {
               disabled={isStaffSheetBusy}
               startIcon={<FileDownloadOutlinedIcon />}
               onClick={() => void exportEnrichedStaffSheet()}
-              title="Повна «Штатка» з усіма рядками для ручного перенесення в Google"
+              title="Імпортуйте «Штатку» (.xlsx), потім скачайте той самий файл з доповненими колонками «Анкета» та «Військовий квиток»"
             >
-              Скачати Штатку для Google
+              Доповнити Штатку (Анкета + ВК)
             </Button>
           </Stack>
           <Stack spacing={0.5} sx={{ mt: 1.5 }}>
             <Typography variant="body2">
-              {rosterPreviewRows.length
-                ? `Штатка · ${formatSourceTimestamp(rosterImportedAt) ?? "—"}`
-                : "Штатку ще не завантажено з БД"}
+              {staffSheetImport?.fileName
+                ? `Файл: ${staffSheetImport.fileName}${staffSheetImport.source === "file" ? " (.xlsx)" : ""}`
+                : rosterPreviewRows.length
+                  ? `Штатка з БД · ${formatSourceTimestamp(rosterImportedAt) ?? "—"}`
+                  : "Спочатку імпортуйте «Штатку» (.xlsx) або оновіть з Google"}
             </Typography>
             {staffEnrichmentReport ? (
               <Typography variant="body2" color="text.secondary">

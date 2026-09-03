@@ -1,5 +1,6 @@
 import {
   pushStaffSheetEnrichmentToGoogle,
+  STAFF_SHEET_ANKETA_VK_COLUMNS,
   STAFF_SHEET_ENRICHMENT_COLUMNS,
   STAFF_SHEET_ENRICHMENT_START_ROW,
   STAFF_SHEET_ENRICHMENT_VALUE_INDEX,
@@ -93,6 +94,8 @@ export type StaffSheetEnrichmentReport = {
 
 export type StaffSheetEnrichmentEntry = {
   excelRowNumber: number;
+  /** ПІБ для зіставлення з рядком у .xlsx (номер рядка може зсунутись). */
+  pib: string;
   values: string[];
 };
 
@@ -158,6 +161,7 @@ export const buildStaffSheetEnrichmentEntries = (options: {
 
     entries.push({
       excelRowNumber,
+      pib: rosterName,
       values: STAFF_SHEET_ENRICHMENT_COLUMNS.map((columnNumber) => {
         if (columnNumber === 10) return hasQuestionnaire ? "так" : "";
         if (columnNumber === 11) return militaryId;
@@ -182,7 +186,20 @@ const buildStaffSheetAnketaEntries = (
 ): StaffSheetEnrichmentEntry[] =>
   entries.map((entry) => ({
     excelRowNumber: entry.excelRowNumber,
+    pib: entry.pib,
     values: [entry.values[0] ?? ""],
+  }));
+
+export const buildStaffSheetAnketaVkEntries = (
+  entries: StaffSheetEnrichmentEntry[],
+): StaffSheetEnrichmentEntry[] =>
+  entries.map((entry) => ({
+    excelRowNumber: entry.excelRowNumber,
+    pib: entry.pib,
+    values: [
+      entry.values[STAFF_SHEET_ENRICHMENT_VALUE_INDEX.anketa] ?? "",
+      entry.values[STAFF_SHEET_ENRICHMENT_VALUE_INDEX.militaryId] ?? "",
+    ],
   }));
 
 export const buildStaffSheetEnrichmentReport = (
@@ -275,10 +292,28 @@ export const pushPersonnelEnrichmentToStaffSheet = async (options?: {
     throw new Error("Немає рядків з ПІБ для оновлення Google Sheet «Штатка».");
   }
 
-  await pushStaffSheetEnrichmentToGoogle(entries);
+  await pushStaffSheetEnrichmentToGoogle(
+    buildStaffSheetAnketaVkEntries(entries),
+    { columns: [...STAFF_SHEET_ANKETA_VK_COLUMNS] },
+  );
 
   return buildStaffSheetEnrichmentReport(entries, context.rosterRows);
 };
+
+export const formatStaffSheetAnketaVkReport = (
+  report: Pick<
+    StaffSheetEnrichmentReport,
+    "rows" | "anketaYes" | "withMilitaryId" | "militaryIdFromVk"
+  >,
+) =>
+  [
+    `рядків: ${report.rows}`,
+    `анкета так: ${report.anketaYes}`,
+    report.withMilitaryId ? `ВК: ${report.withMilitaryId}` : "",
+    report.militaryIdFromVk ? `ВК з файлу: ${report.militaryIdFromVk}` : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
 
 export const formatStaffSheetEnrichmentReport = (
   report: StaffSheetEnrichmentReport,

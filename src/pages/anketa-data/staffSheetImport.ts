@@ -14,6 +14,7 @@ import {
 } from "../ejournal/ejournalUtils";
 import {
   pullStaffSheetRosterImportPayload,
+  sanitizeStaffSheetCellValue,
   staffSheetEditUrl,
   type StaffSheetRosterImportPayload,
 } from "../excel-fill/staffSheet";
@@ -85,6 +86,37 @@ const sortRosterRows = (rows: EjournalPreviewRow[]) =>
       (Number(left.__rowNumber) || 0) - (Number(right.__rowNumber) || 0),
   );
 
+const enrichStaffSheetRowColumnNumbers = (
+  row: EjournalPreviewRow,
+  columns: ReturnType<typeof buildImportColumns>,
+): EjournalPreviewRow => {
+  const next = { ...row };
+  for (const column of columns) {
+    const columnNumber = (column.originalIndex ?? column.order) + 1;
+    const raw = row[column.key];
+    if (raw == null || String(raw).trim() === "") continue;
+    const columnKey = `column_${columnNumber}`;
+    if (!next[columnKey]) next[columnKey] = raw;
+  }
+  return next;
+};
+
+/** Прибирає дублікати заголовків («Військовий квиток» у K2 тощо) після імпорту .xlsx. */
+const sanitizeImportedStaffSheetRow = (
+  row: EjournalPreviewRow,
+): EjournalPreviewRow => {
+  const next = { ...row };
+  for (const columnNumber of [10, 11]) {
+    const key = `column_${columnNumber}`;
+    const raw = String(next[key] ?? "").trim();
+    if (!raw) continue;
+    const cleaned = sanitizeStaffSheetCellValue(raw, columnNumber);
+    if (cleaned) next[key] = cleaned;
+    else delete next[key];
+  }
+  return next;
+};
+
 export const parseStaffSheetImportFile = async (
   file: File,
 ): Promise<StaffSheetImportSnapshot> => {
@@ -101,7 +133,11 @@ export const parseStaffSheetImportFile = async (
   }
 
   const columns = buildImportColumns(rosterSheet);
-  const rows = sortRosterRows(localRowsToPreviewRows(rosterSheet.rows, columns));
+  const rows = sortRosterRows(
+    localRowsToPreviewRows(rosterSheet.rows, columns)
+      .map((row) => enrichStaffSheetRowColumnNumbers(row, columns))
+      .map(sanitizeImportedStaffSheetRow),
+  );
 
   if (!rows.length) {
     throw new Error("Аркуш «Загальний список» порожній.");
@@ -162,6 +198,13 @@ export const importStaffSheetFromFile = async (
           cellValueToJson(row.values[index]),
         ]),
       );
+      for (const column of rosterColumns) {
+        const columnNumber = (column.originalIndex ?? column.order) + 1;
+        const raw = values[column.key];
+        if (raw == null || String(raw).trim() === "") continue;
+        const columnKey = `column_${columnNumber}`;
+        if (!values[columnKey]) values[columnKey] = raw;
+      }
       const statusAddition = findFighterStatusAddition(
         values,
         fighterStatusAdditions,

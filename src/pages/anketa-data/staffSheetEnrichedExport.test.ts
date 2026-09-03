@@ -3,11 +3,15 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { rosterRowsFromStaffSheetPayload } from "./staffSheetImport";
 import { readRosterColumnValue } from "../excel-fill/rosterSourceSnapshot";
-import { buildStaffSheetRosterImportPayload } from "../excel-fill/staffSheet";
+import {
+  buildStaffSheetRosterImportPayload,
+  parseStaffSheetGvizResponse,
+} from "../excel-fill/staffSheet";
 import {
   resetStaffSheetExportTemplateCache,
-  writeStaffSheetExportWorkbook,
+  writeStaffSheetAnketaVkOverlay,
 } from "./staffSheetExportWorkbook";
+import type { StaffSheetEnrichmentEntry } from "./staffSheetEnrichment";
 
 if (typeof window === "undefined") {
   (globalThis as { window?: typeof globalThis }).window = globalThis;
@@ -83,6 +87,83 @@ const gvizHeader = [
   "Позивний",
 ];
 
+describe("staffSheet gviz stacked labels", () => {
+  it("reconstructs Kiyanenko, vacant row, and Babchenko from gviz labels", () => {
+    const gvizSnippet = {
+      table: {
+        cols: [
+          { label: "№ нова нова" },
+          { label: "Підрозділ ж ж" },
+          { label: "Взвод ж ж" },
+          { label: "Відділення ж ж" },
+          {
+            label:
+              "Посада Командир батальйону Заступник командира батальйону",
+          },
+          { label: "ВОС 0210003 0210003" },
+          {
+            label:
+              "Повна посада командир 1 піхотного батальйону заступник командира 1 піхотного батальйону",
+          },
+          { label: "ШПК факт підполковник майор" },
+          { label: "ШПК факт Оф. Оф." },
+          { label: "Анкета " },
+          { label: "Військовий квиток " },
+          { label: "Мобілізація/контракт " },
+          { label: "Звання  старший лейтенант " },
+          { label: "ПІБ КІЯНЕНКО Андрій Олександрович " },
+          { label: "Позивний МАРІК " },
+        ],
+        rows: [
+          {
+            c: [
+              { v: "нова" },
+              { v: "ж" },
+              { v: "ж" },
+              { v: "ж" },
+              {
+                v: "Заступник командира батальйону з психологічної підтримки персоналу",
+              },
+              { v: "3420003" },
+              {
+                v: "заступник командира 1 піхотного батальйону з психологічної підтримки персоналу",
+              },
+              { v: "майор" },
+              { v: "Оф." },
+              { v: "так" },
+              null,
+              null,
+              { v: "майор" },
+              { v: "БАБЧЕНКО Олег Володимирович" },
+              { v: "ШЕФ" },
+            ],
+          },
+        ],
+      },
+    };
+    const table = parseStaffSheetGvizResponse(JSON.stringify(gvizSnippet));
+    const payload = buildStaffSheetRosterImportPayload(table, {
+      source: "gviz",
+      sourceLabel: "test",
+      includeAllRows: true,
+    });
+    const rows = rosterRowsFromStaffSheetPayload(payload);
+    const row2 = rows.find((row) => row.__rowNumber === 2);
+    const row3 = rows.find((row) => row.__rowNumber === 3);
+    const row4 = rows.find((row) => row.__rowNumber === 4);
+    expect(row2).toBeTruthy();
+    expect(row3).toBeTruthy();
+    expect(row4).toBeTruthy();
+    expect(readRosterColumnValue(row2!, 14)).toBe(
+      "КІЯНЕНКО Андрій Олександрович",
+    );
+    expect(readRosterColumnValue(row2!, 11)).toBe("");
+    expect(readRosterColumnValue(row4!, 14)).toBe(
+      "БАБЧЕНКО Олег Володимирович",
+    );
+  });
+});
+
 describe("staffSheetEnrichedExport roster values", () => {
   it("does not prefix column labels to gviz row values", () => {
     const table = [gvizHeader, gvizFirstDataRow];
@@ -97,26 +178,41 @@ describe("staffSheetEnrichedExport roster values", () => {
     expect(readRosterColumnValue(row2!, 14)).toBe(
       "КІЯНЕНКО Андрій Олександрович",
     );
-    expect(readRosterColumnValue(row2!, 5)).toBe("Командир батальйону");
-    expect(readRosterColumnValue(row2!, 1)).toBe("нова");
-    expect(readRosterColumnValue(row2!, 13)).toBe("старший лейтенант");
+    expect(readRosterColumnValue(row2!, 11)).toBe("");
   });
 });
 
-describe("staffSheetExportWorkbook template styles", () => {
-  it("keeps yellow header and bordered data cells from the staff sheet template", async () => {
-    resetStaffSheetExportTemplateCache();
-    const templateData = readFileSync(templatePath).buffer;
-    const table = [gvizHeader, gvizFirstDataRow];
-    const payload = buildStaffSheetRosterImportPayload(table, {
-      source: "gviz",
-      sourceLabel: "test",
-      includeAllRows: true,
-    });
-    const rows = rosterRowsFromStaffSheetPayload(payload);
+describe("staffSheetAnketaVkOverlay", () => {
+  const prepareBaseWithPib = async (
+    pib: string,
+    excelRow: number,
+    patch?: (sheet: {
+      cell: (row: number, col: number) => { value: (v?: unknown) => unknown };
+    }) => void,
+  ) => {
+    const baseData = readFileSync(templatePath).buffer;
+    const XlsxPopulate = (
+      await import("xlsx-populate/browser/xlsx-populate-no-encryption")
+    ).default;
+    const baseWorkbook = await XlsxPopulate.fromDataAsync(baseData);
+    const baseSheet = baseWorkbook.sheet(0);
+    baseSheet.cell(excelRow, 14).value(pib);
+    patch?.(baseSheet);
+    return baseWorkbook.outputAsync();
+  };
 
-    const buffer = await writeStaffSheetExportWorkbook(rows, [], {
-      templateData,
+  it("updates only columns 10 and 11 in the base workbook", async () => {
+    resetStaffSheetExportTemplateCache();
+    const baseData = await prepareBaseWithPib("Іванов Іван Іванович", 3);
+    const entries: StaffSheetEnrichmentEntry[] = [
+      {
+        excelRowNumber: 3,
+        pib: "Іванов Іван Іванович",
+        values: ["так", "МО 312448", "", "", "", ""],
+      },
+    ];
+
+    const buffer = await writeStaffSheetAnketaVkOverlay(baseData, entries, {
       download: false,
     });
 
@@ -124,25 +220,70 @@ describe("staffSheetExportWorkbook template styles", () => {
       await import("xlsx-populate/browser/xlsx-populate-no-encryption")
     ).default;
     const workbook = await XlsxPopulate.fromDataAsync(buffer);
-    const sheet =
-      workbook
-        .sheets()
-        .find((item: { name: () => string }) =>
-          /загальний\s*список/i.test(item.name()),
-        ) ?? workbook.sheet(0);
+    const sheet = workbook.sheet(0);
 
-    const fillRgb = (cell: { style: (name: string) => unknown }) => {
-      const fill = cell.style("fill") as { color?: { rgb?: string } } | string;
-      if (typeof fill === "string") return fill.toLowerCase();
-      return fill.color?.rgb?.replace(/^ff/i, "").toLowerCase() ?? "";
-    };
+    expect(sheet.cell(1, 10).value()).toBe("Анкета");
+    expect(sheet.cell(3, 10).value()).toBe("так");
+    expect(sheet.cell(3, 11).value()).toBe("МО 312448");
+    expect(sheet.cell(2, 10).value() ?? "").toBe("");
+    expect(sheet.cell(1, 1).value()).toBe("№");
+  });
 
-    expect(fillRgb(sheet.cell(1, 1))).toBe("ffff00");
-    expect(fillRgb(sheet.cell(1, 10))).toBe("ffc000");
-    expect(fillRgb(sheet.cell(1, 22))).toBe("92d050");
-    expect(sheet.cell(1, 1).style("bold")).toBe(true);
-    expect(sheet.cell(2, 14).style("leftBorderStyle")).toBe("thin");
-    expect(sheet.cell(2, 14).value()).toBe("КІЯНЕНКО Андрій Олександрович");
-    expect(sheet.row(1).height()).toBe(46.5);
+  it("matches by PIB when excelRowNumber points to a vacant row", async () => {
+    resetStaffSheetExportTemplateCache();
+    const pib = "ПЕТРЕНКО Павло Володимирович";
+    const baseData = await prepareBaseWithPib(pib, 4);
+    const entries: StaffSheetEnrichmentEntry[] = [
+      {
+        excelRowNumber: 3,
+        pib,
+        values: ["так", "АВ 985186", "", "", "", ""],
+      },
+    ];
+
+    const buffer = await writeStaffSheetAnketaVkOverlay(baseData, entries, {
+      download: false,
+    });
+
+    const XlsxPopulate = (
+      await import("xlsx-populate/browser/xlsx-populate-no-encryption")
+    ).default;
+    const workbook = await XlsxPopulate.fromDataAsync(buffer);
+    const sheet = workbook.sheet(0);
+
+    expect(sheet.cell(3, 10).value() ?? "").toBe("");
+    expect(sheet.cell(3, 11).value() ?? "").toBe("");
+    expect(sheet.cell(4, 10).value()).toBe("так");
+    expect(sheet.cell(4, 11).value()).toBe("АВ 985186");
+  });
+
+  it("clears duplicate column header text in column 11", async () => {
+    resetStaffSheetExportTemplateCache();
+    const baseData = await prepareBaseWithPib(
+      "Іванов Іван Іванович",
+      2,
+      (sheet) => {
+        sheet.cell(2, 11).value("Військовий квиток");
+      },
+    );
+
+    const buffer = await writeStaffSheetAnketaVkOverlay(
+      baseData,
+      [
+        {
+          excelRowNumber: 2,
+          pib: "Іванов Іван Іванович",
+          values: ["", "", "", "", "", ""],
+        },
+      ],
+      { download: false },
+    );
+
+    const XlsxPopulate = (
+      await import("xlsx-populate/browser/xlsx-populate-no-encryption")
+    ).default;
+    const workbook = await XlsxPopulate.fromDataAsync(buffer);
+    const sheet = workbook.sheet(0);
+    expect(sheet.cell(2, 11).value() ?? "").toBe("");
   });
 });

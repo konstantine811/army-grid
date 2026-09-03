@@ -7,6 +7,10 @@ import {
   mergeRosterRowsIntoPreview,
   ROSTER_FIELD_PREFIX,
 } from "./personnelRosterMerge";
+import {
+  getPersonDisplayName,
+  isLikelyPersonnelRow,
+} from "./personnelUtils";
 
 const oosRow = (
   name: string,
@@ -119,6 +123,30 @@ describe("mergeRosterRowsIntoPreview", () => {
     expect(merged).toHaveLength(1);
     expect(merged[0].дата_народження).toBe("07.09.1985");
     expect(merged[0][`${ROSTER_FIELD_PREFIX}column_19`]).toBe("3129609236");
+  });
+
+  it("shows ПІБ from штатка when EЖООС прізвище is empty", () => {
+    const preview = {
+      rows: [
+        oosRow("", {
+          birthDate: "12.09.1992",
+          id: "2103999",
+        }),
+      ],
+    };
+    const roster = [
+      rosterRow("ЦАПЕНКО Микола Володимирович", {
+        birthDate: "12.09.1992",
+      }),
+    ];
+
+    const merged = mergeRosterRowsIntoPreview(preview, roster);
+    expect(merged).toHaveLength(1);
+    expect(getPersonDisplayName(merged[0])).toBe(
+      "ЦАПЕНКО Микола Володимирович",
+    );
+    expect(isLikelyPersonnelRow(merged[0]!)).toBe(true);
+    expect(isPersonnelInStaffRoster(merged[0]!)).toBe(true);
   });
 });
 

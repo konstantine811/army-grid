@@ -221,19 +221,38 @@ export function AnketaDataPage() {
           </div>
           <div className="anketa-toolbar-group" aria-label="Штатка">
             <Button
+              component="label"
+              variant="outlined"
+              disabled={!canEdit || sheet.isImportingStaffSheet}
+              startIcon={<FileUploadOutlinedIcon />}
+              title="Імпорт вашої «Штатки» (.xlsx) — для доповнення «Анкета» та «Військовий квиток»"
+            >
+              {sheet.isImportingStaffSheet ? "Імпорт…" : "Імпорт Штатки"}
+              <input
+                hidden
+                type="file"
+                accept=".xlsx,.xlsm"
+                disabled={!canEdit}
+                onChange={(event) => {
+                  void sheet.importStaffSheetFile(event.target.files?.[0]);
+                  event.target.value = "";
+                }}
+              />
+            </Button>
+            <Button
               variant="contained"
               disabled={!canEdit || sheet.isDownloadingStaffSheet}
               startIcon={<FileDownloadOutlinedIcon />}
               onClick={() => void sheet.downloadStaffSheetExcel()}
-              title="Повна «Штатка» з усіма рядками та колонкою «Анкета» — для ручного перенесення в Google"
+              title="Доповнити імпортовану «Штатку» — лише колонки «Анкета» та «Військовий квиток»"
             >
               <span className="anketa-label-full">
                 {sheet.isDownloadingStaffSheet
                   ? "Формую…"
-                  : "Штатка для Google"}
+                  : "Доповнити Штатку"}
               </span>
               <span className="anketa-label-short" aria-hidden="true">
-                {sheet.isDownloadingStaffSheet ? "…" : "↓ Штатка"}
+                {sheet.isDownloadingStaffSheet ? "…" : "↓ Анкета+ВК"}
               </span>
             </Button>
             <Button

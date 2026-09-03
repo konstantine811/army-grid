@@ -73,6 +73,15 @@ describe("resolveStaffSheetMilitaryIdValue", () => {
     expect(result.action).toBe("unchanged");
     expect(result.value).toBe("");
   });
+
+  it("ignores column header text in staff cell", () => {
+    const result = resolveStaffSheetMilitaryIdValue(
+      "Військовий квиток",
+      vkEntry("МО 312448"),
+    );
+    expect(result.action).toBe("from_vk");
+    expect(result.value).toBe("МО 312448");
+  });
 });
 
 describe("planStaffSheetMilitaryIdMerges", () => {

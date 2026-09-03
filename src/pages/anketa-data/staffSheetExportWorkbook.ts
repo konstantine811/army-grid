@@ -10,7 +10,10 @@ import {
   isLikelyCallSignToken,
   looksLikePersonBirthDate,
 } from "../personnel/personnelUtils";
+import { looksLikePersonName } from "../soc-passport/socPassportFields";
 import { normalizeMilitaryIdCellValue } from "../personnel/vkTpvDovidkyImport";
+import { sanitizeStaffSheetCellValue } from "../excel-fill/staffSheet";
+import { normalizeAnketaNameKey } from "./anketaPersonMatch";
 import type { EjournalPreviewRow } from "../ejournal/ejournalTypes";
 import type { StaffSheetEnrichmentEntry } from "./staffSheetEnrichment";
 
@@ -25,6 +28,19 @@ export const STAFF_SHEET_EXPORT_MAX_COLUMN = Math.max(
   ...STAFF_SHEET_EXPORT_COLUMN_NUMBERS,
   46,
 );
+
+export const STAFF_SHEET_EXPORT_PIB_COLUMN = 14;
+
+/** Лише рядки з ПІБ — без вакантних позицій і підрозділів. */
+export const filterStaffSheetExportRowsWithPib = (
+  rosterRows: EjournalPreviewRow[],
+): EjournalPreviewRow[] =>
+  [...rosterRows]
+    .filter((row) => readRosterColumnValue(row, STAFF_SHEET_EXPORT_PIB_COLUMN).trim())
+    .sort(
+      (left, right) =>
+        (Number(left.__rowNumber) || 0) - (Number(right.__rowNumber) || 0),
+    );
 
 const STYLE_PROP_NAMES = [
   "bold",
@@ -100,12 +116,37 @@ type StaffSheetExportSheet = {
   ) => StyleCell & { value: (value?: unknown) => unknown };
 };
 
+const HEADER_LIKE_FILL_RGB = new Set(["FFC000", "FFFF00"]);
+
+const normalizeDataRowAppearance = (
+  sheet: StaffSheetExportSheet,
+  excelRow: number,
+  rosterRow: EjournalPreviewRow | undefined,
+) => {
+  const hasPersonName = Boolean(
+    readRosterColumnValue(rosterRow ?? {}, 14).trim(),
+  );
+  for (let column = 1; column <= STAFF_SHEET_EXPORT_MAX_COLUMN; column += 1) {
+    const cell = sheet.cell(excelRow, column);
+    const fill = cell.style("fill") as { color?: { rgb?: string } } | string;
+    const rgb =
+      typeof fill === "string"
+        ? fill.replace(/^#?FF?/i, "").toUpperCase()
+        : fill?.color?.rgb?.replace(/^FF/i, "").toUpperCase() ?? "";
+    if (!HEADER_LIKE_FILL_RGB.has(rgb)) continue;
+    if (column === 14 && hasPersonName) {
+      cell.style("fill", { type: "solid", color: "FFC6EFCE" });
+      continue;
+    }
+    cell.style("fill", { type: "solid", color: "FFFFFFFF" });
+  }
+};
+
 const ensureDataRowStyles = (
   sheet: StaffSheetExportSheet,
   excelRow: number,
   styleRow = STAFF_SHEET_EXPORT_STYLE_ROW,
 ) => {
-  if (excelRow === styleRow) return;
   for (let column = 1; column <= STAFF_SHEET_EXPORT_MAX_COLUMN; column += 1) {
     copyCellStyle(
       sheet.cell(styleRow, column),
@@ -188,6 +229,120 @@ export const resolveStaffSheetExportCellValue = (
   return rosterRow ? readRosterColumnValue(rosterRow, columnNumber).trim() : "";
 };
 
+const readSheetCellText = (
+  sheet: StaffSheetExportSheet,
+  row: number,
+  column: number,
+) => String(sheet.cell(row, column).value() ?? "").trim();
+
+/** Індекс ПІБ → номер рядка у завантаженому .xlsx (не покладатися лише на __rowNumber з gviz). */
+const buildStaffSheetPibRowIndex = (sheet: StaffSheetExportSheet) => {
+  const index = new Map<string, number>();
+  let emptyStreak = 0;
+  for (let row = STAFF_SHEET_EXPORT_STYLE_ROW; row <= 8000; row += 1) {
+    const pib = readSheetCellText(sheet, row, STAFF_SHEET_EXPORT_PIB_COLUMN);
+    if (looksLikePersonName(pib)) {
+      emptyStreak = 0;
+      const key = normalizeAnketaNameKey(pib);
+      if (key && !index.has(key)) index.set(key, row);
+      continue;
+    }
+    const hasRowContent = [5, 8, 10, 11, 13, 14].some(
+      (column) => readSheetCellText(sheet, row, column).length > 0,
+    );
+    if (!hasRowContent) {
+      emptyStreak += 1;
+      if (emptyStreak >= 80) break;
+    } else {
+      emptyStreak = 0;
+    }
+  }
+  return index;
+};
+
+const resolveStaffSheetOverlayRow = (
+  pibRows: Map<string, number>,
+  entry: StaffSheetEnrichmentEntry,
+  usedRows: Set<number>,
+): number | null => {
+  const key = normalizeAnketaNameKey(entry.pib);
+  if (!key) return null;
+  const row = pibRows.get(key);
+  if (!row || usedRows.has(row)) return null;
+  return row;
+};
+
+/** Доповнює лише «Анкета» (10) та «Військовий квиток» (11) у вже імпортованому .xlsx. */
+export const writeStaffSheetAnketaVkOverlay = async (
+  baseWorkbookData: ArrayBuffer,
+  entries: StaffSheetEnrichmentEntry[],
+  options?: {
+    download?: boolean;
+    fileName?: string;
+  },
+) => {
+  const XlsxPopulate = await loadXlsxPopulate();
+  const workbook = await XlsxPopulate.fromDataAsync(baseWorkbookData);
+  const sheet = findGeneralListSheet(workbook);
+  const pibRows = buildStaffSheetPibRowIndex(sheet);
+  const usedRows = new Set<number>();
+
+  for (const entry of entries) {
+    const excelRow = resolveStaffSheetOverlayRow(pibRows, entry, usedRows);
+    if (!excelRow) continue;
+    usedRows.add(excelRow);
+
+    const anketa = String(
+      entry.values[STAFF_SHEET_ENRICHMENT_VALUE_INDEX.anketa] ?? "",
+    ).trim();
+    const militaryId = normalizeMilitaryIdCellValue(
+      sanitizeStaffSheetCellValue(
+        String(entry.values[STAFF_SHEET_ENRICHMENT_VALUE_INDEX.militaryId] ?? ""),
+        11,
+      ),
+    );
+
+    if (anketa === "так") {
+      sheet.cell(excelRow, 10).value("так");
+    } else if (
+      !sanitizeStaffSheetCellValue(
+        String(sheet.cell(excelRow, 10).value() ?? ""),
+        10,
+      )
+    ) {
+      sheet.cell(excelRow, 10).value("");
+    }
+
+    if (militaryId) {
+      sheet.cell(excelRow, 11).value(militaryId);
+    } else if (
+      !sanitizeStaffSheetCellValue(
+        String(sheet.cell(excelRow, 11).value() ?? ""),
+        11,
+      )
+    ) {
+      sheet.cell(excelRow, 11).value("");
+    }
+  }
+
+  const buffer = await workbook.outputAsync();
+  if (options?.download === false) {
+    return buffer;
+  }
+
+  const stamp = new Date().toISOString().slice(0, 10);
+  const fileName = sanitizeFileName(
+    options?.fileName ?? `Штатка Анкета+ВК ${stamp}.xlsx`,
+  );
+  downloadBlob(
+    new Blob([buffer], {
+      type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    }),
+    fileName,
+  );
+  return buffer;
+};
+
 export const writeStaffSheetExportWorkbook = async (
   rosterRows: EjournalPreviewRow[],
   entries: StaffSheetEnrichmentEntry[],
@@ -205,16 +360,7 @@ export const writeStaffSheetExportWorkbook = async (
   const enrichmentByRow = new Map(
     entries.map((entry) => [entry.excelRowNumber, entry.values]),
   );
-  const rowByNumber = new Map(
-    rosterRows
-      .map((row) => [Number(row.__rowNumber) || 0, row] as const)
-      .filter(([rowNumber]) => rowNumber > 0),
-  );
-  const maxRow = Math.max(
-    STAFF_SHEET_EXPORT_STYLE_ROW,
-    ...[...rowByNumber.keys()],
-    ...[...enrichmentByRow.keys()],
-  );
+  const exportRows = filterStaffSheetExportRowsWithPib(rosterRows);
 
   STAFF_SHEET_EXPORT_COLUMN_NUMBERS.forEach((columnNumber) => {
     const header =
@@ -223,19 +369,26 @@ export const writeStaffSheetExportWorkbook = async (
     sheet.cell(1, columnNumber).value(header);
   });
 
-  for (let excelRow = STAFF_SHEET_EXPORT_STYLE_ROW; excelRow <= maxRow; excelRow += 1) {
+  exportRows.forEach((rosterRow, index) => {
+    const excelRow = STAFF_SHEET_EXPORT_STYLE_ROW + index;
+    const sourceRowNumber = Number(rosterRow.__rowNumber) || 0;
+    const enrichRow = enrichmentByRow.get(sourceRowNumber) ?? [];
     ensureDataRowStyles(sheet, excelRow);
-    const rosterRow = rowByNumber.get(excelRow);
-    const enrichRow = enrichmentByRow.get(excelRow) ?? [];
+    normalizeDataRowAppearance(sheet, excelRow, rosterRow);
     STAFF_SHEET_EXPORT_COLUMN_NUMBERS.forEach((columnNumber) => {
-      const value = resolveStaffSheetExportCellValue(
-        rosterRow,
+      const value = sanitizeStaffSheetCellValue(
+        String(
+          resolveStaffSheetExportCellValue(
+            rosterRow,
+            columnNumber,
+            enrichRow,
+          ) ?? "",
+        ),
         columnNumber,
-        enrichRow,
       );
-      sheet.cell(excelRow, columnNumber).value(value ?? "");
+      sheet.cell(excelRow, columnNumber).value(value);
     });
-  }
+  });
 
   const buffer = await workbook.outputAsync();
   if (options?.download === false) {

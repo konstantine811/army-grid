@@ -87,7 +87,10 @@ export const loadStaffSheetEnrichmentContext =
     ]);
 
     const fromDb = rosterLatestToStaffSheetImportSnapshot(latestRoster);
-    const snapshot = fromDb ?? importedStaffSheet;
+    const snapshot =
+      importedStaffSheet?.fileData?.byteLength
+        ? importedStaffSheet
+        : fromDb ?? importedStaffSheet;
     let rosterRows = sortRosterRows(snapshot?.rows ?? []);
     let importFileName = snapshot?.fileName ?? "";
     if (!rosterRows.length) {

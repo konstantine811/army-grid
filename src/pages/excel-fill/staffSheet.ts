@@ -99,6 +99,9 @@ export const STAFF_SHEET_PUSH_COLUMN_NUMBERS = [
   ...STAFF_SHEET_ROSTER_COLUMNS,
 ] as number[];
 
+/** Лише колонки, які доповнюємо в імпортованій «Штатці». */
+export const STAFF_SHEET_ANKETA_VK_COLUMNS = [10, 11] as const;
+
 /** Колонки для доповнення з анкет / ООС / ВК ТПВ: Анкета, ВК, дата, рік, вік, ІПН. */
 export const STAFF_SHEET_ENRICHMENT_COLUMNS = [10, 11, 16, 17, 18, 19] as const;
 export const STAFF_SHEET_ENRICHMENT_VALUE_INDEX = {
@@ -286,6 +289,53 @@ export const pushStaffSheetToGoogle = async (
 
 const cellText = (value: unknown) => String(value ?? "").trim();
 
+const normalizeStaffSheetHeaderKey = (value: string) =>
+  value
+    .trim()
+    .toLocaleLowerCase("uk-UA")
+    .replace(/\s+/g, " ")
+    .replace(/[\\]/g, "");
+
+/** Прибирає назву колонки з комірки («ПІБ ІВАНОВ…» → «ІВАНОВ…», «Анкета» → «»). */
+export const stripStaffSheetColumnHeaderPrefix = (
+  value: string,
+  headerLabel: string,
+) => {
+  const text = value.trim();
+  if (!text) return "";
+  const headerNorm = normalizeStaffSheetHeaderKey(headerLabel);
+  const textNorm = normalizeStaffSheetHeaderKey(text);
+  if (textNorm === headerNorm) return "";
+  const prefix = `${headerNorm} `;
+  if (textNorm.startsWith(prefix)) {
+    return text.slice(text.toLocaleLowerCase("uk-UA").indexOf(headerNorm) + headerNorm.length).trim();
+  }
+  const headerWords = headerLabel.trim().split(/\s+/);
+  const textWords = text.split(/\s+/);
+  if (
+    headerWords.length <= 3 &&
+    normalizeStaffSheetHeaderKey(textWords.slice(0, headerWords.length).join(" ")) ===
+      headerNorm
+  ) {
+    return textWords.slice(headerWords.length).join(" ").trim();
+  }
+  return text;
+};
+
+export const sanitizeStaffSheetCellValue = (
+  value: string,
+  columnNumber?: number,
+) => {
+  const label =
+    columnNumber != null
+      ? MORNING_GENERAL_LIST_COLUMN_LABELS[columnNumber] ?? ""
+      : "";
+  const stripped = label
+    ? stripStaffSheetColumnHeaderPrefix(value, label)
+    : value.trim();
+  return stripped.trim();
+};
+
 const formatSheetCell = (value: unknown): string => {
   if (value == null) return "";
   if (typeof value === "number" && Number.isFinite(value)) {
@@ -332,6 +382,202 @@ const looksLikePersonName = (value: string) => {
   // Типовий ПІБ: 2–4 слова з великої літери (або весь CAPS).
   return parts.every((part) =>
     /^[A-ZА-ЯІЇЄҐ][A-Za-zА-Яа-яІіЇїЄєҐґʼ'’-]*$/u.test(part),
+  );
+};
+
+const SECOND_JOB_TITLE_SPLIT =
+  /\s+(?=(?:заступник|помічник|начальник|головний)(?:\s|$))/iu;
+
+const splitStackedGvizCellValues = (
+  rest: string,
+  expectedCount: number,
+  headerLabel: string,
+): string[] => {
+  const text = rest.trim();
+  if (!text) return Array.from({ length: expectedCount }, () => "");
+  if (expectedCount <= 1) return [text];
+
+  if (headerLabel === "№") {
+    const words = text.split(/\s+/).filter(Boolean);
+    if (words.length >= expectedCount) return words.slice(0, expectedCount);
+    if (words.length > 1) {
+      return [
+        ...words,
+        ...Array.from({ length: expectedCount - words.length }, () => ""),
+      ].slice(0, expectedCount);
+    }
+  }
+
+  if (
+    headerLabel === "ШПК факт" ||
+    headerLabel === "Звання" ||
+    headerLabel === "Категорія складу"
+  ) {
+    const words = text.split(/\s+/).filter(Boolean);
+    if (
+      words.length === 2 &&
+      /^(?:лейтенант|сержант|капітан)$/iu.test(words[1] ?? "")
+    ) {
+      return [text, ...Array.from({ length: expectedCount - 1 }, () => "")];
+    }
+    if (
+      words.length === expectedCount &&
+      words.every(
+        (word) =>
+          word.length <= 24 &&
+          !/батальйон|командир|заступник|піхотного/i.test(word),
+      )
+    ) {
+      return words;
+    }
+  }
+
+  if (
+    headerLabel === "Посада" ||
+    headerLabel === "Повна посада" ||
+    headerLabel.includes("осада")
+  ) {
+    const parts = text.split(SECOND_JOB_TITLE_SPLIT).map((part) => part.trim());
+    if (parts.length >= expectedCount) {
+      return parts.slice(0, expectedCount);
+    }
+    if (parts.length === 2 && expectedCount === 2) return parts;
+  }
+
+  if (looksLikePersonName(text)) {
+    return [text, ...Array.from({ length: expectedCount - 1 }, () => "")];
+  }
+
+  if (text.split(/\s+/).length === expectedCount) {
+    return text.split(/\s+/).filter(Boolean);
+  }
+
+  return [text, ...Array.from({ length: expectedCount - 1 }, () => "")];
+};
+
+const parseGvizStackedColumnLabel = (
+  label: string,
+  headerLabel: string,
+  expectedCount: number,
+) => {
+  const text = label.trim();
+  if (!text) {
+    return {
+      header: headerLabel,
+      values: Array.from({ length: expectedCount }, () => ""),
+    };
+  }
+  const stripped = stripStaffSheetColumnHeaderPrefix(text, headerLabel);
+  if (!stripped) {
+    return {
+      header: headerLabel,
+      values: Array.from({ length: expectedCount }, () => ""),
+    };
+  }
+  return {
+    header: headerLabel,
+    values: splitStackedGvizCellValues(stripped, expectedCount, headerLabel),
+  };
+};
+
+const countGvizStackedLabelRows = (cols: Array<{ label?: string }>) => {
+  const numberLabel = formatSheetCell(cols[0]?.label ?? "");
+  const numberTokens = stripStaffSheetColumnHeaderPrefix(numberLabel, "№")
+    .split(/\s+/)
+    .filter(Boolean);
+  if (numberTokens.length > 1) return numberTokens.length;
+
+  const posadaLabel = formatSheetCell(cols[4]?.label ?? "");
+  const posadaParts = stripStaffSheetColumnHeaderPrefix(posadaLabel, "Посада")
+    .split(SECOND_JOB_TITLE_SPLIT)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (posadaParts.length > 1) return posadaParts.length;
+
+  return 1;
+};
+
+const detectGvizPibColumnIndex = (cols: Array<{ label?: string }>) => {
+  for (let index = 0; index < cols.length; index += 1) {
+    const header =
+      MORNING_GENERAL_LIST_COLUMN_LABELS[index + 1] ??
+      `Колонка ${index + 1}`;
+    const stripped = stripStaffSheetColumnHeaderPrefix(
+      formatSheetCell(cols[index]?.label ?? ""),
+      header === "ПІБ" ? "ПІБ" : header,
+    );
+    if (looksLikePersonName(stripped)) return index;
+  }
+  return 13;
+};
+
+const isGvizStackedLabelsMode = (
+  cols: Array<{ label?: string }>,
+  body: string[][],
+) => {
+  const pibIndex = detectGvizPibColumnIndex(cols);
+  const labelPib = stripStaffSheetColumnHeaderPrefix(
+    formatSheetCell(cols[pibIndex]?.label ?? ""),
+    "ПІБ",
+  );
+  if (!looksLikePersonName(labelPib)) return false;
+  if (!body.length) return countGvizStackedLabelRows(cols) > 1;
+  const bodyPib = formatSheetCell(body[0]?.[pibIndex] ?? "");
+  if (!looksLikePersonName(bodyPib)) return countGvizStackedLabelRows(cols) > 1;
+  const normalizeName = (value: string) =>
+    value.trim().toLocaleUpperCase("uk-UA").replace(/\s+/g, " ");
+  return normalizeName(labelPib) !== normalizeName(bodyPib);
+};
+
+const expandGvizStackedLabels = (
+  cols: Array<{ label?: string }>,
+  body: string[][],
+): string[][] => {
+  const stackedCount = countGvizStackedLabelRows(cols);
+  const columnCount = cols.length;
+  const syntheticHeader = Array.from({ length: columnCount }, (_, index) => {
+    const fallback =
+      MORNING_GENERAL_LIST_COLUMN_LABELS[index + 1] ?? `Колонка ${index + 1}`;
+    const label = formatSheetCell(cols[index]?.label ?? "");
+    if (!label.trim()) return fallback;
+    const headerNorm = normalizeStaffSheetHeaderKey(fallback);
+    if (normalizeStaffSheetHeaderKey(label).startsWith(headerNorm)) {
+      return fallback;
+    }
+    return fallback;
+  });
+
+  const stackedRows = Array.from({ length: stackedCount }, (_, rowIndex) =>
+    Array.from({ length: columnCount }, (_, colIndex) => {
+      const header =
+        MORNING_GENERAL_LIST_COLUMN_LABELS[colIndex + 1] ??
+        `Колонка ${colIndex + 1}`;
+      const label = formatSheetCell(cols[colIndex]?.label ?? "");
+      const { values } = parseGvizStackedColumnLabel(
+        label,
+        header,
+        stackedCount,
+      );
+      return sanitizeStaffSheetCellValue(values[rowIndex] ?? "", colIndex + 1);
+    }),
+  );
+
+  return [syntheticHeader, ...stackedRows, ...body];
+};
+
+const isStaffSheetLabelOnlyRow = (values: Record<string, string>) => {
+  const texts = Object.entries(values)
+    .filter(([key]) => /^column_\d+$/i.test(key))
+    .map(([, value]) => value.trim())
+    .filter(Boolean);
+  if (!texts.length) return false;
+  const headerLabels = new Set(
+    Object.values(MORNING_GENERAL_LIST_COLUMN_LABELS).map((label) =>
+      normalizeStaffSheetHeaderKey(label),
+    ),
+  );
+  return texts.every((text) =>
+    headerLabels.has(normalizeStaffSheetHeaderKey(text)),
   );
 };
 
@@ -501,11 +747,16 @@ export const buildStaffSheetRosterImportPayload = (
   }
 
   const firstRow = (table[0] ?? []).map((cell) => cellText(cell));
-  const headerIsReal =
-    looksLikeHeaderRow(firstRow) &&
-    !firstRow.some((cell) => looksLikePersonName(cell));
-  const headerRow = headerIsReal ? firstRow : [];
-  const dataRows = headerIsReal ? table.slice(1) : table;
+  const strippedFirstRow = firstRow.map((cell, index) =>
+    sanitizeStaffSheetCellValue(cell, index + 1),
+  );
+  const firstRowLooksLikeHeader = looksLikeHeaderRow(firstRow);
+  const treatFirstRowAsHeader =
+    firstRowLooksLikeHeader &&
+    !strippedFirstRow.some((cell) => looksLikePersonName(cell));
+  const headerIsReal = treatFirstRowAsHeader;
+  const headerRow = treatFirstRowAsHeader ? firstRow : [];
+  const dataRows = treatFirstRowAsHeader ? table.slice(1) : table;
 
   const columnCount = Math.max(
     headerRow.length,
@@ -632,7 +883,10 @@ export const buildStaffSheetRosterImportPayload = (
     .map((cells, index) => {
       const values: Record<string, string> = {};
       columns.forEach((column, columnIndex) => {
-        const text = formatSheetCell(cells[columnIndex]);
+        const text = sanitizeStaffSheetCellValue(
+          formatSheetCell(cells[columnIndex]),
+          column.rosterColumn,
+        );
         if (!text) return;
         if (columnIndex === pibColumnIndex) return;
         if (statusColumnIndex >= 0 && columnIndex === statusColumnIndex) return;
@@ -647,11 +901,17 @@ export const buildStaffSheetRosterImportPayload = (
       const isStaffPosition = [5, 8, 13].some((columnNumber) =>
         Boolean(values[`column_${columnNumber}`]?.trim()),
       );
-      const hasAnyContent = cells.some((cell) => formatSheetCell(cell).trim());
-      if (meta.includeAllRows) {
-        if (!hasAnyContent) return null;
-      } else if (!hasFullName && !isStaffPosition) {
+      const hasAnyContent = cells.some((cell) =>
+        sanitizeStaffSheetCellValue(formatSheetCell(cell)).trim(),
+      );
+      if (!meta.includeAllRows && !hasFullName && !isStaffPosition) {
         return null;
+      }
+      if (meta.includeAllRows && !hasAnyContent) {
+        return {
+          excelRowNumber: index + excelRowOffset,
+          values: {},
+        };
       }
       if (hasFullName) {
         values.column_14 = fullName;
@@ -707,8 +967,14 @@ export const buildStaffSheetRosterImportPayload = (
         values,
       };
     })
-    .filter((row): row is { excelRowNumber: number; values: Record<string, string> } =>
-      Boolean(row),
+    .filter(
+      (
+        row,
+      ): row is { excelRowNumber: number; values: Record<string, string> } => {
+        if (!row) return false;
+        if (isStaffSheetLabelOnlyRow(row.values)) return false;
+        return true;
+      },
     );
 
   if (!rows.length) {
@@ -897,6 +1163,10 @@ const parseGvizJson = (text: string): string[][] => {
   const headerOk =
     looksLikeHeaderRow(header) && !headerHasPerson;
 
+  if (isGvizStackedLabelsMode(cols, body)) {
+    return expandGvizStackedLabels(cols, body);
+  }
+
   if (headerOk) {
     return [header, ...body];
   }
@@ -904,7 +1174,16 @@ const parseGvizJson = (text: string): string[][] => {
   // gviz кладе перший рядок даних у labels — повертаємо його як data.
   // Не плутати зі справжніми заголовками без «Посада» (ПІБ+Статус).
   if (headerHasPerson) {
-    return [header, ...body];
+    const syntheticHeader = cols.map((_, index) => {
+      const fallback =
+        MORNING_GENERAL_LIST_COLUMN_LABELS[index + 1] ??
+        `Колонка ${index + 1}`;
+      return fallback;
+    });
+    const firstDataRow = header.map((cell, index) =>
+      sanitizeStaffSheetCellValue(cell, index + 1),
+    );
+    return [syntheticHeader, firstDataRow, ...body];
   }
 
   if (looksLikeHeaderRow(header)) {
@@ -921,6 +1200,8 @@ const parseGvizJson = (text: string): string[][] => {
 
   return body;
 };
+
+export const parseStaffSheetGvizResponse = parseGvizJson;
 
 const isLikelyRosterStatusValue = (value: string) => {
   const text = value.trim().toLocaleLowerCase("uk-UA");

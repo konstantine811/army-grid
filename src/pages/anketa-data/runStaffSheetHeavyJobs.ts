@@ -8,8 +8,6 @@ import {
 import type { StaffSheetEnrichmentEntry } from "./staffSheetEnrichment";
 import type { StaffSheetRosterImportPayload } from "../excel-fill/staffSheet";
 import type { VkTpvDovidkyNameEntry, VkTpvDovidkyRecord } from "../personnel/vkTpvDovidkyImport";
-import type { EjournalPreviewRow } from "../ejournal/ejournalTypes";
-import { loadStaffSheetExportTemplate } from "./staffSheetExportWorkbook";
 
 export const runStaffSheetEnrichmentHeavy = async (
   input: StaffSheetEnrichmentWorkerInput,
@@ -52,16 +50,12 @@ export const runStaffSheetRosterImportHeavy = async (
     meta,
   });
 
-export const runStaffSheetExportWorkbookHeavy = async (
-  rosterRows: EjournalPreviewRow[],
+export const runStaffSheetAnketaVkOverlayHeavy = async (
   entries: StaffSheetEnrichmentEntry[],
-  templateData?: ArrayBuffer,
-): Promise<ArrayBuffer> => {
-  const template = templateData ?? (await loadStaffSheetExportTemplate());
-  return runHeavyJob({
-    type: "staffSheetExportWorkbook",
-    rosterRows,
+  baseWorkbookData: ArrayBuffer,
+): Promise<ArrayBuffer> =>
+  runHeavyJob({
+    type: "staffSheetAnketaVkOverlay",
     entries,
-    templateData: template,
+    baseWorkbookData,
   });
-};

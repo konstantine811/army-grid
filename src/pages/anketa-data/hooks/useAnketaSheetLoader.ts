@@ -282,7 +282,7 @@ export function useAnketaSheetLoader() {
       };
 
       setMessage(
-        `Імпортовано «Штатку»: ${formatStaffSheetImportSummary(imported)} · зіставлення: ${formatStaffSheetEnrichmentReport(report)}. Далі — «Скачати Штатку» або «→ Google Штатка». Цей файл також доступний для ранкового звіту.`,
+        `Імпортовано «Штатку»: ${formatStaffSheetImportSummary(imported)} · зіставлення: ${formatStaffSheetEnrichmentReport(report)}. Далі — «Доповнити Штатку (Анкета + ВК)» або «→ Google Штатка».`,
       );
     } catch (error) {
       setMessage(
@@ -354,7 +354,7 @@ export function useAnketaSheetLoader() {
         },
       });
       setMessage(
-        `Завантажено Excel · ${formatStaffExportReport(report)}${phase ? ` · ${phase}` : ""}`,
+        `Завантажено «Штатку» · лише «Анкета» + «Військовий квиток» · ${formatStaffExportReport(report)}`,
       );
     } catch (error) {
       setMessage(

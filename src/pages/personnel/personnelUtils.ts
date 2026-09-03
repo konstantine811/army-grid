@@ -18,10 +18,13 @@ import {
   sanitizeFileName,
 } from "../../shared/browserExport";
 import type { DbPreviewState, EjournalPreviewRow } from "../ejournal/ejournalTypes";
+import { readRosterColumnValue } from "../excel-fill/rosterSourceSnapshot";
 import {
   parseDbColumns,
   previewValueToDisplay,
 } from "../ejournal/ejournalUtils";
+
+const ROSTER_FIELD_PREFIX = "roster__";
 
 export {
   getRowKeyByKeyPart,
@@ -392,11 +395,45 @@ export const getPersonFieldValue = (
   return key ? previewValueToDisplay(row?.[key]) : "";
 };
 
-export const getPersonDisplayName = (row: EjournalPreviewRow | null) =>
-  cleanPersonDisplayName(
+/** ПІБ з полів Штатки (column_14 / roster__…), коли в ЕЖООС порожньо або зіпсовано. */
+export const resolvePersonDisplayNameFromRoster = (
+  row: EjournalPreviewRow | null,
+) => {
+  if (!row) return "";
+  const direct = cleanPersonDisplayName(readRosterColumnValue(row, 14));
+  if (direct) return direct;
+
+  for (const [key, value] of Object.entries(row)) {
+    if (!key.startsWith(ROSTER_FIELD_PREFIX)) continue;
+    const bare = key.slice(ROSTER_FIELD_PREFIX.length);
+    if (
+      !/^column_14$/i.test(bare) &&
+      bare.toLocaleLowerCase("uk-UA") !== "піб" &&
+      !bare.toLocaleLowerCase("uk-UA").includes("піб")
+    ) {
+      continue;
+    }
+    const text = cleanPersonDisplayName(previewValueToDisplay(value));
+    if (text) return text;
+  }
+  return "";
+};
+
+export const getPersonDisplayName = (row: EjournalPreviewRow | null) => {
+  const fromOos = cleanPersonDisplayName(
     getPersonFieldValue(row, ["прізвище"]) ||
       getPersonFieldValue(row, ["піб"]),
   );
+  const fromRoster = resolvePersonDisplayNameFromRoster(row);
+  if (
+    fromOos &&
+    fromOos.length >= 5 &&
+    !/^(прізвище|піб|особа|№)\b/i.test(fromOos)
+  ) {
+    return fromOos;
+  }
+  return fromRoster || fromOos;
+};
 
 export type PersonFieldDef = {
   label: string;
@@ -1538,8 +1575,14 @@ export const looksLikePersonnelName = (value: string) => {
 
 export const isLikelyPersonnelRow = (row: EjournalPreviewRow) => {
   if (!row.__dbRowId) return false;
-  const name = getPersonDisplayName(row);
-  return looksLikePersonnelName(name);
+  const fromOos = cleanPersonDisplayName(
+    getPersonFieldValue(row, ["прізвище"]) ||
+      getPersonFieldValue(row, ["піб"]),
+  );
+  const fromRoster = resolvePersonDisplayNameFromRoster(row);
+  return (
+    looksLikePersonnelName(fromOos) || looksLikePersonnelName(fromRoster)
+  );
 };
 
 export const findEjournalPersonnelSheet = (imports: BackendEjournalImport[]) => {

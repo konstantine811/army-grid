@@ -11,6 +11,7 @@ import {
   extractMilitaryIdFromText,
   type VkTpvDovidkyNameEntry,
 } from "../personnel/vkTpvDovidkyImport";
+import { sanitizeStaffSheetCellValue } from "../excel-fill/staffSheet";
 import { runStaffSheetVkIndexHeavy } from "./runStaffSheetHeavyJobs";
 
 export type StaffSheetVkCache = {
@@ -37,7 +38,7 @@ export const resolveStaffSheetMilitaryIdValue = (
   currentValue: string,
   vkEntry: VkTpvDovidkyNameEntry | undefined,
 ): { value: string; action: StaffSheetMilitaryIdMergeAction } => {
-  const current = String(currentValue ?? "").trim();
+  const current = sanitizeStaffSheetCellValue(String(currentValue ?? ""), 11);
   const currentId = extractMilitaryIdFromText(current);
   const vkId = extractMilitaryIdFromText(String(vkEntry?.militaryId ?? ""));
 

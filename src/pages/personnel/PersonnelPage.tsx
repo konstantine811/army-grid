@@ -84,6 +84,7 @@ import {
   getPersonFieldValue,
   inferRosterFieldLabel,
   isLikelyPersonnelRow,
+  resolvePersonDisplayNameFromRoster,
   resolvePersonRosterStatus,
   cleanPersonDisplayName,
   looksLikePersonBirthDate,
@@ -144,6 +145,7 @@ import { staffSheetEditUrl } from "../excel-fill/staffSheet";
 import { STAFF_SHEET_SYNCED_EVENT } from "../../data/staffSheetAutoSync";
 import {
   buildRosterOnlyPreviewState,
+  getRosterPersonName,
   isPersonnelInStaffRoster,
   ROSTER_FIELD_PREFIX,
 } from "./personnelRosterMerge";
@@ -206,6 +208,25 @@ const normalizePersonnelSearchText = (value: unknown) =>
     .replace(/\s+/g, " ")
     .trim()
     .toLocaleLowerCase("uk-UA");
+
+/** Пошук за ПІБ: повний рядок, усі слова або прізвище + імʼя. */
+const personnelSearchMatchesQuery = (searchableText: string, query: string) => {
+  if (!query) return true;
+  if (searchableText.includes(query)) return true;
+
+  const tokens = query.split(/\s+/).filter((token) => token.length >= 2);
+  if (!tokens.length) return searchableText.includes(query);
+
+  if (tokens.every((token) => searchableText.includes(token))) return true;
+
+  if (tokens.length >= 2) {
+    const shortName = tokens.slice(0, 2).join(" ");
+    if (searchableText.includes(shortName)) return true;
+  }
+
+  const surname = tokens[0] ?? "";
+  return surname.length >= 4 && searchableText.includes(surname);
+};
 
 const getRawCallSignSearchValues = (row: EjournalPreviewRow) =>
   collectPersonCallSignFieldValues(row);
@@ -467,6 +488,8 @@ export function PersonnelPage({
       const searchableText = normalizePersonnelSearchText(
         [
         record.summary.name,
+        resolvePersonDisplayNameFromRoster(record.row),
+        getRosterPersonName(record.row),
         record.summary.callSign,
         getPersonFieldValue(record.row, ["позивний"]),
         getPersonFieldValue(record.row, ["позив"]),
@@ -484,7 +507,7 @@ export function PersonnelPage({
           .join(" "),
       );
 
-      return searchableText.includes(normalizedQuery);
+      return personnelSearchMatchesQuery(searchableText, normalizedQuery);
     });
   }, [
     personnelRows,

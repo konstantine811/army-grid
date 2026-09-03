@@ -18,7 +18,7 @@ import {
   buildStaffSheetEnrichmentEntries,
   type StaffSheetEnrichmentEntry,
 } from "../pages/anketa-data/staffSheetEnrichment";
-import { writeStaffSheetExportWorkbook } from "../pages/anketa-data/staffSheetExportWorkbook";
+import { writeStaffSheetAnketaVkOverlay } from "../pages/anketa-data/staffSheetExportWorkbook";
 import {
   buildStaffSheetRosterImportPayload,
   type StaffSheetRosterImportPayload,
@@ -96,10 +96,9 @@ export type HeavyJob =
       };
     }
   | {
-      type: "staffSheetExportWorkbook";
-      rosterRows: EjournalPreviewRow[];
+      type: "staffSheetAnketaVkOverlay";
       entries: StaffSheetEnrichmentEntry[];
-      templateData: ArrayBuffer;
+      baseWorkbookData: ArrayBuffer;
     };
 
 export type HeavyJobResult = {
@@ -115,7 +114,7 @@ export type HeavyJobResult = {
   staffSheetVkIndex: VkTpvDovidkyNameEntry[];
   parseVkTpvDovidky: VkTpvDovidkyRecord[];
   staffSheetRosterImport: StaffSheetRosterImportPayload;
-  staffSheetExportWorkbook: ArrayBuffer;
+  staffSheetAnketaVkOverlay: ArrayBuffer;
 };
 
 export const runHeavyJobSync = <T extends HeavyJob>(
@@ -183,9 +182,8 @@ export const runHeavyJobSync = <T extends HeavyJob>(
 export const runHeavyJobMaybeAsync = async (
   job: HeavyJob,
 ): Promise<unknown> => {
-  if (job.type === "staffSheetExportWorkbook") {
-    return writeStaffSheetExportWorkbook(job.rosterRows, job.entries, {
-      templateData: job.templateData,
+  if (job.type === "staffSheetAnketaVkOverlay") {
+    return writeStaffSheetAnketaVkOverlay(job.baseWorkbookData, job.entries, {
       download: false,
     });
   }
