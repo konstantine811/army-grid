@@ -7,6 +7,7 @@ export type TimesheetEpisodeMove = {
   previousIndex?: string;
   nextIndex?: string;
   note: string;
+  arrivedFrom?: string;
 };
 
 /**

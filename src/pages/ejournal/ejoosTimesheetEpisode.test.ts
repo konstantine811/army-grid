@@ -43,6 +43,21 @@ describe("isInternalStaffIndexHop", () => {
       }),
     ).toBe(false);
   });
+
+  it("does not treat 3ПБ → 1ПБ as an internal 1ПБ index hop", () => {
+    expect(
+      isInternalStaffIndexHop({
+        type: "ПОСАДА",
+        destination: "_5 1ПБ",
+        arrivedFrom: "_5 3ПБ",
+        changeText:
+          "гранатометник 2 піхотного відділення 3 піхотного взводу 2 піхотної роти",
+        previousIndex: "5007925",
+        nextIndex: "2103340",
+        note: "наказ №233 від 12.08.2026",
+      }),
+    ).toBe(false);
+  });
 });
 
 describe("resolveTimesheetEpisodeStart", () => {
@@ -72,5 +87,29 @@ describe("resolveTimesheetEpisodeStart", () => {
         ownUnitMoves: [hop("4907559", "2103764")],
       }),
     ).toBe("07.08.2026");
+  });
+
+  it("starts БУРМІСТР's 3ПБ → 1ПБ episode on 12.08", () => {
+    const movement = {
+      type: "ПОСАДА",
+      destination: "_5 1ПБ",
+      arrivedFrom: "_5 3ПБ",
+      changeText:
+        "гранатометник 2 піхотного відділення 3 піхотного взводу 2 піхотної роти",
+      previousIndex: "5007925",
+      nextIndex: "2103340",
+      note: "наказ №233 від 12.08.2026",
+    };
+    expect(
+      resolveTimesheetEpisodeStart({
+        monthStartLabel: "01.08.2026",
+        appointmentDate: "12.08.2026",
+        inboundDate: "",
+        hasMonthStartAbsence: false,
+        hasDepartureEvidence: false,
+        leftUnitThisMonth: false,
+        ownUnitMoves: [movement],
+      }),
+    ).toBe("12.08.2026");
   });
 });

@@ -10,6 +10,7 @@ export type MovementRuleEvent = {
   changeText: string;
   status: string;
   note: string;
+  arrivedFrom?: string;
   previousIndex?: string;
   nextIndex?: string;
 };
@@ -124,7 +125,7 @@ export const isDispositionToStaffPlacement = (
  * «штурмове відділення» всередині 1ПБ сюди не входить.
  */
 export const mentionsForeignUnit = (value: string) =>
-  /(?:^|[_\s])(?:\d+\s*)ШБ\b|(?:\d+\s+)?штурмов(?:ий|ого|ому|им)?\s+батальйон|(?:^|[_\s])(?:2|3|4|5)\s*ПБ\b|(?:^|[_\s])(?:\d+\s*)(?:РБ|ТБ)\b/iu.test(
+  /(?:^|[_\s])(?:\d+\s*)ШБ(?=$|[_\s.,;/])|(?:\d+\s+)?штурмов(?:ий|ого|ому|им)?\s+батальйон|(?:^|[_\s])(?:2|3|4|5)\s*ПБ(?=$|[_\s.,;/])|(?:^|[_\s])(?:\d+\s*)(?:РБ|ТБ)(?=$|[_\s.,;/])/iu.test(
     ` ${normText(value).toUpperCase()} `,
   );
 
@@ -215,7 +216,13 @@ export const isOwnUnitStaffMove = (event: StaffMoveEvent) =>
 export const isInternalStaffIndexHop = (
   event: Pick<
     MovementRuleEvent,
-    "type" | "destination" | "changeText" | "previousIndex" | "nextIndex" | "note"
+    | "type"
+    | "destination"
+    | "changeText"
+    | "previousIndex"
+    | "nextIndex"
+    | "note"
+    | "arrivedFrom"
   >,
 ) => {
   if (
@@ -226,7 +233,12 @@ export const isInternalStaffIndexHop = (
   ) {
     return false;
   }
-  const blob = [event.note, event.destination, event.changeText].join(" ");
+  const blob = [
+    event.note,
+    event.destination,
+    event.changeText,
+    event.arrivedFrom,
+  ].join(" ");
   if (mentionsExternalMilitaryUnit(blob) || mentionsForeignUnit(blob)) {
     return false;
   }
