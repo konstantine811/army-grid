@@ -264,7 +264,7 @@ const findNearestColumnStyleId = (
   if (canonical) return canonical;
   const sheetCentered: string[] = [];
   const anyCellRe =
-    /<c\b([^<>]*\br="[A-Z]{1,3}(\d+)"(?![0-9A-Za-z])[^<>]*)(\/\s*>|>[\s\S]*?<\/c>)/gi;
+    /<c\b([^<>]*?\br="[A-Z]{1,3}(\d+)"(?![0-9A-Za-z])[^<>]*?)(\/\s*>|>[\s\S]*?<\/c>)/gi;
   for (const cell of sheetXml.matchAll(anyCellRe)) {
     const row = Number(cell[2]);
     if (!row || row < 6) continue;
@@ -1413,7 +1413,7 @@ export async function applyInlineStringWritesToWorkbook(
 
 const collectSheetCells = (sheetXml: string) => {
   const cellRe =
-    /<c\b([^<>]*\br="([A-Z]{1,3})(\d+)"(?![0-9A-Za-z])[^<>]*)(\/\s*>|>[\s\S]*?<\/c>)/gi;
+    /<c\b([^<>]*?\br="([A-Z]{1,3})(\d+)"(?![0-9A-Za-z])[^<>]*?)(\/\s*>|>[\s\S]*?<\/c>)/gi;
   const cells: Array<{
     row: number;
     column: number;

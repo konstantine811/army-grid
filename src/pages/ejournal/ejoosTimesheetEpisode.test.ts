@@ -58,6 +58,21 @@ describe("isInternalStaffIndexHop", () => {
       }),
     ).toBe(false);
   });
+
+  it("does not treat 26 battalion → 1ПБ as an internal staff hop", () => {
+    expect(
+      isInternalStaffIndexHop({
+        type: "ПОСАДА",
+        destination: "_5 1ПБ",
+        arrivedFrom: "26_БАТ ЗВ'ЯЗ",
+        changeText:
+          "гранатометник 1 піхотного відділення 3 піхотного взводу 3 піхотної роти",
+        previousIndex: "6012407",
+        nextIndex: "2103445",
+        note: "наказ №236 від 15.08.2026",
+      }),
+    ).toBe(false);
+  });
 });
 
 describe("resolveTimesheetEpisodeStart", () => {
@@ -126,5 +141,30 @@ describe("resolveTimesheetEpisodeStart", () => {
         ownUnitMoves: [],
       }),
     ).toBe("12.08.2026");
+  });
+
+  it("starts ТРОМБА's 26 battalion → 1ПБ episode on 15.08", () => {
+    expect(
+      resolveTimesheetEpisodeStart({
+        monthStartLabel: "01.08.2026",
+        appointmentDate: "15.08.2026",
+        inboundDate: "",
+        hasMonthStartAbsence: false,
+        hasDepartureEvidence: false,
+        leftUnitThisMonth: false,
+        ownUnitMoves: [
+          {
+            type: "ПОСАДА",
+            destination: "_5 1ПБ",
+            arrivedFrom: "26_БАТ ЗВ'ЯЗ",
+            changeText:
+              "гранатометник 1 піхотного відділення 3 піхотного взводу 3 піхотної роти",
+            previousIndex: "6012407",
+            nextIndex: "2103445",
+            note: "наказ №236 від 15.08.2026",
+          },
+        ],
+      }),
+    ).toBe("15.08.2026");
   });
 });

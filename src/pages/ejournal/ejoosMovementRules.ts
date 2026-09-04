@@ -233,6 +233,14 @@ export const isInternalStaffIndexHop = (
   ) {
     return false;
   }
+  const arrivedFrom = normText(event.arrivedFrom ?? "");
+  if (
+    arrivedFrom &&
+    !/^(?:X|Х|0|[-—.])$/iu.test(arrivedFrom) &&
+    !isOwnFirstPbDestination(arrivedFrom)
+  ) {
+    return false;
+  }
   const blob = [
     event.note,
     event.destination,

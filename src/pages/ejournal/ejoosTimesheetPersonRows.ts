@@ -120,7 +120,7 @@ export const buildSheetGridFromXml = (sheetXml: string, sstXml = "") => {
   const strings = parseSharedStrings(sstXml);
   const rows: unknown[][] = [];
   const cellRe =
-    /<c\b([^<>]*\br="([A-Z]{1,3})(\d+)"(?![0-9A-Za-z])[^<>]*)(\/\s*>|>[\s\S]*?<\/c>)/gi;
+    /<c\b([^<>]*?\br="([A-Z]{1,3})(\d+)"(?![0-9A-Za-z])[^<>]*?)(\/\s*>|>[\s\S]*?<\/c>)/gi;
   for (const cell of sheetXml.matchAll(cellRe)) {
     const row = Number(cell[3]);
     const column = columnLetterToNumber(cell[2]);

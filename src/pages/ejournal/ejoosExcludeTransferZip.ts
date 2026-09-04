@@ -27,7 +27,6 @@ import {
   findTimesheetPersonRowsInGrid,
   loadTimesheetGridFromFile,
   mergeTimesheetGrids,
-  placementSheetFromMergedGrid,
   pickTimesheetKeepRow,
   uniqueExcelRows,
 } from "./ejoosTimesheetPersonRows";
@@ -145,24 +144,26 @@ const findTimesheetStyleRow = (sheet: ExcelSheetSnapshot) => {
   return 7;
 };
 
-const nextTimesheetHistoryRow = (
-  sheet: ExcelSheetSnapshot,
+export const nextTimesheetHistoryRow = (
+  grid: Array<unknown[] | undefined>,
   sourceRow: number,
   reserved: Set<number>,
 ) => {
   const start = sourceRow >= 7 ? sourceRow + 1 : 7;
-  for (let row = start; row <= sheet.rawRows.length + 30; row += 1) {
+  for (let row = start; row <= grid.length + 30; row += 1) {
     if (reserved.has(row)) continue;
+    const gridRow = grid[row - 1];
     if (
-      !cellText(sheet, row, 2) &&
-      !cellText(sheet, row, 7) &&
-      !cellText(sheet, row, 8)
+      !String(gridRow?.[0] ?? "").trim() &&
+      !String(gridRow?.[1] ?? "").trim() &&
+      !String(gridRow?.[6] ?? "").trim() &&
+      !String(gridRow?.[7] ?? "").trim()
     ) {
       reserved.add(row);
       return row;
     }
   }
-  const row = sheet.rawRows.length + reserved.size + 1;
+  const row = grid.length + reserved.size + 1;
   reserved.add(row);
   return row;
 };
@@ -412,10 +413,6 @@ export async function applyExcludeTransfersWithZip(input: {
     timesheet.rawRows,
     timesheetXmlGrid,
   );
-  const timesheetForPlacement = placementSheetFromMergedGrid(
-    timesheet,
-    timesheetGrid,
-  );
   let excludedRow = nextExcludedRow(excluded);
   const excludedStyleSourceRow = findExcludedStyleSourceRow(
     excluded,
@@ -640,7 +637,7 @@ export async function applyExcludeTransfersWithZip(input: {
       timesheetKeepRow = sourceRow;
     } else if (sourceRow > 0) {
       timesheetKeepRow = nextTimesheetHistoryRow(
-        timesheetForPlacement,
+        timesheetXmlGrid,
         sourceRow,
         reservedTimesheetRows,
       );
@@ -650,7 +647,7 @@ export async function applyExcludeTransfersWithZip(input: {
     } else if (writePlan.createTimesheetHistory) {
       const styleRow = findTimesheetStyleRow(timesheet);
       timesheetKeepRow = nextTimesheetHistoryRow(
-        timesheetForPlacement,
+        timesheetXmlGrid,
         styleRow,
         reservedTimesheetRows,
       );
