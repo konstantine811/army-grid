@@ -2300,7 +2300,14 @@ export const buildEjoosSyncPlan = (
       if (isOutboundStaffMove(event)) leftUnitThisMonth = true;
       if (isOwnUnitStaffMove(event)) ownUnitMoves.push(event);
     }
-    const inbound = inboundStaffDateFor(personId, fullName);
+    const temporaryArrival =
+      (personId && arrivalById.get(personId)) ||
+      byPersonName(arrivalByName, personId, fullName) ||
+      null;
+    const inbound =
+      inboundStaffDateFor(personId, fullName) ||
+      temporaryArrival?.arriveDate ||
+      "";
     if (inbound) leftUnitThisMonth = true;
     const departed = timesheetRowsOf(personId, fullName).some(
       (row) => row.hasDepartureText,
@@ -2314,6 +2321,7 @@ export const buildEjoosSyncPlan = (
       ),
       hasDepartureEvidence: departed,
       leftUnitThisMonth,
+      wasTemporaryArrival: Boolean(temporaryArrival),
       ownUnitMoves,
     });
   };
