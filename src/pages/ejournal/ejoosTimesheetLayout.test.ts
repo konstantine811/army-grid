@@ -4,10 +4,13 @@ import {
   TimesheetLayoutError,
   assertCanonicalSlotFreeFor,
   assertHistoryRowsOutsideCanonical,
+  assertTimesheetLayoutReadyForApply,
   buildTimesheetLayout,
   parseCountIfStaffRange,
   resolveCanonicalTimesheetSlot,
   resolveHistoryTimesheetRow,
+  stampTimesheetHistoryInserts,
+  takeHistoryTimesheetRow,
 } from "./ejoosTimesheetLayout";
 
 const sheetOf = (rows: string[][]): ExcelSheetSnapshot =>
@@ -86,6 +89,14 @@ describe("ejoosTimesheetLayout", () => {
     return sheetOf(rows);
   };
 
+  const companyFormulas = {
+    I9: 'COUNTIF(I7:I8,"+")',
+    I79: 'COUNTIF(I47:I74,"+")',
+  };
+
+  const layoutOf = (sheet = companySheet()) =>
+    buildTimesheetLayout(sheet, { formulas: companyFormulas });
+
   it("parses staff bounds from footer COUNTIF", () => {
     expect(parseCountIfStaffRange('COUNTIF(I353:I478,"+")')).toEqual({
       start: 353,
@@ -98,7 +109,7 @@ describe("ejoosTimesheetLayout", () => {
   });
 
   it("anchors GOGA to canonical index 2103167 inside 1 рота / 1 взвод / 2 відділення", () => {
-    const layout = buildTimesheetLayout(companySheet());
+    const layout = layoutOf();
     const slot = resolveCanonicalTimesheetSlot({
       index: "2103167",
       layout,
@@ -114,7 +125,7 @@ describe("ejoosTimesheetLayout", () => {
   });
 
   it("keeps vacant staff slots as canonical even without a person", () => {
-    const layout = buildTimesheetLayout(companySheet());
+    const layout = layoutOf();
     const slot = resolveCanonicalTimesheetSlot({
       index: "2103168",
       layout,
@@ -126,7 +137,7 @@ describe("ejoosTimesheetLayout", () => {
 
   it("finds history only between last staff row and food-summary of the same section", () => {
     const sheet = companySheet();
-    const layout = buildTimesheetLayout(sheet);
+    const layout = layoutOf(sheet);
     const source = resolveCanonicalTimesheetSlot({
       index: "2103167",
       layout,
@@ -144,7 +155,7 @@ describe("ejoosTimesheetLayout", () => {
 
   it("inserts a history row before the footer instead of falling into the next company", () => {
     const sheet = companySheet();
-    const layout = buildTimesheetLayout(sheet);
+    const layout = layoutOf(sheet);
     const source = resolveCanonicalTimesheetSlot({
       index: "2103119",
       layout,
@@ -161,7 +172,7 @@ describe("ejoosTimesheetLayout", () => {
   });
 
   it("blocks overwrite when another person occupies the canonical slot", () => {
-    const layout = buildTimesheetLayout(companySheet());
+    const layout = layoutOf();
     const slot = resolveCanonicalTimesheetSlot({
       index: "2103167",
       layout,
@@ -314,7 +325,8 @@ describe("ejoosTimesheetLayout", () => {
       layout,
       sheet,
     });
-    expect(history).toEqual({ row: 495, insertBefore: false });
+    expect(history.row).toBe(495);
+    expect(history.insertBefore).toBe(false);
     expect(() =>
       assertHistoryRowsOutsideCanonical(layout, [history.row]),
     ).not.toThrow();
@@ -387,5 +399,106 @@ describe("ejoosTimesheetLayout", () => {
         sheet,
       }),
     ).toThrow(TimesheetLayoutError);
+  });
+
+  it("blocks Apply when a food-summary footer has no COUNTIF range", () => {
+    const sheet = companySheet();
+    const layout = buildTimesheetLayout(sheet);
+    expect(layout.issues.some((issue) => issue.code === "TIMESHEET_SECTION_RANGE_UNKNOWN")).toBe(
+      true,
+    );
+    expect(() => assertTimesheetLayoutReadyForApply(layout)).toThrow(
+      /COUNTIF штатного діапазону/i,
+    );
+  });
+
+  it("does not schedule a physical insert when 3 рота history has empty R495", () => {
+    const rows = Array.from({ length: 500 }, emptyRow);
+    rows[351] = ["3 ПІХОТНА РОТА", "3 ПІХОТНА РОТА"];
+    rows[352] = ["3 ПІХОТНА РОТА", "2103461", "Старший стрілець", "100915А", "5"];
+    rows[477] = ["3 ПІХОТНА РОТА", "2103999", "Стрілець", "100915А", "5"];
+    for (let row = 478; row <= 493; row += 1) {
+      rows[row] = ["", `21034${row}`, "Стрілець", "100915А", "5"];
+    }
+    rows[495] = ["", "2103431", "Стрілець", "100915А", "5"];
+    rows[496] = ["3 ПІХОТНА РОТА", "2111771", "Стрілець", "100915А", "5", "солдат", "КОВАЛЬЧУК", "222"];
+    rows[497] = ["На продовольчому забезпеченні в 3 ПІХОТНІЙ РОТІ перебуває", "65"];
+    const sheet = sheetOf(rows);
+    const layout = buildTimesheetLayout(sheet, {
+      formulas: { I498: 'COUNTIF(I353:I478,"+")' },
+    });
+    const slot = resolveCanonicalTimesheetSlot({ index: "2103461", layout });
+    const inserts: Parameters<typeof takeHistoryTimesheetRow>[1] = [];
+    const row = takeHistoryTimesheetRow(
+      resolveHistoryTimesheetRow({ sourceSlot: slot, layout, sheet }),
+      inserts,
+    );
+    expect(row).toBe(495);
+    expect(inserts).toEqual([]);
+    const writes = [{ row: 495, column: 7, value: "ПОЧЕПЕЦЬКИЙ" }];
+    stampTimesheetHistoryInserts(writes, inserts);
+    expect(writes[0]?.insertRowsBefore).toBeFalsy();
+  });
+
+  it("stamps one insert per footer instead of merging all sections into the top footer", () => {
+    const writes = [
+      { row: 38, column: 7, value: "ВІЄРА" },
+      { row: 498, column: 7, value: "ПОЧЕПЕЦЬКИЙ" },
+    ];
+    stampTimesheetHistoryInserts(writes, [
+      { sectionKey: "управління", footerRow: 38, targetRow: 38 },
+      { sectionKey: "3 піхотна рота", footerRow: 498, targetRow: 498 },
+    ]);
+    expect(writes[0]).toMatchObject({
+      row: 38,
+      insertRowsBefore: true,
+      insertRowCount: 1,
+    });
+    expect(writes[1]).toMatchObject({
+      row: 498,
+      insertRowsBefore: true,
+      insertRowCount: 1,
+    });
+  });
+
+  it("counts insert offsets per section, not from a global reserved set", () => {
+    const rows = Array.from({ length: 40 }, emptyRow);
+    rows[5] = ["УПРАВЛІННЯ", "УПРАВЛІННЯ"];
+    rows[6] = ["УПРАВЛІННЯ", "2103119", "Командир", "210003", "24", "", "СИДОРЕНКО", "1"];
+    rows[7] = ["", "2103998", "Стрілець", "100915А", "5"];
+    rows[8] = ["На продовольчому забезпеченні в УПРАВЛІННІ перебуває", "1"];
+    rows[19] = ["1 ПІХОТНА РОТА", "1 ПІХОТНА РОТА"];
+    rows[20] = ["1 ПІХОТНА РОТА", "2103167", "Гранатометник", "103061А", "5", "", "ГОГА", "2"];
+    rows[24] = ["На продовольчому забезпеченні в 1 ПІХОТНІЙ РОТІ перебуває", "1"];
+    const sheet = sheetOf(rows);
+    const layout = buildTimesheetLayout(sheet, {
+      formulas: {
+        I9: 'COUNTIF(I7:I7,"+")',
+        I25: 'COUNTIF(I21:I21,"+")',
+      },
+    });
+    const reserved = new Set([25]);
+    const insertCountBySection = new Map<string, number>();
+    const management = resolveCanonicalTimesheetSlot({
+      index: "2103119",
+      layout,
+    });
+    const first = resolveHistoryTimesheetRow({
+      sourceSlot: management,
+      layout,
+      sheet,
+      reserved,
+      insertCountBySection,
+    });
+    const second = resolveHistoryTimesheetRow({
+      sourceSlot: management,
+      layout,
+      sheet,
+      reserved,
+      insertCountBySection,
+    });
+    expect(first).toMatchObject({ row: 9, insertBefore: true });
+    expect(second).toMatchObject({ row: 10, insertBefore: true });
+    expect(insertCountBySection.get(first.sectionKey)).toBe(2);
   });
 });

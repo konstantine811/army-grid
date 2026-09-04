@@ -641,11 +641,18 @@ export const shiftSheetRowsDown = (
 
 const bumpWriteRowNumbers = (
   writes: ZipCellWrite[],
-  aboveRow: number,
-  delta: number,
+  insertAt: number,
+  count: number,
 ) => {
+  const lastNewRow = insertAt + count - 1;
   for (const write of writes) {
-    if (write.row > aboveRow) write.row += delta;
+    if (write.row > lastNewRow) write.row += count;
+    if (write.styleSourceRow && write.styleSourceRow >= insertAt) {
+      write.styleSourceRow += count;
+    }
+    if (write.heightSourceRow && write.heightSourceRow >= insertAt) {
+      write.heightSourceRow += count;
+    }
   }
 };
 
@@ -1147,11 +1154,15 @@ export async function applyInlineStringWritesToWorkbook(
       styleSourceRow: write.styleSourceRow || template,
     };
   });
-  for (const write of resolvedWrites) {
+  const insertQueue = resolvedWrites
+    .filter((write) => write.insertRowsBefore)
+    .sort((left, right) => right.row - left.row);
+  for (const write of insertQueue) {
     if (!write.insertRowsBefore) continue;
     const count = Math.max(1, write.insertRowCount ?? 1);
-    sheetXml = shiftSheetRowsDown(sheetXml, write.row, count);
-    bumpWriteRowNumbers(resolvedWrites, write.row + count - 1, count);
+    const insertAt = write.row;
+    sheetXml = shiftSheetRowsDown(sheetXml, insertAt, count);
+    bumpWriteRowNumbers(resolvedWrites, insertAt, count);
     write.insertRowsBefore = false;
   }
   const byRow = new Map<number, ZipCellWrite[]>();

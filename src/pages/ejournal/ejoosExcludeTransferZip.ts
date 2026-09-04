@@ -24,11 +24,13 @@ import {
 } from "./ejoosZipCellWrites";
 import {
   assertHistoryRowsOutsideCanonical,
+  assertTimesheetLayoutReadyForApply,
   buildTimesheetLayout,
   resolveCanonicalTimesheetSlot,
   resolveHistoryTimesheetRow,
   stampTimesheetHistoryInserts,
   takeHistoryTimesheetRow,
+  type PendingHistoryInsert,
 } from "./ejoosTimesheetLayout";
 import { stripTimesheetDivisionLabel } from "./ejoosTimesheetUnitSections";
 import {
@@ -160,6 +162,7 @@ const nextTimesheetHistoryRow = (
   layout: ReturnType<typeof buildTimesheetLayout>,
   sourceIndex = "",
   grid?: Array<unknown[] | undefined>,
+  insertCountBySection?: Map<string, number>,
 ) => {
   const sourceSlot = sourceIndex
     ? resolveCanonicalTimesheetSlot({ index: sourceIndex, layout })
@@ -171,6 +174,7 @@ const nextTimesheetHistoryRow = (
     sheet,
     grid,
     reserved,
+    insertCountBySection,
   });
 };
 
@@ -434,7 +438,9 @@ export async function applyExcludeTransfersWithZip(input: {
     shpoIndexes: shpoRows.map((row) => row.positionIndex),
     formulas: timesheetArtifacts.formulas,
   });
-  const pendingHistoryInserts: number[] = [];
+  assertTimesheetLayoutReadyForApply(timesheetLayout);
+  const pendingHistoryInserts: PendingHistoryInsert[] = [];
+  const insertCountBySection = new Map<string, number>();
 
   for (const op of ops) {
     const personId = personIdFromShpo(shpoRows, {
@@ -668,6 +674,7 @@ export async function applyExcludeTransfersWithZip(input: {
           timesheetLayout,
           sourceIndex,
           timesheetGrid,
+          insertCountBySection,
         ),
         pendingHistoryInserts,
       );
@@ -684,6 +691,7 @@ export async function applyExcludeTransfersWithZip(input: {
           timesheetLayout,
           sourceIndex,
           timesheetGrid,
+          insertCountBySection,
         ),
         pendingHistoryInserts,
       );
@@ -800,7 +808,10 @@ export async function applyExcludeTransfersWithZip(input: {
   }
 
   stampTimesheetHistoryInserts(timesheetWrites, pendingHistoryInserts);
-  assertHistoryRowsOutsideCanonical(timesheetLayout, pendingHistoryInserts);
+  assertHistoryRowsOutsideCanonical(
+    timesheetLayout,
+    pendingHistoryInserts.map((item) => item.targetRow),
+  );
 
   let blob: Blob | File = ejoos.file;
   blob = await applyInlineStringWritesToWorkbook(

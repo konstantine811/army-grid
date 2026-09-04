@@ -33,6 +33,7 @@ const TOP_LEVEL_KINDS = new Set<TimesheetUnitKind>([
 
 export type TimesheetLayoutErrorCode =
   | "TIMESHEET_SLOT_AMBIGUOUS"
+  | "TIMESHEET_SECTION_RANGE_UNKNOWN"
   | "CANONICAL_SLOT_MISSING"
   | "SOURCE_SLOT_MISSING"
   | "SLOT_OCCUPIED_CONFLICT"
@@ -89,8 +90,9 @@ export type TimesheetSection = {
 };
 
 export type TimesheetLayoutIssue = {
-  code: "TIMESHEET_SLOT_AMBIGUOUS";
-  index: string;
+  code: "TIMESHEET_SLOT_AMBIGUOUS" | "TIMESHEET_SECTION_RANGE_UNKNOWN";
+  index?: string;
+  section?: string;
   rows: number[];
 };
 
@@ -108,6 +110,14 @@ export type TimesheetShpoHint = {
 export type TimesheetHistoryPlacement = {
   row: number;
   insertBefore: boolean;
+  sectionKey: string;
+  footerRow: number;
+};
+
+export type PendingHistoryInsert = {
+  sectionKey: string;
+  footerRow: number;
+  targetRow: number;
 };
 
 export type TimesheetFormulaMap = Map<string, string> | Record<string, string>;
@@ -251,8 +261,10 @@ export const buildTimesheetLayout = (
   }
   closeSection(lastRow + 1, false);
 
+  const issues: TimesheetLayoutIssue[] = [];
   const sections: TimesheetSection[] = openSections.map((section) => {
     const footer = section.footerRow || lastRow + 1;
+    const footerIsSummary = isTimesheetSummaryRowAt(view, footer);
     const countIf =
       countIfRangeOnRow(options?.formulas, footer) ||
       (() => {
@@ -268,6 +280,14 @@ export const buildTimesheetLayout = (
     if (countIf) {
       canonicalStart = countIf.start;
       canonicalEnd = countIf.end;
+    } else if (footerIsSummary) {
+      issues.push({
+        code: "TIMESHEET_SECTION_RANGE_UNKNOWN",
+        section: section.label,
+        rows: [footer],
+      });
+      canonicalStart = section.headerRow + 1;
+      canonicalEnd = section.headerRow;
     } else {
       const seen = new Set<string>();
       for (let row = section.headerRow; row < footer; row += 1) {
@@ -304,7 +324,6 @@ export const buildTimesheetLayout = (
 
   const byIndex: Record<string, TimesheetCanonicalSlot> = {};
   const candidatesByIndex = new Map<string, number[]>();
-  const issues: TimesheetLayoutIssue[] = [];
   const sectionByRow = new Map<number, TimesheetSection>();
 
   for (const section of sections) {
@@ -354,7 +373,11 @@ export const buildTimesheetLayout = (
       (row) => !cellAt(view, row, 7) && !cellAt(view, row, 8),
     );
     if (emptyStaff.length > 1) {
-      issues.push({ code: "TIMESHEET_SLOT_AMBIGUOUS", index, rows: emptyStaff });
+      issues.push({
+        code: "TIMESHEET_SLOT_AMBIGUOUS",
+        index,
+        rows: emptyStaff,
+      });
       delete byIndex[index];
     }
   }
@@ -440,6 +463,18 @@ const resolveHistorySection = (input: {
   return null;
 };
 
+export const assertTimesheetLayoutReadyForApply = (layout: TimesheetLayout) => {
+  const unknown = layout.issues.find(
+    (issue) => issue.code === "TIMESHEET_SECTION_RANGE_UNKNOWN",
+  );
+  if (!unknown) return;
+  throw new TimesheetLayoutError(
+    "TIMESHEET_SECTION_RANGE_UNKNOWN",
+    `Не прочитано COUNTIF штатного діапазону для секції «${unknown.section || "—"}» (підсумок R${unknown.rows[0] ?? "?"}). Apply заблоковано.`,
+    { section: unknown.section, rows: unknown.rows },
+  );
+};
+
 export const resolveHistoryTimesheetRow = (input: {
   sourceSlot?: TimesheetCanonicalSlot | null;
   sourceRow?: number;
@@ -447,8 +482,10 @@ export const resolveHistoryTimesheetRow = (input: {
   sheet: ExcelSheetSnapshot;
   grid?: Array<unknown[] | undefined>;
   reserved?: Set<number>;
+  insertCountBySection?: Map<string, number>;
 }): TimesheetHistoryPlacement => {
   const reserved = input.reserved ?? new Set<number>();
+  const insertCountBySection = input.insertCountBySection;
   const section = resolveHistorySection(input);
   if (!section) {
     throw new TimesheetLayoutError(
@@ -458,6 +495,18 @@ export const resolveHistoryTimesheetRow = (input: {
         index: input.sourceSlot?.index ?? "",
         rows: input.sourceRow ? [input.sourceRow] : [],
       },
+    );
+  }
+  const rangeUnknown = input.layout.issues.find(
+    (issue) =>
+      issue.code === "TIMESHEET_SECTION_RANGE_UNKNOWN" &&
+      issue.section === section.label,
+  );
+  if (rangeUnknown) {
+    throw new TimesheetLayoutError(
+      "TIMESHEET_SECTION_RANGE_UNKNOWN",
+      `Не прочитано COUNTIF штатного діапазону для секції «${section.label}». Історію не ставимо.`,
+      { section: section.label, rows: rangeUnknown.rows },
     );
   }
   const view: TimesheetGridView = { sheet: input.sheet, grid: input.grid };
@@ -472,22 +521,37 @@ export const resolveHistoryTimesheetRow = (input: {
       if (isTimesheetUnitHeaderRow(view, row)) continue;
       if (!rowIsCompletelyEmpty(view, row)) continue;
       reserved.add(row);
-      return { row, insertBefore: false };
+      return {
+        row,
+        insertBefore: false,
+        sectionKey: section.key,
+        footerRow: section.footerRow,
+      };
     }
   }
-  const insertOffset = [...reserved].filter(
-    (row) => row >= section.footerRow,
-  ).length;
-  const row = section.footerRow + insertOffset;
+  const offset = insertCountBySection?.get(section.key) ?? 0;
+  const row = section.footerRow + offset;
+  insertCountBySection?.set(section.key, offset + 1);
   reserved.add(row);
-  return { row, insertBefore: true };
+  return {
+    row,
+    insertBefore: true,
+    sectionKey: section.key,
+    footerRow: section.footerRow,
+  };
 };
 
 export const takeHistoryTimesheetRow = (
   placement: TimesheetHistoryPlacement,
-  pendingInserts: number[],
+  pendingInserts: PendingHistoryInsert[],
 ) => {
-  if (placement.insertBefore) pendingInserts.push(placement.row);
+  if (placement.insertBefore) {
+    pendingInserts.push({
+      sectionKey: placement.sectionKey,
+      footerRow: placement.footerRow,
+      targetRow: placement.row,
+    });
+  }
   return placement.row;
 };
 
@@ -497,14 +561,25 @@ export const stampTimesheetHistoryInserts = (
     insertRowsBefore?: boolean;
     insertRowCount?: number;
   }>,
-  pendingInserts: number[],
+  pendingInserts: PendingHistoryInsert[],
 ) => {
   if (!pendingInserts.length) return;
-  const start = Math.min(...pendingInserts);
-  const first = writes.find((write) => write.row === start);
-  if (!first) return;
-  first.insertRowsBefore = true;
-  first.insertRowCount = pendingInserts.length;
+  const byFooter = new Map<number, PendingHistoryInsert[]>();
+  for (const item of pendingInserts) {
+    const list = byFooter.get(item.footerRow) ?? [];
+    list.push(item);
+    byFooter.set(item.footerRow, list);
+  }
+  for (const [footerRow, group] of byFooter) {
+    const first =
+      writes.find((write) => write.row === footerRow) ||
+      writes.find((write) =>
+        group.some((item) => item.targetRow === write.row),
+      );
+    if (!first) continue;
+    first.insertRowsBefore = true;
+    first.insertRowCount = group.length;
+  }
 };
 
 export const assertHistoryRowsOutsideCanonical = (

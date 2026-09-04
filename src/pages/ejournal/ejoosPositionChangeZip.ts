@@ -39,11 +39,13 @@ import {
   type ZipCellWrite,
 } from "./ejoosZipCellWrites";
 import {
+  assertTimesheetLayoutReadyForApply,
   buildTimesheetLayout,
   resolveCanonicalTimesheetSlot,
   resolveHistoryTimesheetRow,
   stampTimesheetHistoryInserts,
   takeHistoryTimesheetRow,
+  type PendingHistoryInsert,
   type TimesheetLayout,
 } from "./ejoosTimesheetLayout";
 import { loadTimesheetSheetArtifacts } from "./ejoosTimesheetPersonRows";
@@ -91,6 +93,7 @@ const nextTimesheetHistoryInSection = (
   reserved: Set<number>,
   layout: TimesheetLayout,
   sourceIndex = "",
+  insertCountBySection?: Map<string, number>,
 ) => {
   const sourceSlot = sourceIndex
     ? resolveCanonicalTimesheetSlot({ index: sourceIndex, layout })
@@ -101,6 +104,7 @@ const nextTimesheetHistoryInSection = (
     layout,
     sheet,
     reserved,
+    insertCountBySection,
   });
 };
 
@@ -126,7 +130,8 @@ type PositionChangeContext = {
   oosWrites: ZipCellWrite[];
   timesheetWrites: ZipCellWrite[];
   reservedTimesheetRows: Set<number>;
-  pendingHistoryInserts: number[];
+  pendingHistoryInserts: PendingHistoryInsert[];
+  insertCountBySection: Map<string, number>;
   takeExcludedRow: () => number;
   excludedStyleSourceRow: number;
   timesheetLayout: TimesheetLayout;
@@ -222,6 +227,7 @@ const collectWrites = (op: EjoosSyncOp, ctx: PositionChangeContext) => {
           ctx.reservedTimesheetRows,
           ctx.timesheetLayout,
           op.payload.previousIndex || op.payload.fromPositionIndex || "",
+          ctx.insertCountBySection,
         ),
         ctx.pendingHistoryInserts,
       );
@@ -344,6 +350,7 @@ const collectWrites = (op: EjoosSyncOp, ctx: PositionChangeContext) => {
           ctx.reservedTimesheetRows,
           ctx.timesheetLayout,
           targetIndex,
+          ctx.insertCountBySection,
         ),
         ctx.pendingHistoryInserts,
       );
@@ -630,10 +637,15 @@ export async function applyPositionChangeWithZip(input: {
     timesheetWrites: [],
     reservedTimesheetRows: new Set<number>(),
     pendingHistoryInserts: [],
-    timesheetLayout: buildTimesheetLayout(timesheet, {
-      shpoIndexes: parseEjoosShpo(shpo).map((row) => row.positionIndex),
-      formulas: timesheetArtifacts.formulas,
-    }),
+    insertCountBySection: new Map<string, number>(),
+    timesheetLayout: (() => {
+      const layout = buildTimesheetLayout(timesheet, {
+        shpoIndexes: parseEjoosShpo(shpo).map((row) => row.positionIndex),
+        formulas: timesheetArtifacts.formulas,
+      });
+      assertTimesheetLayoutReadyForApply(layout);
+      return layout;
+    })(),
     takeExcludedRow: () => excludedRow++,
     excludedStyleSourceRow: Math.max(
       EJOOS_PERSON_DATA_START_ROW,

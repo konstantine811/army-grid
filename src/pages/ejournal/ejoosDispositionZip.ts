@@ -27,11 +27,13 @@ import {
 } from "./ejoosZipCellWrites";
 import {
   TimesheetLayoutError,
+  assertTimesheetLayoutReadyForApply,
   buildTimesheetLayout,
   resolveCanonicalTimesheetSlot,
   resolveHistoryTimesheetRow,
   stampTimesheetHistoryInserts,
   takeHistoryTimesheetRow,
+  type PendingHistoryInsert,
   type TimesheetLayout,
 } from "./ejoosTimesheetLayout";
 import {
@@ -686,6 +688,7 @@ const nextTimesheetRow = (
   grid?: Array<unknown[] | undefined>,
   layout?: TimesheetLayout,
   sourceIndex = "",
+  insertCountBySection?: Map<string, number>,
 ) => {
   if (!layout) {
     throw new TimesheetLayoutError(
@@ -703,6 +706,7 @@ const nextTimesheetRow = (
     sheet,
     grid,
     reserved,
+    insertCountBySection,
   });
 };
 
@@ -753,7 +757,8 @@ type DispositionContext = {
   reservedShpoRows: Set<number>;
   reservedAbsentRows: Set<number>;
   reservedTimesheetRows: Set<number>;
-  pendingHistoryInserts: number[];
+  pendingHistoryInserts: PendingHistoryInsert[];
+  insertCountBySection: Map<string, number>;
   timesheetLayout: TimesheetLayout;
 };
 
@@ -994,6 +999,7 @@ const collectWrites = (op: EjoosSyncOp, ctx: DispositionContext) => {
           op.payload.previousIndex ||
           op.positionIndex ||
           "",
+        ctx.insertCountBySection,
       ),
       ctx.pendingHistoryInserts,
     );
@@ -1106,11 +1112,16 @@ export async function applyDispositionWithZip(input: {
     reservedAbsentRows: new Set<number>(),
     reservedTimesheetRows: new Set<number>(),
     pendingHistoryInserts: [],
-    timesheetLayout: buildTimesheetLayout(timesheetView, {
-      grid: timesheetGrid,
-      shpoIndexes: parseEjoosShpo(shpo).map((row) => row.positionIndex),
-      formulas: timesheetArtifacts.formulas,
-    }),
+    insertCountBySection: new Map<string, number>(),
+    timesheetLayout: (() => {
+      const layout = buildTimesheetLayout(timesheetView, {
+        grid: timesheetGrid,
+        shpoIndexes: parseEjoosShpo(shpo).map((row) => row.positionIndex),
+        formulas: timesheetArtifacts.formulas,
+      });
+      assertTimesheetLayoutReadyForApply(layout);
+      return layout;
+    })(),
   };
   for (const op of ops) collectWrites(op, ctx);
   const { shpoWrites, absentWrites, timesheetWrites } = ctx;
