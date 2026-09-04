@@ -20,15 +20,10 @@ export const resolveTimesheetEpisodeStart = (input: {
   hasMonthStartAbsence: boolean;
   hasDepartureEvidence: boolean;
   leftUnitThisMonth: boolean;
-  wasTemporaryArrival?: boolean;
   ownUnitMoves: TimesheetEpisodeMove[];
 }) => {
   if (input.hasMonthStartAbsence) return input.monthStartLabel;
-  if (
-    input.leftUnitThisMonth ||
-    input.hasDepartureEvidence ||
-    input.wasTemporaryArrival
-  ) {
+  if (input.leftUnitThisMonth || input.hasDepartureEvidence) {
     return input.appointmentDate || input.inboundDate || "";
   }
   const hops = input.ownUnitMoves;

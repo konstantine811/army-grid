@@ -1,10 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { isInternalStaffIndexHop } from "./ejoosMovementRules";
 import { resolveTimesheetEpisodeStart } from "./ejoosTimesheetEpisode";
-import {
-  dayFromOrderLabel,
-  timesheetMarkFromArchive,
-} from "./ejoosTimesheetText";
 
 const hop = (from: string, to: string) => ({
   type: "ПОСАДА",
@@ -76,29 +72,5 @@ describe("resolveTimesheetEpisodeStart", () => {
         ownUnitMoves: [hop("4907559", "2103764")],
       }),
     ).toBe("07.08.2026");
-  });
-
-  it("starts a temporary arrival's staff episode on the appointment date", () => {
-    const activeFrom = resolveTimesheetEpisodeStart({
-      monthStartLabel: "01.08.2026",
-      appointmentDate: "12.08.2026",
-      inboundDate: "10.08.2026",
-      hasMonthStartAbsence: false,
-      hasDepartureEvidence: false,
-      leftUnitThisMonth: false,
-      wasTemporaryArrival: true,
-      ownUnitMoves: [hop("тимчасово прибулий", "2103340")],
-    });
-    expect(activeFrom).toBe("12.08.2026");
-    const activeFromDay = dayFromOrderLabel(activeFrom);
-    const mark = (day: number) =>
-      timesheetMarkFromArchive(day, {
-        activeFromDay,
-        lastDay: 25,
-        spans: [],
-        fillBeforeActive: true,
-      });
-    expect(mark(11)).toBe("-");
-    expect(mark(12)).toBe("+");
   });
 });
