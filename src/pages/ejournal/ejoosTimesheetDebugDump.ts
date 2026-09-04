@@ -65,7 +65,9 @@ const rowCells = (row: CellValue[] | undefined) =>
   Array.from({ length: TIMESHEET_LAST_COL }, (_, index) => cell(row, index));
 
 const isSummaryRow = (text: string) =>
-  /на продовольч|перебуває\s*\d|^\s*всього\b/iu.test(text);
+  /на\s*продоволь/iu.test(text) ||
+  /перебува(?:є|e)\s*\d/iu.test(text) ||
+  /^\s*всього\b/iu.test(text);
 
 const classifyRow = (
   sheet: ExcelSheetSnapshot,
@@ -117,14 +119,26 @@ const classifyRow = (
   };
 };
 
+export type TimesheetDebugDumpOptions = {
+  positionTitle?: string;
+  sourceRow?: number;
+  maxRow?: number;
+  /** Друкувати rawRows/people/rows/sections масивами (важко для консолі). */
+  verbose?: boolean;
+  /** Рахувати append≈R для кожної секції (повільно без positionTitle). */
+  includeSectionAppend?: boolean;
+  /** Скільки рядків у текстовому дампі; решта — «… ще N рядків». */
+  maxFormattedRows?: number;
+};
+
+export const isTimesheetVerboseDebugEnabled = () =>
+  typeof localStorage !== "undefined" &&
+  localStorage.getItem("ejoosTimesheetDebug") === "1";
+
 /** Знімок структури Табеля для дебагу правил пошуку секцій. */
 export const buildTimesheetDebugDump = (
   sheet: ExcelSheetSnapshot | undefined,
-  options?: {
-    positionTitle?: string;
-    sourceRow?: number;
-    maxRow?: number;
-  },
+  options?: TimesheetDebugDumpOptions,
 ) => {
   if (!sheet) {
     return {
@@ -148,16 +162,19 @@ export const buildTimesheetDebugDump = (
     rows.push(classifyRow(sheet, excelRow, personByRow));
   }
 
+  const includeSectionAppend =
+    options?.includeSectionAppend ?? Boolean(options?.positionTitle);
   const sectionHeaders = rows.filter((row) => row.kind === "section_header");
   const sections: TimesheetSectionDebug[] = sectionHeaders.map((header) => {
     const bounds = findTimesheetUnitSectionBounds({ sheet }, header.colA_parsed);
-    const appendRowForDeparture = bounds
-      ? findTimesheetAppendRowForUnit(sheet, {
-          sourceRow: options?.sourceRow ?? header.excelRow,
-          positionTitle: options?.positionTitle ?? header.colA_parsed,
-          placementScope: "company",
-        })
-      : 0;
+    const appendRowForDeparture =
+      includeSectionAppend && bounds
+        ? findTimesheetAppendRowForUnit(sheet, {
+            sourceRow: options?.sourceRow ?? header.excelRow,
+            positionTitle: options?.positionTitle ?? header.colA_parsed,
+            placementScope: "company",
+          })
+        : 0;
     return {
       headerRow: bounds?.headerRow ?? header.excelRow,
       endRow: bounds?.endRow ?? header.excelRow,
@@ -201,6 +218,7 @@ const formatDayMarks = (days: string[]) => {
 
 export const formatTimesheetDebugDump = (
   dump: ReturnType<typeof buildTimesheetDebugDump>,
+  formatOptions?: { maxFormattedRows?: number; includeSections?: boolean },
 ) => {
   const lines: string[] = [];
   lines.push(`=== Табель: ${dump.sheetName ?? "?"} ===`);
@@ -216,7 +234,12 @@ export const formatTimesheetDebugDump = (
   );
   lines.push("");
 
-  for (const row of dump.rows) {
+  const maxFormattedRows = formatOptions?.maxFormattedRows;
+  const visibleRows =
+    maxFormattedRows && maxFormattedRows > 0
+      ? dump.rows.slice(0, maxFormattedRows)
+      : dump.rows;
+  for (const row of visibleRows) {
     const parts = [
       `R${String(row.excelRow).padStart(4, " ")}`,
       row.kind.padEnd(16, " "),
@@ -237,8 +260,22 @@ export const formatTimesheetDebugDump = (
     ].filter(Boolean);
     lines.push(parts.join(" | "));
   }
+  if (maxFormattedRows && dump.rows.length > maxFormattedRows) {
+    lines.push(
+      `… ще ${dump.rows.length - maxFormattedRows} рядків (localStorage.ejoosTimesheetDebug=1 для повного дампу)`,
+    );
+  }
 
-  if (dump.sections.length) {
+  if (dump.placementHint) {
+    lines.push("");
+    lines.push("=== placementHint ===");
+    lines.push(`positionTitle: ${dump.placementHint.positionTitle}`);
+    lines.push(`companyPhrases: ${dump.placementHint.companyPhrases.join(" | ")}`);
+    lines.push(`appendRow: ${dump.placementHint.appendRow}`);
+  }
+
+  const includeSections = formatOptions?.includeSections ?? true;
+  if (includeSections && dump.sections.length) {
     lines.push("");
     lines.push("=== Секції (company scope) ===");
     for (const section of dump.sections) {
@@ -261,13 +298,53 @@ export const dumpTimesheetFromWorkbook = (
 
 export const logTimesheetDebugDump = (
   sheet: ExcelSheetSnapshot | undefined,
-  options?: Parameters<typeof buildTimesheetDebugDump>[1],
+  options?: TimesheetDebugDumpOptions,
 ) => {
+  const verbose = options?.verbose ?? isTimesheetVerboseDebugEnabled();
   const dump = buildTimesheetDebugDump(sheet, options);
-  console.log(formatTimesheetDebugDump(dump));
-  console.log("[ЕЖООС Табель] rawRows (усі комірки)", dump.rawRows);
-  console.log("[ЕЖООС Табель] parseEjoosTimesheetPeople", dump.people);
-  console.log("[ЕЖООС Табель] rows (класифікація)", dump.rows);
-  console.log("[ЕЖООС Табель] sections", dump.sections);
+  const maxFormattedRows =
+    options?.maxFormattedRows ?? (verbose ? undefined : 100);
+  const includeSections =
+    options?.includeSectionAppend ?? Boolean(options?.positionTitle);
+  console.log(
+    formatTimesheetDebugDump(dump, { maxFormattedRows, includeSections }),
+  );
+  if (verbose) {
+    console.log("[ЕЖООС Табель] rawRows (усі комірки)", dump.rawRows);
+    console.log("[ЕЖООС Табель] parseEjoosTimesheetPeople", dump.people);
+    console.log("[ЕЖООС Табель] rows (класифікація)", dump.rows);
+    console.log("[ЕЖООС Табель] sections", dump.sections);
+  }
   return dump;
+};
+
+const positionTitleFromApplyError = (message: string) =>
+  message.match(/секції підрозділу:\s*(.+?)\.\s*(?:Деталі|$)/iu)?.[1]?.trim() ||
+  "";
+
+export const formatApplyErrorWithTimesheetDump = (
+  workbook: ExcelWorkbookSnapshot | null | undefined,
+  err: unknown,
+  fallback = "Не вдалося застосувати",
+) => {
+  const base = err instanceof Error ? err.message : fallback;
+  if (/консолі \(F12\)/i.test(base)) {
+    return base;
+  }
+  const sheet = workbook?.sheets.find((item) => /табель/i.test(item.sheetName));
+  if (sheet) {
+    const positionTitle = positionTitleFromApplyError(base);
+    console.group("[ЕЖООС Табель] dump після помилки застосування");
+    logTimesheetDebugDump(sheet, {
+      positionTitle: positionTitle || undefined,
+      maxRow: Math.min(sheet.rawRows.length, 220),
+      maxFormattedRows: positionTitle ? undefined : 80,
+      includeSectionAppend: Boolean(positionTitle),
+    });
+    console.groupEnd();
+  }
+  if (sheet) {
+    return `${base} Деталі Табеля — у консолі (F12).`;
+  }
+  return base;
 };

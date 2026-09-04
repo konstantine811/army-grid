@@ -686,6 +686,7 @@ export async function applyExcludeTransfersWithZip(input: {
             timesheetForPlacement.rawRows.length,
             Math.max(sourceRow + 40, 220),
           ),
+          includeSectionAppend: true,
         });
         console.groupEnd();
         throw new Error(
@@ -712,6 +713,7 @@ export async function applyExcludeTransfersWithZip(input: {
           positionTitle: unitPlacementTitle,
           sourceRow: styleRow,
           maxRow: Math.min(timesheetForPlacement.rawRows.length, 220),
+          includeSectionAppend: true,
         });
         console.groupEnd();
         throw new Error(

@@ -25,7 +25,16 @@ import {
   applyInlineStringWritesToWorkbook,
   type ZipCellWrite,
 } from "./ejoosZipCellWrites";
-import { findTimesheetAppendRowForUnit } from "./ejoosTimesheetUnitSections";
+import {
+  findDepartureAppendBounds,
+  findTimesheetAppendRowForUnit,
+  timesheetAppendNeedsRowInsert,
+} from "./ejoosTimesheetUnitSections";
+import {
+  loadTimesheetGridFromFile,
+  mergeTimesheetGrids,
+  placementSheetFromMergedGrid,
+} from "./ejoosTimesheetPersonRows";
 
 const valueOf = (value: CellValue | unknown): string | number | null => {
   if (value === undefined || value === null || value === "") return null;
@@ -87,17 +96,19 @@ const findOrAllocateStaffIndexRow = (
   reserved: Set<number>,
   positionTitle = "",
   sourceRow = 0,
+  grid?: Array<unknown[] | undefined>,
 ) => {
   if (!staffIndex) return 0;
   for (let row = 7; row <= sheet.rawRows.length; row += 1) {
     if (textAt(sheet, row, 2) === staffIndex) return row;
   }
-  return   findTimesheetAppendRowForUnit(sheet, {
+  return findTimesheetAppendRowForUnit(sheet, {
     sourceRow: sourceRow || undefined,
     positionTitle,
     staffIndex,
     reserved,
     placementScope: "company",
+    grid,
   });
 };
 
@@ -574,6 +585,7 @@ const timesheetDispositionTarget = (
 
   let row = section ? section.lastRow + 1 : sheet.rawRows.length + 1;
   while (reserved.has(row)) row += 1;
+  if (row < 7) row = Math.max(7, sheet.rawRows.length + 1);
   reserved.add(row);
   return { row, styleRow, cols, isNewRow: true };
 };
@@ -672,13 +684,25 @@ const nextTimesheetRow = (
   sourceRow: number,
   reserved: Set<number>,
   positionTitle = "",
+  grid?: Array<unknown[] | undefined>,
 ) =>
   findTimesheetAppendRowForUnit(sheet, {
     sourceRow,
     positionTitle,
     reserved,
     placementScope: "company",
+    grid,
   });
+
+const stampInsertBeforeOnFirstWrite = (
+  writes: ZipCellWrite[],
+  row: number,
+  insertBefore: boolean,
+) => {
+  if (!insertBefore) return;
+  const first = writes.find((write) => write.row === row);
+  if (first) first.insertRowsBefore = true;
+};
 
 /**
  * У РУХ призначення приходить у різних формах: «у розпорядження командира…»,
@@ -720,6 +744,7 @@ type DispositionContext = {
   shpo: ExcelSheetSnapshot;
   absent: ExcelSheetSnapshot;
   timesheet: ExcelSheetSnapshot;
+  timesheetGrid: Array<unknown[] | undefined>;
   shpoWrites: ZipCellWrite[];
   absentWrites: ZipCellWrite[];
   timesheetWrites: ZipCellWrite[];
@@ -929,6 +954,7 @@ const collectWrites = (op: EjoosSyncOp, ctx: DispositionContext) => {
           ctx.reservedTimesheetRows,
           op.payload.positionTitle || "",
           staffTimesheetRow,
+          ctx.timesheetGrid,
         )
       : 0);
   if (sourceTimesheetRow > 0) {
@@ -956,6 +982,25 @@ const collectWrites = (op: EjoosSyncOp, ctx: DispositionContext) => {
       sourceTimesheetRow,
       ctx.reservedTimesheetRows,
       op.payload.positionTitle || "",
+      ctx.timesheetGrid,
+    );
+    if (historyRow < 7) {
+      throw new Error(
+        `Не знайдено рядок для історії розпорядження в Табелі${op.fullName ? `: ${op.fullName}` : ""}`,
+      );
+    }
+    const historyBounds = findDepartureAppendBounds(
+      timesheet,
+      op.payload.positionTitle || "",
+      ctx.timesheetGrid,
+    );
+    const insertHistoryRow = Boolean(
+      historyBounds &&
+        timesheetAppendNeedsRowInsert(
+          { sheet: timesheet, grid: ctx.timesheetGrid },
+          historyRow,
+          historyBounds,
+        ),
     );
     for (let column = 1; column <= 40; column += 1) {
       timesheetWrites.push({
@@ -967,6 +1012,7 @@ const collectWrites = (op: EjoosSyncOp, ctx: DispositionContext) => {
         styleSourceRow: sourceTimesheetRow,
       });
     }
+    stampInsertBeforeOnFirstWrite(timesheetWrites, historyRow, insertHistoryRow);
     const orderDay = dayFromOrderLabel(op.payload.orderDate);
     const departMark = [
       formatTimesheetDeparture(place),
@@ -1043,12 +1089,19 @@ export async function applyDispositionWithZip(input: {
   if (!shpo || !absent || !timesheet) {
     throw new Error("Не знайдено ШПО, Тимчасово відсутні або Табель");
   }
+  const timesheetXmlGrid = await loadTimesheetGridFromFile(
+    ejoos.file,
+    timesheet.sheetName,
+  );
+  const timesheetGrid = mergeTimesheetGrids(timesheet.rawRows, timesheetXmlGrid);
+  const timesheetView = placementSheetFromMergedGrid(timesheet, timesheetGrid);
 
   const ctx: DispositionContext = {
     plan,
     shpo,
     absent,
-    timesheet,
+    timesheet: timesheetView,
+    timesheetGrid,
     shpoWrites: [],
     absentWrites: [],
     timesheetWrites: [],

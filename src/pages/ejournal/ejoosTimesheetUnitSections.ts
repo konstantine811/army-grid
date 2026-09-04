@@ -49,7 +49,9 @@ const normUnit = (value: string) =>
   stripTimesheetDivisionLabel(value).toLocaleLowerCase("uk-UA");
 
 const isTimesheetSummaryRow = (text: string) =>
-  /на продовольч|перебуває\s*\d|^\s*всього\b/iu.test(text);
+  /на\s*продоволь/iu.test(text) ||
+  /перебува(?:є|e)\s*\d/iu.test(text) ||
+  /^\s*всього\b/iu.test(text);
 
 const looksLikePersonRow = (view: TimesheetGridView, row: number) =>
   Boolean(
@@ -453,6 +455,7 @@ export const findTimesheetUnitSectionBounds = (
       if (
         colB &&
         !isStaffIndexText(colB) &&
+        !isTimesheetSummaryRow(colB) &&
         unitDescriptorsMatch(colB, targetUnit)
       ) {
         headerRow = row;
@@ -685,7 +688,6 @@ const appendRowInsertBeforeSectionBoundary = (
   const headerLevel = sectionHeaderLevel(bounds.division);
   const lastOccupied = lastOccupiedRowInBounds(view, bounds);
   for (let row = lastOccupied + 1; row <= bounds.endRow + 8; row += 1) {
-    if (reserved.has(row)) continue;
     if (isTimesheetSummaryRowAt(view, row)) {
       reserved.add(row);
       return row;

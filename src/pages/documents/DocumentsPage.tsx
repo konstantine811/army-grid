@@ -6103,7 +6103,9 @@ export function DocumentsPage(_props: {
     const blob = await createLostMilitaryIdKitZip(lostMilitaryIdFields);
     const fileName = `${safeFilePart(lostMilitaryIdFields.folderName)}.zip`;
     downloadBlob(fileName, blob);
-    setDocumentMessage(`Комплект «${fileName}» збережено.`);
+    setDocumentMessage(
+      `Комплект «${fileName}» збережено (рапорт, наказ, акт — 3 файли в архіві).`,
+    );
     setWorkflowStep("document", "on");
     void saveLostMilitaryIdDocument(lostMilitaryIdFields);
   };

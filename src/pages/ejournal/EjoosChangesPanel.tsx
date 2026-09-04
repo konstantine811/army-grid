@@ -25,7 +25,7 @@ import {
   planBlocksWorkbookApply,
   SOURCE_DATE_UNKNOWN_MESSAGE,
 } from "./ejoosSyncPlan";
-import { logTimesheetDebugDump } from "./ejoosTimesheetDebugDump";
+import { logTimesheetDebugDump, isTimesheetVerboseDebugEnabled } from "./ejoosTimesheetDebugDump";
 
 type ChangeFilter =
   | "ALL"
@@ -95,21 +95,15 @@ export function EjoosChangesPanel() {
   const [bulkApplyOpen, setBulkApplyOpen] = useState(false);
 
   useEffect(() => {
-    if (!ejoosSnapshot) {
-      console.info("[ЕЖООС Табель] snapshot ще не завантажено");
-      return;
-    }
+    if (!isTimesheetVerboseDebugEnabled() || !ejoosSnapshot) return;
     const sheet = ejoosSnapshot.sheets.find((item) =>
       /табель/i.test(item.sheetName),
     );
-    if (!sheet) {
-      console.warn("[ЕЖООС Табель] аркуш «6. Табель» не знайдено");
-      return;
-    }
+    if (!sheet) return;
     console.group(
       `[ЕЖООС Табель] структура (Операції · ${session?.analyzedAt ?? "—"})`,
     );
-    logTimesheetDebugDump(sheet, { maxRow: sheet.rawRows.length });
+    logTimesheetDebugDump(sheet, { maxRow: 120, maxFormattedRows: 120 });
     console.groupEnd();
   }, [ejoosSnapshot, session?.analyzedAt]);
 

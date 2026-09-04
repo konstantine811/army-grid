@@ -121,6 +121,28 @@ export const formatUaLongDate = (value: string) => {
   return `${day} ${monthName} ${year} року`;
 };
 
+/** Номер в/ч без префікса «військової частини» (напр. «А4862»). */
+export const militaryUnitLabel = (
+  unit: string,
+  fallback = DEFAULT_UNIT,
+) => {
+  const text = unit.trim() || fallback;
+  const match = text.match(/військової\s+частини\s+(.+)/iu);
+  return (match?.[1] ?? text).replace(/\s+/g, " ").trim() || fallback;
+};
+
+/** «військової частини А4862» — без подвоєння, якщо префікс уже в полі. */
+export const normalizeMilitaryUnitPhrase = (
+  unit: string,
+  fallback = DEFAULT_UNIT,
+) => {
+  const text = unit.trim() || fallback;
+  if (/військової\s+частини/iu.test(text)) {
+    return text.replace(/\s+/g, " ").trim();
+  }
+  return `військової частини ${text}`;
+};
+
 export const buildLostMilitaryIdFolderName = (fullName: string) => {
   const name = fullName.trim();
   return name
@@ -304,7 +326,7 @@ export const buildLostMilitaryIdReportText = (fields: LostMilitaryIdFields) => {
   if (fields.reportTextOverride.trim()) return fields.reportTextOverride.trim();
   const person = declinedPerson(fields);
   const investigator = declinedInvestigator(fields);
-  const unit = fields.militaryUnit.trim() || DEFAULT_UNIT;
+  const unit = normalizeMilitaryUnitPhrase(fields.militaryUnit);
   const search = fields.searchConducted
     ? `Після виявлення факту втрати військового квитка були проведені пошукові заходи, однак ${
         fields.searchResult.trim() || DEFAULT_SEARCH_RESULT
@@ -319,7 +341,7 @@ export const buildLostMilitaryIdReportText = (fields: LostMilitaryIdFields) => {
     : "Проведення службового розслідування пропоную доручити командиру підрозділу.";
 
   return [
-    `Доповідаю, що військовослужбовцем військової частини ${unit} ${person.rankInstrumental} ${person.instrumental}, ${person.positionInstrumental}, ${lossDateText(fields)}, ${circumstancesText(fields)} було втрачено військовий квиток.`,
+    `Доповідаю, що військовослужбовцем ${unit} ${person.rankInstrumental} ${person.instrumental}, ${person.positionInstrumental}, ${lossDateText(fields)}, ${circumstancesText(fields)} було втрачено військовий квиток.`,
     search,
     `У зв’язку з викладеним прошу призначити службове розслідування за фактом втрати військового квитка ${person.rankInstrumental} ${person.instrumental}.`,
     investigatorLine,
@@ -330,7 +352,7 @@ export const buildLostMilitaryIdOrderText = (fields: LostMilitaryIdFields) => {
   if (fields.orderTextOverride.trim()) return fields.orderTextOverride.trim();
   const person = declinedPerson(fields);
   const investigator = declinedInvestigator(fields);
-  const unit = fields.militaryUnit.trim() || DEFAULT_UNIT;
+  const unit = normalizeMilitaryUnitPhrase(fields.militaryUnit);
   const assign = investigator.nominative
     ? `Проведення службового розслідування доручити ${joinSpaced(
         investigator.position,
@@ -339,7 +361,7 @@ export const buildLostMilitaryIdOrderText = (fields: LostMilitaryIdFields) => {
       )}.`
     : "Проведення службового розслідування доручити визначеній посадовій особі.";
   return [
-    `Призначити службове розслідування за фактом втрати військового квитка військовослужбовцем військової частини ${unit} ${person.rankInstrumental} ${person.instrumental}.`,
+    `Призначити службове розслідування за фактом втрати військового квитка військовослужбовцем ${unit} ${person.rankInstrumental} ${person.instrumental}.`,
     assign,
     "Службове розслідування провести відповідно до вимог статті 85 Статуту внутрішньої служби Збройних Сил України та Порядку проведення службового розслідування у Збройних Силах України, затвердженого наказом Міністерства оборони України від 21.11.2017 № 608 (зі змінами).",
     "Матеріали службового розслідування подати на затвердження у встановлений строк.",
@@ -353,7 +375,7 @@ export const buildLostMilitaryIdActCircumstances = (
     return fields.actCircumstancesOverride.trim();
   }
   const person = declinedPerson(fields);
-  const unit = fields.militaryUnit.trim() || DEFAULT_UNIT;
+  const unit = normalizeMilitaryUnitPhrase(fields.militaryUnit);
   const longDate = formatUaLongDate(fields.lossDate) || lossDateText(fields);
   return [
     `Службове розслідування проводиться за фактом втрати військового квитка військовослужбовцем ${person.instrumental}.`,
@@ -363,7 +385,7 @@ export const buildLostMilitaryIdActCircumstances = (
           fields.searchResult.trim() || DEFAULT_SEARCH_RESULT
         }.`
       : "Пошукові заходи не проводились.",
-    `Про втрату документа командир 1 піхотного батальйону військової частини ${unit} доповів рапортом${
+    `Про втрату документа командир 1 піхотного батальйону ${unit} доповів рапортом${
       fields.reportDate.trim() ? ` від ${fields.reportDate.trim()}` : ""
     }.`,
   ].join("\n\n");
@@ -371,13 +393,14 @@ export const buildLostMilitaryIdActCircumstances = (
 
 export const buildLostMilitaryIdPersonCard = (fields: LostMilitaryIdFields) => {
   const person = declinedPerson(fields);
-  const unit = fields.militaryUnit.trim() || DEFAULT_UNIT;
+  const unit = normalizeMilitaryUnitPhrase(fields.militaryUnit);
+  const unitNumber = militaryUnitLabel(fields.militaryUnit);
   return [
     `${person.nominative}, ${fields.rank.trim() || "______"}, ${
       capitalizeReportPosition(fields.staffPosition) || "______"
-    } військової частини ${unit}.`,
+    } ${unit}.`,
     fields.enlistedDate.trim()
-      ? `В ЗСУ з ${fields.enlistedDate}. До списків частини ${unit} зарахований ${fields.enlistedDate}${
+      ? `В ЗСУ з ${fields.enlistedDate}. До списків частини ${unitNumber} зарахований ${fields.enlistedDate}${
           fields.enlistedOrder.trim()
             ? ` відповідно до ${fields.enlistedOrder}`
             : ""
@@ -412,15 +435,15 @@ export const buildLostMilitaryIdActProposals = (fields: LostMilitaryIdFields) =>
     return fields.actProposalsOverride.trim();
   }
   const person = declinedPerson(fields);
-  const unit = fields.militaryUnit.trim() || DEFAULT_UNIT;
+  const unit = normalizeMilitaryUnitPhrase(fields.militaryUnit);
   const order =
     fields.orderNumber.trim() && fields.orderDate.trim()
-      ? `наказу командира військової частини ${unit} від ${fields.orderDate} №${fields.orderNumber}`
-      : `наказу командира військової частини ${unit} про призначення службового розслідування`;
+      ? `наказу командира ${unit} від ${fields.orderDate} №${fields.orderNumber}`
+      : `наказу командира ${unit} про призначення службового розслідування`;
   return [
     `1. Розслідування стосовно ${order} вважати завершеним.`,
     `2. З урахуванням матеріалів службового розслідування та частини 1 пункту 6 Положення про військовий квиток осіб рядового, сержантського і старшинського складу, затвердженого Указом Президента України від 30 грудня 2016 року № 582/2016, за допущену втрату військового квитка ${person.rankGenitive} ${person.genitive} притягнути до дисциплінарної відповідальності.`,
-    `3. Начальнику відділення персоналу та стройового штабу військової частини ${unit} забезпечити направлення у встановленому порядку документів для відновлення військового квитка ${person.rankGenitive} ${person.genitive}.`,
+    `3. Начальнику відділення персоналу та стройового штабу ${unit} забезпечити направлення у встановленому порядку документів для відновлення військового квитка ${person.rankGenitive} ${person.genitive}.`,
   ].join("\n");
 };
 

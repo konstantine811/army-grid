@@ -17,6 +17,7 @@ import {
   readWorkbookSnapshot,
 } from "../../excelRoundTrip";
 import { readEjoosWorkbookSnapshot } from "./ejoosTimesheetPersonRows";
+import { formatApplyErrorWithTimesheetDump } from "./ejoosTimesheetDebugDump";
 import {
   applyConfirmedEjoosOps,
   base64ToFile,
@@ -885,7 +886,7 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
           ` Файл не качається — експорт з вкладки «Експорт».${normalizedWarning}`,
       );
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Не вдалося застосувати");
+      setError(formatApplyErrorWithTimesheetDump(ejoosSnapshot, err));
     } finally {
       setIsLoading(false);
     }
@@ -998,7 +999,7 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
               ` Файл не качається — експорт з вкладки «Експорт», коли закінчите всі зміни.${normalizedWarning}`,
       );
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Не вдалося застосувати");
+      setError(formatApplyErrorWithTimesheetDump(ejoosSnapshot, err));
     } finally {
       setIsLoading(false);
     }

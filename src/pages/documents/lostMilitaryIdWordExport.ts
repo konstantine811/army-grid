@@ -11,13 +11,14 @@ import {
 } from "docx";
 import JSZip from "jszip";
 import {
+  buildLostMilitaryIdReportText,
+  buildLostMilitaryIdOrderText,
+  buildLostMilitaryIdPersonCard,
   buildLostMilitaryIdActCircumstances,
   buildLostMilitaryIdActConclusions,
   buildLostMilitaryIdActProposals,
-  buildLostMilitaryIdOrderText,
-  buildLostMilitaryIdPersonCard,
-  buildLostMilitaryIdReportText,
   declinedPerson,
+  normalizeMilitaryUnitPhrase,
   reporterFooterBlock,
   reporterHeaderBlock,
   type LostMilitaryIdFields,
@@ -149,7 +150,7 @@ const buildReportDocument = (fields: LostMilitaryIdFields) => {
 };
 
 const buildOrderDocument = (fields: LostMilitaryIdFields) => {
-  const unit = fields.militaryUnit.trim() || "А4862";
+  const unit = normalizeMilitaryUnitPhrase(fields.militaryUnit);
   const number = fields.orderNumber.trim() || "______";
   const date = fields.orderDate.trim() || fields.reportDate.trim() || "____.____.______";
   const body = splitBlocks(buildLostMilitaryIdOrderText(fields));
@@ -164,7 +165,7 @@ const buildOrderDocument = (fields: LostMilitaryIdFields) => {
         footers: { default: pageFooter() },
         children: [
           para("НАКАЗ", { bold: true, align: AlignmentType.CENTER, spacingAfter: 80 }),
-          para(`командира військової частини ${unit}`, {
+          para(`командира ${unit}`, {
             align: AlignmentType.CENTER,
             spacingAfter: 40,
           }),
@@ -181,8 +182,8 @@ const buildOrderDocument = (fields: LostMilitaryIdFields) => {
           }),
           ...body.map((block) => para(block, { indent: true })),
           empty(),
-          para("Командир військової частини", { spacingAfter: 40 }),
-          para(`військової частини ${unit}`, { spacingAfter: 200 }),
+          para("Командир", { spacingAfter: 40 }),
+          para(unit, { spacingAfter: 200 }),
           para("________________", { spacingAfter: 0 }),
         ],
       },
@@ -192,7 +193,7 @@ const buildOrderDocument = (fields: LostMilitaryIdFields) => {
 
 const buildActDocument = (fields: LostMilitaryIdFields) => {
   const person = declinedPerson(fields);
-  const unit = fields.militaryUnit.trim() || "А4862";
+  const unit = normalizeMilitaryUnitPhrase(fields.militaryUnit);
   const investigator = [
     capitalizeReportPosition(fields.investigatorPosition),
     fields.investigatorRank.trim(),
@@ -202,8 +203,8 @@ const buildActDocument = (fields: LostMilitaryIdFields) => {
     .join(" ");
   const orderLabel =
     fields.orderNumber.trim() && fields.orderDate.trim()
-      ? `наказу командира військової частини ${unit} від ${fields.orderDate} №${fields.orderNumber}`
-      : `наказу командира військової частини ${unit} «Про призначення службового розслідування»`;
+      ? `наказу командира ${unit} від ${fields.orderDate} №${fields.orderNumber}`
+      : `наказу командира ${unit} «Про призначення службового розслідування»`;
   const legal = splitBlocks(buildLostMilitaryIdActCircumstances(fields));
   const conclusions = buildLostMilitaryIdActConclusions(fields);
   const proposals = buildLostMilitaryIdActProposals(fields);
@@ -219,7 +220,7 @@ const buildActDocument = (fields: LostMilitaryIdFields) => {
         footers: { default: pageFooter() },
         children: [
           para("ЗАТВЕРДЖУЮ", { bold: true, align: AlignmentType.RIGHT, spacingAfter: 40 }),
-          para(`Командир військової частини ${unit}`, {
+          para(`Командир ${unit}`, {
             align: AlignmentType.RIGHT,
             spacingAfter: 40,
           }),
@@ -229,13 +230,13 @@ const buildActDocument = (fields: LostMilitaryIdFields) => {
             spacingAfter: 280,
           }),
           para(
-            `АКТ службового розслідування за фактом втрати військового квитка військовослужбовцем військової частини ${unit} ${person.rankInstrumental} ${person.instrumental}`,
+            `АКТ службового розслідування за фактом втрати військового квитка військовослужбовцем ${unit} ${person.rankInstrumental} ${person.instrumental}`,
             { bold: true, align: AlignmentType.CENTER },
           ),
           para(
             `Відповідно до вимог статті 85 Статуту внутрішньої служби ЗС України, Порядку проведення службового розслідування у ЗС України, затвердженого наказом Міністерства оборони України від 21.11.2017 № 608 (зі змінами) та ${orderLabel}, мною, ${
               investigator || "________________"
-            }, було проведено службове розслідування за фактом втрати військового квитка ${person.positionInstrumental} військової частини ${unit} ${person.rankInstrumental} ${person.instrumental}.`,
+            }, було проведено службове розслідування за фактом втрати військового квитка ${person.positionInstrumental} ${unit} ${person.rankInstrumental} ${person.instrumental}.`,
             { indent: true },
           ),
           para("1. Нормативно-правова база:", { bold: true }),

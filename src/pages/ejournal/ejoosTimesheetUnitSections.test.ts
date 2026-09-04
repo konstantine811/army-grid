@@ -488,6 +488,39 @@ describe("ejoosTimesheetUnitSections", () => {
     expect(timesheetAppendNeedsRowInsert({ sheet }, appendRow, bounds!)).toBe(true);
   });
 
+  it("stacks departure rows when summary slot is already reserved", () => {
+    const rows = Array.from({ length: 250 }, () => Array(40).fill(""));
+    rows[198] = [
+      "'1 ПІХОТНА РОТА",
+      "На продовольchому забезпеченні в 1 PІХOTNIJ ROTI перebуває",
+    ];
+    rows[199] = ["'2 ПІХОТНА РОТА", "2103200", "", "", "", "солдат", "КЛУБАНЬ", "10001"];
+    rows[200] = ["", "На продовольчому забезпеченні в 2 ПІХОТНІЙ РОТІ перебуває"];
+    rows[201] = ["'3 ПІХОТНА РОТА", "3 ПІХОТНА РОТА"];
+    const sheet = sheetOf(rows);
+    const title =
+      "старший стрілець - оператор безпілотних літальних апаратів 2 піхотного відділення 1 піхотного взводу 2 піхотної роти 1 піхотного батальйону";
+    const reserved = new Set<number>([201]);
+
+    const appendRow = findTimesheetAppendRowForUnit(sheet, {
+      sourceRow: 200,
+      positionTitle: title,
+      placementScope: "company",
+      reserved,
+    });
+    expect(appendRow).toBe(201);
+  });
+
+  it("does not treat summary col B as company header", () => {
+    const rows = Array.from({ length: 250 }, () => Array(40).fill(""));
+    rows[199] = ["'2 ПІХОТНА РОТА", "2103200", "", "", "", "солдат", "КЛУБАНЬ", "10001"];
+    rows[200] = ["", "На продовольчому забезпеченні в 2 ПІХОТНІЙ РОТІ перебуває"];
+    const sheet = sheetOf(rows);
+    const bounds = findTimesheetUnitSectionBounds({ sheet }, "2 піхотної роти");
+    expect(bounds?.headerRow).toBe(200);
+    expect(bounds?.division).not.toMatch(/продоволь/i);
+  });
+
   it("finds 2nd company section by repeated col A without col B rota header", () => {
     const rows = Array.from({ length: 250 }, () => Array(40).fill(""));
     rows[45] = ["'1 ПІХОТНА РОТА", "2103144", "", "", "", "лейтенант", "РОТНИЙ", "10001"];

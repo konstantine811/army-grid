@@ -1,5 +1,6 @@
 import JSZip from "jszip";
 import {
+  expandSharedFormulas,
   repairBrokenCellOpenTags,
   stripCellsWithoutValidReference,
   stripStaleCalcChainFromZip,
@@ -547,13 +548,66 @@ const insertRowXml = (sheetXml: string, rowNumber: number, rowXml: string) => {
   return sheetXml;
 };
 
+const A1_REF_IN_FORMULA = /(\$?)([A-Z]{1,3})(\$?)(\d+)/g;
+
+/** Зсуває A1-посилання в тексті формули / ref="…" для рядків >= fromRow. */
+const bumpA1RefsInText = (text: string, fromRow: number, delta: number) => {
+  if (!delta) return text;
+  return text.replace(A1_REF_IN_FORMULA, (match, colAbs, col, rowAbs, rowStr) => {
+    const row = Number(rowStr);
+    if (!Number.isFinite(row) || row < fromRow) return match;
+    return `${colAbs}${col}${rowAbs}${row + delta}`;
+  });
+};
+
+const bumpFormulaAttrs = (attrs: string, fromRow: number, delta: number) => {
+  let next = attrs;
+  for (const name of ["ref", "ref2", "ca"] as const) {
+    const value = parseAttr(next, name);
+    if (!value) continue;
+    const bumped = bumpA1RefsInText(value, fromRow, delta);
+    next = next.replace(new RegExp(`\\b${name}="[^"]*"`, "i"), `${name}="${bumped}"`);
+  }
+  return next;
+};
+
+const bumpFormulaElement = (
+  formulaXml: string,
+  fromRow: number,
+  delta: number,
+) => {
+  const openMatch = formulaXml.match(/^<f\b([^>]*?)(\/?)\s*>/i);
+  if (!openMatch) return formulaXml;
+  const attrs = bumpFormulaAttrs(String(openMatch[1]), fromRow, delta);
+  if (openMatch[2] === "/" || /\/\s*>/.test(openMatch[0])) {
+    return `<f${attrs}/>`;
+  }
+  const body = formulaXml.match(/^<f\b[^>]*>([\s\S]*)<\/f>$/i)?.[1] ?? "";
+  return `<f${attrs}>${bumpA1RefsInText(body, fromRow, delta)}</f>`;
+};
+
+/** Оновлює ref= і текст формул після вставки рядків (shared formula на Табелі). */
+export const bumpSheetFormulaRowRefs = (
+  sheetXml: string,
+  fromRow: number,
+  delta: number,
+) => {
+  if (!delta || fromRow < 1) return sheetXml;
+  return sheetXml.replace(/<f\b[^>]*(?:\/>|>[\s\S]*?<\/f>)/gi, (formulaXml) =>
+    bumpFormulaElement(formulaXml, fromRow, delta),
+  );
+};
+
 const renumberRowBlock = (rowXml: string, newRowNumber: number) =>
   rowXml
-    .replace(/^<row\b([^>]*\br=")(\d+)("[^>]*>)/i, `$1${newRowNumber}$3`)
+    .replace(
+      /^<row\b([^>]*\br=")(\d+)("[^>]*>)/i,
+      `<row$1${newRowNumber}$3`,
+    )
     .replace(
       /<c\b([^<>]*?\br=")([A-Z]+)(\d+)("[^<>]*?(?:\/>|>[\s\S]*?<\/c>))/gi,
       (_full, prefix, column, _row, suffix) =>
-        `${prefix}${column}${newRowNumber}${suffix}`,
+        `<c${prefix}${column}${newRowNumber}${suffix}`,
     );
 
 /** Зсуває існуючі рядки sheetData вниз, звільняючи місце для вставки. */
@@ -563,6 +617,7 @@ export const shiftSheetRowsDown = (
   count = 1,
 ) => {
   if (fromRow < 1 || count < 1) return sheetXml;
+  let next = bumpSheetFormulaRowRefs(sheetXml, fromRow, count);
   const rowNumbers = [
     ...new Set(
       [...sheetXml.matchAll(/<row\b[^>]*\br="(\d+)"/gi)].map((match) =>
@@ -572,7 +627,6 @@ export const shiftSheetRowsDown = (
   ]
     .filter((row) => row >= fromRow)
     .sort((left, right) => right - left);
-  let next = sheetXml;
   for (const rowNumber of rowNumbers) {
     const block = findRowBlock(next, rowNumber);
     if (!block) continue;
@@ -624,15 +678,16 @@ const normalizeWorksheetRows = (sheetXml: string) => {
       existingRows.add(rowNumber);
 
       const isSelfClosing = /\/\s*>$/.test(openMatch[0]);
-      const inner = isSelfClosing
-        ? ""
-        : rowXml.slice(openMatch[0].length, rowXml.lastIndexOf("</row>"));
-      const cellRe = /<c\b[^<>]*?(?:\/>|>[\s\S]*?<\/c>)/gi;
+      if (isSelfClosing) {
+        const cells = [...(rowCells.get(rowNumber)?.entries() ?? [])]
+          .sort(([a], [b]) => a - b)
+          .map(([, cellXml]) => cellXml);
+        return `${updateRowSpans(openMatch[0].replace(/\s*\/\s*>$/, ">"), cells)}${cells.join("")}</row>`;
+      }
       const cells = [...(rowCells.get(rowNumber)?.entries() ?? [])]
         .sort(([a], [b]) => a - b)
         .map(([, cellXml]) => cellXml);
-      const withoutCells = inner.replace(cellRe, "");
-      return `${updateRowSpans(openMatch[0], cells)}${withoutCells}${cells.join("")}</row>`;
+      return `${updateRowSpans(openMatch[0], cells)}${cells.join("")}</row>`;
     },
   );
 
@@ -643,10 +698,11 @@ const normalizeWorksheetRows = (sheetXml: string) => {
       const cells = [...(rowCells.get(rowNumber)?.entries() ?? [])]
         .sort(([a], [b]) => a - b)
         .map(([, cellXml]) => cellXml);
+      const openTag = updateRowSpans(`<row r="${rowNumber}">`, cells);
       normalized = insertRowXml(
         normalized,
         rowNumber,
-        `<row r="${rowNumber}" ${updateRowSpans(">", cells).slice(1)}${cells.join("")}</row>`,
+        `${openTag}${cells.join("")}</row>`,
       );
     });
 
@@ -1330,7 +1386,11 @@ export async function applyInlineStringWritesToWorkbook(
   }
   sheetXml = normalizeWorksheetRows(sheetXml);
   sheetXml = sortSheetDataRows(sheetXml);
-  sheetXml = stripOrphanSharedFormulas(sheetXml);
+  if (resolvedWrites.some((write) => write.insertRowsBefore)) {
+    sheetXml = expandSharedFormulas(sheetXml);
+  } else {
+    sheetXml = stripOrphanSharedFormulas(sheetXml);
+  }
   sheetXml = stripCellsWithoutValidReference(sheetXml);
   sheetXml = repairBrokenCellOpenTags(sheetXml);
   // Не чіпати <dimension>: вставка перед <sheetData> ламає порядок OOXML

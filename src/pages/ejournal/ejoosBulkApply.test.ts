@@ -676,6 +676,90 @@ describe("СЗЧ → РОЗПОРЯДЖ then final sh occupant", () => {
     expect(String(didenkoRow?.[8 + 10 - 1] ?? "")).toMatch(/вибув у розпорядження/i);
   }, 30_000);
 
+  it("finds disposition block from full sheet XML when snapshot usedRange is shorter", async () => {
+    const module = await import(
+      "xlsx-populate/browser/xlsx-populate-no-encryption"
+    );
+    const workbook = await module.default.fromBlankAsync();
+    const shpo = workbook.sheet(0);
+    shpo.name("1. ШПО");
+    workbook.addSheet("2. ООС").cell(1, 1).value("2. ООС");
+    workbook.addSheet("3. Виключені").cell(1, 1).value("3. Виключені");
+    workbook.addSheet("4. Тимчасово прибулі").cell(1, 1).value("4. Тимчасово прибулі");
+    const absents = workbook.addSheet("5. Тимчасово відсутні");
+    absents.cell(1, 1).value("5. Тимчасово відсутні");
+    const timesheet = workbook.addSheet("6. Табель");
+    timesheet.cell(1, 1).value("6. Табель");
+    timesheet.cell(2, 9).value("Серпень 2026 р.");
+    shpo.cell(7, 1).value("2103454");
+    shpo.cell(7, 6).value("солдат");
+    shpo.cell(7, 7).value("ПІВКІН Станіслав Ігорович");
+    shpo.cell(7, 8).value("14020");
+    timesheet.cell(7, 2).value("2103454");
+    timesheet.cell(7, 6).value("солдат");
+    timesheet.cell(7, 7).value("ПІВКІН Станіслав Ігорович");
+    timesheet.cell(7, 8).value("14020");
+    for (let day = 1; day <= 20; day += 1) {
+      timesheet.cell(7, 8 + day).value("+");
+    }
+    timesheet
+      .cell(40, 2)
+      .value(
+        "ВИБУВ У РОЗПОРЯДЖЕННЯ КОМАНДИРА ВІЙСЬКОВОЇ ЧАСТИНИ А 4862",
+      );
+    timesheet.cell(41, 1).value("РОЗПОРЯДЖЕННЯ");
+    timesheet.cell(41, 3).value("СЗЧ");
+    timesheet.cell(41, 4).value("солдат");
+    timesheet.cell(41, 5).value("ІСНУЮЧИЙ ЗАПИС");
+
+    const blobIn = (await workbook.outputAsync("blob")) as Blob;
+    const ejoos = await readWorkbookSnapshot(
+      new File([blobIn], "ejoos.xlsx", { type: XLSX_MIME }),
+      EJOOS_SYNC_READ_OPTIONS,
+    );
+    const ts = ejoos.sheets.find((sheet) => /табель/i.test(sheet.sheetName));
+    expect(ts).toBeTruthy();
+    ts!.rawRows = ts!.rawRows.slice(0, 12);
+
+    const pivkin = op({
+      id: "disp-pivkin",
+      kind: "move_to_disposition",
+      personId: "14020",
+      fullName: "ПІВКІН Станіслав Ігорович",
+      positionIndex: "2103454",
+      rank: "солдат",
+      payload: {
+        previousIndex: "2103454",
+        destination: "у розпорядження командира",
+        orderDate: "10.08.2026",
+        orderNumber: "231",
+        shpoExcelRow: "7",
+        timesheetExcelRow: "7",
+        absenceCode: "СЗЧ",
+        absenceType: "СЗЧ",
+        remainsInOos: "true",
+        timesheetFound: "true",
+        keepOpenSzchTimesheet: "1",
+      },
+    });
+    const { blob } = await applyConfirmedEjoosOps({
+      ejoos,
+      plan: dummyPlan([pivkin]),
+      ops: [pivkin],
+    });
+    const after = await readWorkbookSnapshot(
+      new File([blob], "ejoos-out.xlsx", { type: XLSX_MIME }),
+      EJOOS_SYNC_READ_OPTIONS,
+    );
+    const outTs = after.sheets.find((sheet) => /табель/i.test(sheet.sheetName));
+    const pivkinRow = (outTs?.rawRows ?? []).find((row) =>
+      row.some((cell) => /півкін/i.test(String(cell ?? ""))),
+    );
+    expect(pivkinRow).toBeDefined();
+    expect(String(pivkinRow?.[0] ?? "")).toBe("РОЗПОРЯДЖЕННЯ");
+    expect(String(outTs?.rawRows?.[6]?.[6] ?? "")).toBe("");
+  }, 30_000);
+
   it("appends DIDENKO at the end of disposition block (columns B/D/E/F like real Табель)", async () => {
     const module = await import(
       "xlsx-populate/browser/xlsx-populate-no-encryption"

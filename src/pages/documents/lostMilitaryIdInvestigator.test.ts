@@ -5,6 +5,8 @@ import {
   declinedInvestigator,
   investigatorFromPersonnelRow,
   mergeLostMilitaryIdFields,
+  militaryUnitLabel,
+  normalizeMilitaryUnitPhrase,
 } from "./lostMilitaryIdReport";
 import { buildPersonSummary } from "../personnel/personnelUtils";
 
@@ -17,6 +19,23 @@ const person = (name: string, extra: Record<string, unknown> = {}) =>
     id: extra.id ?? "11524",
     ...extra,
   }) as EjournalPreviewRow;
+
+describe("normalizeMilitaryUnitPhrase", () => {
+  it("adds prefix when the field holds only the unit number", () => {
+    expect(normalizeMilitaryUnitPhrase("А4862")).toBe("військової частини А4862");
+  });
+
+  it("does not duplicate prefix when it is already present", () => {
+    expect(normalizeMilitaryUnitPhrase("військової частини А4862")).toBe(
+      "військової частини А4862",
+    );
+  });
+
+  it("extracts the unit number for short references", () => {
+    expect(militaryUnitLabel("військової частини А4862")).toBe("А4862");
+    expect(militaryUnitLabel("А4862")).toBe("А4862");
+  });
+});
 
 describe("investigatorFromPersonnelRow", () => {
   it("fills name, rank and dative position from Особовий склад", () => {

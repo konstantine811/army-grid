@@ -29,6 +29,95 @@ const columnLetterToNumber = (letter: string) => {
   return index;
 };
 
+const columnNumberToLetter = (columnNumber: number) => {
+  let n = columnNumber;
+  let letters = "";
+  while (n > 0) {
+    const rem = (n - 1) % 26;
+    letters = String.fromCharCode(65 + rem) + letters;
+    n = Math.floor((n - 1) / 26);
+  }
+  return letters;
+};
+
+const A1_REF_IN_FORMULA = /(\$?)([A-Z]{1,3})(\$?)(\d+)/g;
+
+const shiftFormulaByCellDelta = (text: string, dCol: number, dRow: number) => {
+  if (!dCol && !dRow) return text;
+  return text.replace(
+    A1_REF_IN_FORMULA,
+    (match, colAbs, col, rowAbs, rowStr) => {
+      let colNum = columnLetterToNumber(col);
+      const row = Number(rowStr);
+      if (!Number.isFinite(row) || colNum < 1) return match;
+      if (!colAbs) colNum += dCol;
+      const nextRow = rowAbs ? row : row + dRow;
+      if (colNum < 1 || nextRow < 1) return match;
+      return `${colAbs}${columnNumberToLetter(colNum)}${rowAbs}${nextRow}`;
+    },
+  );
+};
+
+const cellReferencePartsFromXml = (cellXml: string) => {
+  const ref = cellXml.match(/<c\b[^<>]*?\br="([A-Z]+)([0-9]+)"/i);
+  if (!ref) return null;
+  return {
+    row: Number(ref[2]),
+    columnNumber: columnLetterToNumber(ref[1]),
+  };
+};
+
+/**
+ * Shared formula після вставки рядків на Табелі часто ламається — Excel відкриває
+ * файл через Repair і видаляє `<f t="shared">`. Розгортаємо в звичайні формули.
+ */
+export const expandSharedFormulas = (sheetXml: string) => {
+  if (!/\bt="shared"/i.test(sheetXml)) return sheetXml;
+
+  const masters = new Map<
+    string,
+    { formula: string; col: number; row: number }
+  >();
+  for (const cell of sheetXml.matchAll(/<c\b[^<>]*?(?:\/>|>[\s\S]*?<\/c>)/gi)) {
+    const cellXml = cell[0];
+    const ref = cellReferencePartsFromXml(cellXml);
+    if (!ref) continue;
+    const formulaOpen = cellXml.match(
+      /<f\b((?:(?!\/>)[^<>])*)>([\s\S]*?)<\/f>/i,
+    );
+    if (!formulaOpen) continue;
+    const attrs = formulaOpen[1];
+    if (!/\bt="shared"/i.test(attrs)) continue;
+    const body = formulaOpen[2].trim();
+    if (!body) continue;
+    const si = parseAttr(attrs, "si");
+    if (si == null) continue;
+    masters.set(si, { formula: body, col: ref.columnNumber, row: ref.row });
+  }
+  if (!masters.size) return sheetXml;
+
+  return sheetXml.replace(/<c\b[^<>]*?(?:\/>|>[\s\S]*?<\/c>)/gi, (cellXml) => {
+    const ref = cellReferencePartsFromXml(cellXml);
+    if (!ref) return cellXml;
+    return cellXml.replace(
+      /<f\b([^<>]*?)(?:\/>|>([\s\S]*?)<\/f>)/i,
+      (formulaXml, attrs, body = "") => {
+        if (!/\bt="shared"/i.test(String(attrs))) return formulaXml;
+        const si = parseAttr(String(attrs), "si");
+        if (si == null || !masters.has(si)) return "";
+        const master = masters.get(si)!;
+        const masterBody = body.trim();
+        const dCol = ref.columnNumber - master.col;
+        const dRow = ref.row - master.row;
+        const expanded = masterBody
+          ? masterBody
+          : shiftFormulaByCellDelta(master.formula, dCol, dRow);
+        return `<f>${expanded}</f>`;
+      },
+    );
+  });
+};
+
 const hasStaleExternalWorkbookRef = (xml: string) =>
   /\[[^\]]+\.xlsx\]/i.test(xml) ||
   /externalLink/i.test(xml) ||
@@ -376,15 +465,16 @@ const normalizeWorksheetRows = (sheetXml: string) => {
       existingRows.add(rowNumber);
 
       const isSelfClosing = /\/\s*>$/.test(openMatch[0]);
-      const inner = isSelfClosing
-        ? ""
-        : rowXml.slice(openMatch[0].length, rowXml.lastIndexOf("</row>"));
-      const cellRe = /<c\b[^<>]*?(?:\/>|>[\s\S]*?<\/c>)/gi;
+      if (isSelfClosing) {
+        const cells = [...(rowCells.get(rowNumber)?.entries() ?? [])]
+          .sort(([a], [b]) => a - b)
+          .map(([, cellXml]) => cellXml);
+        return `${updateRowSpans(openMatch[0].replace(/\s*\/\s*>$/, ">"), cells)}${cells.join("")}</row>`;
+      }
       const cells = [...(rowCells.get(rowNumber)?.entries() ?? [])]
         .sort(([a], [b]) => a - b)
         .map(([, cellXml]) => cellXml);
-      const withoutCells = inner.replace(cellRe, "");
-      return `${updateRowSpans(openMatch[0], cells)}${withoutCells}${cells.join("")}</row>`;
+      return `${updateRowSpans(openMatch[0], cells)}${cells.join("")}</row>`;
     },
   );
 
@@ -505,6 +595,7 @@ export async function sanitizeEjoosWorkbookBlob(input: Blob | File): Promise<Blo
     next = stripInvalidNumericCellValues(next);
     next = normalizeWorksheetRows(next);
     next = normalizeInternalFormulaWorkbookRefs(next);
+    next = expandSharedFormulas(next);
     next = stripOrphanSharedFormulas(next);
     if (hasStaleExternalWorkbookRef(next)) {
       next = stripStaleExternalValidationExts(next);
