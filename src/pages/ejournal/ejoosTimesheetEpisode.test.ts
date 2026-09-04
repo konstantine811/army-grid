@@ -112,4 +112,19 @@ describe("resolveTimesheetEpisodeStart", () => {
       }),
     ).toBe("12.08.2026");
   });
+
+  it("uses a temporary-arrival record as evidence but prefers the 1ПБ appointment date", () => {
+    expect(
+      resolveTimesheetEpisodeStart({
+        monthStartLabel: "01.08.2026",
+        appointmentDate: "12.08.2026",
+        inboundDate: "10.08.2026",
+        hasMonthStartAbsence: false,
+        hasDepartureEvidence: false,
+        leftUnitThisMonth: false,
+        wasTemporaryArrival: true,
+        ownUnitMoves: [],
+      }),
+    ).toBe("12.08.2026");
+  });
 });
