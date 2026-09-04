@@ -26,19 +26,12 @@ import {
   type ZipCellWrite,
 } from "./ejoosZipCellWrites";
 import {
-  TimesheetLayoutError,
-  assertTimesheetLayoutReadyForApply,
-  buildTimesheetLayout,
-  resolveCanonicalTimesheetSlot,
-  resolveHistoryTimesheetRow,
-  stampTimesheetHistoryInserts,
-  takeHistoryTimesheetRow,
-  withTimesheetHistoryInsert,
-  type PendingHistoryInsert,
-  type TimesheetLayout,
-} from "./ejoosTimesheetLayout";
+  findDepartureAppendBounds,
+  findTimesheetAppendRowForUnit,
+  timesheetAppendNeedsRowInsert,
+} from "./ejoosTimesheetUnitSections";
 import {
-  loadTimesheetSheetArtifacts,
+  loadTimesheetGridFromFile,
   mergeTimesheetGrids,
   placementSheetFromMergedGrid,
 } from "./ejoosTimesheetPersonRows";
@@ -96,22 +89,27 @@ const findTimesheetStyleRow = (sheet: ExcelSheetSnapshot) => {
   return 7;
 };
 
-/** Штатний рядок тільки за індексом. Новий рядок не створюємо. */
+/** Якщо індексу немає в Табелі — вставляємо в кінець секції підрозділу, не за числом індексу. */
 const findOrAllocateStaffIndexRow = (
   sheet: ExcelSheetSnapshot,
   staffIndex: string,
-  _reserved: Set<number>,
-  _positionTitle = "",
-  _sourceRow = 0,
-  _grid?: Array<unknown[] | undefined>,
-  layout?: TimesheetLayout,
+  reserved: Set<number>,
+  positionTitle = "",
+  sourceRow = 0,
+  grid?: Array<unknown[] | undefined>,
 ) => {
   if (!staffIndex) return 0;
-  if (layout) return layout.byIndex[staffIndex]?.row ?? 0;
   for (let row = 7; row <= sheet.rawRows.length; row += 1) {
     if (textAt(sheet, row, 2) === staffIndex) return row;
   }
-  return 0;
+  return findTimesheetAppendRowForUnit(sheet, {
+    sourceRow: sourceRow || undefined,
+    positionTitle,
+    staffIndex,
+    reserved,
+    placementScope: "company",
+    grid,
+  });
 };
 
 const writeStaffTimesheetIdentity = (
@@ -685,30 +683,25 @@ const nextTimesheetRow = (
   sheet: ExcelSheetSnapshot,
   sourceRow: number,
   reserved: Set<number>,
-  _positionTitle = "",
+  positionTitle = "",
   grid?: Array<unknown[] | undefined>,
-  layout?: TimesheetLayout,
-  sourceIndex = "",
-  insertCountBySection?: Map<string, number>,
-) => {
-  if (!layout) {
-    throw new TimesheetLayoutError(
-      "SOURCE_SLOT_MISSING",
-      "Немає TimesheetLayout для історії розпорядження.",
-    );
-  }
-  const sourceSlot = sourceIndex
-    ? resolveCanonicalTimesheetSlot({ index: sourceIndex, layout })
-    : null;
-  return resolveHistoryTimesheetRow({
-    sourceSlot,
+) =>
+  findTimesheetAppendRowForUnit(sheet, {
     sourceRow,
-    layout,
-    sheet,
-    grid,
+    positionTitle,
     reserved,
-    insertCountBySection,
+    placementScope: "company",
+    grid,
   });
+
+const stampInsertBeforeOnFirstWrite = (
+  writes: ZipCellWrite[],
+  row: number,
+  insertBefore: boolean,
+) => {
+  if (!insertBefore) return;
+  const first = writes.find((write) => write.row === row);
+  if (first) first.insertRowsBefore = true;
 };
 
 /**
@@ -758,9 +751,6 @@ type DispositionContext = {
   reservedShpoRows: Set<number>;
   reservedAbsentRows: Set<number>;
   reservedTimesheetRows: Set<number>;
-  pendingHistoryInserts: PendingHistoryInsert[];
-  insertCountBySection: Map<string, number>;
-  timesheetLayout: TimesheetLayout;
 };
 
 const collectWrites = (op: EjoosSyncOp, ctx: DispositionContext) => {
@@ -965,7 +955,6 @@ const collectWrites = (op: EjoosSyncOp, ctx: DispositionContext) => {
           op.payload.positionTitle || "",
           staffTimesheetRow,
           ctx.timesheetGrid,
-          ctx.timesheetLayout,
         )
       : 0);
   if (sourceTimesheetRow > 0) {
@@ -988,38 +977,42 @@ const collectWrites = (op: EjoosSyncOp, ctx: DispositionContext) => {
       );
     }
 
-    const history = takeHistoryTimesheetRow(
-      nextTimesheetRow(
-        timesheet,
-        sourceTimesheetRow,
-        ctx.reservedTimesheetRows,
-        op.payload.positionTitle || "",
-        ctx.timesheetGrid,
-        ctx.timesheetLayout,
-        op.payload.timesheetStaffIndex ||
-          op.payload.previousIndex ||
-          op.positionIndex ||
-          "",
-        ctx.insertCountBySection,
-      ),
-      ctx.pendingHistoryInserts,
+    const historyRow = nextTimesheetRow(
+      timesheet,
+      sourceTimesheetRow,
+      ctx.reservedTimesheetRows,
+      op.payload.positionTitle || "",
+      ctx.timesheetGrid,
     );
-    const historyRow = history.row;
-    for (let column = 1; column <= 40; column += 1) {
-      timesheetWrites.push(
-        withTimesheetHistoryInsert(
-          {
-            row: historyRow,
-            column,
-            value: valueOf(
-              timesheet.rawRows[sourceTimesheetRow - 1]?.[column - 1],
-            ),
-            styleSourceRow: sourceTimesheetRow,
-          },
-          history,
-        ),
+    if (historyRow < 7) {
+      throw new Error(
+        `Не знайдено рядок для історії розпорядження в Табелі${op.fullName ? `: ${op.fullName}` : ""}`,
       );
     }
+    const historyBounds = findDepartureAppendBounds(
+      timesheet,
+      op.payload.positionTitle || "",
+      ctx.timesheetGrid,
+    );
+    const insertHistoryRow = Boolean(
+      historyBounds &&
+        timesheetAppendNeedsRowInsert(
+          { sheet: timesheet, grid: ctx.timesheetGrid },
+          historyRow,
+          historyBounds,
+        ),
+    );
+    for (let column = 1; column <= 40; column += 1) {
+      timesheetWrites.push({
+        row: historyRow,
+        column,
+        value: valueOf(
+          timesheet.rawRows[sourceTimesheetRow - 1]?.[column - 1],
+        ),
+        styleSourceRow: sourceTimesheetRow,
+      });
+    }
+    stampInsertBeforeOnFirstWrite(timesheetWrites, historyRow, insertHistoryRow);
     const orderDay = dayFromOrderLabel(op.payload.orderDate);
     const departMark = [
       formatTimesheetDeparture(place),
@@ -1047,18 +1040,13 @@ const collectWrites = (op: EjoosSyncOp, ctx: DispositionContext) => {
           timesheet.rawRows[sourceTimesheetRow - 1]?.[8 + day - 1],
         );
       }
-      timesheetWrites.push(
-        withTimesheetHistoryInsert(
-          {
-            row: historyRow,
-            column: 8 + day,
-            value,
-            styleSourceRow: sourceTimesheetRow,
-            wrapText: typeof value === "string" && /вибув/iu.test(value),
-          },
-          history,
-        ),
-      );
+      timesheetWrites.push({
+        row: historyRow,
+        column: 8 + day,
+        value,
+        styleSourceRow: sourceTimesheetRow,
+        wrapText: typeof value === "string" && /вибув/iu.test(value),
+      });
       timesheetWrites.push({
         row: sourceTimesheetRow,
         column: 8 + day,
@@ -1066,17 +1054,12 @@ const collectWrites = (op: EjoosSyncOp, ctx: DispositionContext) => {
       });
     }
     if (journalId && !textAt(timesheet, sourceTimesheetRow, 8)) {
-      timesheetWrites.push(
-        withTimesheetHistoryInsert(
-          {
-            row: historyRow,
-            column: 8,
-            value: journalId,
-            styleSourceRow: sourceTimesheetRow,
-          },
-          history,
-        ),
-      );
+      timesheetWrites.push({
+        row: historyRow,
+        column: 8,
+        value: journalId,
+        styleSourceRow: sourceTimesheetRow,
+      });
     }
     for (const column of [6, 7, 8]) {
       timesheetWrites.push({
@@ -1106,14 +1089,11 @@ export async function applyDispositionWithZip(input: {
   if (!shpo || !absent || !timesheet) {
     throw new Error("Не знайдено ШПО, Тимчасово відсутні або Табель");
   }
-  const timesheetArtifacts = await loadTimesheetSheetArtifacts(
+  const timesheetXmlGrid = await loadTimesheetGridFromFile(
     ejoos.file,
     timesheet.sheetName,
   );
-  const timesheetGrid = mergeTimesheetGrids(
-    timesheet.rawRows,
-    timesheetArtifacts.grid,
-  );
+  const timesheetGrid = mergeTimesheetGrids(timesheet.rawRows, timesheetXmlGrid);
   const timesheetView = placementSheetFromMergedGrid(timesheet, timesheetGrid);
 
   const ctx: DispositionContext = {
@@ -1128,21 +1108,9 @@ export async function applyDispositionWithZip(input: {
     reservedShpoRows: new Set<number>(),
     reservedAbsentRows: new Set<number>(),
     reservedTimesheetRows: new Set<number>(),
-    pendingHistoryInserts: [],
-    insertCountBySection: new Map<string, number>(),
-    timesheetLayout: (() => {
-      const layout = buildTimesheetLayout(timesheetView, {
-        grid: timesheetGrid,
-        shpoIndexes: parseEjoosShpo(shpo).map((row) => row.positionIndex),
-        formulas: timesheetArtifacts.formulas,
-      });
-      assertTimesheetLayoutReadyForApply(layout);
-      return layout;
-    })(),
   };
   for (const op of ops) collectWrites(op, ctx);
   const { shpoWrites, absentWrites, timesheetWrites } = ctx;
-  stampTimesheetHistoryInserts(timesheetWrites, ctx.pendingHistoryInserts);
 
   let blob: Blob | File = ejoos.file;
   blob = await applyInlineStringWritesToWorkbook(

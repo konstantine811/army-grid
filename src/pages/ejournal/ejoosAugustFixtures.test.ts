@@ -21,6 +21,7 @@ import {
 import { DEFAULT_STATUS_RULES } from "./ejoosRules";
 import { isInformationalOp, isWorkbookApplyOp, personChangesFromOps } from "./ejoosPersonDiff";
 import { personOpsBlockApply } from "./ejoosOpRequirements";
+import { timesheetRowInExpectedUnitSection } from "./ejoosTimesheetUnitSections";
 
 const XLSX_MIME =
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
@@ -1135,17 +1136,28 @@ describe("August fixtures: processed outbound movement", () => {
       ops: applyOps,
     });
     const written = await XlsxPopulate.fromDataAsync(blob);
-    const timesheetSheet = sheetByName(written, "6. Табель");
-    expect(String(timesheetSheet.cell(47, 7).value() ?? "")).toMatch(/вієра/i);
-    const headerRow = [47, 48, 49].find((row) =>
-      /1 ПІХОТНА РОТА/i.test(
-        `${timesheetSheet.cell(row, 1).value() ?? ""} ${timesheetSheet.cell(row, 2).value() ?? ""}`,
+    const ts = sheetByName(written, "6. Табель");
+    expect(String(ts.cell(46, 7).value() ?? "")).toBe("");
+    let personRow = 0;
+    for (let row = 7; row <= 60; row += 1) {
+      if (String(ts.cell(row, 8).value() ?? "") === person.id) {
+        personRow = row;
+        break;
+      }
+    }
+    expect(personRow).toBeGreaterThan(48);
+    const afterSnapshot = await snapshotOf(blob, "ЄЖООС_станом_на_25-08-2026.xlsx");
+    const timesheetSheet = afterSnapshot.sheets.find((sheet) =>
+      /табель/i.test(sheet.sheetName),
+    );
+    expect(timesheetSheet).toBeTruthy();
+    expect(
+      timesheetRowInExpectedUnitSection(
+        timesheetSheet!,
+        personRow,
+        person.positionTitle,
       ),
-    );
-    expect(headerRow).toBeGreaterThan(47);
-    expect(String(timesheetSheet.cell(headerRow! + 1, 7).value() ?? "")).toMatch(
-      /іванов/i,
-    );
+    ).toBe(true);
 
     const after = buildEjoosSyncPlan(ejoos, pb, {
       statusRules: DEFAULT_STATUS_RULES,
@@ -1323,10 +1335,7 @@ describe("August fixtures: Pochepetskyi outbound after rank", () => {
     const exclude = personOps.find((op) => op.kind === "exclude_transfer");
     expect(exclude?.payload.fromRank).toMatch(/старший солдат/i);
     expect(exclude?.payload.timesheetExcelRow).toBe("7");
-    expect(exclude?.payload.timesheetAction).toBe(
-      "CREATE_HISTORY_IN_SOURCE_SECTION",
-    );
-    expect(exclude?.payload.timesheetCreateHistory).toBe("1");
+    expect(exclude?.payload.timesheetCreateHistory).not.toBe("1");
     expect(exclude?.payload.timesheetReplaceInPlace).not.toBe("1");
     expect(exclude?.payload.excludeDate).toMatch(/19\.08\.2026/);
     expect(

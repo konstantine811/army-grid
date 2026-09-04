@@ -5,7 +5,6 @@ import {
   type ExcelWorkbookSnapshot,
 } from "../../excelRoundTrip";
 import { canonicalName, normId } from "./ejoosIdentity";
-import { extractSheetFormulasByCell } from "./ejoosTimesheetLayout";
 import { resolveSheetPath } from "./ejoosZipCellWrites";
 
 const LEFTOVER_NOTE = /вибув|переведен|згідно|розпорядж/i;
@@ -121,7 +120,7 @@ export const buildSheetGridFromXml = (sheetXml: string, sstXml = "") => {
   const strings = parseSharedStrings(sstXml);
   const rows: unknown[][] = [];
   const cellRe =
-    /<c\b([^<>]*\br="([A-Z]{1,3})(\d+)"(?![0-9A-Za-z])[^<>/]*)(\/\s*>|>[\s\S]*?<\/c>)/gi;
+    /<c\b([^<>]*\br="([A-Z]{1,3})(\d+)"(?![0-9A-Za-z])[^<>]*)(\/\s*>|>[\s\S]*?<\/c>)/gi;
   for (const cell of sheetXml.matchAll(cellRe)) {
     const row = Number(cell[3]);
     const column = columnLetterToNumber(cell[2]);
@@ -188,35 +187,23 @@ export const pickTimesheetKeepRow = (
 export const uniqueExcelRows = (rows: number[]) =>
   [...new Set(rows.filter((row) => row > 0))].sort((left, right) => left - right);
 
-export const loadTimesheetSheetArtifacts = async (
-  file: Blob | File | undefined,
-  sheetName: string,
-) => {
-  const empty = {
-    grid: [] as unknown[][],
-    formulas: new Map<string, string>(),
-  };
-  if (!file || !sheetName) return empty;
-  try {
-    const zip = await JSZip.loadAsync(await file.arrayBuffer());
-    const path = await resolveSheetPath(zip, sheetName);
-    if (!path) return empty;
-    const sheetXml = (await zip.file(path)?.async("string")) || "";
-    const sstXml =
-      (await zip.file("xl/sharedStrings.xml")?.async("string")) || "";
-    return {
-      grid: buildSheetGridFromXml(sheetXml, sstXml),
-      formulas: extractSheetFormulasByCell(sheetXml),
-    };
-  } catch {
-    return empty;
-  }
-};
-
 export const loadTimesheetGridFromFile = async (
   file: Blob | File | undefined,
   sheetName: string,
-) => (await loadTimesheetSheetArtifacts(file, sheetName)).grid;
+) => {
+  if (!file || !sheetName) return [];
+  try {
+    const zip = await JSZip.loadAsync(await file.arrayBuffer());
+    const path = await resolveSheetPath(zip, sheetName);
+    if (!path) return [];
+    const sheetXml = (await zip.file(path)?.async("string")) || "";
+    const sstXml =
+      (await zip.file("xl/sharedStrings.xml")?.async("string")) || "";
+    return buildSheetGridFromXml(sheetXml, sstXml);
+  } catch {
+    return [];
+  }
+};
 
 /** Рядки Табеля поза usedRange (дописана історія внизу) підмішуємо в snapshot. */
 export const hydrateEjoosTimesheetSnapshot = async (

@@ -22,24 +22,13 @@ import {
   applyInlineStringWritesToWorkbook,
   type ZipCellWrite,
 } from "./ejoosZipCellWrites";
-import {
-  assertHistoryRowsOutsideCanonical,
-  assertTimesheetLayoutReadyForApply,
-  buildTimesheetLayout,
-  resolveCanonicalTimesheetSlot,
-  resolveHistoryTimesheetRow,
-  stampTimesheetHistoryInserts,
-  takeHistoryTimesheetRow,
-  withTimesheetHistoryInsert,
-  type PendingHistoryInsert,
-  type TimesheetHistoryWriteTarget,
-} from "./ejoosTimesheetLayout";
 import { stripTimesheetDivisionLabel } from "./ejoosTimesheetUnitSections";
 import {
   findTimesheetPersonRowsInGrid,
-  loadTimesheetSheetArtifacts,
+  loadTimesheetGridFromFile,
   mergeTimesheetGrids,
   placementSheetFromMergedGrid,
+  pickTimesheetKeepRow,
   uniqueExcelRows,
 } from "./ejoosTimesheetPersonRows";
 import {
@@ -48,10 +37,7 @@ import {
   parseTimesheetAbsenceSpans,
   timesheetTransferMarkForDay,
 } from "./ejoosTimesheetText";
-import {
-  assertTimesheetTransferAction,
-  resolveTimesheetTransferAction,
-} from "./ejoosTimesheetTransferAction";
+import { excludeWritePlan } from "./ejoosExcludePolicy";
 
 const valueOf = (value: CellValue | unknown): string | number | null => {
   if (value === undefined || value === null || value === "") return null;
@@ -163,23 +149,22 @@ const nextTimesheetHistoryRow = (
   sheet: ExcelSheetSnapshot,
   sourceRow: number,
   reserved: Set<number>,
-  layout: ReturnType<typeof buildTimesheetLayout>,
-  sourceIndex = "",
-  grid?: Array<unknown[] | undefined>,
-  insertCountBySection?: Map<string, number>,
 ) => {
-  const sourceSlot = sourceIndex
-    ? resolveCanonicalTimesheetSlot({ index: sourceIndex, layout })
-    : null;
-  return resolveHistoryTimesheetRow({
-    sourceSlot,
-    sourceRow,
-    layout,
-    sheet,
-    grid,
-    reserved,
-    insertCountBySection,
-  });
+  const start = sourceRow >= 7 ? sourceRow + 1 : 7;
+  for (let row = start; row <= sheet.rawRows.length + 30; row += 1) {
+    if (reserved.has(row)) continue;
+    if (
+      !cellText(sheet, row, 2) &&
+      !cellText(sheet, row, 7) &&
+      !cellText(sheet, row, 8)
+    ) {
+      reserved.add(row);
+      return row;
+    }
+  }
+  const row = sheet.rawRows.length + reserved.size + 1;
+  reserved.add(row);
+  return row;
 };
 
 const excludedNumberValue = (
@@ -409,55 +394,6 @@ export async function applyExcludeTransfersWithZip(input: {
     throw new Error("У ЕЖООС не знайдено всі аркуші для переведення");
   }
 
-  const timesheetArtifacts = await loadTimesheetSheetArtifacts(
-    ejoos.file,
-    timesheet.sheetName,
-  );
-  const timesheetGrid = mergeTimesheetGrids(
-    timesheet.rawRows,
-    timesheetArtifacts.grid,
-  );
-  const timesheetForPlacement = placementSheetFromMergedGrid(
-    timesheet,
-    timesheetGrid,
-  );
-  const shpoRows = parseEjoosShpo(shpo);
-  const timesheetLayout = buildTimesheetLayout(timesheetForPlacement, {
-    grid: timesheetGrid,
-    shpoIndexes: shpoRows.map((row) => row.positionIndex),
-    formulas: timesheetArtifacts.formulas,
-  });
-  assertTimesheetLayoutReadyForApply(timesheetLayout);
-
-  const prepared = ops.map((op) => {
-    const personId = personIdFromShpo(shpoRows, {
-      fullName: op.payload.fromName || op.fullName,
-      positionIndex:
-        op.payload.occupiedPositionIndex ||
-        op.payload.fromPositionIndex ||
-        op.payload.previousIndex ||
-        op.positionIndex,
-      personId: op.payload.fromPersonId || op.personId,
-    });
-    const positionIndex =
-      op.payload.fromPositionIndex ||
-      op.payload.previousIndex ||
-      op.positionIndex;
-    const timesheetName = op.payload.fromName || op.fullName;
-    const action = assertTimesheetTransferAction(
-      resolveTimesheetTransferAction({
-        personId,
-        fullName: timesheetName,
-        fromPositionIndex: positionIndex,
-        payload: op.payload,
-        layout: timesheetLayout,
-        sheet: timesheetForPlacement,
-        grid: timesheetGrid,
-      }),
-    );
-    return { op, personId, positionIndex, timesheetName, action };
-  });
-
   const excludedWrites: ZipCellWrite[] = [];
   const oosWrites: ZipCellWrite[] = [];
   const shpoWrites: ZipCellWrite[] = [];
@@ -468,17 +404,41 @@ export async function applyExcludeTransfersWithZip(input: {
     : null;
   const reservedTimesheetRows = new Set<number>();
   const writtenTimesheetByPerson = new Map<string, number[]>();
+  const timesheetXmlGrid = await loadTimesheetGridFromFile(
+    ejoos.file,
+    timesheet.sheetName,
+  );
+  const timesheetGrid = mergeTimesheetGrids(
+    timesheet.rawRows,
+    timesheetXmlGrid,
+  );
+  const timesheetForPlacement = placementSheetFromMergedGrid(
+    timesheet,
+    timesheetGrid,
+  );
   let excludedRow = nextExcludedRow(excluded);
   const excludedStyleSourceRow = findExcludedStyleSourceRow(
     excluded,
     excludedRow,
   );
-  const pendingHistoryInserts: PendingHistoryInsert[] = [];
-  const insertCountBySection = new Map<string, number>();
+  const shpoRows = parseEjoosShpo(shpo);
 
-  for (const { op, personId, positionIndex, timesheetName, action } of prepared) {
+  for (const op of ops) {
+    const personId = personIdFromShpo(shpoRows, {
+      fullName: op.payload.fromName || op.fullName,
+      positionIndex:
+        op.payload.occupiedPositionIndex ||
+        op.payload.fromPositionIndex ||
+        op.payload.previousIndex ||
+        op.positionIndex,
+      personId: op.payload.fromPersonId || op.personId,
+    });
     const existingExcludedRow = Number(op.payload.excludedExcelRow || 0);
     let oosRow = Number(op.payload.oosExcelRow || 0);
+    const positionIndex =
+      op.payload.fromPositionIndex ||
+      op.payload.previousIndex ||
+      op.positionIndex;
 
     if (existingExcludedRow) {
       for (const [column, value] of excludedPatchValues(
@@ -538,6 +498,7 @@ export async function applyExcludeTransfersWithZip(input: {
       }
     }
 
+    const timesheetName = op.payload.fromName || op.fullName;
     const personTimesheetKey = `${personId || ""}|${nameKey(timesheetName)}`;
     const existingTimesheetRows = uniqueExcelRows([
       ...findTimesheetPersonRowsInGrid(
@@ -547,10 +508,29 @@ export async function applyExcludeTransfersWithZip(input: {
       ),
       ...(writtenTimesheetByPerson.get(personTimesheetKey) ?? []),
     ]);
+    const plannedKeep = Number(op.payload.timesheetExcelRow || 0);
     const isClosedHistoryRow = (row: number) =>
       timesheetRowHasDeparture(timesheet, row) ||
       timesheetGridHasDeparture(timesheetGrid, row);
-    let timesheetKeepRow = action.sourceRow;
+    const openTimesheetRows = existingTimesheetRows.filter(
+      (row) => !isClosedHistoryRow(row),
+    );
+    let timesheetKeepRow = pickTimesheetKeepRow(
+      openTimesheetRows,
+      () => true,
+      plannedKeep && openTimesheetRows.includes(plannedKeep) ? plannedKeep : 0,
+    );
+    if (!timesheetKeepRow && !openTimesheetRows.length) {
+      timesheetKeepRow = pickTimesheetKeepRow(
+        existingTimesheetRows,
+        isClosedHistoryRow,
+        plannedKeep,
+      );
+    }
+    const writePlan = excludeWritePlan(op.payload);
+    if (!timesheetKeepRow && writePlan.replaceInPlace && plannedKeep > 0) {
+      timesheetKeepRow = plannedKeep;
+    }
     const { days, presentDays } = timesheetHistoryDayMarks(
       op,
       plan,
@@ -561,39 +541,28 @@ export async function applyExcludeTransfersWithZip(input: {
       if (fromRaw != null && String(fromRaw).trim() !== "") return fromRaw;
       return valueOf(timesheetGrid[row - 1]?.[column - 1]);
     };
-    const copyTimesheetRow = (
-      sourceRow: number,
-      target: TimesheetHistoryWriteTarget,
-    ) => {
+    const copyTimesheetRow = (sourceRow: number, targetRow: number) => {
       // Колонка A — повтор роти/батальйону на рядку даних (не заголовок наступної секції).
-      timesheetWrites.push(
-        withTimesheetHistoryInsert(
-          {
-            row: target.row,
-            column: 1,
-            value:
-              timesheetCellValue(sourceRow, 1) ||
-              timesheetCellValue(Math.max(target.row - 1, 7), 1) ||
-              null,
-            styleSourceRow: sourceRow,
-            styleSourceColumn: 1,
-            copyNeighborStyle: false,
-            keepNeighborStyle: true,
-          },
-          target,
-        ),
-      );
-      for (let column = 2; column <= 5; column += 1) {
+      timesheetWrites.push({
+        row: targetRow,
+        column: 1,
+        value:
+          timesheetCellValue(sourceRow, 1) ||
+          timesheetCellValue(Math.max(targetRow - 1, 7), 1) ||
+          null,
+        styleSourceRow: sourceRow,
+        styleSourceColumn: 1,
+        copyNeighborStyle: false,
+        keepNeighborStyle: true,
+      });
+      for (let column = 2; column <= TIMESHEET_STYLE_LAST_COLUMN; column += 1) {
         timesheetWrites.push(
-          withTimesheetHistoryInsert(
-            timesheetStyledWrite(
-              target.row,
-              column,
-              timesheetCellValue(sourceRow, column),
-              sourceRow,
-              column,
-            ),
-            target,
+          timesheetStyledWrite(
+            targetRow,
+            column,
+            timesheetCellValue(sourceRow, column),
+            sourceRow,
+            column,
           ),
         );
       }
@@ -622,13 +591,7 @@ export async function applyExcludeTransfersWithZip(input: {
         });
       }
     };
-    const writeHistoryOnRow = (
-      target: TimesheetHistoryWriteTarget | number,
-      styleRow: number,
-    ) => {
-      const historyTarget: TimesheetHistoryWriteTarget =
-        typeof target === "number" ? { row: target } : target;
-      const targetRow = historyTarget.row;
+    const writeHistoryOnRow = (targetRow: number, styleRow: number) => {
       const styleDayColumn = (() => {
         for (let day = 1; day <= 31; day += 1) {
           const mark = cellText(timesheet, styleRow, 8 + day);
@@ -638,102 +601,60 @@ export async function applyExcludeTransfersWithZip(input: {
       })();
       if (op.payload.fromRank || op.rank) {
         timesheetWrites.push(
-          withTimesheetHistoryInsert(
-            timesheetStyledWrite(
-              targetRow,
-              6,
-              op.payload.fromRank || op.rank,
-              styleRow,
-              6,
-            ),
-            historyTarget,
+          timesheetStyledWrite(
+            targetRow,
+            6,
+            op.payload.fromRank || op.rank,
+            styleRow,
+            6,
           ),
         );
       }
       timesheetWrites.push(
-        withTimesheetHistoryInsert(
-          timesheetStyledWrite(
-            targetRow,
-            7,
-            op.payload.fromName || op.fullName || null,
-            styleRow,
-            7,
-          ),
-          historyTarget,
+        timesheetStyledWrite(
+          targetRow,
+          7,
+          op.payload.fromName || op.fullName || null,
+          styleRow,
+          7,
         ),
-        withTimesheetHistoryInsert(
-          timesheetStyledWrite(targetRow, 8, personId || null, styleRow, 8),
-          historyTarget,
-        ),
+        timesheetStyledWrite(targetRow, 8, personId || null, styleRow, 8),
       );
       if (positionIndex && !cellText(timesheet, targetRow, 2)) {
         timesheetWrites.push(
-          withTimesheetHistoryInsert(
-            timesheetStyledWrite(targetRow, 2, positionIndex, styleRow, 2),
-            historyTarget,
-          ),
+          timesheetStyledWrite(targetRow, 2, positionIndex, styleRow, 2),
         );
       }
       for (const { day, value } of days) {
         timesheetWrites.push(
-          withTimesheetHistoryInsert(
-            timesheetStyledWrite(targetRow, 8 + day, value, styleRow, styleDayColumn),
-            historyTarget,
-          ),
+          timesheetStyledWrite(targetRow, 8 + day, value, styleRow, styleDayColumn),
         );
       }
       timesheetWrites.push(
-        withTimesheetHistoryInsert(
-          timesheetStyledWrite(targetRow, 40, presentDays, styleRow, 40),
-          historyTarget,
-        ),
+        timesheetStyledWrite(targetRow, 40, presentDays, styleRow, 40),
       );
     };
-    const sourceRow = action.sourceRow;
-    const sourceIndex =
-      action.sourceIndex ||
-      (sourceRow > 0 ? cellText(timesheetForPlacement, sourceRow, 2) : "") ||
-      positionIndex;
-    if (action.kind === "PATCH_HISTORY" && sourceRow > 0) {
+    const sourceRow = timesheetKeepRow || plannedKeep;
+    if (writePlan.replaceInPlace && sourceRow > 0) {
       writeHistoryOnRow(sourceRow, sourceRow);
       timesheetKeepRow = sourceRow;
-    } else if (action.kind === "MOVE_TO_HISTORY" && sourceRow > 0) {
-      const history = takeHistoryTimesheetRow(
-        nextTimesheetHistoryRow(
-          timesheetForPlacement,
-          sourceRow,
-          reservedTimesheetRows,
-          timesheetLayout,
-          sourceIndex,
-          timesheetGrid,
-          insertCountBySection,
-        ),
-        pendingHistoryInserts,
+    } else if (sourceRow > 0) {
+      timesheetKeepRow = nextTimesheetHistoryRow(
+        timesheetForPlacement,
+        sourceRow,
+        reservedTimesheetRows,
       );
-      timesheetKeepRow = history.row;
-      action.targetHistoryRow = history.row;
-      copyTimesheetRow(sourceRow, history);
-      writeHistoryOnRow(history, sourceRow);
+      copyTimesheetRow(sourceRow, timesheetKeepRow);
+      writeHistoryOnRow(timesheetKeepRow, sourceRow);
       clearTimesheetOccupant(sourceRow);
-    } else if (action.kind === "CREATE_HISTORY_IN_SOURCE_SECTION") {
-      const styleRow =
-        sourceRow > 0 ? sourceRow : findTimesheetStyleRow(timesheet);
-      const history = takeHistoryTimesheetRow(
-        nextTimesheetHistoryRow(
-          timesheetForPlacement,
-          styleRow,
-          reservedTimesheetRows,
-          timesheetLayout,
-          sourceIndex,
-          timesheetGrid,
-          insertCountBySection,
-        ),
-        pendingHistoryInserts,
+    } else if (writePlan.createTimesheetHistory) {
+      const styleRow = findTimesheetStyleRow(timesheet);
+      timesheetKeepRow = nextTimesheetHistoryRow(
+        timesheetForPlacement,
+        styleRow,
+        reservedTimesheetRows,
       );
-      timesheetKeepRow = history.row;
-      action.targetHistoryRow = history.row;
-      if (sourceRow > 0) copyTimesheetRow(sourceRow, history);
-      writeHistoryOnRow(history, styleRow);
+      writeHistoryOnRow(timesheetKeepRow, styleRow);
     }
     if (timesheetKeepRow > 0) {
       writtenTimesheetByPerson.set(personTimesheetKey, [timesheetKeepRow]);
@@ -741,7 +662,7 @@ export async function applyExcludeTransfersWithZip(input: {
     }
     for (const row of existingTimesheetRows) {
       if (row === timesheetKeepRow) continue;
-      if (isClosedHistoryRow(row) && action.kind === "PATCH_HISTORY") {
+      if (isClosedHistoryRow(row) && writePlan.replaceInPlace) {
         continue;
       }
       for (const column of [1, 6, 7, 8, 40]) {
@@ -844,12 +765,6 @@ export async function applyExcludeTransfersWithZip(input: {
       }
     }
   }
-
-  stampTimesheetHistoryInserts(timesheetWrites, pendingHistoryInserts);
-  assertHistoryRowsOutsideCanonical(
-    timesheetLayout,
-    pendingHistoryInserts.map((item) => item.targetRow),
-  );
 
   let blob: Blob | File = ejoos.file;
   blob = await applyInlineStringWritesToWorkbook(

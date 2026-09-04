@@ -255,7 +255,7 @@ export const effectiveTimesheetCompanyDivision = (
 
 const isStaffIndexText = (text: string) => /^\d{5,}$/.test(text.trim());
 
-export const isTimesheetSummaryRowAt = (view: TimesheetGridView, row: number) => {
+const isTimesheetSummaryRowAt = (view: TimesheetGridView, row: number) => {
   for (let column = 1; column <= 7; column += 1) {
     const text = cellAt(view, row, column);
     if (text && isTimesheetSummaryRow(text)) return true;

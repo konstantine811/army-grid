@@ -21,13 +21,9 @@ import {
   resolveOutboundTransferDestination,
 } from "./ejoosMovementRules";
 import { resolveTimesheetEpisodeStart } from "./ejoosTimesheetEpisode";
-import { buildTimesheetLayout } from "./ejoosTimesheetLayout";
-import {
-  resolveTimesheetTransferAction,
-  TimesheetTransferError,
-} from "./ejoosTimesheetTransferAction";
 import {
   absenceOnlyBlocksExclusion,
+  excludedTimesheetWrite,
   excludedRowsToClear,
   externalTransferProcessState,
   isFalseInternalHopExclusion,
@@ -1125,9 +1121,6 @@ export const buildEjoosSyncPlan = (
   const ejoosExcluded = parseEjoosExcluded(excludedSheet);
   const ejoosDays = parseEjoosTimesheetDay(timesheetSheet, timesheetDay);
   const timesheetPeople = parseEjoosTimesheetPeople(timesheetSheet);
-  const timesheetLayoutForTransfer = timesheetSheet
-    ? buildTimesheetLayout(timesheetSheet)
-    : null;
   const ejoosShpo = parseEjoosShpo(shpoSheet);
   const ejoosOos = parseEjoosOos(oosSheet);
   const shpoByIndex = new Map(ejoosShpo.map((row) => [row.positionIndex, row]));
@@ -4453,68 +4446,41 @@ export const buildEjoosSyncPlan = (
       const arrival =
         arrivalOf(fromId, fromName) ||
         arrivalOf(event.personId, event.fullName);
+      const namedTimesheetRows = [
+        ...timesheetRowsOf(fromId, fromName),
+        ...timesheetRowsOf(event.personId, event.fullName),
+      ].filter(
+        (row, index, rows) =>
+          rows.findIndex((other) => other.excelRow === row.excelRow) === index,
+      );
       const timesheetWrite = (() => {
-        if (!timesheetSheet || !timesheetLayoutForTransfer) {
+        const base = excludedTimesheetWrite(
+          namedTimesheetRows,
+          fromIndex && isVacantStaffRow(dayByIndex.get(fromIndex))
+            ? dayByIndex.get(fromIndex)?.excelRow || 0
+            : 0,
+        );
+        const historyRow = namedTimesheetRows.find(
+          (row) => row.hasDepartureText,
+        );
+        if (
+          base.replaceInPlace &&
+          historyRow &&
+          timesheetSheet &&
+          sourcePositionTitle &&
+          !timesheetRowInExpectedUnitSection(
+            timesheetSheet,
+            historyRow.excelRow,
+            sourcePositionTitle,
+          )
+        ) {
           return {
             createHistory: false,
             replaceInPlace: false,
-            sourceExcelRow: 0,
-            action: "",
-            sourceIndex: fromIndex,
-            sourceSection: "",
-            targetHistoryRow: 0,
+            sourceExcelRow: historyRow.excelRow,
           };
         }
-        try {
-          const action = resolveTimesheetTransferAction({
-            personId: fromId || event.personId,
-            fullName: fromName,
-            fromPositionIndex: fromIndex,
-            payload: {
-              transitSameMonth: unrecordedSameMonthTransit ? "1" : "",
-              timesheetActiveFrom:
-                unrecordedSameMonthTransit || arrival
-                  ? inboundPlacement?.orderDate || ""
-                  : "",
-              priorPlacementDate: inboundPlacement?.orderDate || "",
-              appointmentOrderDate: inboundPlacement?.orderDate || "",
-              shpoExcelRow: shpo ? String(shpo.excelRow) : "",
-              oosExcelRow: oos ? String(oos.excelRow) : "",
-              arrivalExcelRow: arrival ? String(arrival.excelRow) : "",
-              timesheetDestination,
-              destination: exclusionPlace,
-              documentsDest: event.changeText || "",
-              changeText: event.changeText || "",
-              positionTitle: sourcePositionTitle || "",
-              orderNumber: event.orderNumber,
-              orderDate: event.orderDate,
-            },
-            layout: timesheetLayoutForTransfer,
-            sheet: timesheetSheet,
-          });
-          return {
-            createHistory: action.createTimesheetHistory,
-            replaceInPlace: action.replaceInPlace,
-            sourceExcelRow: action.sourceRow,
-            action: action.kind,
-            sourceIndex: action.sourceIndex,
-            sourceSection: action.sourceSection,
-            targetHistoryRow: action.targetHistoryRow,
-          };
-        } catch (error) {
-          if (error instanceof TimesheetTransferError) {
-            return {
-              createHistory: false,
-              replaceInPlace: false,
-              sourceExcelRow: 0,
-              action: "",
-              sourceIndex: fromIndex,
-              sourceSection: "",
-              targetHistoryRow: 0,
-            };
-          }
-          throw error;
-        }
+        return base;
       })();
       // Колонки «наказ» і перша «дата» — стройовий наказ. Окремі реквізити
       // підстави (наприклад 668-РС від 03.08.2026) сюди не підставляємо.
@@ -4586,15 +4552,6 @@ export const buildEjoosSyncPlan = (
               : "",
           timesheetCreateHistory: timesheetWrite.createHistory ? "1" : "",
           timesheetReplaceInPlace: timesheetWrite.replaceInPlace ? "1" : "",
-          timesheetAction: timesheetWrite.action,
-          timesheetSourceIndex: timesheetWrite.sourceIndex,
-          timesheetSourceRow: timesheetWrite.sourceExcelRow
-            ? String(timesheetWrite.sourceExcelRow)
-            : "",
-          timesheetSourceSection: timesheetWrite.sourceSection,
-          timesheetTargetHistoryRow: timesheetWrite.targetHistoryRow
-            ? String(timesheetWrite.targetHistoryRow)
-            : "",
           transitSameMonth: unrecordedSameMonthTransit ? "1" : "",
           basisNumber: event.basisNumber,
           basisDate: event.basisDate,
