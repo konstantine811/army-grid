@@ -43,6 +43,19 @@ export type ZipCellWrite = {
   insertRowsBefore?: boolean;
   /** Скільки фізичних рядків вставити, якщо insertRowsBefore. За замовчуванням 1. */
   insertRowCount?: number;
+  /** Write належить новоствореному history row і не повинен зсуватися разом зі старими рядками. */
+  insertedRow?: boolean;
+  /** Секція / footer-група для insertedRow (щоб не змішати вставки різних рот). */
+  insertGroup?: string;
+};
+
+const lastWriteByColumn = (writes: ZipCellWrite[]) => {
+  const last = new Map<number, ZipCellWrite>();
+  for (const write of writes) {
+    if (write.styleOnly) continue;
+    last.set(write.column, write);
+  }
+  return [...last.values()].sort((left, right) => left.column - right.column);
 };
 
 const escapeXml = (value: string) =>
@@ -643,10 +656,25 @@ const bumpWriteRowNumbers = (
   writes: ZipCellWrite[],
   insertAt: number,
   count: number,
+  insertGroup?: string,
 ) => {
   const lastNewRow = insertAt + count - 1;
+  const hasMarkedInserts = writes.some(
+    (write) => write.insertedRow && write.insertGroup === insertGroup,
+  );
   for (const write of writes) {
-    if (write.row > lastNewRow) write.row += count;
+    const isNewHistory =
+      hasMarkedInserts &&
+      Boolean(insertGroup) &&
+      write.insertedRow &&
+      write.insertGroup === insertGroup;
+    if (isNewHistory) {
+      // Нові history rows лишаються в [insertAt, lastNewRow].
+    } else if (hasMarkedInserts) {
+      if (write.row >= insertAt) write.row += count;
+    } else if (write.row > lastNewRow) {
+      write.row += count;
+    }
     if (write.styleSourceRow && write.styleSourceRow >= insertAt) {
       write.styleSourceRow += count;
     }
@@ -1162,7 +1190,7 @@ export async function applyInlineStringWritesToWorkbook(
     const count = Math.max(1, write.insertRowCount ?? 1);
     const insertAt = write.row;
     sheetXml = shiftSheetRowsDown(sheetXml, insertAt, count);
-    bumpWriteRowNumbers(resolvedWrites, insertAt, count);
+    bumpWriteRowNumbers(resolvedWrites, insertAt, count, write.insertGroup);
     write.insertRowsBefore = false;
   }
   const byRow = new Map<number, ZipCellWrite[]>();
@@ -1275,9 +1303,7 @@ export async function applyInlineStringWritesToWorkbook(
       );
       const partIndex = split.indexByRow.get(row);
       if (partIndex == null) {
-        const cells = rowWrites
-          .filter((write) => !write.styleOnly)
-          .map((write) => {
+        const cells = lastWriteByColumn(rowWrites).map((write) => {
             const next = withSharedString(write);
             return buildCellXml(
               `${columnNumberToLetter(next.column)}${next.row}`,
@@ -1352,9 +1378,7 @@ export async function applyInlineStringWritesToWorkbook(
         (a, b) => a.column - b.column,
       );
       if (!existingRowNums.has(row)) {
-        const cells = rowWrites
-          .filter((write) => !write.styleOnly)
-          .map((write) => {
+        const cells = lastWriteByColumn(rowWrites).map((write) => {
             const next = withSharedString(write);
             return buildCellXml(
               `${columnNumberToLetter(next.column)}${next.row}`,
@@ -1428,7 +1452,7 @@ export async function applyInlineStringWritesToWorkbook(
 
 const collectSheetCells = (sheetXml: string) => {
   const cellRe =
-    /<c\b([^<>]*\br="([A-Z]{1,3})(\d+)"(?![0-9A-Za-z])[^<>]*)(\/\s*>|>[\s\S]*?<\/c>)/gi;
+    /<c\b([^<>]*\br="([A-Z]{1,3})(\d+)"(?![0-9A-Za-z])[^<>/]*)(\/\s*>|>[\s\S]*?<\/c>)/gi;
   const cells: Array<{
     row: number;
     column: number;

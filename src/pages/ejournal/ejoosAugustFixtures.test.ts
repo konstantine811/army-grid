@@ -1323,7 +1323,10 @@ describe("August fixtures: Pochepetskyi outbound after rank", () => {
     const exclude = personOps.find((op) => op.kind === "exclude_transfer");
     expect(exclude?.payload.fromRank).toMatch(/старший солдат/i);
     expect(exclude?.payload.timesheetExcelRow).toBe("7");
-    expect(exclude?.payload.timesheetCreateHistory).not.toBe("1");
+    expect(exclude?.payload.timesheetAction).toBe(
+      "CREATE_HISTORY_IN_SOURCE_SECTION",
+    );
+    expect(exclude?.payload.timesheetCreateHistory).toBe("1");
     expect(exclude?.payload.timesheetReplaceInPlace).not.toBe("1");
     expect(exclude?.payload.excludeDate).toMatch(/19\.08\.2026/);
     expect(

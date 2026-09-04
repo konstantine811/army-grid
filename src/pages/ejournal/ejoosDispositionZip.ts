@@ -33,6 +33,7 @@ import {
   resolveHistoryTimesheetRow,
   stampTimesheetHistoryInserts,
   takeHistoryTimesheetRow,
+  withTimesheetHistoryInsert,
   type PendingHistoryInsert,
   type TimesheetLayout,
 } from "./ejoosTimesheetLayout";
@@ -987,7 +988,7 @@ const collectWrites = (op: EjoosSyncOp, ctx: DispositionContext) => {
       );
     }
 
-    const historyRow = takeHistoryTimesheetRow(
+    const history = takeHistoryTimesheetRow(
       nextTimesheetRow(
         timesheet,
         sourceTimesheetRow,
@@ -1003,15 +1004,21 @@ const collectWrites = (op: EjoosSyncOp, ctx: DispositionContext) => {
       ),
       ctx.pendingHistoryInserts,
     );
+    const historyRow = history.row;
     for (let column = 1; column <= 40; column += 1) {
-      timesheetWrites.push({
-        row: historyRow,
-        column,
-        value: valueOf(
-          timesheet.rawRows[sourceTimesheetRow - 1]?.[column - 1],
+      timesheetWrites.push(
+        withTimesheetHistoryInsert(
+          {
+            row: historyRow,
+            column,
+            value: valueOf(
+              timesheet.rawRows[sourceTimesheetRow - 1]?.[column - 1],
+            ),
+            styleSourceRow: sourceTimesheetRow,
+          },
+          history,
         ),
-        styleSourceRow: sourceTimesheetRow,
-      });
+      );
     }
     const orderDay = dayFromOrderLabel(op.payload.orderDate);
     const departMark = [
@@ -1040,13 +1047,18 @@ const collectWrites = (op: EjoosSyncOp, ctx: DispositionContext) => {
           timesheet.rawRows[sourceTimesheetRow - 1]?.[8 + day - 1],
         );
       }
-      timesheetWrites.push({
-        row: historyRow,
-        column: 8 + day,
-        value,
-        styleSourceRow: sourceTimesheetRow,
-        wrapText: typeof value === "string" && /вибув/iu.test(value),
-      });
+      timesheetWrites.push(
+        withTimesheetHistoryInsert(
+          {
+            row: historyRow,
+            column: 8 + day,
+            value,
+            styleSourceRow: sourceTimesheetRow,
+            wrapText: typeof value === "string" && /вибув/iu.test(value),
+          },
+          history,
+        ),
+      );
       timesheetWrites.push({
         row: sourceTimesheetRow,
         column: 8 + day,
@@ -1054,12 +1066,17 @@ const collectWrites = (op: EjoosSyncOp, ctx: DispositionContext) => {
       });
     }
     if (journalId && !textAt(timesheet, sourceTimesheetRow, 8)) {
-      timesheetWrites.push({
-        row: historyRow,
-        column: 8,
-        value: journalId,
-        styleSourceRow: sourceTimesheetRow,
-      });
+      timesheetWrites.push(
+        withTimesheetHistoryInsert(
+          {
+            row: historyRow,
+            column: 8,
+            value: journalId,
+            styleSourceRow: sourceTimesheetRow,
+          },
+          history,
+        ),
+      );
     }
     for (const column of [6, 7, 8]) {
       timesheetWrites.push({

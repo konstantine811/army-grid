@@ -191,7 +191,12 @@ const excludePreviews = (
 
   const historyDays = timesheetDayCells(op, timesheetDay, departPhrase);
   const timesheetPlan = excludeWritePlan(op.payload);
-  if (timesheetPlan.createTimesheetHistory || op.payload.timesheetExcelRow) {
+  if (
+    timesheetPlan.createTimesheetHistory ||
+    timesheetPlan.replaceInPlace ||
+    op.payload.timesheetExcelRow ||
+    op.payload.timesheetAction
+  ) {
     rows.push({
       sheetKey: "timesheet-history",
       sheetLabel: "6. Табель",

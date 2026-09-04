@@ -8,6 +8,7 @@ import {
   resolveHistoryTimesheetRow,
   stampTimesheetHistoryInserts,
   takeHistoryTimesheetRow,
+  withTimesheetHistoryInsert,
   type PendingHistoryInsert,
 } from "./ejoosTimesheetLayout";
 import {
@@ -106,28 +107,34 @@ describe("multi-section timesheet history inserts", () => {
       }),
       pending,
     );
-    expect(first).toBe(38);
-    expect(second).toBe(498);
+    expect(first.row).toBe(38);
+    expect(second.row).toBe(498);
     expect(pending.map((item) => ({ footer: item.footerRow, target: item.targetRow }))).toEqual([
       { footer: 38, target: 38 },
       { footer: 498, target: 498 },
     ]);
     expect(pending[0]?.sectionKey).not.toBe(pending[1]?.sectionKey);
     const writes: ZipCellWrite[] = [
-      { row: first, column: 7, value: "ВІЄРА" },
-      { row: second, column: 7, value: "ПОЧЕПЕЦЬКИЙ" },
+      withTimesheetHistoryInsert({ row: first.row, column: 7, value: "ВІЄРА" }, first),
+      withTimesheetHistoryInsert(
+        { row: second.row, column: 7, value: "ПОЧЕПЕЦЬКИЙ" },
+        second,
+      ),
     ];
     stampTimesheetHistoryInserts(writes, pending);
     expect(writes[0]).toMatchObject({
       row: 38,
       insertRowsBefore: true,
       insertRowCount: 1,
+      insertedRow: true,
     });
     expect(writes[1]).toMatchObject({
       row: 498,
       insertRowsBefore: true,
       insertRowCount: 1,
+      insertedRow: true,
     });
+    expect(writes[0]?.insertGroup).not.toBe(writes[1]?.insertGroup);
   });
 
   it("inserts one row per footer and keeps a lower canonical write on the shifted staff row", async () => {
@@ -198,20 +205,26 @@ describe("multi-section timesheet history inserts", () => {
       pending,
     );
     const writes: ZipCellWrite[] = [
-      {
-        row: historyA,
-        column: 7,
-        value: "ВІЄРА",
-        styleSourceRow: 7,
-        heightSourceRow: 7,
-      },
-      {
-        row: historyB,
-        column: 7,
-        value: "ПОЧЕПЕЦЬКИЙ",
-        styleSourceRow: 353,
-        heightSourceRow: 353,
-      },
+      withTimesheetHistoryInsert(
+        {
+          row: historyA.row,
+          column: 7,
+          value: "ВІЄРА",
+          styleSourceRow: 7,
+          heightSourceRow: 7,
+        },
+        historyA,
+      ),
+      withTimesheetHistoryInsert(
+        {
+          row: historyB.row,
+          column: 7,
+          value: "ПОЧЕПЕЦЬКИЙ",
+          styleSourceRow: 353,
+          heightSourceRow: 353,
+        },
+        historyB,
+      ),
       {
         row: 353,
         column: 2,
@@ -259,5 +272,135 @@ describe("multi-section timesheet history inserts", () => {
     expect(companyCountIf).toBeTruthy();
     expect(companyCountIf).not.toMatch(/I353:I478/);
     expect(companyCountIf).toMatch(/COUNTIF\(\s*I354:I479/i);
+  }, 30_000);
+
+  it("rebases original writes after two history inserts in the same section", async () => {
+    const module = await import(
+      "xlsx-populate/browser/xlsx-populate-no-encryption"
+    );
+    const workbook = await module.default.fromBlankAsync();
+    const sheet = workbook.sheet(0);
+    sheet.name("6. Табель");
+    sheet.cell(1, 1).value("6. Табель");
+    sheet.cell(352, 1).value("'3 ПІХОТНА РОТА");
+    sheet.cell(352, 2).value("3 ПІХОТНА РОТА");
+    sheet.cell(353, 2).value("2103461");
+    sheet.cell(353, 7).value("ДЖЕРЕЛО").style({ fill: "ffff00" });
+    for (let row = 479; row <= 497; row += 1) {
+      sheet.cell(row, 2).value(`2198${row}`);
+    }
+    sheet
+      .cell(498, 1)
+      .value("На продовольчому забезпеченні в 3 ПІХОТНІЙ РОТІ перебуває");
+    sheet.cell(498, 9).formula('COUNTIF(I353:I478,"+")');
+    sheet.cell(499, 1).value("'РБпАК");
+    sheet.cell(499, 2).value("РБпАК");
+    sheet.cell(499, 7).value("СТАРИЙ 499").style({ fill: "5b9bd5" });
+    sheet.cell(500, 2).value("2105001");
+    sheet.cell(500, 7).value("СТАРИЙ 500");
+    const blob = (await workbook.outputAsync("blob")) as Blob;
+
+    const snapshot = twoSectionSheet();
+    const layout = buildTimesheetLayout(snapshot, { formulas: twoSectionFormulas });
+    const reserved = new Set<number>();
+    const insertCountBySection = new Map<string, number>();
+    const pending: PendingHistoryInsert[] = [];
+    const company = resolveCanonicalTimesheetSlot({
+      index: "2103461",
+      layout,
+    });
+    const historyA = takeHistoryTimesheetRow(
+      resolveHistoryTimesheetRow({
+        sourceSlot: company,
+        layout,
+        sheet: snapshot,
+        reserved,
+        insertCountBySection,
+      }),
+      pending,
+    );
+    const historyB = takeHistoryTimesheetRow(
+      resolveHistoryTimesheetRow({
+        sourceSlot: company,
+        layout,
+        sheet: snapshot,
+        reserved,
+        insertCountBySection,
+      }),
+      pending,
+    );
+    expect(historyA.row).toBe(498);
+    expect(historyB.row).toBe(499);
+    const writes: ZipCellWrite[] = [
+      withTimesheetHistoryInsert(
+        {
+          row: historyA.row,
+          column: 7,
+          value: "ІСТОРІЯ A",
+          styleSourceRow: 353,
+          heightSourceRow: 353,
+        },
+        historyA,
+      ),
+      withTimesheetHistoryInsert(
+        {
+          row: historyB.row,
+          column: 7,
+          value: "ІСТОРІЯ B",
+          styleSourceRow: 353,
+          heightSourceRow: 353,
+        },
+        historyB,
+      ),
+      {
+        row: 499,
+        column: 7,
+        value: "ПІСЛЯ ЗСУВУ 499",
+        styleSourceRow: 499,
+        heightSourceRow: 499,
+      },
+      {
+        row: 500,
+        column: 7,
+        value: "ПІСЛЯ ЗСУВУ 500",
+        styleSourceRow: 500,
+        heightSourceRow: 500,
+      },
+    ];
+    stampTimesheetHistoryInserts(writes, pending);
+    expect(writes.filter((write) => write.insertedRow).map((write) => write.row)).toEqual([
+      498, 499,
+    ]);
+    expect(writes.find((write) => write.insertRowsBefore)).toMatchObject({
+      row: 498,
+      insertRowCount: 2,
+    });
+    const nextRowWrite = writes.find(
+      (write) => write.value === "ПІСЛЯ ЗСУВУ 499",
+    );
+    expect(nextRowWrite?.insertedRow).toBeFalsy();
+
+    const next = await applyInlineStringWritesToWorkbook(blob, /табель/i, writes);
+    expect(writes.find((write) => write.value === "ІСТОРІЯ A")?.row).toBe(498);
+    expect(writes.find((write) => write.value === "ІСТОРІЯ B")?.row).toBe(499);
+    expect(nextRowWrite?.row).toBe(501);
+    expect(nextRowWrite?.styleSourceRow).toBe(501);
+    expect(nextRowWrite?.heightSourceRow).toBe(501);
+    const shifted500 = writes.find((write) => write.value === "ПІСЛЯ ЗСУВУ 500");
+    expect(shifted500?.row).toBe(502);
+    expect(shifted500?.styleSourceRow).toBe(502);
+    expect(shifted500?.heightSourceRow).toBe(502);
+
+    const written = await module.default.fromDataAsync(await next.arrayBuffer());
+    const timesheet = written.sheet("6. Табель");
+    expect(String(timesheet.cell(498, 7).value() ?? "")).toBe("ІСТОРІЯ A");
+    expect(String(timesheet.cell(499, 7).value() ?? "")).toBe("ІСТОРІЯ B");
+    expect(String(timesheet.cell(500, 1).value() ?? "")).toMatch(
+      /на продовольчому забезпеченні в 3 піхотній роті/i,
+    );
+    expect(String(timesheet.cell(501, 1).value() ?? "")).toMatch(/рбпак/i);
+    expect(String(timesheet.cell(501, 7).value() ?? "")).toBe("ПІСЛЯ ЗСУВУ 499");
+    expect(String(timesheet.cell(502, 7).value() ?? "")).toBe("ПІСЛЯ ЗСУВУ 500");
+    expect(String(timesheet.cell(499, 7).value() ?? "")).not.toBe("ПІСЛЯ ЗСУВУ 499");
   }, 30_000);
 });

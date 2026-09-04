@@ -45,6 +45,7 @@ import {
   resolveHistoryTimesheetRow,
   stampTimesheetHistoryInserts,
   takeHistoryTimesheetRow,
+  withTimesheetHistoryInsert,
   type PendingHistoryInsert,
   type TimesheetLayout,
 } from "./ejoosTimesheetLayout";
@@ -220,7 +221,7 @@ const collectWrites = (op: EjoosSyncOp, ctx: PositionChangeContext) => {
   );
   if (oldTimesheetRow > 0) {
     if (preserveHistory) {
-      const historyRow = takeHistoryTimesheetRow(
+      const history = takeHistoryTimesheetRow(
         nextTimesheetHistoryInSection(
           timesheet,
           oldTimesheetRow,
@@ -231,13 +232,19 @@ const collectWrites = (op: EjoosSyncOp, ctx: PositionChangeContext) => {
         ),
         ctx.pendingHistoryInserts,
       );
+      const historyRow = history.row;
       for (let column = 1; column <= 40; column += 1) {
-        ctx.timesheetWrites.push({
-          row: historyRow,
-          column,
-          value: valueOf(timesheet.rawRows[oldTimesheetRow - 1]?.[column - 1]),
-          styleSourceRow: oldTimesheetRow,
-        });
+        ctx.timesheetWrites.push(
+          withTimesheetHistoryInsert(
+            {
+              row: historyRow,
+              column,
+              value: valueOf(timesheet.rawRows[oldTimesheetRow - 1]?.[column - 1]),
+              styleSourceRow: oldTimesheetRow,
+            },
+            history,
+          ),
+        );
       }
       let presentDays = 0;
       const historySpans = historyAbsenceSpansForClosedEpisode(
@@ -252,32 +259,47 @@ const collectWrites = (op: EjoosSyncOp, ctx: PositionChangeContext) => {
         } else if (day === departDay) {
           value = formatTimesheetTransferMark(op.payload);
         }
-        ctx.timesheetWrites.push({
-          row: historyRow,
-          column: 8 + day,
-          value,
-          styleSourceRow: oldTimesheetRow,
-          wrapText: typeof value === "string" && /вибув/iu.test(value),
-        });
+        ctx.timesheetWrites.push(
+          withTimesheetHistoryInsert(
+            {
+              row: historyRow,
+              column: 8 + day,
+              value,
+              styleSourceRow: oldTimesheetRow,
+              wrapText: typeof value === "string" && /вибув/iu.test(value),
+            },
+            history,
+          ),
+        );
         ctx.timesheetWrites.push({
           row: oldTimesheetRow,
           column: 8 + day,
           value: null,
         });
       }
-      ctx.timesheetWrites.push({
-        row: historyRow,
-        column: 40,
-        value: presentDays,
-        styleSourceRow: oldTimesheetRow,
-      });
+      ctx.timesheetWrites.push(
+        withTimesheetHistoryInsert(
+          {
+            row: historyRow,
+            column: 40,
+            value: presentDays,
+            styleSourceRow: oldTimesheetRow,
+          },
+          history,
+        ),
+      );
       if (personId && !textAt(timesheet, oldTimesheetRow, 8)) {
-        ctx.timesheetWrites.push({
-          row: historyRow,
-          column: 8,
-          value: personId,
-          styleSourceRow: oldTimesheetRow,
-        });
+        ctx.timesheetWrites.push(
+          withTimesheetHistoryInsert(
+            {
+              row: historyRow,
+              column: 8,
+              value: personId,
+              styleSourceRow: oldTimesheetRow,
+            },
+            history,
+          ),
+        );
       }
     } else {
       for (let day = 1; day <= 31; day += 1) {
@@ -343,7 +365,7 @@ const collectWrites = (op: EjoosSyncOp, ctx: PositionChangeContext) => {
         !historyAlreadySeparate &&
         !isTransferCancel)
     ) {
-      const historyRow = takeHistoryTimesheetRow(
+      const history = takeHistoryTimesheetRow(
         nextTimesheetHistoryInSection(
           timesheet,
           newTimesheetRow,
@@ -354,28 +376,48 @@ const collectWrites = (op: EjoosSyncOp, ctx: PositionChangeContext) => {
         ),
         ctx.pendingHistoryInserts,
       );
+      const historyRow = history.row;
       for (let column = 1; column <= 40; column += 1) {
-        ctx.timesheetWrites.push({
-          row: historyRow,
-          column,
-          value: valueOf(timesheet.rawRows[newTimesheetRow - 1]?.[column - 1]),
-          styleSourceRow: newTimesheetRow,
-        });
+        ctx.timesheetWrites.push(
+          withTimesheetHistoryInsert(
+            {
+              row: historyRow,
+              column,
+              value: valueOf(timesheet.rawRows[newTimesheetRow - 1]?.[column - 1]),
+              styleSourceRow: newTimesheetRow,
+            },
+            history,
+          ),
+        );
       }
       if (otherPerson) {
         for (let day = Math.max(1, departDay); day <= 31; day += 1) {
-          ctx.timesheetWrites.push({
-            row: historyRow,
-            column: 8 + day,
-            value: null,
-            styleSourceRow: newTimesheetRow,
-          });
+          ctx.timesheetWrites.push(
+            withTimesheetHistoryInsert(
+              {
+                row: historyRow,
+                column: 8 + day,
+                value: null,
+                styleSourceRow: newTimesheetRow,
+              },
+              history,
+            ),
+          );
         }
       } else if (preserveHistory && !samePerson) {
         ctx.timesheetWrites.push(
-          { row: historyRow, column: 6, value: rank || null },
-          { row: historyRow, column: 7, value: fullName || null },
-          { row: historyRow, column: 8, value: personId || null },
+          withTimesheetHistoryInsert(
+            { row: historyRow, column: 6, value: rank || null },
+            history,
+          ),
+          withTimesheetHistoryInsert(
+            { row: historyRow, column: 7, value: fullName || null },
+            history,
+          ),
+          withTimesheetHistoryInsert(
+            { row: historyRow, column: 8, value: personId || null },
+            history,
+          ),
         );
       }
       if (preserveHistory && samePerson) {
@@ -402,20 +444,30 @@ const collectWrites = (op: EjoosSyncOp, ctx: PositionChangeContext) => {
               } else if (day <= lastDay) {
                 value = "-";
               }
-              ctx.timesheetWrites.push({
-                row: historyRow,
-                column: 8 + day,
-                value,
-                styleSourceRow: newTimesheetRow,
-                wrapText: typeof value === "string" && /вибув/iu.test(value),
-              });
+              ctx.timesheetWrites.push(
+                withTimesheetHistoryInsert(
+                  {
+                    row: historyRow,
+                    column: 8 + day,
+                    value,
+                    styleSourceRow: newTimesheetRow,
+                    wrapText: typeof value === "string" && /вибув/iu.test(value),
+                  },
+                  history,
+                ),
+              );
             }
-            ctx.timesheetWrites.push({
-              row: historyRow,
-              column: 40,
-              value: presentDays,
-              styleSourceRow: newTimesheetRow,
-            });
+            ctx.timesheetWrites.push(
+              withTimesheetHistoryInsert(
+                {
+                  row: historyRow,
+                  column: 40,
+                  value: presentDays,
+                  styleSourceRow: newTimesheetRow,
+                },
+                history,
+              ),
+            );
           }
         }
       }

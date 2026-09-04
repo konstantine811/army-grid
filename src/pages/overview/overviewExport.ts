@@ -12,6 +12,7 @@ import {
   isBchsTrainingStatus,
   isBchsTreatmentStatus,
   isBchsVacationStatus,
+  isBchsWoundedByExcelNote,
   normalizeBchsText,
 } from "../bchs/bchsCalc";
 import type { EjournalPreviewRow } from "../ejournal/ejournalTypes";
@@ -176,7 +177,8 @@ export type ImportantOverviewSummary = {
   awol: number;
   missing: number;
   killed: number;
-  wounded300: number;
+  treatmentWounded: number;
+  treatmentIllness: number;
   absent: number;
   management: number;
   support: number;
@@ -222,28 +224,34 @@ export const buildImportantOverviewSummary = (
   const awol = count((person) => isBchsAwolStatus(person.status));
   const missing = count((person) => isBchsMissingStatus(person.status));
   const killed = count((person) => isBchsKilledStatus(person.status));
-  const listedNames = new Set(
-    listedPeople.map((person) => canonicalName(person.fullName)).filter(Boolean),
+  const archiveNotesByName = new Map<string, string>();
+  for (const period of archivePeriods) {
+    if (dateMs(period.returnDate)) continue;
+    const name = canonicalName(period.fullName);
+    if (!name) continue;
+    const text = [period.absenceType, period.place].filter(Boolean).join(" ");
+    if (!text) continue;
+    archiveNotesByName.set(
+      name,
+      [archiveNotesByName.get(name), text].filter(Boolean).join("\n"),
+    );
+  }
+  const treatmentNoteText = (person: (typeof listedPeople)[number]) =>
+    [
+      person.medicalNote,
+      person.treatmentNote,
+      person.status,
+      person.medicalPlace,
+      archiveNotesByName.get(canonicalName(person.fullName)) ?? "",
+    ]
+      .filter(Boolean)
+      .join("\n");
+  const treatmentWounded = count(
+    (person) =>
+      isBchsTreatmentStatus(person.status) &&
+      isBchsWoundedByExcelNote(treatmentNoteText(person)),
   );
-  const archiveMatches = (matches: (text: string) => boolean) => {
-    const matchedNames = new Set<string>();
-    for (const period of archivePeriods) {
-      if (dateMs(period.returnDate)) continue;
-      const name = canonicalName(period.fullName);
-      if (!name || !listedNames.has(name)) continue;
-      const text = normalizeBchsText(
-        [period.absenceType, period.place].filter(Boolean).join(" "),
-      );
-      if (matches(text)) matchedNames.add(name);
-    }
-    return matchedNames.size;
-  };
-  const wounded300 = archiveMatches(
-    (text) =>
-      /(?:^|\D)300(?:\D|$)/.test(text) ||
-      text.includes("по поран") ||
-      (text.includes("ліку") && text.includes("поран")),
-  );
+  const treatmentIllness = Math.max(0, treatment - treatmentWounded);
   const absent =
     trainingTrip + detached + treatment + vacation + awol + missing + killed;
 
@@ -258,7 +266,8 @@ export const buildImportantOverviewSummary = (
     awol,
     missing,
     killed,
-    wounded300,
+    treatmentWounded,
+    treatmentIllness,
     absent,
     management: count((person) =>
       normalizeBchsText(person.roleType).includes("упр"),
@@ -317,7 +326,8 @@ export const buildImportantOverviewSummarySheetData = (
     row("Навчання/відрядження", summary.trainingTrip, "#B4C7E7"),
     row("Відкомандировані", summary.detached),
     row("Лікування", summary.treatment, "#F4B6F4"),
-    row("300", summary.wounded300, "#F4B6F4"),
+    row("Лікування по пораненню", summary.treatmentWounded, "#F4B6F4"),
+    row("Лікування по хворобі", summary.treatmentIllness, "#F4B6F4"),
     row("Відпустка/Лікувальна відпустка", summary.vacation, "#F4B6F4"),
     row("СЗЧ", summary.awol, "#C05AE6"),
     row("Зниклі безвісти", summary.missing, "#F4A261"),

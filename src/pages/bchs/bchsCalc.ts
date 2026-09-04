@@ -682,9 +682,16 @@ export const isBchsMissingStatus = (status: string) =>
 export const isBchsKilledStatus = (status: string) =>
   normalizeBchsText(status).includes("загиб");
 
-/** Excel AF/T: «*по пораненню*». */
+/**
+ * Універсальний маркер поранення в примітках / статусі.
+ * Ловить «по пораненню», «поранення», «після поранення», окремий код 300.
+ */
+export const BCHS_WOUNDED_NOTE_RE =
+  /(?:по\s*)?поран(?:ен\w*|\.)|(?:^|[^\d])300(?:[^\d]|$)/i;
+
+/** Excel AF/T / колонка «Примітки»: поранення в будь-якому рядку клітинки. */
 export const isBchsWoundedByExcelNote = (note: string) =>
-  normalizeBchsText(note).includes("по пораненню");
+  BCHS_WOUNDED_NOTE_RE.test(normalizeBchsText(note));
 
 const isBchsExcelHospitalPlace = (medicalPlace: string) =>
   normalizeBchsText(medicalPlace).includes("шпитал");

@@ -20,6 +20,7 @@ import {
 import { formatTimesheetTransferMark } from "./ejoosExcludedColumns";
 import { positionCloseWritesExcluded } from "./ejoosExcludePolicy";
 import { buildSheetRowPreviews } from "./ejoosSheetRowPreview";
+import { timesheetActionPreview } from "./ejoosTimesheetTransferAction";
 import { timesheetOpNeedsManualCode } from "./ejoosOpRequirements";
 import { EJOOS_TIMESHEET_CODES } from "./ejoosRules";
 import { dayFromOrderLabel } from "./ejoosTimesheetText";
@@ -238,6 +239,9 @@ export function PersonChangeCard({
     [person.ops, person.timesheetPreview, timesheetDay],
   );
   const excludeOp = person.ops.find((op) => op.kind === "exclude_transfer");
+  const timesheetAction = excludeOp
+    ? timesheetActionPreview(excludeOp.payload)
+    : null;
   const needsDestination = Boolean(
     excludeOp && !excludeOp.payload.destination?.trim(),
   );
@@ -470,6 +474,14 @@ export function PersonChangeCard({
               </span>
             )}
           </div>
+          {timesheetAction ? (
+            <div className="ejoos-timesheet-action-tech">
+              <span className="ejoos-stat-label">Табель</span>
+              <pre>
+                {`sourceIndex: ${timesheetAction.sourceIndex || "—"}\nsourceRow: ${timesheetAction.sourceRow ? `R${timesheetAction.sourceRow}` : "—"}\nsourceSection: ${timesheetAction.sourceSection || "—"}\naction: ${timesheetAction.action}\ntargetHistoryRow: ${timesheetAction.targetHistoryRow ? `R${timesheetAction.targetHistoryRow}` : "—"}`}
+              </pre>
+            </div>
+          ) : null}
           {excludeOp.payload.basisNumber || excludeOp.payload.basisDate ? (
             <Typography variant="body2" className="ejoos-muted" sx={{ mb: 1 }}>
               Документ-підстава з РУХ:{" "}

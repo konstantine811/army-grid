@@ -1560,6 +1560,13 @@ function applyExcludeTransfer(input: {
   ) {
     timesheetRow = 0;
   }
+  if (
+    timesheetRow <= 0 &&
+    !timesheetWritePlan.createTimesheetHistory &&
+    !timesheetWritePlan.replaceInPlace
+  ) {
+    throw new Error("EXTERNAL_TRANSFER_WITHOUT_TIMESHEET_ACTION");
+  }
 
   // 1) Виключені — A:AA переносимо з ООС, AB:AF дописуємо з Рух
   if (excluded && !op.payload.excludedExcelRow) {

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { isBchsWoundedByExcelNote } from "../bchs/bchsCalc";
 import {
   buildImportantOverviewExportFileName,
   buildImportantOverviewSummary,
@@ -284,6 +285,8 @@ describe("overviewExport", () => {
       staff: 3,
       listed: 2,
       treatment: 1,
+      treatmentWounded: 0,
+      treatmentIllness: 1,
       vacation: 1,
       absent: 2,
       management: 1,
@@ -292,7 +295,12 @@ describe("overviewExport", () => {
       available: 0,
       inRanks: 0,
     });
-    expect(buildImportantOverviewSummarySheetData(summary)).toHaveLength(22);
+    expect(buildImportantOverviewSummarySheetData(summary)).toHaveLength(23);
+    expect(
+      buildImportantOverviewSummarySheetData(summary).some(
+        (row) => row[0] && "value" in row[0] && row[0].value === "300",
+      ),
+    ).toBe(false);
 
     const sheets = buildImportantOverviewExportSheets(
       [],
@@ -331,7 +339,7 @@ describe("overviewExport", () => {
     expect(summary.available).toBe(1);
   });
 
-  it("counts open 300 periods from 1PB archive for the selected unit", () => {
+  it("splits Лікування by a universal wounding note regex", () => {
     const filters = {
       activeFilters: [
         { id: "unit", label: "Підрозділ", values: ["2 рота"] },
@@ -342,16 +350,76 @@ describe("overviewExport", () => {
         __dbRowId: "1",
         column_2: "2 рота",
         column_14: "Іванов Іван Іванович",
+        column_21: "Лікування",
+        column_32: "ПРИБУВ 14.06.26 Полі Б\nпо пораненню",
       },
       {
         __dbRowId: "2",
         column_2: "2 рота",
         column_14: "Петренко Петро Петрович",
+        column_21: "Лікування",
+        column_32: "повернули після СЗЧ 24.05.26\nпо пораненню",
+      },
+      {
+        __dbRowId: "3",
+        column_2: "2 рота",
+        column_14: "Сидоренко Сидір Сидорович",
+        column_21: "Лікування",
+        column_32: "по хворобі\nприбув після СЗЧ 10.08.2026",
+      },
+      {
+        __dbRowId: "4",
+        column_2: "2 рота",
+        column_14: "Коваленко Костянтин",
+        column_21: "Лікування",
+        column_32: "на навчання по зв'язку з Зимою\n20.02.26\nна лікування 10.08.2026",
+      },
+      {
+        __dbRowId: "5",
+        column_2: "2 рота",
+        column_14: "Мельник Максим",
+        column_21: "Лікування",
+        column_32: "поранення\nВодій квадроциклу",
+      },
+      {
+        __dbRowId: "6",
+        column_2: "3 рота",
+        column_14: "Інший Іван",
+        column_21: "Лікування",
+        column_32: "по пораненню",
+      },
+    ] as never[];
+
+    const summary = buildImportantOverviewSummary(rosterRows, filters);
+    expect(summary.treatment).toBe(5);
+    expect(summary.treatmentWounded).toBe(3);
+    expect(summary.treatmentIllness).toBe(2);
+  });
+
+  it("also sees поранення from an open 1PB archive period for a treatment person", () => {
+    const filters = {
+      activeFilters: [
+        { id: "unit", label: "Підрозділ", values: ["2 рота"] },
+      ],
+    };
+    const rosterRows = [
+      {
+        __dbRowId: "1",
+        column_2: "2 рота",
+        column_14: "Іванов Іван Іванович",
+        column_21: "Лікування",
+      },
+      {
+        __dbRowId: "2",
+        column_2: "2 рота",
+        column_14: "Петренко Петро Петрович",
+        column_21: "Лікування",
       },
       {
         __dbRowId: "3",
         column_2: "3 рота",
         column_14: "Сидоренко Сидір Сидорович",
+        column_21: "Лікування",
       },
     ] as never[];
     const archivePeriods = [
@@ -381,6 +449,31 @@ describe("overviewExport", () => {
       archivePeriods,
     );
 
-    expect(summary.wounded300).toBe(1);
+    expect(summary.treatmentWounded).toBe(1);
+    expect(summary.treatmentIllness).toBe(1);
+  });
+
+  it("matches wounding notes in any line of the cell", () => {
+    const wounded = [
+      "по пораненню",
+      "ПРИБУВ 14.06.26 Полі Б\nпо пораненню",
+      "повернули після СЗЧ 24.05.26\nпо пораненню",
+      "поранення\nВодій квадроциклу",
+      "лікування після поранення",
+      "300",
+    ];
+    const notWounded = [
+      "по хворобі\nприбув після СЗЧ 10.08.2026",
+      "на лікування 10.08.2026",
+      "ТРАНЗИТЕР",
+      "НРК/ мультикам",
+      "вибув до Бобра з МР 10.12.2025",
+    ];
+    for (const note of wounded) {
+      expect(isBchsWoundedByExcelNote(note), note).toBe(true);
+    }
+    for (const note of notWounded) {
+      expect(isBchsWoundedByExcelNote(note), note).toBe(false);
+    }
   });
 });

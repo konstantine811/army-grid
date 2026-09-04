@@ -38,7 +38,8 @@ export type TimesheetLayoutErrorCode =
   | "SOURCE_SLOT_MISSING"
   | "SLOT_OCCUPIED_CONFLICT"
   | "SECTION_HISTORY_FULL"
-  | "HISTORY_INSIDE_CANONICAL";
+  | "HISTORY_INSIDE_CANONICAL"
+  | "TIMESHEET_CANONICAL_RANGE_MISMATCH";
 
 export class TimesheetLayoutError extends Error {
   code: TimesheetLayoutErrorCode;
@@ -90,7 +91,10 @@ export type TimesheetSection = {
 };
 
 export type TimesheetLayoutIssue = {
-  code: "TIMESHEET_SLOT_AMBIGUOUS" | "TIMESHEET_SECTION_RANGE_UNKNOWN";
+  code:
+    | "TIMESHEET_SLOT_AMBIGUOUS"
+    | "TIMESHEET_SECTION_RANGE_UNKNOWN"
+    | "TIMESHEET_CANONICAL_RANGE_MISMATCH";
   index?: string;
   section?: string;
   rows: number[];
@@ -145,7 +149,7 @@ export const parseCountIfStaffRange = (formula: string) => {
 export const extractSheetFormulasByCell = (sheetXml: string) => {
   const formulas = new Map<string, string>();
   const cellRe =
-    /<c\b([^<>]*\br="([A-Z]{1,3}\d+)"(?![0-9A-Za-z])[^<>]*)(\/\s*>|>[\s\S]*?<\/c>)/gi;
+    /<c\b([^<>]*\br="([A-Z]{1,3}\d+)"(?![0-9A-Za-z])[^<>/]*)(\/\s*>|>[\s\S]*?<\/c>)/gi;
   for (const cell of sheetXml.matchAll(cellRe)) {
     const ref = cell[2].toUpperCase();
     const inner = cell[3] || "";
@@ -280,6 +284,15 @@ export const buildTimesheetLayout = (
     if (countIf) {
       canonicalStart = countIf.start;
       canonicalEnd = countIf.end;
+      // COUNTIF often starts at the first platoon/body row and skips company HQ
+      // (командир роти на R46 при формулі I47:I…). Those rows are still staff.
+      for (let row = section.headerRow + 1; row < countIf.start && row < footer; row += 1) {
+        if (isTimesheetSummaryRowAt(view, row)) break;
+        if (isTimesheetUnitHeaderRow(view, row)) continue;
+        if (!isPositionIndex(cellAt(view, row, 2))) continue;
+        canonicalStart = row;
+        break;
+      }
     } else if (footerIsSummary) {
       issues.push({
         code: "TIMESHEET_SECTION_RANGE_UNKNOWN",
@@ -382,6 +395,42 @@ export const buildTimesheetLayout = (
     }
   }
 
+  const shpoIndexes = new Set(
+    [...(options?.shpoIndexes ?? [])].map((index) => String(index).trim()).filter(Boolean),
+  );
+  if (shpoIndexes.size) {
+    const rowsByIndex = new Map<string, number[]>();
+    for (let row = DATA_START_ROW; row <= lastRow; row += 1) {
+      const index = cellAt(view, row, 2);
+      if (!isPositionIndex(index) || !shpoIndexes.has(index)) continue;
+      const rows = rowsByIndex.get(index) ?? [];
+      rows.push(row);
+      rowsByIndex.set(index, rows);
+    }
+    for (const [index, rows] of rowsByIndex) {
+      if (byIndex[index]) continue;
+      if (
+        issues.some(
+          (issue) =>
+            issue.index === index && issue.code === "TIMESHEET_SLOT_AMBIGUOUS",
+        )
+      ) {
+        continue;
+      }
+      const onlyAfterCanonical = rows.every((row) => {
+        const section = sectionByRow.get(row);
+        if (!section) return true;
+        return row > section.canonicalEndRow;
+      });
+      if (!onlyAfterCanonical) continue;
+      issues.push({
+        code: "TIMESHEET_CANONICAL_RANGE_MISMATCH",
+        index,
+        rows,
+      });
+    }
+  }
+
   return { sections, byIndex, sectionByRow, issues };
 };
 
@@ -467,11 +516,21 @@ export const assertTimesheetLayoutReadyForApply = (layout: TimesheetLayout) => {
   const unknown = layout.issues.find(
     (issue) => issue.code === "TIMESHEET_SECTION_RANGE_UNKNOWN",
   );
-  if (!unknown) return;
+  if (unknown) {
+    throw new TimesheetLayoutError(
+      "TIMESHEET_SECTION_RANGE_UNKNOWN",
+      `Не прочитано COUNTIF штатного діапазону для секції «${unknown.section || "—"}» (підсумок R${unknown.rows[0] ?? "?"}). Apply заблоковано.`,
+      { section: unknown.section, rows: unknown.rows },
+    );
+  }
+  const mismatch = layout.issues.find(
+    (issue) => issue.code === "TIMESHEET_CANONICAL_RANGE_MISMATCH",
+  );
+  if (!mismatch) return;
   throw new TimesheetLayoutError(
-    "TIMESHEET_SECTION_RANGE_UNKNOWN",
-    `Не прочитано COUNTIF штатного діапазону для секції «${unknown.section || "—"}» (підсумок R${unknown.rows[0] ?? "?"}). Apply заблоковано.`,
-    { section: unknown.section, rows: unknown.rows },
+    "TIMESHEET_CANONICAL_RANGE_MISMATCH",
+    `Індекс ${mismatch.index} є в Табелі (R${mismatch.rows.join(", R")}), але поза штатним COUNTIF-діапазоном. Apply заблоковано.`,
+    { index: mismatch.index, rows: mismatch.rows },
   );
 };
 
@@ -541,18 +600,41 @@ export const resolveHistoryTimesheetRow = (input: {
   };
 };
 
+export type TimesheetHistoryWriteTarget = {
+  row: number;
+  insertedRow?: boolean;
+  insertGroup?: string;
+};
+
 export const takeHistoryTimesheetRow = (
   placement: TimesheetHistoryPlacement,
   pendingInserts: PendingHistoryInsert[],
-) => {
+): TimesheetHistoryWriteTarget => {
   if (placement.insertBefore) {
     pendingInserts.push({
       sectionKey: placement.sectionKey,
       footerRow: placement.footerRow,
       targetRow: placement.row,
     });
+    return {
+      row: placement.row,
+      insertedRow: true,
+      insertGroup: placement.sectionKey,
+    };
   }
-  return placement.row;
+  return { row: placement.row };
+};
+
+export const withTimesheetHistoryInsert = <T extends { row: number }>(
+  write: T,
+  target: TimesheetHistoryWriteTarget,
+): T => {
+  if (!target.insertedRow) return write;
+  return {
+    ...write,
+    insertedRow: true,
+    insertGroup: target.insertGroup,
+  };
 };
 
 export const stampTimesheetHistoryInserts = (
@@ -560,6 +642,8 @@ export const stampTimesheetHistoryInserts = (
     row: number;
     insertRowsBefore?: boolean;
     insertRowCount?: number;
+    insertedRow?: boolean;
+    insertGroup?: string;
   }>,
   pendingInserts: PendingHistoryInsert[],
 ) => {
@@ -571,11 +655,12 @@ export const stampTimesheetHistoryInserts = (
     byFooter.set(item.footerRow, list);
   }
   for (const [footerRow, group] of byFooter) {
+    const sectionKey = group[0]?.sectionKey ?? "";
+    const historyWrites = writes.filter(
+      (write) => write.insertedRow && write.insertGroup === sectionKey,
+    );
     const first =
-      writes.find((write) => write.row === footerRow) ||
-      writes.find((write) =>
-        group.some((item) => item.targetRow === write.row),
-      );
+      historyWrites.find((write) => write.row === footerRow) || historyWrites[0];
     if (!first) continue;
     first.insertRowsBefore = true;
     first.insertRowCount = group.length;
