@@ -41,6 +41,8 @@ export type ZipCellWrite = {
   styleOnly?: boolean;
   /** Зсунути рядки вниз і вставити новий рядок на цій позиції (перед summary/наступною секцією). */
   insertRowsBefore?: boolean;
+  /** Скільки фізичних рядків вставити, якщо insertRowsBefore. За замовчуванням 1. */
+  insertRowCount?: number;
 };
 
 const escapeXml = (value: string) =>
@@ -1147,8 +1149,10 @@ export async function applyInlineStringWritesToWorkbook(
   });
   for (const write of resolvedWrites) {
     if (!write.insertRowsBefore) continue;
-    sheetXml = shiftSheetRowsDown(sheetXml, write.row, 1);
-    bumpWriteRowNumbers(resolvedWrites, write.row, 1);
+    const count = Math.max(1, write.insertRowCount ?? 1);
+    sheetXml = shiftSheetRowsDown(sheetXml, write.row, count);
+    bumpWriteRowNumbers(resolvedWrites, write.row + count - 1, count);
+    write.insertRowsBefore = false;
   }
   const byRow = new Map<number, ZipCellWrite[]>();
   for (const write of resolvedWrites) {

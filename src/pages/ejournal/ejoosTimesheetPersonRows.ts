@@ -5,6 +5,7 @@ import {
   type ExcelWorkbookSnapshot,
 } from "../../excelRoundTrip";
 import { canonicalName, normId } from "./ejoosIdentity";
+import { extractSheetFormulasByCell } from "./ejoosTimesheetLayout";
 import { resolveSheetPath } from "./ejoosZipCellWrites";
 
 const LEFTOVER_NOTE = /вибув|переведен|згідно|розпорядж/i;
@@ -187,23 +188,35 @@ export const pickTimesheetKeepRow = (
 export const uniqueExcelRows = (rows: number[]) =>
   [...new Set(rows.filter((row) => row > 0))].sort((left, right) => left - right);
 
-export const loadTimesheetGridFromFile = async (
+export const loadTimesheetSheetArtifacts = async (
   file: Blob | File | undefined,
   sheetName: string,
 ) => {
-  if (!file || !sheetName) return [];
+  const empty = {
+    grid: [] as unknown[][],
+    formulas: new Map<string, string>(),
+  };
+  if (!file || !sheetName) return empty;
   try {
     const zip = await JSZip.loadAsync(await file.arrayBuffer());
     const path = await resolveSheetPath(zip, sheetName);
-    if (!path) return [];
+    if (!path) return empty;
     const sheetXml = (await zip.file(path)?.async("string")) || "";
     const sstXml =
       (await zip.file("xl/sharedStrings.xml")?.async("string")) || "";
-    return buildSheetGridFromXml(sheetXml, sstXml);
+    return {
+      grid: buildSheetGridFromXml(sheetXml, sstXml),
+      formulas: extractSheetFormulasByCell(sheetXml),
+    };
   } catch {
-    return [];
+    return empty;
   }
 };
+
+export const loadTimesheetGridFromFile = async (
+  file: Blob | File | undefined,
+  sheetName: string,
+) => (await loadTimesheetSheetArtifacts(file, sheetName)).grid;
 
 /** Рядки Табеля поза usedRange (дописана історія внизу) підмішуємо в snapshot. */
 export const hydrateEjoosTimesheetSnapshot = async (

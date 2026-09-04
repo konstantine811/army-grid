@@ -1,12 +1,17 @@
 import { describe, expect, it } from "vitest";
 import type { EjournalPreviewRow } from "../ejournal/ejournalTypes";
 import {
+  actApprovalDateLine,
   createLostMilitaryIdFields,
   declinedInvestigator,
+  instrumentalInvestigatorLine,
+  investigatorFooterBlock,
+  investigatorFooterLines,
   investigatorFromPersonnelRow,
   mergeLostMilitaryIdFields,
   militaryUnitLabel,
   normalizeMilitaryUnitPhrase,
+  splitLostMilitaryIdSignatory,
 } from "./lostMilitaryIdReport";
 import { buildPersonSummary } from "../personnel/personnelUtils";
 
@@ -85,5 +90,57 @@ describe("mergeLostMilitaryIdFields investigator mode", () => {
     });
     expect(merged.investigatorPosition.startsWith("К")).toBe(true);
     expect(declinedInvestigator(merged).position.startsWith("К")).toBe(true);
+  });
+});
+
+describe("act document blocks", () => {
+  it("uses instrumental case for investigator in act intro", () => {
+    const fields = mergeLostMilitaryIdFields(
+      createLostMilitaryIdFields(null, buildPersonSummary(null)),
+      {
+        investigatorFullName: "ПАЛЮХ Олег",
+        investigatorRank: "старший лейтенант",
+        investigatorPosition:
+          "заступник командира роти вогневої підтримки з психологічної підтримки персоналу",
+      },
+    );
+    const line = instrumentalInvestigatorLine(fields);
+    expect(line).toMatch(/заступником/i);
+    expect(line).toMatch(/старшим лейтенантом/i);
+    expect(line).toMatch(/Олегом/i);
+  });
+
+  it("splits investigator footer into nominative position lines", () => {
+    const fields = mergeLostMilitaryIdFields(
+      createLostMilitaryIdFields(null, buildPersonSummary(null)),
+      {
+        investigatorPosition:
+          "заступник командира роти вогневої підтримки з психологічної підтримки персоналу",
+      },
+    );
+    expect(investigatorFooterLines(fields)).toEqual([
+      "Заступник командира роти вогневої підтримки",
+      "з психологічної підтримки персоналу:",
+    ]);
+  });
+
+  it("fills approval block from signatory settings", () => {
+    const parts = splitLostMilitaryIdSignatory({
+      blockType: "APPROVAL",
+      title: "Командир військової частини А4862\nстарший лейтенант",
+      rank: "",
+      fullName: "Дмитро СЕМЕНЮК",
+    });
+    expect(parts.titleLines).toEqual(["Командир військової частини А4862"]);
+    expect(parts.rank).toBe("старший лейтенант");
+    expect(parts.fullName).toMatch(/СЕМЕНЮК/i);
+  });
+
+  it("formats approval date from order date", () => {
+    const fields = mergeLostMilitaryIdFields(
+      createLostMilitaryIdFields(null, buildPersonSummary(null)),
+      { orderDate: "15.11.2025" },
+    );
+    expect(actApprovalDateLine(fields)).toBe("«15»  листопада  2025 року");
   });
 });

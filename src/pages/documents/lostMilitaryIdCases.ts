@@ -184,6 +184,23 @@ export const toUkrainianInstrumentalPosition = (position: string) => {
   return capitalizeReportPosition([instrumentalFirst, ...rest].join(" "));
 };
 
+/** Знахідний → називний (для підпису внизу акту). */
+export const toUkrainianNominativePosition = (position: string) => {
+  const text = position.trim();
+  if (!text) return "";
+  const [first, ...rest] = text.split(/\s+/);
+  const key = first.toLocaleLowerCase("uk-UA");
+  let nominativeFirst = key;
+  if (key.endsWith("ому") || key.endsWith("ему")) {
+    nominativeFirst = `${key.slice(0, -3)}ий`;
+  } else if (key.endsWith("ю")) {
+    nominativeFirst = key.slice(0, -1);
+  } else if (key.endsWith("у") && key.length > 3) {
+    nominativeFirst = key.slice(0, -1);
+  }
+  return capitalizeReportPosition([nominativeFirst, ...rest].join(" "));
+};
+
 /** «Андрій КІЯНЕНКО» / «КІЯНЕНКО Андрій» → «Андрія КІЯНЕНКА». */
 export const toUkrainianGenitiveGivenSurname = (fullName: string) => {
   const parts = splitName(fullName);

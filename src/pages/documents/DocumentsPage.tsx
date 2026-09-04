@@ -196,6 +196,8 @@ import {
 import { PersonnelNamePicker } from "./PersonnelNamePicker";
 import {
   createLostMilitaryIdReportWordBlob,
+  createLostMilitaryIdOrderWordBlob,
+  createLostMilitaryIdActWordBlob,
   createLostMilitaryIdKitZip,
 } from "./lostMilitaryIdWordExport";
 
@@ -2014,6 +2016,28 @@ export function DocumentsPage(_props: {
     mode === "zhbdCertificate" ||
     mode === "ubdRestoreReport" ||
     mode === "lostMilitaryId";
+  const [lostMilitaryIdPreviewDoc, setLostMilitaryIdPreviewDoc] = useState<
+    "report" | "order" | "act"
+  >("report");
+  useEffect(() => {
+    if (mode !== "lostMilitaryId") return;
+    const step = resolveDocumentWorkflowStatus(
+      "lostMilitaryId",
+      workflow.currentStatus,
+    );
+    if (step === "order") setLostMilitaryIdPreviewDoc("order");
+    else if (step === "act" || step === "received" || step === "handed") {
+      setLostMilitaryIdPreviewDoc("act");
+    } else {
+      setLostMilitaryIdPreviewDoc("report");
+    }
+  }, [mode, workflow.currentStatus]);
+  const lostMilitaryIdPreviewLabel =
+    lostMilitaryIdPreviewDoc === "order"
+      ? "Наказ"
+      : lostMilitaryIdPreviewDoc === "act"
+        ? "Акт"
+        : "Рапорт";
   const buildActiveWordBlob = useCallback(() => {
     if (mode === "ubdReport") return createUbdWordBlob(ubdWordFields);
     if (mode === "form6Report") return createForm6WordBlob(form6Fields);
@@ -2028,6 +2052,12 @@ export function DocumentsPage(_props: {
       return createUbdRestoreWordBlob(ubdRestoreFields);
     }
     if (mode === "lostMilitaryId") {
+      if (lostMilitaryIdPreviewDoc === "order") {
+        return createLostMilitaryIdOrderWordBlob(lostMilitaryIdFields);
+      }
+      if (lostMilitaryIdPreviewDoc === "act") {
+        return createLostMilitaryIdActWordBlob(lostMilitaryIdFields);
+      }
       return createLostMilitaryIdReportWordBlob(lostMilitaryIdFields);
     }
     return Promise.reject(new Error("Немає Word-шаблону для цього документа."));
@@ -2035,6 +2065,7 @@ export function DocumentsPage(_props: {
     form12Fields,
     form6Fields,
     lostMilitaryIdFields,
+    lostMilitaryIdPreviewDoc,
     mode,
     serviceCharacteristicFields,
     zhbdCertificateFields,
@@ -6466,7 +6497,37 @@ export function DocumentsPage(_props: {
 
   const wordPreviewPanel = selectedDocument ? (
     <section className="analytics-panel document-preview">
-      <div className="panel-heading">Попередній перегляд Word</div>
+      <div className="panel-heading">
+        {mode === "lostMilitaryId"
+          ? `Попередній перегляд Word · ${lostMilitaryIdPreviewLabel}`
+          : "Попередній перегляд Word"}
+      </div>
+      {mode === "lostMilitaryId" ? (
+        <>
+          <Stack direction="row" spacing={1} sx={{ mb: 1 }}>
+            {(
+              [
+                ["report", "Рапорт"],
+                ["order", "Наказ"],
+                ["act", "Акт"],
+              ] as const
+            ).map(([key, label]) => (
+              <Button
+                key={key}
+                size="small"
+                variant={lostMilitaryIdPreviewDoc === key ? "contained" : "outlined"}
+                onClick={() => setLostMilitaryIdPreviewDoc(key)}
+              >
+                {label}
+              </Button>
+            ))}
+          </Stack>
+          <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1 }}>
+            «Сформувати комплект» завантажує три окремі .docx у ZIP. Новий формат акту — з
+            «ЗАТВЕРДЖУЮ» зверху; відкрийте файл «… · Акт.docx».
+          </Typography>
+        </>
+      ) : null}
       <WordDocumentPreview
         blob={wordPreview.blob}
         error={wordPreview.error}

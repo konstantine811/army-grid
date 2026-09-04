@@ -14,9 +14,11 @@ import {
   toUkrainianInstrumentalFullName,
   toUkrainianInstrumentalPosition,
   toUkrainianInstrumentalRank,
+  toUkrainianNominativePosition,
 } from "./lostMilitaryIdCases";
 import { toUkrainianDativePosition } from "./form12Report";
 import { capitalizeReportPosition } from "./reportPosition";
+import { formatPositionTitleBlock } from "./ubdRestoreReport";
 
 export const lostMilitaryIdWorkflowSteps = [
   { key: "document", title: "Заповнили рапорт" },
@@ -230,6 +232,110 @@ export const reportSignerOf = (fields: LostMilitaryIdFields) =>
   fields.signatories.find((item) => item.blockType === "SIGNER") ??
   fields.signatories[0] ??
   null;
+
+export const approvalSignatoryOf = (fields: LostMilitaryIdFields) =>
+  fields.signatories.find((item) => item.blockType === "APPROVAL") ?? null;
+
+const RANK_IN_SIGNATORY_TITLE =
+  /(головний майстер-сержант|старший майстер-сержант|майстер-сержант|штаб-сержант|головний сержант|старший сержант|молодший сержант|старший лейтенант|молодший лейтенант|старший солдат|підполковник|полковник|лейтенант|сержант|капітан|майор|солдат)$/iu;
+
+export const splitLostMilitaryIdSignatory = (
+  signatory: LostMilitaryIdSignatory | null,
+) => {
+  if (!signatory) {
+    return {
+      titleLines: [] as string[],
+      rank: "",
+      fullName: "",
+      signatureData: "",
+    };
+  }
+  const lines = signatory.title
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  let rank = signatory.rank.trim();
+  const titleLines: string[] = [];
+  for (const line of lines) {
+    const tail = line.match(RANK_IN_SIGNATORY_TITLE);
+    if (tail && !rank) {
+      rank = tail[1];
+      const head = line.slice(0, -tail[1].length).trim();
+      if (head) titleLines.push(head);
+      continue;
+    }
+    if (
+      rank &&
+      line.toLocaleLowerCase("uk-UA") === rank.toLocaleLowerCase("uk-UA")
+    ) {
+      continue;
+    }
+    titleLines.push(line);
+  }
+  return {
+    titleLines,
+    rank,
+    fullName: formatNominativeGivenSurname(signatory.fullName),
+    signatureData: signatory.signatureData?.trim() ?? "",
+  };
+};
+
+export const actApprovalDateLine = (fields: LostMilitaryIdFields) => {
+  const long = formatUaLongDate(fields.orderDate || fields.reportDate);
+  const match = long.match(/^(\d{1,2})\s+(\S+)\s+(\d{4})/);
+  if (!match) return "«____» ______________ ______ року";
+  return `«${match[1].padStart(2, " ")}»  ${match[2]}  ${match[3]} року`;
+};
+
+export const instrumentalInvestigatorLine = (fields: LostMilitaryIdFields) => {
+  const nominative = toUkrainianNominativePosition(fields.investigatorPosition);
+  const position = toUkrainianInstrumentalPosition(
+    nominative || fields.investigatorPosition,
+  );
+  const rank =
+    toUkrainianInstrumentalRank(fields.investigatorRank) ||
+    fields.investigatorRank.trim();
+  const name =
+    toUkrainianInstrumentalFullName(fields.investigatorFullName) ||
+    fields.investigatorFullName.trim();
+  return joinSpaced(position, rank, name);
+};
+
+export const investigatorFooterLines = (fields: LostMilitaryIdFields) => {
+  const nominative = toUkrainianNominativePosition(fields.investigatorPosition);
+  const text = capitalizeReportPosition(
+    nominative || fields.investigatorPosition,
+  );
+  if (!text) return [] as string[];
+  if (text.includes("\n")) {
+    return text
+      .split(/\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+  }
+  const blocked = formatPositionTitleBlock(text);
+  if (blocked.includes("\n")) {
+    return blocked
+      .split(/\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+  }
+  const zSplit = text.match(/^(.*?)\s+(з\s+[а-яіїєґ].*)$/iu);
+  if (zSplit) {
+    const second = zSplit[2].trim();
+    return [
+      zSplit[1].trim(),
+      second.endsWith(":") ? second : `${second}:`,
+    ];
+  }
+  return [text];
+};
+
+export const investigatorFooterBlock = (fields: LostMilitaryIdFields) => ({
+  titleLines: investigatorFooterLines(fields),
+  rank: fields.investigatorRank.trim(),
+  name: formatNominativeGivenSurname(fields.investigatorFullName),
+});
 
 export const formatReporterTitleLines = (title: string, rank = "") => {
   const explicit = title

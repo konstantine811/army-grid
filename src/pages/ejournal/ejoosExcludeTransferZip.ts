@@ -23,15 +23,17 @@ import {
   type ZipCellWrite,
 } from "./ejoosZipCellWrites";
 import {
-  findDepartureAppendBounds,
-  findTimesheetAppendRowForUnit,
-  stripTimesheetDivisionLabel,
-  timesheetAppendNeedsRowInsert,
-  timesheetRowInExpectedUnitSection,
-} from "./ejoosTimesheetUnitSections";
+  assertHistoryRowsOutsideCanonical,
+  buildTimesheetLayout,
+  resolveCanonicalTimesheetSlot,
+  resolveHistoryTimesheetRow,
+  stampTimesheetHistoryInserts,
+  takeHistoryTimesheetRow,
+} from "./ejoosTimesheetLayout";
+import { stripTimesheetDivisionLabel } from "./ejoosTimesheetUnitSections";
 import {
   findTimesheetPersonRowsInGrid,
-  loadTimesheetGridFromFile,
+  loadTimesheetSheetArtifacts,
   mergeTimesheetGrids,
   placementSheetFromMergedGrid,
   pickTimesheetKeepRow,
@@ -44,7 +46,6 @@ import {
   timesheetTransferMarkForDay,
 } from "./ejoosTimesheetText";
 import { excludeWritePlan } from "./ejoosExcludePolicy";
-import { logTimesheetDebugDump } from "./ejoosTimesheetDebugDump";
 
 const valueOf = (value: CellValue | unknown): string | number | null => {
   if (value === undefined || value === null || value === "") return null;
@@ -156,14 +157,22 @@ const nextTimesheetHistoryRow = (
   sheet: ExcelSheetSnapshot,
   sourceRow: number,
   reserved: Set<number>,
-  positionTitle = "",
-) =>
-  findTimesheetAppendRowForUnit(sheet, {
+  layout: ReturnType<typeof buildTimesheetLayout>,
+  sourceIndex = "",
+  grid?: Array<unknown[] | undefined>,
+) => {
+  const sourceSlot = sourceIndex
+    ? resolveCanonicalTimesheetSlot({ index: sourceIndex, layout })
+    : null;
+  return resolveHistoryTimesheetRow({
+    sourceSlot,
     sourceRow,
-    positionTitle,
+    layout,
+    sheet,
+    grid,
     reserved,
-    placementScope: "company",
   });
+};
 
 const excludedNumberValue = (
   column: number,
@@ -402,13 +411,13 @@ export async function applyExcludeTransfersWithZip(input: {
     : null;
   const reservedTimesheetRows = new Set<number>();
   const writtenTimesheetByPerson = new Map<string, number[]>();
-  const timesheetXmlGrid = await loadTimesheetGridFromFile(
+  const timesheetArtifacts = await loadTimesheetSheetArtifacts(
     ejoos.file,
     timesheet.sheetName,
   );
   const timesheetGrid = mergeTimesheetGrids(
     timesheet.rawRows,
-    timesheetXmlGrid,
+    timesheetArtifacts.grid,
   );
   const timesheetForPlacement = placementSheetFromMergedGrid(
     timesheet,
@@ -420,6 +429,12 @@ export async function applyExcludeTransfersWithZip(input: {
     excludedRow,
   );
   const shpoRows = parseEjoosShpo(shpo);
+  const timesheetLayout = buildTimesheetLayout(timesheetForPlacement, {
+    grid: timesheetGrid,
+    shpoIndexes: shpoRows.map((row) => row.positionIndex),
+    formulas: timesheetArtifacts.formulas,
+  });
+  const pendingHistoryInserts: number[] = [];
 
   for (const op of ops) {
     const personId = personIdFromShpo(shpoRows, {
@@ -540,7 +555,6 @@ export async function applyExcludeTransfersWithZip(input: {
       return valueOf(timesheetGrid[row - 1]?.[column - 1]);
     };
     const copyTimesheetRow = (sourceRow: number, targetRow: number) => {
-      markTimesheetInsertIfNeeded(targetRow);
       // Колонка A — повтор роти/батальйону на рядку даних (не заголовок наступної секції).
       timesheetWrites.push({
         row: targetRow,
@@ -633,95 +647,47 @@ export async function applyExcludeTransfersWithZip(input: {
         timesheetStyledWrite(targetRow, 40, presentDays, styleRow, 40),
       );
     };
-    const unitPlacementTitle = String(op.payload.positionTitle || "").trim();
     const sourceRow = timesheetKeepRow || plannedKeep;
-    const historyMisplaced =
-      sourceRow > 0 &&
-      Boolean(unitPlacementTitle) &&
-      !timesheetRowInExpectedUnitSection(
-        timesheetForPlacement,
-        sourceRow,
-        unitPlacementTitle,
-      );
-    let insertHistoryRow = false;
-    const markTimesheetInsertIfNeeded = (targetRow: number) => {
-      if (insertHistoryRow || targetRow < 7 || !unitPlacementTitle) return;
-      const bounds = findDepartureAppendBounds(
-        timesheetForPlacement,
-        unitPlacementTitle,
-      );
-      insertHistoryRow = Boolean(
-        bounds &&
-          timesheetAppendNeedsRowInsert(
-            { sheet: timesheetForPlacement },
-            targetRow,
-            bounds,
-          ),
-      );
-    };
-    const stampInsertOnFirstKeepWrite = () => {
-      if (!insertHistoryRow) return;
-      const first = timesheetWrites.find((write) => write.row === timesheetKeepRow);
-      if (first) first.insertRowsBefore = true;
-      insertHistoryRow = false;
-    };
-    if (writePlan.replaceInPlace && sourceRow > 0 && !historyMisplaced) {
+    const sourceIndex =
+      op.payload.fromPositionIndex ||
+      op.payload.previousIndex ||
+      (sourceRow > 0 ? cellText(timesheetForPlacement, sourceRow, 2) : "") ||
+      positionIndex;
+    const onCanonicalSlot =
+      Boolean(sourceIndex) &&
+      timesheetLayout.byIndex[sourceIndex]?.row === sourceRow;
+    if (writePlan.replaceInPlace && sourceRow > 0 && !onCanonicalSlot) {
       writeHistoryOnRow(sourceRow, sourceRow);
       timesheetKeepRow = sourceRow;
     } else if (sourceRow > 0) {
-      timesheetKeepRow = nextTimesheetHistoryRow(
-        timesheetForPlacement,
-        sourceRow,
-        reservedTimesheetRows,
-        unitPlacementTitle,
-      );
-      if (timesheetKeepRow < 7) {
-        console.group(
-          `[ЕЖООС Табель] не знайдено рядок вибуття · ${unitPlacementTitle || "—"}`,
-        );
-        logTimesheetDebugDump(timesheetForPlacement, {
-          positionTitle: unitPlacementTitle,
+      timesheetKeepRow = takeHistoryTimesheetRow(
+        nextTimesheetHistoryRow(
+          timesheetForPlacement,
           sourceRow,
-          maxRow: Math.min(
-            timesheetForPlacement.rawRows.length,
-            Math.max(sourceRow + 40, 220),
-          ),
-          includeSectionAppend: true,
-        });
-        console.groupEnd();
-        throw new Error(
-          `Не знайдено рядок для історії вибуття в секції підрозділу${unitPlacementTitle ? `: ${unitPlacementTitle}` : ""}. Деталі Табеля — у консолі (F12).`,
-        );
-      }
+          reservedTimesheetRows,
+          timesheetLayout,
+          sourceIndex,
+          timesheetGrid,
+        ),
+        pendingHistoryInserts,
+      );
       copyTimesheetRow(sourceRow, timesheetKeepRow);
       writeHistoryOnRow(timesheetKeepRow, sourceRow);
-      stampInsertOnFirstKeepWrite();
       clearTimesheetOccupant(sourceRow);
     } else if (writePlan.createTimesheetHistory) {
       const styleRow = findTimesheetStyleRow(timesheet);
-      timesheetKeepRow = nextTimesheetHistoryRow(
-        timesheetForPlacement,
-        styleRow,
-        reservedTimesheetRows,
-        unitPlacementTitle,
+      timesheetKeepRow = takeHistoryTimesheetRow(
+        nextTimesheetHistoryRow(
+          timesheetForPlacement,
+          styleRow,
+          reservedTimesheetRows,
+          timesheetLayout,
+          sourceIndex,
+          timesheetGrid,
+        ),
+        pendingHistoryInserts,
       );
-      if (timesheetKeepRow < 7) {
-        console.group(
-          `[ЕЖООС Табель] не знайдено рядок нової історії · ${unitPlacementTitle || "—"}`,
-        );
-        logTimesheetDebugDump(timesheetForPlacement, {
-          positionTitle: unitPlacementTitle,
-          sourceRow: styleRow,
-          maxRow: Math.min(timesheetForPlacement.rawRows.length, 220),
-          includeSectionAppend: true,
-        });
-        console.groupEnd();
-        throw new Error(
-          `Не знайдено рядок для нової історії вибуття в Табелі${unitPlacementTitle ? `: ${unitPlacementTitle}` : ""}. Деталі Табеля — у консолі (F12).`,
-        );
-      }
       writeHistoryOnRow(timesheetKeepRow, styleRow);
-      stampInsertOnFirstKeepWrite();
     }
     if (timesheetKeepRow > 0) {
       writtenTimesheetByPerson.set(personTimesheetKey, [timesheetKeepRow]);
@@ -729,7 +695,7 @@ export async function applyExcludeTransfersWithZip(input: {
     }
     for (const row of existingTimesheetRows) {
       if (row === timesheetKeepRow) continue;
-      if (isClosedHistoryRow(row) && writePlan.replaceInPlace && !historyMisplaced) {
+      if (isClosedHistoryRow(row) && writePlan.replaceInPlace) {
         continue;
       }
       for (const column of [1, 6, 7, 8, 40]) {
@@ -832,6 +798,9 @@ export async function applyExcludeTransfersWithZip(input: {
       }
     }
   }
+
+  stampTimesheetHistoryInserts(timesheetWrites, pendingHistoryInserts);
+  assertHistoryRowsOutsideCanonical(timesheetLayout, pendingHistoryInserts);
 
   let blob: Blob | File = ejoos.file;
   blob = await applyInlineStringWritesToWorkbook(

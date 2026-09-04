@@ -38,7 +38,15 @@ import {
   applyInlineStringWritesToWorkbook,
   type ZipCellWrite,
 } from "./ejoosZipCellWrites";
-import { findTimesheetAppendRowForUnit } from "./ejoosTimesheetUnitSections";
+import {
+  buildTimesheetLayout,
+  resolveCanonicalTimesheetSlot,
+  resolveHistoryTimesheetRow,
+  stampTimesheetHistoryInserts,
+  takeHistoryTimesheetRow,
+  type TimesheetLayout,
+} from "./ejoosTimesheetLayout";
+import { loadTimesheetSheetArtifacts } from "./ejoosTimesheetPersonRows";
 
 const valueOf = (value: CellValue | unknown): string | number | null => {
   if (value === undefined || value === null || value === "") return null;
@@ -77,18 +85,24 @@ const nextExcludedRow = (sheet: ExcelSheetSnapshot) => {
   return last + 1;
 };
 
-const nextTimesheetFreeRow = (
+const nextTimesheetHistoryInSection = (
   sheet: ExcelSheetSnapshot,
   sourceRow: number,
   reserved: Set<number>,
-  positionTitle = "",
-) =>
-  findTimesheetAppendRowForUnit(sheet, {
+  layout: TimesheetLayout,
+  sourceIndex = "",
+) => {
+  const sourceSlot = sourceIndex
+    ? resolveCanonicalTimesheetSlot({ index: sourceIndex, layout })
+    : null;
+  return resolveHistoryTimesheetRow({
+    sourceSlot,
     sourceRow,
-    positionTitle,
+    layout,
+    sheet,
     reserved,
-    placementScope: "any",
   });
+};
 
 /** Історію в ООС ведемо в одній клітинці: найновіше значення — першим рядком. */
 const historyValue = (
@@ -112,8 +126,10 @@ type PositionChangeContext = {
   oosWrites: ZipCellWrite[];
   timesheetWrites: ZipCellWrite[];
   reservedTimesheetRows: Set<number>;
+  pendingHistoryInserts: number[];
   takeExcludedRow: () => number;
   excludedStyleSourceRow: number;
+  timesheetLayout: TimesheetLayout;
 };
 
 const collectWrites = (op: EjoosSyncOp, ctx: PositionChangeContext) => {
@@ -199,11 +215,15 @@ const collectWrites = (op: EjoosSyncOp, ctx: PositionChangeContext) => {
   );
   if (oldTimesheetRow > 0) {
     if (preserveHistory) {
-      const historyRow = nextTimesheetFreeRow(
-        timesheet,
-        oldTimesheetRow,
-        ctx.reservedTimesheetRows,
-        op.payload.positionTitle || "",
+      const historyRow = takeHistoryTimesheetRow(
+        nextTimesheetHistoryInSection(
+          timesheet,
+          oldTimesheetRow,
+          ctx.reservedTimesheetRows,
+          ctx.timesheetLayout,
+          op.payload.previousIndex || op.payload.fromPositionIndex || "",
+        ),
+        ctx.pendingHistoryInserts,
       );
       for (let column = 1; column <= 40; column += 1) {
         ctx.timesheetWrites.push({
@@ -272,8 +292,14 @@ const collectWrites = (op: EjoosSyncOp, ctx: PositionChangeContext) => {
     }
   }
 
-  // 3) Табель — нова штатна позиція з «+» від дати наказу.
-  const newTimesheetRow = Number(op.payload.timesheetExcelRow || 0);
+  // 3) Табель — нова штатна позиція: тільки канонічний слот за final index.
+  const targetIndex =
+    op.payload.nextIndex || op.payload.fromPositionIndex || op.positionIndex;
+  const plannedTimesheetRow = Number(op.payload.timesheetExcelRow || 0);
+  const newTimesheetRow =
+    targetIndex && ctx.timesheetLayout.byIndex[targetIndex]
+      ? ctx.timesheetLayout.byIndex[targetIndex].row
+      : plannedTimesheetRow;
   if (newTimesheetRow > 0) {
     const occupiedBy = textAt(timesheet, newTimesheetRow, 7);
     const occupiedId = textAt(timesheet, newTimesheetRow, 8);
@@ -311,11 +337,15 @@ const collectWrites = (op: EjoosSyncOp, ctx: PositionChangeContext) => {
         !historyAlreadySeparate &&
         !isTransferCancel)
     ) {
-      const historyRow = nextTimesheetFreeRow(
-        timesheet,
-        newTimesheetRow,
-        ctx.reservedTimesheetRows,
-        op.payload.positionTitle || "",
+      const historyRow = takeHistoryTimesheetRow(
+        nextTimesheetHistoryInSection(
+          timesheet,
+          newTimesheetRow,
+          ctx.reservedTimesheetRows,
+          ctx.timesheetLayout,
+          targetIndex,
+        ),
+        ctx.pendingHistoryInserts,
       );
       for (let column = 1; column <= 40; column += 1) {
         ctx.timesheetWrites.push({
@@ -585,6 +615,10 @@ export async function applyPositionChangeWithZip(input: {
   }
 
   let excludedRow = nextExcludedRow(excluded);
+  const timesheetArtifacts = await loadTimesheetSheetArtifacts(
+    ejoos.file,
+    timesheet.sheetName,
+  );
   const ctx: PositionChangeContext = {
     plan,
     oos,
@@ -595,6 +629,11 @@ export async function applyPositionChangeWithZip(input: {
     oosWrites: [],
     timesheetWrites: [],
     reservedTimesheetRows: new Set<number>(),
+    pendingHistoryInserts: [],
+    timesheetLayout: buildTimesheetLayout(timesheet, {
+      shpoIndexes: parseEjoosShpo(shpo).map((row) => row.positionIndex),
+      formulas: timesheetArtifacts.formulas,
+    }),
     takeExcludedRow: () => excludedRow++,
     excludedStyleSourceRow: Math.max(
       EJOOS_PERSON_DATA_START_ROW,
@@ -631,6 +670,8 @@ export async function applyPositionChangeWithZip(input: {
       }
     }
   }
+
+  stampTimesheetHistoryInserts(ctx.timesheetWrites, ctx.pendingHistoryInserts);
 
   let blob: Blob | File = ejoos.file;
   blob = await applyInlineStringWritesToWorkbook(

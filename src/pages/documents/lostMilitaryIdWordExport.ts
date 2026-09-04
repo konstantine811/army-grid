@@ -17,13 +17,17 @@ import {
   buildLostMilitaryIdActCircumstances,
   buildLostMilitaryIdActConclusions,
   buildLostMilitaryIdActProposals,
+  actApprovalDateLine,
+  approvalSignatoryOf,
   declinedPerson,
+  investigatorFooterBlock,
+  instrumentalInvestigatorLine,
   normalizeMilitaryUnitPhrase,
   reporterFooterBlock,
-  reporterHeaderBlock,
+  splitLostMilitaryIdSignatory,
   type LostMilitaryIdFields,
 } from "./lostMilitaryIdReport";
-import { capitalizeReportPosition } from "./reportPosition";
+import { formatNominativeGivenSurname } from "./lostMilitaryIdCases";
 
 const FONT = "Times New Roman";
 
@@ -91,9 +95,9 @@ const pageFooter = () =>
   });
 
 const buildReportDocument = (fields: LostMilitaryIdFields) => {
-  const header = reporterHeaderBlock(fields);
   const footer = reporterFooterBlock(fields);
   const body = splitBlocks(buildLostMilitaryIdReportText(fields));
+  const reportDate = fields.reportDate.trim() || "____.____.______";
   return new Document({
     sections: [
       {
@@ -106,13 +110,8 @@ const buildReportDocument = (fields: LostMilitaryIdFields) => {
         children: [
           para(fields.addressee.trim() || "Командиру військової частини А4862", {
             align: AlignmentType.RIGHT,
-            spacingAfter: 80,
+            spacingAfter: 280,
           }),
-          empty(),
-          ...header.map((line) =>
-            para(line, { align: AlignmentType.RIGHT, spacingAfter: 40 }),
-          ),
-          empty(),
           para("РАПОРТ", {
             bold: true,
             align: AlignmentType.CENTER,
@@ -123,9 +122,8 @@ const buildReportDocument = (fields: LostMilitaryIdFields) => {
           ...footer.titleLines.map((line) =>
             para(line, { spacingAfter: 40 }),
           ),
-          empty(),
           new Paragraph({
-            spacing: { after: 200 },
+            spacing: { after: 80 },
             tabStops: [
               { type: TabStopType.CENTER, position: 4680 },
               { type: TabStopType.RIGHT, position: 9000 },
@@ -140,7 +138,8 @@ const buildReportDocument = (fields: LostMilitaryIdFields) => {
               run(footer.name || "________________"),
             ],
           }),
-          para(fields.reportDate.trim() || "____.____.______", {
+          para(reportDate, {
+            align: AlignmentType.RIGHT,
             spacingAfter: 0,
           }),
         ],
@@ -194,13 +193,9 @@ const buildOrderDocument = (fields: LostMilitaryIdFields) => {
 const buildActDocument = (fields: LostMilitaryIdFields) => {
   const person = declinedPerson(fields);
   const unit = normalizeMilitaryUnitPhrase(fields.militaryUnit);
-  const investigator = [
-    capitalizeReportPosition(fields.investigatorPosition),
-    fields.investigatorRank.trim(),
-    fields.investigatorFullName.trim(),
-  ]
-    .filter(Boolean)
-    .join(" ");
+  const investigatorLine = instrumentalInvestigatorLine(fields);
+  const approval = splitLostMilitaryIdSignatory(approvalSignatoryOf(fields));
+  const investigatorFooter = investigatorFooterBlock(fields);
   const orderLabel =
     fields.orderNumber.trim() && fields.orderDate.trim()
       ? `наказу командира ${unit} від ${fields.orderDate} №${fields.orderNumber}`
@@ -208,6 +203,12 @@ const buildActDocument = (fields: LostMilitaryIdFields) => {
   const legal = splitBlocks(buildLostMilitaryIdActCircumstances(fields));
   const conclusions = buildLostMilitaryIdActConclusions(fields);
   const proposals = buildLostMilitaryIdActProposals(fields);
+  const actTitleTail = `службового розслідування за фактом втрати військового квитка військовослужбовцем ${unit} ${person.rankInstrumental} ${person.instrumental}`;
+
+  const approvalTitleLines =
+    approval.titleLines.length > 0
+      ? approval.titleLines
+      : [`Командир ${unit}`];
 
   return new Document({
     sections: [
@@ -219,23 +220,41 @@ const buildActDocument = (fields: LostMilitaryIdFields) => {
         },
         footers: { default: pageFooter() },
         children: [
-          para("ЗАТВЕРДЖУЮ", { bold: true, align: AlignmentType.RIGHT, spacingAfter: 40 }),
-          para(`Командир ${unit}`, {
+          para("ЗАТВЕРДЖУЮ", {
+            bold: true,
             align: AlignmentType.RIGHT,
             spacingAfter: 40,
           }),
-          para("________________", { align: AlignmentType.RIGHT, spacingAfter: 40 }),
-          para("«____» ______________ ______ року", {
+          ...approvalTitleLines.map((line) =>
+            para(line, { align: AlignmentType.RIGHT, spacingAfter: 40 }),
+          ),
+          new Paragraph({
+            alignment: AlignmentType.RIGHT,
+            spacing: { after: 40 },
+            tabStops: [{ type: TabStopType.RIGHT, position: 9000 }],
+            children: [
+              run(approval.rank || "________________"),
+              new TextRun({ text: "\t", font: FONT, size: 28 }),
+              run(approval.fullName || "________________"),
+            ],
+          }),
+          para(actApprovalDateLine(fields), {
             align: AlignmentType.RIGHT,
             spacingAfter: 280,
           }),
-          para(
-            `АКТ службового розслідування за фактом втрати військового квитка військовослужбовцем ${unit} ${person.rankInstrumental} ${person.instrumental}`,
-            { bold: true, align: AlignmentType.CENTER },
-          ),
+          para("АКТ", {
+            bold: true,
+            align: AlignmentType.CENTER,
+            spacingAfter: 40,
+          }),
+          para(actTitleTail, {
+            bold: true,
+            align: AlignmentType.CENTER,
+            spacingAfter: 280,
+          }),
           para(
             `Відповідно до вимог статті 85 Статуту внутрішньої служби ЗС України, Порядку проведення службового розслідування у ЗС України, затвердженого наказом Міністерства оборони України від 21.11.2017 № 608 (зі змінами) та ${orderLabel}, мною, ${
-              investigator || "________________"
+              investigatorLine || "________________"
             }, було проведено службове розслідування за фактом втрати військового квитка ${person.positionInstrumental} ${unit} ${person.rankInstrumental} ${person.instrumental}.`,
             { indent: true },
           ),
@@ -321,18 +340,26 @@ const buildActDocument = (fields: LostMilitaryIdFields) => {
             { indent: true },
           ),
           empty(),
-          ...(fields.investigatorPosition
-            ? capitalizeReportPosition(fields.investigatorPosition)
-                .split(/\n/)
-                .map((line) => para(line, { spacingAfter: 40 }))
-            : [para("Особа, яка проводила службове розслідування", { spacingAfter: 40 })]),
+          ...(investigatorFooter.titleLines.length
+            ? investigatorFooter.titleLines.map((line) =>
+                para(line, { spacingAfter: 40 }),
+              )
+            : [
+                para("Особа, яка проводила службове розслідування", {
+                  spacingAfter: 40,
+                }),
+              ]),
           new Paragraph({
             spacing: { after: 0 },
             tabStops: [{ type: TabStopType.RIGHT, position: 9000 }],
             children: [
-              run(fields.investigatorRank.trim() || "________________"),
+              run(investigatorFooter.rank || "________________"),
               new TextRun({ text: "\t", font: FONT, size: 28 }),
-              run(fields.investigatorFullName.trim() || "________________"),
+              run(
+                investigatorFooter.name ||
+                  formatNominativeGivenSurname(fields.investigatorFullName) ||
+                  "________________",
+              ),
             ],
           }),
         ],
