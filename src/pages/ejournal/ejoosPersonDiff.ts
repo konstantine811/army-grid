@@ -4,6 +4,7 @@ import { mapPbStatusToEjoosWithRules, readOperatorSettings } from "./ejoosStatus
 import { formatTimesheetTransferMark } from "./ejoosExcludedColumns";
 import {
   dayFromOrderLabel,
+  formatDispositionTimesheetDeparture,
   parseTimesheetAbsenceSpans,
   timesheetMarkFromArchive,
   timesheetTransferMarkForDay,
@@ -737,9 +738,13 @@ export const buildSheetImpacts = (ops: EjoosSyncOp[]): SheetImpactItem[] => {
           ? "edit"
           : "skip",
         op.payload.timesheetCreateRow === "1"
-          ? `Додати рядок на ${op.payload.timesheetStaffIndex || op.payload.previousIndex || op.positionIndex || "—"} · 01–зріз ${op.payload.absenceCode || "СЗЧ"}`
+          ? `Додати рядок у блок «ВИБУВ У РОЗПОРЯДЖЕННЯ…» · 01–зріз ${op.payload.absenceCode || "СЗЧ"}; у дату наказу записати вибуття в розпорядження`
           : op.payload.keepOpenSzchTimesheet === "1"
-          ? `Один рядок, 01–зріз ${op.payload.absenceCode || "СЗЧ"}; ${op.payload.orderDate || "дату розпорядження"} не писати «вибув у розпорядження»`
+          ? `Блок «ВИБУВ У РОЗПОРЯДЖЕННЯ…» · 01–зріз ${op.payload.absenceCode || "СЗЧ"}; ${op.payload.orderDate || "у дату розпорядження"} записати «${formatDispositionTimesheetDeparture(
+              op.payload.destination || op.payload.changeText || "",
+              op.payload.orderNumber || "",
+              op.payload.orderDate || "",
+            )}», далі «-»`
           : op.payload.timesheetFound === "true"
             ? "Закрити штатний рядок і зберегти історію розпорядження"
             : "Штатного рядка немає — Табель не змінюємо",
@@ -995,8 +1000,12 @@ const describeWillDo = (ops: EjoosSyncOp[]): string[] => {
           : "5. Тимчасово відсутні: чинний запис уже є",
       payload.keepOpenSzchTimesheet === "1"
         ? payload.timesheetCreateRow === "1"
-          ? `6. Табель: додати рядок на ${payload.timesheetStaffIndex || payload.previousIndex || "—"} · 01–зріз ${payload.absenceCode || "СЗЧ"}`
-          : `6. Табель: один рядок 01–зріз ${payload.absenceCode || "СЗЧ"}; ${payload.orderDate || "дату розпорядження"} не писати «вибув у розпорядження»`
+          ? `6. Табель: додати рядок у блок «ВИБУВ У РОЗПОРЯДЖЕННЯ…» · 01–зріз ${payload.absenceCode || "СЗЧ"}; у дату наказу записати вибуття в розпорядження`
+          : `6. Табель: блок «ВИБУВ У РОЗПОРЯДЖЕННЯ…» · 01–зріз ${payload.absenceCode || "СЗЧ"}; ${payload.orderDate || "у дату розпорядження"} записати «${formatDispositionTimesheetDeparture(
+              payload.destination || payload.changeText || "",
+              payload.orderNumber || "",
+              payload.orderDate || "",
+            )}», далі «-»`
         : payload.timesheetFound === "true"
           ? "6. Табель: закрити штатний рядок і записати розпорядження"
           : "6. Табель: без змін (штатного рядка немає)",
@@ -1221,20 +1230,49 @@ export const buildTimesheetPreview = (
       op.payload.timesheetCode?.trim() &&
       Number(op.payload.day || 0) > 0,
   );
+  const openDispositionOp = [...ops]
+    .reverse()
+    .find(
+      (op) =>
+        op.kind === "move_to_disposition" &&
+        op.payload.keepOpenSzchTimesheet === "1" &&
+        op.payload.absenceCode?.trim(),
+    );
+  const openDispositionMark = openDispositionOp?.payload.absenceCode?.trim() || "";
+  const dispositionOrderDay = dayFromOrderLabel(
+    openDispositionOp?.payload.orderDate || "",
+  );
+  const dispositionDeparture = openDispositionOp
+    ? formatDispositionTimesheetDeparture(
+        openDispositionOp.payload.destination ||
+          openDispositionOp.payload.changeText ||
+          "",
+        openDispositionOp.payload.orderNumber || "",
+        openDispositionOp.payload.orderDate || "",
+      )
+    : "";
   const rankOnly =
     !spans.length &&
     !dayOps.length &&
+    !openDispositionMark &&
     activeFrom <= 1 &&
     !departDay &&
     ops.some((op) => op.kind === "rank_change");
-  if (!spans.length && !dayOps.length && activeFrom <= 1 && !departDay && !rankOnly) {
+  if (
+    !spans.length &&
+    !dayOps.length &&
+    !openDispositionMark &&
+    activeFrom <= 1 &&
+    !departDay &&
+    !rankOnly
+  ) {
     return null;
   }
 
   const spanEnd = spans.reduce((max, span) => Math.max(max, span.toDay), 0);
   const lastDay = Math.min(
     31,
-    Math.max(timesheetDay, spanEnd, departDay, 1),
+    Math.max(timesheetDay, spanEnd, departDay, dispositionOrderDay, 1),
   );
   const days: PersonTimesheetPreview["days"] = [];
   for (let day = 1; day <= lastDay; day += 1) {
@@ -1256,17 +1294,32 @@ export const buildTimesheetPreview = (
       }
       continue;
     }
+    if (dispositionOrderDay > 0 && day === dispositionOrderDay) {
+      days.push({
+        day,
+        mark: "ПЕРЕВ",
+        title: dispositionDeparture,
+      });
+      continue;
+    }
+    if (openDispositionOp && dispositionOrderDay > 0 && day > dispositionOrderDay) {
+      days.push({ day, mark: "-" });
+      continue;
+    }
 
-    const fromArchive = timesheetMarkFromArchive(day, {
-      activeFromDay: activeFrom,
-      lastDay,
-      spans,
-      fillBeforeActive: activeFrom > 1,
-    });
+    const fromArchive = spans.length
+      ? timesheetMarkFromArchive(day, {
+          activeFromDay: activeFrom,
+          lastDay,
+          spans,
+          fillBeforeActive: activeFrom > 1,
+        })
+      : null;
     const fromDayOp = dayOps.find((op) => Number(op.payload.day) === day);
     const mark =
       fromArchive ||
       fromDayOp?.payload.timesheetCode ||
+      openDispositionMark ||
       (day <= timesheetDay ? "+" : "");
     if (!mark) continue;
     days.push({ day, mark });
@@ -1287,8 +1340,11 @@ export const buildTimesheetPreview = (
           )
         ? "Нижче — новий активний рядок. Історичний епізод з «вибув» лишається окремим рядком."
         : undefined,
-    departDay: departDay || undefined,
-    departPhrase: departDay && departMark ? departMark : undefined,
+    departDay: departDay || dispositionOrderDay || undefined,
+    departPhrase:
+      (departDay && departMark ? departMark : "") ||
+      dispositionDeparture ||
+      undefined,
   };
 };
 

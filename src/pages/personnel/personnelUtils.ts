@@ -71,8 +71,6 @@ export const createDefaultActionForm = (): PersonActionForm => ({
   rank: "",
 });
 
-const ROSTER_FIELD_PREFIX = "roster__";
-
 /** Позивний з дужок / «позивний …» / імені файлу анкети (не дата народження). */
 export const isLikelyBirthDateToken = (value: string) => {
   const text = String(value ?? "").trim();
@@ -1675,8 +1673,8 @@ export const loadAllEjournalSheetRows = async (
   };
 
   const fetchFreshStream = async (): Promise<DbPreviewState> => {
-    const firstSize = 20;
-    const nextSize = 20;
+    const firstSize = 250;
+    const nextSize = 500;
     const firstPage = await api.listEjournalSheetRows(sheet.id, {
       limit: firstSize,
       offset: 0,

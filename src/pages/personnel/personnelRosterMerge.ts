@@ -215,6 +215,7 @@ export const mergeRosterRowsIntoPreview = (
   const pickRosterForPreviewRow = (base: EjournalPreviewRow) => {
     const spreadsheetId = getPersonExternalId(base);
     const birth = normalizePersonBirthKey(resolvePersonBirthDate(base));
+    const nameKey = normalizeRosterText(getPersonDisplayName(base));
     const byId = pickBestRow(rosterById.get(spreadsheetId), birth);
     if (byId) return byId;
 
@@ -223,9 +224,16 @@ export const mergeRosterRowsIntoPreview = (
         getPersonFieldValue(base, ["рнокпп"]),
     );
     const byRnokpp = pickBestRow(rosterByRnokpp.get(rnokpp), birth);
-    if (byRnokpp) return byRnokpp;
+    if (byRnokpp) {
+      const rosterNameKey = normalizeRosterText(getRosterPersonName(byRnokpp));
+      // ІПН у старих картках може належати іншій людині. Не склеюємо
+      // різні ПІБ лише через однаковий номер; порожній ПІБ усе ще можна
+      // безпечно доповнити за ІПН.
+      if (!nameKey || !rosterNameKey || nameKey === rosterNameKey) {
+        return byRnokpp;
+      }
+    }
 
-    const nameKey = normalizeRosterText(getPersonDisplayName(base));
     if (nameKey && birth) {
       const byNameBirth = pickBestRow(
         rosterByNameBirth.get(`${nameKey}|${birth}`),
@@ -298,6 +306,44 @@ export const mergeRosterRowsIntoPreview = (
     });
 
   return [...mergedRows, ...rosterOnlyRows];
+};
+
+/** Доповнює рядки Штатки з БД кешем/Google-імпортом (без дублікатів за ПІБ / рядком). */
+export const combineRosterRowSources = (
+  primary: EjournalPreviewRow[],
+  secondary: EjournalPreviewRow[],
+): EjournalPreviewRow[] => {
+  if (!secondary.length) return primary;
+
+  const seenRows = new Set<number>();
+  const seenNames = new Set<string>();
+  const seenRnokpp = new Set<string>();
+
+  const remember = (row: EjournalPreviewRow) => {
+    const rowNum = Number(row.__rowNumber);
+    if (Number.isFinite(rowNum) && rowNum > 0) seenRows.add(rowNum);
+    const name = normalizeRosterText(getRosterPersonName(row));
+    if (name) seenNames.add(name);
+    const rnokpp = getRosterPersonRnokpp(row);
+    if (rnokpp) seenRnokpp.add(rnokpp);
+  };
+
+  const merged = [...primary];
+  primary.forEach(remember);
+
+  for (const row of secondary) {
+    const rowNum = Number(row.__rowNumber);
+    const name = normalizeRosterText(getRosterPersonName(row));
+    const rnokpp = getRosterPersonRnokpp(row);
+    if (Number.isFinite(rowNum) && rowNum > 0 && seenRows.has(rowNum)) continue;
+    if (name && seenNames.has(name)) continue;
+    if (rnokpp && seenRnokpp.has(rnokpp)) continue;
+    if (!name) continue;
+    merged.push(row);
+    remember(row);
+  }
+
+  return merged;
 };
 
 const ROSTER_ONLY_SHEET_STUB: BackendEjournalImportSheet = {

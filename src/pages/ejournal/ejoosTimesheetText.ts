@@ -54,6 +54,71 @@ export const formatTimesheetDeparture = (rawDestination: string) => {
   return `вибув ${timesheetDeparturePreposition(destination)} ${destination}`;
 };
 
+/** РОЗПОРЯДЖ: повна фраза в день наказу; до неї — код відсутності, після — «-». */
+export const formatDispositionTimesheetDeparture = (
+  rawDestination: string,
+  orderNumber: string,
+  orderDate: string,
+) => {
+  const destination =
+    String(rawDestination || "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .replace(/^[,;:\s]+/, "")
+      .replace(/^який\s+знаходиться\s+/iu, "")
+      .replace(/^у\s+розпорядженні(?=\s|$)/iu, "у розпорядження")
+      .replace(/^розпорядженні(?=\s|$)/iu, "у розпорядження") ||
+    "у розпорядження командира військової частини А4862";
+  const number = String(orderNumber || "")
+    .replace(/^\s*(?:наказ\s*)?№\s*/iu, "")
+    .trim();
+  const date = String(orderDate || "").trim();
+  return [
+    `вибув ${destination}`,
+    number ? `наказ №${number}` : "",
+    date ? `від ${date}` : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+};
+
+/** РОЗПОРЯДЖ: до дати наказу — код відсутності, у дату — «вибув…», далі «-». */
+export const timesheetMarkForOpenDispositionDay = (
+  day: number,
+  options: {
+    dispositionOrderDay: number;
+    dispositionDeparture: string;
+    absenceCode: string;
+    lastDay: number;
+    absenceSpans?: TimesheetAbsenceSpan[];
+    fillBeforeActive?: boolean;
+  },
+): string => {
+  const {
+    dispositionOrderDay,
+    dispositionDeparture,
+    absenceCode,
+    lastDay,
+    absenceSpans,
+  } = options;
+  if (dispositionOrderDay > 0 && day === dispositionOrderDay) {
+    return dispositionDeparture;
+  }
+  if (dispositionOrderDay > 0 && day > dispositionOrderDay) {
+    return "-";
+  }
+  if (absenceSpans?.length) {
+    const fromSpan = timesheetMarkFromArchive(day, {
+      activeFromDay: 1,
+      lastDay,
+      spans: absenceSpans,
+      fillBeforeActive: options.fillBeforeActive ?? true,
+    });
+    if (fromSpan) return fromSpan;
+  }
+  return absenceCode;
+};
+
 /**
  * Хвіст «Яка зміна»: «2103200 Стрілець → 2103xxx Стрілець МЕХАНІЗОВАНОГО…»
  * → нова посада без службового індексу.

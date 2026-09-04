@@ -1074,7 +1074,6 @@ export const api = {
       await invalidateDataCache(
         CacheKeys.rosterLatest,
         CacheKeys.overview,
-        'ejournal:sheet-rows:',
       )
       return result
     })

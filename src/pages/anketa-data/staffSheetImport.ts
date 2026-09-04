@@ -16,6 +16,7 @@ import {
   pullStaffSheetRosterImportPayload,
   sanitizeStaffSheetCellValue,
   staffSheetEditUrl,
+  writeStaffSheetLastSyncAt,
   type StaffSheetRosterImportPayload,
 } from "../excel-fill/staffSheet";
 import { mapRosterLatestToPreviewRows } from "../excel-fill/rosterSourceSnapshot";
@@ -115,6 +116,27 @@ const sanitizeImportedStaffSheetRow = (
     else delete next[key];
   }
   return next;
+};
+
+export const staffSheetSnapshotFromPayload = (
+  payload: StaffSheetRosterImportPayload,
+  source: StaffSheetImportSnapshot["source"] = "google",
+): StaffSheetImportSnapshot => {
+  const rows = sortRosterRows(
+    rosterRowsFromStaffSheetPayload(payload).map(sanitizeImportedStaffSheetRow),
+  );
+  if (!rows.length) {
+    throw new Error("Після розбору «Штатки» не знайдено жодного рядка.");
+  }
+  return {
+    fileName: payload.sourceFileName,
+    importedAt: new Date().toISOString(),
+    sheetName: payload.sheets[0]?.name ?? "Загальний список",
+    rows,
+    fileData: null,
+    source,
+    personCount: buildStaffSheetPreviewRows(rows).length,
+  };
 };
 
 export const parseStaffSheetImportFile = async (
@@ -235,14 +257,23 @@ export const importStaffSheetFromFile = async (
   const fresh = await api.getLatestPersonnelRoster();
   if (fresh) await writeDataCache(CacheKeys.rosterLatest, fresh);
 
-  await saveStaffSheetImport(imported);
-  return imported;
+  // The selected workbook is authoritative for this import. Stamp it only
+  // after the DB write so an immediate stale /roster/latest response cannot
+  // replace its rows in the Personnel page.
+  const persistedImport = {
+    ...imported,
+    importedAt: new Date().toISOString(),
+  };
+  await saveStaffSheetImport(persistedImport);
+  return persistedImport;
 };
 
 /** Google Sheet «Штатка» → БД персоналу (єдине джерело для Огляду / Excel Fill). */
 export const importStaffSheetFromGoogle =
   async (): Promise<StaffSheetImportSnapshot> => {
     const payload = await pullStaffSheetRosterImportPayload();
+    const snapshotFromGoogle = staffSheetSnapshotFromPayload(payload, "google");
+
     await api.importPersonnelRoster({
       name: payload.name,
       sourceFileName: payload.sourceFileName,
@@ -251,7 +282,9 @@ export const importStaffSheetFromGoogle =
         `Імпорт «Штатки» з Google Sheets · ${staffSheetEditUrl()}`,
       sheets: payload.sheets,
     });
+
     await invalidatePersonnelCaches();
+
     const fresh = await api.getLatestPersonnelRoster();
     if (!fresh?.sheet) {
       throw new Error(
@@ -259,11 +292,17 @@ export const importStaffSheetFromGoogle =
       );
     }
     await writeDataCache(CacheKeys.rosterLatest, fresh);
-    const snapshot = rosterLatestToStaffSheetImportSnapshot(fresh, "google");
-    if (!snapshot) {
-      throw new Error("«Загальний список» порожній після імпорту з Google Sheets.");
-    }
+
+    const fromDb = rosterLatestToStaffSheetImportSnapshot(fresh, "google");
+    const snapshot =
+      fromDb &&
+      fromDb.personCount >= snapshotFromGoogle.personCount &&
+      fromDb.rows.length >= snapshotFromGoogle.rows.length
+        ? fromDb
+        : snapshotFromGoogle;
+
     await saveStaffSheetImport(snapshot);
+    writeStaffSheetLastSyncAt(snapshot.importedAt);
     return snapshot;
   };
 

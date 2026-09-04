@@ -1,6 +1,7 @@
 import JSZip from "jszip";
 import {
   repairBrokenCellOpenTags,
+  stripCellsWithoutValidReference,
   stripStaleCalcChainFromZip,
 } from "./ejoosWorkbookSanitize";
 
@@ -37,6 +38,8 @@ export type ZipCellWrite = {
   sharedStringIndex?: number;
   /** Keep the current value; only stamp neighbor `s` (font / align / wrap). */
   styleOnly?: boolean;
+  /** Зсунути рядки вниз і вставити новий рядок на цій позиції (перед summary/наступною секцією). */
+  insertRowsBefore?: boolean;
 };
 
 const escapeXml = (value: string) =>
@@ -544,6 +547,52 @@ const insertRowXml = (sheetXml: string, rowNumber: number, rowXml: string) => {
   return sheetXml;
 };
 
+const renumberRowBlock = (rowXml: string, newRowNumber: number) =>
+  rowXml
+    .replace(/^<row\b([^>]*\br=")(\d+)("[^>]*>)/i, `$1${newRowNumber}$3`)
+    .replace(
+      /<c\b([^<>]*?\br=")([A-Z]+)(\d+)("[^<>]*?(?:\/>|>[\s\S]*?<\/c>))/gi,
+      (_full, prefix, column, _row, suffix) =>
+        `${prefix}${column}${newRowNumber}${suffix}`,
+    );
+
+/** Зсуває існуючі рядки sheetData вниз, звільняючи місце для вставки. */
+export const shiftSheetRowsDown = (
+  sheetXml: string,
+  fromRow: number,
+  count = 1,
+) => {
+  if (fromRow < 1 || count < 1) return sheetXml;
+  const rowNumbers = [
+    ...new Set(
+      [...sheetXml.matchAll(/<row\b[^>]*\br="(\d+)"/gi)].map((match) =>
+        Number(match[1]),
+      ),
+    ),
+  ]
+    .filter((row) => row >= fromRow)
+    .sort((left, right) => right - left);
+  let next = sheetXml;
+  for (const rowNumber of rowNumbers) {
+    const block = findRowBlock(next, rowNumber);
+    if (!block) continue;
+    const renumbered = renumberRowBlock(block.full, rowNumber + count);
+    next =
+      next.slice(0, block.start) + renumbered + next.slice(block.end);
+  }
+  return next;
+};
+
+const bumpWriteRowNumbers = (
+  writes: ZipCellWrite[],
+  aboveRow: number,
+  delta: number,
+) => {
+  for (const write of writes) {
+    if (write.row > aboveRow) write.row += delta;
+  }
+};
+
 const normalizeWorksheetRows = (sheetXml: string) => {
   const dataOpen = sheetXml.search(/<sheetData\b[^>]*>/i);
   const dataClose = sheetXml.search(/<\/sheetData>/i);
@@ -972,6 +1021,28 @@ export async function applyInlineStringWritesToWorkbook(
 ): Promise<Blob> {
   if (!writes.length) return file;
 
+  const validWrites = writes.filter((write) => {
+    const row = Number(write.row);
+    const column = Number(write.column);
+    return (
+      Number.isFinite(row) &&
+      row >= 1 &&
+      Number.isFinite(column) &&
+      column >= 1 &&
+      column <= 256
+    );
+  });
+  if (!validWrites.length) {
+    throw new Error(
+      "Некоректні координати клітинок для запису в Excel (перевірте рядок/колонку).",
+    );
+  }
+  if (validWrites.length !== writes.length) {
+    throw new Error(
+      `Некоректні координати клітинок: ${writes.length - validWrites.length} з ${writes.length} записів мають порожній рядок або колонку.`,
+    );
+  }
+
   const zip = await JSZip.loadAsync(await file.arrayBuffer());
   const originalStylesXml =
     (await zip.file("xl/styles.xml")?.async("string")) || "";
@@ -1018,6 +1089,11 @@ export async function applyInlineStringWritesToWorkbook(
       styleSourceRow: write.styleSourceRow || template,
     };
   });
+  for (const write of resolvedWrites) {
+    if (!write.insertRowsBefore) continue;
+    sheetXml = shiftSheetRowsDown(sheetXml, write.row, 1);
+    bumpWriteRowNumbers(resolvedWrites, write.row, 1);
+  }
   const byRow = new Map<number, ZipCellWrite[]>();
   for (const write of resolvedWrites) {
     const list = byRow.get(write.row) ?? [];
@@ -1250,11 +1326,12 @@ export async function applyInlineStringWritesToWorkbook(
           sheetXml = insertRowXml(sheetXml, item.row, item.xml);
         }
       }
-      sheetXml = normalizeWorksheetRows(sheetXml);
-      sheetXml = sortSheetDataRows(sheetXml);
     }
   }
+  sheetXml = normalizeWorksheetRows(sheetXml);
+  sheetXml = sortSheetDataRows(sheetXml);
   sheetXml = stripOrphanSharedFormulas(sheetXml);
+  sheetXml = stripCellsWithoutValidReference(sheetXml);
   sheetXml = repairBrokenCellOpenTags(sheetXml);
   // Не чіпати <dimension>: вставка перед <sheetData> ламає порядок OOXML
   // (має бути до sheetViews) — Excel тоді заміняє весь аркуш.

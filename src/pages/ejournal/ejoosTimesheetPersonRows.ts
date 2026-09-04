@@ -131,6 +131,29 @@ export const buildSheetGridFromXml = (sheetXml: string, sstXml = "") => {
   return rows;
 };
 
+/** Єдине джерело для placement-логіки: snapshot + XML разом. */
+export const placementSheetFromMergedGrid = (
+  sheet: ExcelSheetSnapshot,
+  merged: Array<unknown[] | undefined>,
+): ExcelSheetSnapshot => {
+  const lastRow = Math.max(sheet.rawRows.length, merged.length);
+  const rawRows: string[][] = [];
+  for (let row = 0; row < lastRow; row += 1) {
+    const mergedRow = merged[row];
+    const snapshotRow = sheet.rawRows[row];
+    rawRows.push(
+      Array.from({ length: 40 }, (_, column) => {
+        const mergedValue = mergedRow?.[column];
+        if (mergedValue != null && String(mergedValue).trim() !== "") {
+          return String(mergedValue).trim();
+        }
+        return String(snapshotRow?.[column] ?? "").trim();
+      }),
+    );
+  }
+  return { ...sheet, rawRows };
+};
+
 export const mergeTimesheetGrids = (
   ...grids: Array<Array<unknown[] | undefined>>
 ) => {

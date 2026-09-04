@@ -572,10 +572,383 @@ describe("СЗЧ → РОЗПОРЯДЖ then final sh occupant", () => {
       .filter((item) => /діденко/i.test(item.name) || item.id === "11040");
     expect(didenkoRows).toHaveLength(1);
     expect(didenkoRows[0].id).toBe("11040");
-    expect(didenkoRows[0].days.every((mark) => mark === "СЗЧ")).toBe(true);
-    expect(didenkoRows[0].days[9]).not.toMatch(/вибув/i);
+    expect(didenkoRows[0].days.slice(0, 9).every((mark) => mark === "СЗЧ")).toBe(
+      true,
+    );
+    expect(didenkoRows[0].days[9]).toBe(
+      "вибув у розпорядження командира наказ №231 від 10.08.2026",
+    );
+    expect(didenkoRows[0].days.slice(10).every((mark) => mark === "-")).toBe(
+      true,
+    );
 
     const abs = after.sheets.find((sheet) => /відсут/i.test(sheet.sheetName));
     expect(String(abs?.rawRows[5]?.[2] ?? "").trim()).toBe("11040");
+  }, 30_000);
+
+  it("appends DIDENKO into the ВИБУВ У РОЗПОРЯДЖЕННЯ subsection with name in column E", async () => {
+    const module = await import(
+      "xlsx-populate/browser/xlsx-populate-no-encryption"
+    );
+    const workbook = await module.default.fromBlankAsync();
+    const shpo = workbook.sheet(0);
+    shpo.name("1. ШПО");
+    workbook.addSheet("2. ООС").cell(1, 1).value("2. ООС");
+    workbook.addSheet("3. Виключені").cell(1, 1).value("3. Виключені");
+    workbook.addSheet("4. Тимчасово прибулі").cell(1, 1).value("4. Тимчасово прибулі");
+    const absents = workbook.addSheet("5. Тимчасово відсутні");
+    absents.cell(1, 1).value("5. Тимчасово відсутні");
+    const timesheet = workbook.addSheet("6. Табель");
+    timesheet.cell(1, 1).value("6. Табель");
+    timesheet.cell(2, 9).value("Серпень 2026 р.");
+    shpo.cell(7, 1).value("2103520");
+    shpo.cell(7, 6).value("солдат");
+    shpo.cell(7, 7).value("ДІДЕНКО Ілля Андрійович");
+    shpo.cell(7, 8).value("11040");
+    shpo.cell(20, 2).value(", який знаходиться у розпорядженні командира");
+    absents.cell(6, 2).value("ДІДЕНКО Ілля Андрійович");
+    absents.cell(6, 5).value("СЗЧ");
+    absents.cell(6, 7).value("13.07.2026");
+    timesheet.cell(7, 2).value("2103520");
+    timesheet.cell(7, 6).value("солдат");
+    timesheet.cell(7, 7).value("ДІДЕНКО Ілля Андрійович");
+    timesheet.cell(7, 8).value("11040");
+    for (let day = 1; day <= 9; day += 1) {
+      timesheet.cell(7, 8 + day).value("СЗЧ");
+    }
+    timesheet
+      .cell(15, 2)
+      .value(
+        "ВИБУВ У РОЗПОРЯДЖЕННЯ КОМАНДИРА ВІЙСЬКОВОЇ ЧАСТИНИ А 4862",
+      );
+    timesheet.cell(16, 1).value("РОЗПОРЯДЖЕННЯ");
+    timesheet.cell(16, 3).value("СЗЧ");
+    timesheet.cell(16, 4).value("солдат");
+    timesheet.cell(16, 5).value("ГОРГУЦА Андрій Юрійович");
+
+    const blobIn = (await workbook.outputAsync("blob")) as Blob;
+    const ejoos = await readWorkbookSnapshot(
+      new File([blobIn], "ejoos.xlsx", { type: XLSX_MIME }),
+      EJOOS_SYNC_READ_OPTIONS,
+    );
+    const didenko = op({
+      id: "disp-didenko-section",
+      kind: "move_to_disposition",
+      personId: "11040",
+      fullName: "ДІДЕНКО Ілля Андрійович",
+      positionIndex: "2103520",
+      rank: "солдат",
+      payload: {
+        previousIndex: "2103520",
+        destination: "у розпорядження командира",
+        orderDate: "10.08.2026",
+        orderNumber: "231",
+        shpoExcelRow: "7",
+        timesheetExcelRow: "7",
+        absenceCode: "СЗЧ",
+        absenceType: "СЗЧ",
+        remainsInOos: "true",
+        timesheetFound: "true",
+        keepOpenSzchTimesheet: "1",
+        vacateTimesheetStaffSlot: "1",
+      },
+    });
+    const { blob } = await applyConfirmedEjoosOps({
+      ejoos,
+      plan: dummyPlan([didenko]),
+      ops: [didenko],
+    });
+    const after = await readWorkbookSnapshot(
+      new File([blob], "ejoos.xlsx", { type: XLSX_MIME }),
+      EJOOS_SYNC_READ_OPTIONS,
+    );
+    const ts = after.sheets.find((sheet) => /табель/i.test(sheet.sheetName));
+    const didenkoRow = (ts?.rawRows ?? []).find((row) =>
+      row.some((cell) => /діденко/i.test(String(cell ?? ""))),
+    );
+    expect(didenkoRow).toBeDefined();
+    expect(String(didenkoRow?.[0] ?? "")).toBe("РОЗПОРЯДЖЕННЯ");
+    expect(String(didenkoRow?.[2] ?? "")).toBe("СЗЧ");
+    expect(String(didenkoRow?.[4] ?? "")).toMatch(/діденко/i);
+    expect(didenkoRow).not.toBe(ts?.rawRows?.[15]);
+    expect(String(ts?.rawRows?.[15]?.[4] ?? "")).toMatch(/горгуц/i);
+    expect(String(ts?.rawRows?.[6]?.[6] ?? "")).toBe("");
+    expect(String(didenkoRow?.[8 + 10 - 1] ?? "")).toMatch(/вибув у розпорядження/i);
+  }, 30_000);
+
+  it("appends DIDENKO at the end of disposition block (columns B/D/E/F like real Табель)", async () => {
+    const module = await import(
+      "xlsx-populate/browser/xlsx-populate-no-encryption"
+    );
+    const workbook = await module.default.fromBlankAsync();
+    const shpo = workbook.sheet(0);
+    shpo.name("1. ШПО");
+    workbook.addSheet("2. ООС").cell(1, 1).value("2. ООС");
+    workbook.addSheet("3. Виключені").cell(1, 1).value("3. Виключені");
+    workbook.addSheet("4. Тимчасово прибулі").cell(1, 1).value("4. Тимчасово прибулі");
+    const absents = workbook.addSheet("5. Тимчасово відсутні");
+    absents.cell(1, 1).value("5. Тимчасово відсутні");
+    const timesheet = workbook.addSheet("6. Табель");
+    timesheet.cell(1, 1).value("6. Табель");
+    timesheet.cell(2, 9).value("Серпень 2026 р.");
+    shpo.cell(7, 1).value("2103520");
+    shpo.cell(7, 6).value("солдат");
+    shpo.cell(7, 7).value("ДІДЕНКО Ілля Андрійович");
+    shpo.cell(7, 8).value("11040");
+    shpo.cell(20, 2).value(", який знаходиться у розпорядженні командира");
+    absents.cell(6, 2).value("ДІДЕНКО Ілля Андрійович");
+    absents.cell(6, 5).value("СЗЧ");
+    absents.cell(6, 7).value("13.07.2026");
+    timesheet.cell(7, 2).value("2103520");
+    timesheet.cell(7, 6).value("солдат");
+    timesheet.cell(7, 7).value("ДІДЕНКО Ілля Андрійович");
+    timesheet.cell(7, 8).value("11040");
+    for (let day = 1; day <= 9; day += 1) {
+      timesheet.cell(7, 8 + day).value("СЗЧ");
+    }
+    timesheet
+      .cell(15, 2)
+      .value(
+        "ВИБУВ У РОЗПОРЯДЖЕННЯ КОМАНДИРА ВІЙСЬКОВОЇ ЧАСТИНИ А 4862",
+      );
+    timesheet.cell(16, 1).value("РОЗПОРЯДЖЕННЯ");
+    timesheet.cell(16, 3).value("Кулеметник");
+    timesheet.cell(16, 4).value("СЗЧ");
+    timesheet.cell(16, 6).value("солдат");
+    timesheet.cell(16, 7).value("ГОРГУЦА Андрій Юрійович");
+    timesheet.cell(17, 1).value("РОЗПОРЯДЖЕННЯ");
+    timesheet.cell(17, 3).value("Розвідник");
+    timesheet.cell(17, 4).value("ЗБ");
+    timesheet.cell(17, 6).value("солдат");
+    timesheet.cell(17, 7).value("ВОЛОС Руслан Вікторович");
+    timesheet.cell(18, 1).value("РОЗПОРЯДЖЕННЯ");
+    timesheet.cell(18, 6).value("солдат");
+    timesheet.cell(18, 7).value("ШЕВЧЕНКО Юрій Сергійович");
+
+    const blobIn = (await workbook.outputAsync("blob")) as Blob;
+    const ejoos = await readWorkbookSnapshot(
+      new File([blobIn], "ejoos.xlsx", { type: XLSX_MIME }),
+      EJOOS_SYNC_READ_OPTIONS,
+    );
+    const didenko = op({
+      id: "disp-didenko-real-layout",
+      kind: "move_to_disposition",
+      personId: "11040",
+      fullName: "ДІДЕНКО Ілля Андрійович",
+      positionIndex: "2103520",
+      rank: "солдат",
+      payload: {
+        previousIndex: "2103520",
+        destination: "у розпорядження командира",
+        orderDate: "10.08.2026",
+        orderNumber: "231",
+        shpoExcelRow: "7",
+        timesheetExcelRow: "7",
+        absenceCode: "СЗЧ",
+        absenceType: "СЗЧ",
+        remainsInOos: "true",
+        timesheetFound: "true",
+        keepOpenSzchTimesheet: "1",
+        vacateTimesheetStaffSlot: "1",
+      },
+    });
+    const { blob } = await applyConfirmedEjoosOps({
+      ejoos,
+      plan: dummyPlan([didenko]),
+      ops: [didenko],
+    });
+    const after = await readWorkbookSnapshot(
+      new File([blob], "ejoos.xlsx", { type: XLSX_MIME }),
+      EJOOS_SYNC_READ_OPTIONS,
+    );
+    const ts = after.sheets.find((sheet) => /табель/i.test(sheet.sheetName));
+    expect(String(ts?.rawRows?.[18]?.[0] ?? "")).toBe("РОЗПОРЯДЖЕННЯ");
+    expect(String(ts?.rawRows?.[18]?.[3] ?? "")).toBe("СЗЧ");
+    expect(String(ts?.rawRows?.[18]?.[5] ?? "")).toBe("солдат");
+    expect(String(ts?.rawRows?.[18]?.[6] ?? "")).toMatch(/діденко/i);
+    expect(String(ts?.rawRows?.[17]?.[6] ?? "")).toMatch(/шевченко/i);
+    expect(String(ts?.rawRows?.[15]?.[6] ?? "")).toMatch(/горгуц/i);
+  }, 30_000);
+
+  it("does not append into mid-sheet РОЗПОРЯДЖЕННЯ rows with staff index in column B", async () => {
+    const module = await import(
+      "xlsx-populate/browser/xlsx-populate-no-encryption"
+    );
+    const workbook = await module.default.fromBlankAsync();
+    const shpo = workbook.sheet(0);
+    shpo.name("1. ШПО");
+    workbook.addSheet("2. ООС").cell(1, 1).value("2. ООС");
+    workbook.addSheet("3. Виключені").cell(1, 1).value("3. Виключені");
+    workbook.addSheet("4. Тимчасово прибулі").cell(1, 1).value("4. Тимчасово прибулі");
+    const absents = workbook.addSheet("5. Тимчасово відсутні");
+    absents.cell(1, 1).value("5. Тимчасово відсутні");
+    const timesheet = workbook.addSheet("6. Табель");
+    timesheet.cell(1, 1).value("6. Табель");
+    timesheet.cell(2, 9).value("Серпень 2026 р.");
+    shpo.cell(7, 1).value("2103520");
+    shpo.cell(7, 6).value("солдат");
+    shpo.cell(7, 7).value("ДІДЕНКО Ілля Андрійович");
+    shpo.cell(7, 8).value("11040");
+    shpo.cell(20, 2).value(", який знаходиться у розпорядженні командира");
+    absents.cell(6, 2).value("ДІДЕНКО Ілля Андрійович");
+    absents.cell(6, 5).value("СЗЧ");
+    absents.cell(6, 7).value("13.07.2026");
+    timesheet.cell(7, 2).value("2103520");
+    timesheet.cell(7, 6).value("солдат");
+    timesheet.cell(7, 7).value("ДІДЕНКО Ілля Андрійович");
+    timesheet.cell(7, 8).value("11040");
+    for (let day = 1; day <= 9; day += 1) {
+      timesheet.cell(7, 8 + day).value("СЗЧ");
+    }
+    timesheet.cell(10, 1).value("РОЗПОРЯДЖЕННЯ");
+    timesheet.cell(10, 2).value("2103181");
+    timesheet.cell(10, 4).value("солдат");
+    timesheet.cell(10, 7).value("ТАФІ Іван Олегович");
+    timesheet
+      .cell(20, 2)
+      .value(
+        "ВИБУВ У РОЗПОРЯДЖЕННЯ КОМАНДИРА ВІЙСЬКОВОЇ ЧАСТИНИ А 4862",
+      );
+    timesheet.cell(21, 1).value("РОЗПОРЯДЖЕННЯ");
+    timesheet.cell(21, 3).value("Водій");
+    timesheet.cell(21, 4).value("СЗЧ");
+    timesheet.cell(21, 6).value("солдат");
+    timesheet.cell(21, 7).value("ГОРГУЦА Андрій Юрійович");
+    timesheet.cell(22, 1).value("РОЗПОРЯДЖЕННЯ");
+    timesheet.cell(22, 3).value("Розвідник");
+    timesheet.cell(22, 4).value("ЗБ");
+    timesheet.cell(22, 6).value("солдат");
+    timesheet.cell(22, 7).value("ВОЛОС Руслан Вікторович");
+
+    const blobIn = (await workbook.outputAsync("blob")) as Blob;
+    const ejoos = await readWorkbookSnapshot(
+      new File([blobIn], "ejoos.xlsx", { type: XLSX_MIME }),
+      EJOOS_SYNC_READ_OPTIONS,
+    );
+    const didenko = op({
+      id: "disp-didenko-not-mid",
+      kind: "move_to_disposition",
+      personId: "11040",
+      fullName: "ДІДЕНКО Ілля Андрійович",
+      positionIndex: "2103520",
+      rank: "солдат",
+      payload: {
+        previousIndex: "2103520",
+        destination: "у розпорядження командира",
+        orderDate: "10.08.2026",
+        orderNumber: "231",
+        shpoExcelRow: "7",
+        timesheetExcelRow: "7",
+        absenceCode: "СЗЧ",
+        absenceType: "СЗЧ",
+        remainsInOos: "true",
+        timesheetFound: "true",
+        keepOpenSzchTimesheet: "1",
+        vacateTimesheetStaffSlot: "1",
+      },
+    });
+    const { blob } = await applyConfirmedEjoosOps({
+      ejoos,
+      plan: dummyPlan([didenko]),
+      ops: [didenko],
+    });
+    const after = await readWorkbookSnapshot(
+      new File([blob], "ejoos.xlsx", { type: XLSX_MIME }),
+      EJOOS_SYNC_READ_OPTIONS,
+    );
+    const ts = after.sheets.find((sheet) => /табель/i.test(sheet.sheetName));
+    expect(String(ts?.rawRows?.[9]?.[6] ?? "")).toMatch(/таф/i);
+    expect(String(ts?.rawRows?.[9]?.[6] ?? "")).not.toMatch(/діденко/i);
+    expect(String(ts?.rawRows?.[22]?.[0] ?? "")).toBe("РОЗПОРЯДЖЕННЯ");
+    expect(String(ts?.rawRows?.[22]?.[6] ?? "")).toMatch(/діденко/i);
+  }, 30_000);
+
+  it("appends into Серпень subsection before the МАЙ marker row", async () => {
+    const module = await import(
+      "xlsx-populate/browser/xlsx-populate-no-encryption"
+    );
+    const workbook = await module.default.fromBlankAsync();
+    const shpo = workbook.sheet(0);
+    shpo.name("1. ШПО");
+    workbook.addSheet("2. ООС").cell(1, 1).value("2. ООС");
+    workbook.addSheet("3. Виключені").cell(1, 1).value("3. Виключені");
+    workbook.addSheet("4. Тимчасово прибулі").cell(1, 1).value("4. Тимчасово прибулі");
+    const absents = workbook.addSheet("5. Тимчасово відсутні");
+    absents.cell(1, 1).value("5. Тимчасово відсутні");
+    const timesheet = workbook.addSheet("6. Табель");
+    timesheet.cell(1, 1).value("6. Табель");
+    timesheet.cell(2, 9).value("Серпень 2026 р.");
+    shpo.cell(7, 1).value("2103520");
+    shpo.cell(7, 6).value("солдат");
+    shpo.cell(7, 7).value("ДІДЕНКО Ілля Андрійович");
+    shpo.cell(7, 8).value("11040");
+    shpo.cell(20, 2).value(", який знаходиться у розпорядженні командира");
+    absents.cell(6, 2).value("ДІДЕНКО Ілля Андрійович");
+    absents.cell(6, 5).value("СЗЧ");
+    absents.cell(6, 7).value("13.07.2026");
+    timesheet.cell(7, 2).value("2103520");
+    timesheet.cell(7, 6).value("солдат");
+    timesheet.cell(7, 7).value("ДІДЕНКО Ілля Андрійович");
+    timesheet.cell(7, 8).value("11040");
+    for (let day = 1; day <= 9; day += 1) {
+      timesheet.cell(7, 8 + day).value("СЗЧ");
+    }
+    timesheet
+      .cell(15, 2)
+      .value(
+        "ВИБУВ У РОЗПОРЯДЖЕННЯ КОМАНДИРА ВІЙСЬКОВОЇ ЧАСТИНИ А 4862",
+      );
+    timesheet.cell(16, 1).value("РОЗПОРЯДЖЕННЯ");
+    timesheet.cell(16, 3).value("Кулеметник");
+    timesheet.cell(16, 4).value("СЗЧ");
+    timesheet.cell(16, 6).value("солдат");
+    timesheet.cell(16, 7).value("ГУСАЧЕНКО Ігор Борисович");
+    timesheet.cell(17, 3).value("Водій");
+    timesheet.cell(17, 4).value("ЗБ");
+    timesheet.cell(17, 6).value("солдат");
+    timesheet.cell(17, 7).value("ОНОПА Володимир Юрійович");
+    timesheet.cell(18, 7).value("МАЙ");
+    timesheet.cell(19, 1).value("РОЗПОРЯДЖЕННЯ");
+    timesheet.cell(19, 7).value("ЗАКАЛЮЖНИЙ Іван Олегович");
+
+    const blobIn = (await workbook.outputAsync("blob")) as Blob;
+    const ejoos = await readWorkbookSnapshot(
+      new File([blobIn], "ejoos.xlsx", { type: XLSX_MIME }),
+      EJOOS_SYNC_READ_OPTIONS,
+    );
+    const didenko = op({
+      id: "disp-didenko-august-slice",
+      kind: "move_to_disposition",
+      personId: "11040",
+      fullName: "ДІДЕНКО Ілля Андрійович",
+      positionIndex: "2103520",
+      rank: "солдат",
+      payload: {
+        previousIndex: "2103520",
+        destination: "у розпорядження командира",
+        orderDate: "10.08.2026",
+        orderNumber: "231",
+        shpoExcelRow: "7",
+        timesheetExcelRow: "7",
+        absenceCode: "СЗЧ",
+        absenceType: "СЗЧ",
+        remainsInOos: "true",
+        timesheetFound: "true",
+        keepOpenSzchTimesheet: "1",
+        vacateTimesheetStaffSlot: "1",
+      },
+    });
+    const { blob } = await applyConfirmedEjoosOps({
+      ejoos,
+      plan: dummyPlan([didenko]),
+      ops: [didenko],
+    });
+    const after = await readWorkbookSnapshot(
+      new File([blob], "ejoos.xlsx", { type: XLSX_MIME }),
+      EJOOS_SYNC_READ_OPTIONS,
+    );
+    const ts = after.sheets.find((sheet) => /табель/i.test(sheet.sheetName));
+    expect(String(ts?.rawRows?.[17]?.[6] ?? "")).toMatch(/діденко/i);
+    expect(String(ts?.rawRows?.[18]?.[6] ?? "")).toMatch(/закалюж/i);
   }, 30_000);
 });

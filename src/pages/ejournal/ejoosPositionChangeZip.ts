@@ -38,6 +38,7 @@ import {
   applyInlineStringWritesToWorkbook,
   type ZipCellWrite,
 } from "./ejoosZipCellWrites";
+import { findTimesheetAppendRowForUnit } from "./ejoosTimesheetUnitSections";
 
 const valueOf = (value: CellValue | unknown): string | number | null => {
   if (value === undefined || value === null || value === "") return null;
@@ -80,22 +81,14 @@ const nextTimesheetFreeRow = (
   sheet: ExcelSheetSnapshot,
   sourceRow: number,
   reserved: Set<number>,
-) => {
-  for (let row = sourceRow + 1; row <= sheet.rawRows.length + 30; row += 1) {
-    if (reserved.has(row)) continue;
-    if (
-      !textAt(sheet, row, 2) &&
-      !textAt(sheet, row, 7) &&
-      !textAt(sheet, row, 8)
-    ) {
-      reserved.add(row);
-      return row;
-    }
-  }
-  const row = sheet.rawRows.length + reserved.size + 1;
-  reserved.add(row);
-  return row;
-};
+  positionTitle = "",
+) =>
+  findTimesheetAppendRowForUnit(sheet, {
+    sourceRow,
+    positionTitle,
+    reserved,
+    placementScope: "any",
+  });
 
 /** Історію в ООС ведемо в одній клітинці: найновіше значення — першим рядком. */
 const historyValue = (
@@ -210,6 +203,7 @@ const collectWrites = (op: EjoosSyncOp, ctx: PositionChangeContext) => {
         timesheet,
         oldTimesheetRow,
         ctx.reservedTimesheetRows,
+        op.payload.positionTitle || "",
       );
       for (let column = 1; column <= 40; column += 1) {
         ctx.timesheetWrites.push({
@@ -321,6 +315,7 @@ const collectWrites = (op: EjoosSyncOp, ctx: PositionChangeContext) => {
         timesheet,
         newTimesheetRow,
         ctx.reservedTimesheetRows,
+        op.payload.positionTitle || "",
       );
       for (let column = 1; column <= 40; column += 1) {
         ctx.timesheetWrites.push({

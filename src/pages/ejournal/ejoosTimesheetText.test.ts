@@ -10,7 +10,9 @@ import {
   timesheetMarkFromArchive,
   isTimesheetAbsenceCode,
   extractTimesheetDestinationFromPosition,
+  formatDispositionTimesheetDeparture,
   formatTimesheetDeparture,
+  timesheetMarkForOpenDispositionDay,
   archiveReturnContradictsCurrentSh,
   findTimesheetMonthHeaderCell,
   isInternalStaffTimesheetDeparture,
@@ -512,6 +514,37 @@ describe("timesheet departure phrase strips position and picks до/у", () => {
     expect(formatTimesheetDeparture("розпорядження командира")).toBe(
       "вибув у розпорядження командира",
     );
+  });
+
+  it("Gorgutsa: builds the full disposition order phrase", () => {
+    expect(
+      formatDispositionTimesheetDeparture(
+        ", який знаходиться у розпорядженні командира військової частини А4862",
+        "706-РС",
+        "12.08.2026",
+      ),
+    ).toBe(
+      "вибув у розпорядження командира військової частини А4862 наказ №706-РС від 12.08.2026",
+    );
+  });
+
+  it("open disposition: absence code before order day, phrase on order day, dashes after", () => {
+    const departure = formatDispositionTimesheetDeparture(
+      ", який знаходиться у розпорядженні командира військової частини А4862",
+      "706-РС",
+      "12.08.2026",
+    );
+    const mark = (day: number) =>
+      timesheetMarkForOpenDispositionDay(day, {
+        dispositionOrderDay: 12,
+        dispositionDeparture: departure,
+        absenceCode: "СЗЧ",
+        lastDay: 25,
+      });
+    expect(mark(11)).toBe("СЗЧ");
+    expect(mark(12)).toBe(departure);
+    expect(mark(13)).toBe("-");
+    expect(mark(25)).toBe("-");
   });
 
   it("does not treat a bare job title as a destination", () => {

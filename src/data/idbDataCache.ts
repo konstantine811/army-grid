@@ -19,7 +19,15 @@ type CacheEntry<T = unknown> = {
 
 const memoryCache = new Map<string, CacheEntry>();
 const inFlight = new Map<string, Promise<unknown>>();
+const cacheGenerations = new Map<string, number>();
 const listeners = new Map<string, Set<() => void>>();
+
+const getCacheGeneration = (key: string) => cacheGenerations.get(key) ?? 0;
+
+const invalidateInFlightKey = (key: string) => {
+  cacheGenerations.set(key, getCacheGeneration(key) + 1);
+  inFlight.delete(key);
+};
 
 const notifyDataCache = (key: string) => {
   listeners.get(key)?.forEach((listener) => listener());
@@ -139,13 +147,16 @@ export const invalidateDataCache = async (
   if (keysOrPrefixes.length === 0) return;
 
   const notified = new Set<string>();
+  const activeKeys = new Set([...memoryCache.keys(), ...inFlight.keys()]);
   for (const token of keysOrPrefixes) {
     memoryCache.delete(token);
     notified.add(token);
-    for (const key of [...memoryCache.keys()]) {
-      if (key.startsWith(token)) {
+    invalidateInFlightKey(token);
+    for (const key of activeKeys) {
+      if (key !== token && key.startsWith(token)) {
         memoryCache.delete(key);
         notified.add(key);
+        invalidateInFlightKey(key);
       }
     }
   }
@@ -215,6 +226,7 @@ export const fetchWithCache = async <T>(options: {
   if (pending) return pending as Promise<T>;
 
   const run = async () => {
+    const generation = getCacheGeneration(options.key);
     const cached = await readDataCache<T>(options.key);
     if (cached != null) {
       await options.onCached?.(cached);
@@ -233,6 +245,12 @@ export const fetchWithCache = async <T>(options: {
 
     try {
       const fresh = await options.fetcher();
+      if (generation !== getCacheGeneration(options.key)) {
+        return fetchWithCache({ ...options, force: true });
+      }
+      if (fresh == null && cached != null) {
+        return cached;
+      }
       const changed =
         cached == null ||
         (options.isChanged ? options.isChanged(cached, fresh) : true);
@@ -259,6 +277,7 @@ export const fetchWithCache = async <T>(options: {
 export const resetDataCacheMemory = () => {
   memoryCache.clear();
   inFlight.clear();
+  cacheGenerations.clear();
 };
 
 export { payloadChanged as jsonChanged } from "./payloadFingerprint";

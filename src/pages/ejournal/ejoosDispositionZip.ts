@@ -12,14 +12,20 @@ import {
 import { canonicalName, normId } from "./ejoosIdentity";
 import {
   dayFromOrderLabel,
+  formatDispositionTimesheetDeparture,
   formatTimesheetDeparture,
+  formatTimesheetMonthHeader,
   parseTimesheetAbsenceSpans,
+  parseTimesheetMonthHeaderText,
+  timesheetMarkForOpenDispositionDay,
   timesheetMarkFromArchive,
+  timesheetMonthHeaderTextFromCell,
 } from "./ejoosTimesheetText";
 import {
   applyInlineStringWritesToWorkbook,
   type ZipCellWrite,
 } from "./ejoosZipCellWrites";
+import { findTimesheetAppendRowForUnit } from "./ejoosTimesheetUnitSections";
 
 const valueOf = (value: CellValue | unknown): string | number | null => {
   if (value === undefined || value === null || value === "") return null;
@@ -74,23 +80,25 @@ const findTimesheetStyleRow = (sheet: ExcelSheetSnapshot) => {
   return 7;
 };
 
-/** Якщо індексу немає в Табелі — вставляємо новий рядок після найближчого штатного. */
+/** Якщо індексу немає в Табелі — вставляємо в кінець секції підрозділу, не за числом індексу. */
 const findOrAllocateStaffIndexRow = (
   sheet: ExcelSheetSnapshot,
   staffIndex: string,
   reserved: Set<number>,
+  positionTitle = "",
+  sourceRow = 0,
 ) => {
   if (!staffIndex) return 0;
   for (let row = 7; row <= sheet.rawRows.length; row += 1) {
     if (textAt(sheet, row, 2) === staffIndex) return row;
   }
-  let anchor = findTimesheetStyleRow(sheet);
-  for (let row = 7; row <= sheet.rawRows.length; row += 1) {
-    const idx = textAt(sheet, row, 2);
-    if (!/^\d{5,}$/.test(idx)) continue;
-    if (Number(idx) <= Number(staffIndex)) anchor = row;
-  }
-  return nextTimesheetRow(sheet, anchor, reserved);
+  return   findTimesheetAppendRowForUnit(sheet, {
+    sourceRow: sourceRow || undefined,
+    positionTitle,
+    staffIndex,
+    reserved,
+    placementScope: "company",
+  });
 };
 
 const writeStaffTimesheetIdentity = (
@@ -121,6 +129,504 @@ const writeStaffTimesheetIdentity = (
         styleSourceRow: styleRow,
       });
     }
+  }
+};
+
+const DISPOSITION_TIMESHEET_HEADER_RE =
+  /ВИБУВ\s+У\s+РОЗПОРЯДЖЕННЯ\s+КОМАНДИРА/iu;
+const DISPOSITION_TIMESHEET_SCAN_COLUMNS = 48;
+
+const isCommanderDispositionLabel = (text: string) =>
+  /РОЗПОРЯДЖ/iu.test(text) && !/^\d{5,}$/.test(text);
+
+type DispositionTimesheetCols = {
+  division: number;
+  specialty: number;
+  status: number;
+  rank: number;
+  name: number;
+  id: number;
+};
+
+/** Реальний Табель (рядок 1145): A, C посада, D код, F звання, G ПІБ, H ID. */
+const DEFAULT_DISPOSITION_TIMESHEET_COLS: DispositionTimesheetCols = {
+  division: 1,
+  specialty: 3,
+  status: 4,
+  rank: 6,
+  name: 7,
+  id: 8,
+};
+
+const COMPACT_DISPOSITION_TIMESHEET_COLS: DispositionTimesheetCols = {
+  division: 1,
+  specialty: 0,
+  status: 3,
+  rank: 4,
+  name: 5,
+  id: 8,
+};
+
+const looksLikePersonName = (text: string) =>
+  /[А-ЯІЇЄҐ][а-яіїєґ'`-]+\s+[А-ЯІЇЄҐ]/u.test(text);
+
+const DISPOSITION_MONTH_MARKER_ALIASES: Record<string, number> = {
+  май: 5,
+};
+
+const UK_MONTH_TITLES = [
+  "Січень",
+  "Лютий",
+  "Березень",
+  "Квітень",
+  "Травень",
+  "Червень",
+  "Липень",
+  "Серпень",
+  "Вересень",
+  "Жовтень",
+  "Листопад",
+  "Грудень",
+] as const;
+
+const parseDispositionMonthMarker = (text: string) => {
+  const key = text.trim().toLocaleLowerCase("uk-UA");
+  if (!key || key.length > 20) return 0;
+  if (DISPOSITION_MONTH_MARKER_ALIASES[key]) {
+    return DISPOSITION_MONTH_MARKER_ALIASES[key];
+  }
+  const idx = UK_MONTH_TITLES.findIndex(
+    (title) => title.toLocaleLowerCase("uk-UA") === key,
+  );
+  return idx >= 0 ? idx + 1 : 0;
+};
+
+const isDispositionMonthMarkerRow = (
+  sheet: ExcelSheetSnapshot,
+  row: number,
+) => {
+  const markerMonth = parseDispositionMonthMarker(textAt(sheet, row, 7));
+  if (!markerMonth) return false;
+  if (/РОЗПОРЯДЖ/iu.test(textAt(sheet, row, 1))) return false;
+  if (looksLikeDispositionStatus(textAt(sheet, row, 4))) return false;
+  if (textAt(sheet, row, 6) && looksLikePersonName(textAt(sheet, row, 7))) {
+    return false;
+  }
+  return true;
+};
+
+const readSheetTimesheetMonth = (sheet: ExcelSheetSnapshot) => {
+  for (let row = 1; row <= Math.min(6, sheet.rawRows.length); row += 1) {
+    for (let column = 1; column <= 40; column += 1) {
+      const text = timesheetMonthHeaderTextFromCell(
+        sheet.rawRows[row - 1]?.[column - 1],
+      );
+      const parsed = parseTimesheetMonthHeaderText(text);
+      if (parsed) return parsed.month;
+    }
+  }
+  return 0;
+};
+
+const targetMonthFromPlan = (plan: EjoosSyncPlan) => {
+  const header = formatTimesheetMonthHeader(plan.timesheetDayLabel);
+  return parseTimesheetMonthHeaderText(header)?.month ?? 0;
+};
+
+type DispositionMonthSlice = {
+  startRow: number;
+  endRow: number;
+  month: number;
+};
+
+const findDispositionMonthSlices = (
+  sheet: ExcelSheetSnapshot,
+  headerRow: number,
+  primaryMonth: number,
+): DispositionMonthSlice[] => {
+  const slices: DispositionMonthSlice[] = [];
+  let start = headerRow + 1;
+  let sliceMonth = primaryMonth;
+  for (let row = headerRow + 1; row <= sheet.rawRows.length; row += 1) {
+    if (isTimesheetDispositionHeaderRow(sheet, row)) break;
+    if (isStaffTimesheetRow(sheet, row)) break;
+    if (!isDispositionMonthMarkerRow(sheet, row)) continue;
+    const markerMonth = parseDispositionMonthMarker(textAt(sheet, row, 7));
+    if (!markerMonth) continue;
+    if (row > start) {
+      slices.push({ startRow: start, endRow: row - 1, month: sliceMonth });
+    }
+    start = row + 1;
+    sliceMonth = markerMonth;
+  }
+  if (start <= sheet.rawRows.length) {
+    slices.push({
+      startRow: start,
+      endRow: sheet.rawRows.length,
+      month: sliceMonth,
+    });
+  }
+  return slices;
+};
+
+const isDispositionSubsectionDataRow = (
+  sheet: ExcelSheetSnapshot,
+  row: number,
+  cols: DispositionTimesheetCols,
+) => {
+  if (isTimesheetDispositionHeaderRow(sheet, row)) return false;
+  if (isStaffTimesheetRow(sheet, row)) return false;
+  if (isDispositionMonthMarkerRow(sheet, row)) return false;
+  if (isDispositionDataRow(sheet, row, cols)) return true;
+  if (looksLikePersonName(textAt(sheet, row, cols.name))) return true;
+  if (looksLikePersonName(textAt(sheet, row, 7))) return true;
+  return rowHasTimesheetDayMarks(sheet, row);
+};
+
+
+const looksLikeDispositionStatus = (text: string) =>
+  /^(?:ЗБ|СЗЧ|лік|від|\+|-|РОЗПОРЯДЖ)/iu.test(text);
+
+const rowHasDispositionDivision = (sheet: ExcelSheetSnapshot, row: number) =>
+  /РОЗПОРЯДЖ/iu.test(textAt(sheet, row, 1)) ||
+  /РОЗПОРЯДЖ/iu.test(textAt(sheet, row, 2));
+
+const rowTextThrough = (
+  sheet: ExcelSheetSnapshot,
+  row: number,
+  lastColumn = DISPOSITION_TIMESHEET_SCAN_COLUMNS,
+) => {
+  const chunks: string[] = [];
+  for (let column = 1; column <= lastColumn; column += 1) {
+    const text = textAt(sheet, row, column);
+    if (text) chunks.push(text);
+  }
+  return chunks.join(" ");
+};
+
+const isTimesheetDispositionHeaderRow = (
+  sheet: ExcelSheetSnapshot,
+  row: number,
+) => DISPOSITION_TIMESHEET_HEADER_RE.test(rowTextThrough(sheet, row));
+
+const findTimesheetDispositionHeaderRow = (sheet: ExcelSheetSnapshot) => {
+  let headerRow = 0;
+  for (let row = 1; row <= sheet.rawRows.length; row += 1) {
+    if (isTimesheetDispositionHeaderRow(sheet, row)) headerRow = row;
+  }
+  return headerRow;
+};
+
+const isStaffTimesheetRow = (sheet: ExcelSheetSnapshot, row: number) =>
+  /^\d{5,}$/.test(textAt(sheet, row, 2)) &&
+  Boolean(textAt(sheet, row, 6) || textAt(sheet, row, 7));
+
+const isDispositionDataRow = (
+  sheet: ExcelSheetSnapshot,
+  row: number,
+  cols: DispositionTimesheetCols,
+) => {
+  if (isTimesheetDispositionHeaderRow(sheet, row)) return false;
+  if (isStaffTimesheetRow(sheet, row)) return false;
+  if (/^\d{5,}$/.test(textAt(sheet, row, 2))) return false;
+  if (isCommanderDispositionLabel(textAt(sheet, row, 2))) return true;
+  if (
+    /РОЗПОРЯДЖ/iu.test(textAt(sheet, row, 1)) &&
+    !/^\d{5,}$/.test(textAt(sheet, row, 2))
+  ) {
+    return true;
+  }
+  if (
+    isCommanderDispositionLabel(textAt(sheet, row, cols.division)) &&
+    cols.division !== 1
+  ) {
+    return true;
+  }
+  return false;
+};
+
+const findLastCommanderDispositionDataRow = (sheet: ExcelSheetSnapshot) => {
+  for (let row = sheet.rawRows.length; row >= 1; row -= 1) {
+    if (isStaffTimesheetRow(sheet, row)) continue;
+    if (isDispositionDataRow(sheet, row, DEFAULT_DISPOSITION_TIMESHEET_COLS)) {
+      return row;
+    }
+  }
+  return 0;
+};
+
+const rowHasTimesheetDayMarks = (sheet: ExcelSheetSnapshot, row: number) => {
+  for (let day = 1; day <= 31; day += 1) {
+    if (textAt(sheet, row, 8 + day)) return true;
+  }
+  return false;
+};
+
+const inferDispositionTimesheetColumns = (
+  sheet: ExcelSheetSnapshot,
+  headerRow: number,
+): DispositionTimesheetCols => {
+  const start = headerRow > 0 ? headerRow + 1 : 7;
+  let compactCandidate = false;
+  for (let row = start; row <= sheet.rawRows.length; row += 1) {
+    if (isTimesheetDispositionHeaderRow(sheet, row)) continue;
+    if (isStaffTimesheetRow(sheet, row)) continue;
+    if (
+      !/РОЗПОРЯДЖ/iu.test(textAt(sheet, row, 1)) ||
+      /^\d{5,}$/.test(textAt(sheet, row, 2))
+    ) {
+      continue;
+    }
+    if (looksLikePersonName(textAt(sheet, row, 7))) {
+      return DEFAULT_DISPOSITION_TIMESHEET_COLS;
+    }
+    if (
+      looksLikePersonName(textAt(sheet, row, 5)) &&
+      !looksLikePersonName(textAt(sheet, row, 7))
+    ) {
+      compactCandidate = true;
+    }
+  }
+  for (let row = sheet.rawRows.length; row >= start; row -= 1) {
+    if (!isDispositionDataRow(sheet, row, DEFAULT_DISPOSITION_TIMESHEET_COLS)) {
+      continue;
+    }
+    if (looksLikePersonName(textAt(sheet, row, 7))) {
+      return DEFAULT_DISPOSITION_TIMESHEET_COLS;
+    }
+  }
+  if (compactCandidate) return COMPACT_DISPOSITION_TIMESHEET_COLS;
+  return DEFAULT_DISPOSITION_TIMESHEET_COLS;
+};
+
+const occupantMatchesOp = (
+  sheet: ExcelSheetSnapshot,
+  row: number,
+  nameCol: number,
+  idCol: number,
+  op: EjoosSyncOp,
+) => {
+  const currentId = textAt(sheet, row, idCol);
+  const currentName = textAt(sheet, row, nameCol);
+  if (!currentId && !currentName) return false;
+  if (op.personId && currentId && currentId === op.personId) return true;
+  return Boolean(
+    op.fullName &&
+      currentName &&
+      canonicalName(currentName) === canonicalName(op.fullName),
+  );
+};
+
+const dispositionRowHasOccupant = (
+  sheet: ExcelSheetSnapshot,
+  row: number,
+  cols: DispositionTimesheetCols,
+) =>
+  Boolean(
+    textAt(sheet, row, cols.name) ||
+      looksLikePersonName(textAt(sheet, row, 6)) ||
+      looksLikePersonName(textAt(sheet, row, 7)) ||
+      textAt(sheet, row, cols.id) ||
+      textAt(sheet, row, cols.rank),
+  );
+
+const rowHasDispositionSectionContent = (
+  sheet: ExcelSheetSnapshot,
+  row: number,
+  cols: DispositionTimesheetCols,
+) => {
+  if (isTimesheetDispositionHeaderRow(sheet, row)) return false;
+  if (isStaffTimesheetRow(sheet, row)) return false;
+  if (rowHasDispositionDivision(sheet, row)) return true;
+  if (dispositionRowHasOccupant(sheet, row, cols)) return true;
+  if (looksLikeDispositionStatus(textAt(sheet, row, cols.status))) return true;
+  if (looksLikeDispositionStatus(textAt(sheet, row, 4))) return true;
+  return rowHasTimesheetDayMarks(sheet, row);
+};
+
+const findTimesheetDispositionSection = (
+  sheet: ExcelSheetSnapshot,
+  plan: EjoosSyncPlan,
+) => {
+  const headerRow = findTimesheetDispositionHeaderRow(sheet);
+  const cols = inferDispositionTimesheetColumns(
+    sheet,
+    headerRow || findLastCommanderDispositionDataRow(sheet),
+  );
+  const targetMonth =
+    targetMonthFromPlan(plan) || readSheetTimesheetMonth(sheet);
+  const primaryMonth = readSheetTimesheetMonth(sheet) || targetMonth;
+
+  if (headerRow && targetMonth) {
+    const slices = findDispositionMonthSlices(sheet, headerRow, primaryMonth);
+    const slice =
+      slices.find((item) => item.month === targetMonth) ||
+      slices.find((item) => item.month === primaryMonth) ||
+      slices[0];
+    if (slice) {
+      let lastRow = slice.startRow - 1;
+      let styleRow = slice.startRow;
+      for (let row = slice.startRow; row <= slice.endRow; row += 1) {
+        if (!isDispositionSubsectionDataRow(sheet, row, cols)) continue;
+        lastRow = row;
+        styleRow = row;
+      }
+      return {
+        headerRow,
+        lastRow,
+        styleRow: styleRow || Math.max(slice.startRow, 7),
+        cols,
+        slice,
+      };
+    }
+  }
+
+  if (headerRow) {
+    let lastRow = headerRow;
+    let styleRow = 0;
+    for (let row = headerRow + 1; row <= sheet.rawRows.length; row += 1) {
+      if (isTimesheetDispositionHeaderRow(sheet, row)) break;
+      if (isStaffTimesheetRow(sheet, row)) break;
+      if (isDispositionMonthMarkerRow(sheet, row)) break;
+      if (!isDispositionSubsectionDataRow(sheet, row, cols)) continue;
+      lastRow = row;
+      styleRow = row;
+    }
+    return {
+      headerRow,
+      lastRow,
+      styleRow: styleRow || Math.max(headerRow + 1, 7),
+      cols,
+    };
+  }
+
+  const lastDataRow = findLastCommanderDispositionDataRow(sheet);
+  if (!lastDataRow) return null;
+
+  let firstDataRow = lastDataRow;
+  for (let row = lastDataRow - 1; row >= 1; row -= 1) {
+    if (isStaffTimesheetRow(sheet, row)) break;
+    if (isTimesheetDispositionHeaderRow(sheet, row)) break;
+    if (!isDispositionDataRow(sheet, row, cols)) break;
+    firstDataRow = row;
+  }
+
+  return {
+    headerRow: Math.max(1, firstDataRow - 1),
+    lastRow: lastDataRow,
+    styleRow: lastDataRow,
+    cols,
+  };
+};
+
+const rowMatchesDispositionOp = (
+  sheet: ExcelSheetSnapshot,
+  row: number,
+  op: EjoosSyncOp,
+  cols: DispositionTimesheetCols,
+) => occupantMatchesOp(sheet, row, cols.name, cols.id, op);
+
+const DISPOSITION_TIMESHEET_STYLE_LAST_COLUMN = 40;
+
+const seedDispositionTimesheetRowStyles = (
+  writes: ZipCellWrite[],
+  targetRow: number,
+  styleRow: number,
+) => {
+  for (let column = 1; column <= DISPOSITION_TIMESHEET_STYLE_LAST_COLUMN; column += 1) {
+    writes.push({
+      row: targetRow,
+      column,
+      value: null,
+      styleOnly: true,
+      styleSourceRow: styleRow,
+      styleSourceColumn: column,
+      copyNeighborStyle: false,
+      keepNeighborStyle: true,
+      heightSourceRow: styleRow,
+    });
+  }
+};
+
+/** Рядок у блоці «ВИБУВ У РОЗПОРЯДЖЕННЯ…» — існуючий запис або новий рядок у кінці секції. */
+const timesheetDispositionTarget = (
+  sheet: ExcelSheetSnapshot,
+  reserved: Set<number>,
+  plan: EjoosSyncPlan,
+  op?: EjoosSyncOp,
+) => {
+  const section = findTimesheetDispositionSection(sheet, plan);
+  const cols = section?.cols ?? DEFAULT_DISPOSITION_TIMESHEET_COLS;
+  const styleRow = section?.styleRow ?? 7;
+  const sliceEnd = section?.slice?.endRow ?? section?.lastRow ?? 0;
+
+  if (section && op) {
+    const searchEnd = sliceEnd || section.lastRow;
+    for (let row = section.headerRow + 1; row <= searchEnd; row += 1) {
+      if (isDispositionMonthMarkerRow(sheet, row)) continue;
+      if (!isDispositionSubsectionDataRow(sheet, row, cols)) continue;
+      if (rowMatchesDispositionOp(sheet, row, op, cols)) {
+        reserved.add(row);
+        return { row, styleRow, cols, isNewRow: false };
+      }
+    }
+  }
+
+  let row = section ? section.lastRow + 1 : sheet.rawRows.length + 1;
+  while (reserved.has(row)) row += 1;
+  reserved.add(row);
+  return { row, styleRow, cols, isNewRow: true };
+};
+
+const writeDispositionTimesheetIdentity = (
+  writes: ZipCellWrite[],
+  sheet: ExcelSheetSnapshot,
+  targetRow: number,
+  styleRow: number,
+  op: EjoosSyncOp,
+  absenceCode: string,
+  cols: DispositionTimesheetCols,
+  positionTitle?: string,
+) => {
+  const specialty =
+    positionTitle ||
+    op.payload.positionTitle ||
+    textAt(sheet, targetRow, cols.specialty) ||
+    null;
+  const entries: Array<[number, string | null]> = [
+    [cols.division, "РОЗПОРЯДЖЕННЯ"],
+    [cols.status, absenceCode || shpoDispositionMark(op) || null],
+    [cols.rank, op.rank || null],
+    [cols.name, op.fullName || null],
+    [cols.id, op.personId || null],
+  ];
+  if (cols.specialty > 0 && specialty) {
+    entries.splice(1, 0, [cols.specialty, specialty]);
+  }
+  for (const [column, value] of entries) {
+    if (!value) continue;
+    writes.push({
+      row: targetRow,
+      column,
+      value,
+      styleSourceRow: styleRow,
+      styleSourceColumn: column,
+      keepNeighborStyle: true,
+      copyNeighborStyle: false,
+    });
+  }
+};
+
+const clearTimesheetStaffOccupant = (
+  writes: ZipCellWrite[],
+  row: number,
+  lastDay: number,
+) => {
+  for (let day = 1; day <= lastDay; day += 1) {
+    writes.push({ row, column: 8 + day, value: null });
+  }
+  for (const column of [6, 7, 8]) {
+    writes.push({ row, column, value: null });
   }
 };
 
@@ -165,26 +671,14 @@ const nextTimesheetRow = (
   sheet: ExcelSheetSnapshot,
   sourceRow: number,
   reserved: Set<number>,
-) => {
-  for (
-    let row = sourceRow + 1;
-    row <= sheet.rawRows.length + 30;
-    row += 1
-  ) {
-    if (reserved.has(row)) continue;
-    if (
-      !textAt(sheet, row, 2) &&
-      !textAt(sheet, row, 7) &&
-      !textAt(sheet, row, 8)
-    ) {
-      reserved.add(row);
-      return row;
-    }
-  }
-  const row = sheet.rawRows.length + reserved.size + 1;
-  reserved.add(row);
-  return row;
-};
+  positionTitle = "",
+) =>
+  findTimesheetAppendRowForUnit(sheet, {
+    sourceRow,
+    positionTitle,
+    reserved,
+    placementScope: "company",
+  });
 
 /**
  * У РУХ призначення приходить у різних формах: «у розпорядження командира…»,
@@ -232,24 +726,6 @@ type DispositionContext = {
   reservedShpoRows: Set<number>;
   reservedAbsentRows: Set<number>;
   reservedTimesheetRows: Set<number>;
-};
-
-const occupantMatchesOp = (
-  sheet: ExcelSheetSnapshot,
-  row: number,
-  nameCol: number,
-  idCol: number,
-  op: EjoosSyncOp,
-) => {
-  const currentId = textAt(sheet, row, idCol);
-  const currentName = textAt(sheet, row, nameCol);
-  if (!currentId && !currentName) return false;
-  if (op.personId && currentId && currentId === op.personId) return true;
-  return Boolean(
-    op.fullName &&
-      currentName &&
-      canonicalName(currentName) === canonicalName(op.fullName),
-  );
 };
 
 const collectWrites = (op: EjoosSyncOp, ctx: DispositionContext) => {
@@ -336,9 +812,113 @@ const collectWrites = (op: EjoosSyncOp, ctx: DispositionContext) => {
     }
   }
 
-  const sourceTimesheetRow =
+  const staffTimesheetRow =
     Number(op.payload.timesheetExcelRow || 0) ||
-    findStaffTimesheetRow(timesheet, op) ||
+    findStaffTimesheetRow(timesheet, op);
+  const lastDay = Math.min(31, plan.timesheetDay);
+  const absenceCode = op.payload.absenceCode || statusMark;
+  const absenceSpans = parseTimesheetAbsenceSpans(
+    op.payload.timesheetAbsenceSpans || "",
+  );
+  const journalId =
+    op.personId ||
+    personIdFromShpo(parseEjoosShpo(shpo), {
+      fullName: op.fullName,
+      positionIndex: op.positionIndex || op.payload.previousIndex,
+      personId: op.personId,
+    });
+  const dispositionOrderDay = dayFromOrderLabel(op.payload.orderDate);
+  const dispositionDeparture = formatDispositionTimesheetDeparture(
+    op.payload.destination || op.payload.changeText || "",
+    op.payload.orderNumber || "",
+    op.payload.orderDate || "",
+  );
+  const paintOpenSzch = (
+    row: number,
+    styleSourceRow: number,
+    idColumn: number,
+  ) => {
+    for (let day = 1; day <= lastDay; day += 1) {
+      const value = timesheetMarkForOpenDispositionDay(day, {
+        dispositionOrderDay,
+        dispositionDeparture,
+        absenceCode,
+        lastDay,
+        absenceSpans: absenceSpans.length ? absenceSpans : undefined,
+      });
+    timesheetWrites.push({
+        row,
+        column: 8 + day,
+        value,
+        styleSourceRow,
+        styleSourceColumn: 8 + day,
+        keepNeighborStyle: day !== dispositionOrderDay,
+        wrapText: day === dispositionOrderDay,
+        copyNeighborStyle: false,
+      });
+    }
+    if (journalId) {
+      timesheetWrites.push({
+        row,
+        column: idColumn,
+        value: journalId,
+        styleSourceRow,
+        styleSourceColumn: idColumn,
+        keepNeighborStyle: true,
+        copyNeighborStyle: false,
+      });
+    }
+  };
+
+  const keepOpenSzch = op.payload.keepOpenSzchTimesheet === "1";
+  const writeDispositionTimesheet =
+    keepOpenSzch ||
+    op.payload.timesheetFound === "true" ||
+    op.payload.timesheetCreateRow === "1";
+  if (writeDispositionTimesheet) {
+    const target = timesheetDispositionTarget(
+      timesheet,
+      ctx.reservedTimesheetRows,
+      plan,
+      op,
+    );
+    if (target.isNewRow) {
+      seedDispositionTimesheetRowStyles(
+        timesheetWrites,
+        target.row,
+        target.styleRow,
+      );
+    }
+    writeDispositionTimesheetIdentity(
+      timesheetWrites,
+      timesheet,
+      target.row,
+      target.styleRow,
+      op,
+      absenceCode,
+      target.cols,
+      staffTimesheetRow > 0
+        ? textAt(timesheet, staffTimesheetRow, 3) ||
+            op.payload.positionTitle ||
+            undefined
+        : op.payload.positionTitle,
+    );
+    paintOpenSzch(target.row, target.styleRow, target.cols.id);
+    if (
+      staffTimesheetRow > 0 &&
+      occupantMatchesOp(timesheet, staffTimesheetRow, 7, 8, op)
+    ) {
+      clearTimesheetStaffOccupant(
+        timesheetWrites,
+        staffTimesheetRow,
+        lastDay,
+      );
+    }
+    return;
+  }
+
+  const sourceTimesheetRow =
+    staffTimesheetRow ||
     (op.payload.timesheetCreateRow === "1"
       ? findOrAllocateStaffIndexRow(
           timesheet,
@@ -347,6 +927,8 @@ const collectWrites = (op: EjoosSyncOp, ctx: DispositionContext) => {
             op.positionIndex ||
             "",
           ctx.reservedTimesheetRows,
+          op.payload.positionTitle || "",
+          staffTimesheetRow,
         )
       : 0);
   if (sourceTimesheetRow > 0) {
@@ -368,90 +950,12 @@ const collectWrites = (op: EjoosSyncOp, ctx: DispositionContext) => {
         op,
       );
     }
-    const lastDay = Math.min(31, plan.timesheetDay);
-    const absenceCode = op.payload.absenceCode || statusMark;
-    const absenceSpans = parseTimesheetAbsenceSpans(
-      op.payload.timesheetAbsenceSpans || "",
-    );
-    const journalId =
-      op.personId ||
-      personIdFromShpo(parseEjoosShpo(shpo), {
-        fullName: op.fullName,
-        positionIndex: op.positionIndex || op.payload.previousIndex,
-        personId: op.personId,
-      });
-    const paintOpenSzch = (row: number, styleSourceRow: number) => {
-      for (let day = 1; day <= lastDay; day += 1) {
-        const fromSpan = absenceSpans.length
-          ? timesheetMarkFromArchive(day, {
-              activeFromDay: 1,
-              lastDay,
-              spans: absenceSpans,
-              fillBeforeActive: true,
-            })
-          : null;
-        const value = fromSpan || absenceCode;
-        timesheetWrites.push({
-          row,
-          column: 8 + day,
-          value,
-          styleSourceRow,
-        });
-      }
-      if (journalId) {
-        timesheetWrites.push({
-          row,
-          column: 8,
-          value: journalId,
-          styleSourceRow,
-        });
-      }
-    };
-
-    const keepOpenSzch = op.payload.keepOpenSzchTimesheet === "1";
-    if (keepOpenSzch) {
-      const vacateStaff = op.payload.vacateTimesheetStaffSlot === "1";
-      if (vacateStaff) {
-        const historyRow = nextTimesheetRow(
-          timesheet,
-          sourceTimesheetRow,
-          ctx.reservedTimesheetRows,
-        );
-        for (let column = 1; column <= 40; column += 1) {
-          timesheetWrites.push({
-            row: historyRow,
-            column,
-            value: valueOf(
-              timesheet.rawRows[sourceTimesheetRow - 1]?.[column - 1],
-            ),
-            styleSourceRow: sourceTimesheetRow,
-          });
-        }
-        paintOpenSzch(historyRow, sourceTimesheetRow);
-        for (let day = 1; day <= lastDay; day += 1) {
-          timesheetWrites.push({
-            row: sourceTimesheetRow,
-            column: 8 + day,
-            value: null,
-          });
-        }
-        for (const column of [6, 7, 8]) {
-          timesheetWrites.push({
-            row: sourceTimesheetRow,
-            column,
-            value: null,
-          });
-        }
-      } else {
-        paintOpenSzch(sourceTimesheetRow, sourceTimesheetRow);
-      }
-      return;
-    }
 
     const historyRow = nextTimesheetRow(
       timesheet,
       sourceTimesheetRow,
       ctx.reservedTimesheetRows,
+      op.payload.positionTitle || "",
     );
     for (let column = 1; column <= 40; column += 1) {
       timesheetWrites.push({
@@ -524,8 +1028,8 @@ const collectWrites = (op: EjoosSyncOp, ctx: DispositionContext) => {
 /**
  * Виведення в розпорядження: звільняємо штатну позицію в ШПО, лише якщо там
  * досі ця особа (фінальний sh wins), і додаємо її до блоку «у розпорядженні».
- * Відкритий СЗЧ у Табелі фарбуємо на місці без «вибув у розпорядження».
- * ООС і Виключені не змінюються.
+ * У Табелі особа потрапляє в кінець блоку «ВИБУВ У РОЗПОРЯДЖЕННЯ…»; штатний
+ * рядок звільняється. ООС і Виключені не змінюються.
  */
 export async function applyDispositionWithZip(input: {
   ejoos: ExcelWorkbookSnapshot;

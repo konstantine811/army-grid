@@ -136,6 +136,9 @@ describe("БЕЗВІСТИ → РОЗПОРЯДЖ person card", () => {
           positionIndex: "2103455",
           payload: {
             previousIndex: "2103455",
+            destination:
+              ", який знаходиться у розпорядженні командира військової частини А4862",
+            orderNumber: "241",
             orderDate: "12.08.2026",
             remainsInOos: "true",
             timesheetFound: "true",
@@ -153,7 +156,17 @@ describe("БЕЗВІСТИ → РОЗПОРЯДЖ person card", () => {
     expect(
       people[0].sheetImpacts.find((item) => item.sheetKey === "timesheet")
         ?.detail,
-    ).toMatch(/12\.08\.2026 не писати «вибув у розпорядження»/i);
+    ).toMatch(/12\.08\.2026 записати «вибув у розпорядження/i);
+    expect(people[0].ops[0]?.payload.keepOpenSzchTimesheet).toBe("1");
+    expect(people[0].ops[0]?.payload.absenceCode).toBe("ЗБ");
+    expect(people[0].timesheetPreview?.runs).toEqual([
+      { from: 1, to: 11, mark: "ЗБ" },
+      { from: 12, to: 12, mark: "ПЕРЕВ" },
+      { from: 13, to: 25, mark: "-" },
+    ]);
+    expect(people[0].timesheetPreview?.departPhrase).toBe(
+      "вибув у розпорядження командира військової частини А4862 наказ №241 від 12.08.2026",
+    );
   });
 });
 
@@ -169,6 +182,10 @@ describe("СЗЧ → РОЗПОРЯДЖ person card", () => {
           positionIndex: "2103520",
           payload: {
             previousIndex: "2103520",
+            destination:
+              ", який знаходиться у розпорядженні командира військової частини А4862",
+            orderNumber: "706-РС",
+            orderDate: "12.08.2026",
             remainsInOos: "true",
             timesheetFound: "true",
             keepOpenSzchTimesheet: "1",
@@ -179,12 +196,17 @@ describe("СЗЧ → РОЗПОРЯДЖ person card", () => {
       ],
       25,
     );
-    expect(people[0].ejoosWillDo.join("\n")).toMatch(/один рядок 01–зріз СЗЧ/i);
+    expect(people[0].ejoosWillDo.join("\n")).toMatch(/блок «ВИБУВ У РОЗПОРЯДЖЕННЯ…» · 01–зріз СЗЧ/i);
     expect(people[0].ejoosWillDo.join("\n")).toMatch(/Виключені: без змін/);
     expect(
       people[0].sheetImpacts.find((item) => item.sheetKey === "timesheet")
         ?.detail,
-    ).toMatch(/не писати «вибув у розпорядження»/i);
+    ).toMatch(/наказ №706-РС від 12\.08\.2026/i);
+    expect(people[0].timesheetPreview?.runs).toEqual([
+      { from: 1, to: 11, mark: "СЗЧ" },
+      { from: 12, to: 12, mark: "ПЕРЕВ" },
+      { from: 13, to: 25, mark: "-" },
+    ]);
   });
 });
 

@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Box,
   Button,
@@ -25,6 +25,7 @@ import {
   planBlocksWorkbookApply,
   SOURCE_DATE_UNKNOWN_MESSAGE,
 } from "./ejoosSyncPlan";
+import { logTimesheetDebugDump } from "./ejoosTimesheetDebugDump";
 
 type ChangeFilter =
   | "ALL"
@@ -68,6 +69,7 @@ const FILTERS: { id: ChangeFilter; label: string }[] = [
 export function EjoosChangesPanel() {
   const {
     session,
+    ejoosSnapshot,
     selectedPersonId,
     setSelectedPersonId,
     setDecision,
@@ -91,6 +93,25 @@ export function EjoosChangesPanel() {
     reviewOnly?: boolean;
   } | null>(null);
   const [bulkApplyOpen, setBulkApplyOpen] = useState(false);
+
+  useEffect(() => {
+    if (!ejoosSnapshot) {
+      console.info("[ЕЖООС Табель] snapshot ще не завантажено");
+      return;
+    }
+    const sheet = ejoosSnapshot.sheets.find((item) =>
+      /табель/i.test(item.sheetName),
+    );
+    if (!sheet) {
+      console.warn("[ЕЖООС Табель] аркуш «6. Табель» не знайдено");
+      return;
+    }
+    console.group(
+      `[ЕЖООС Табель] структура (Операції · ${session?.analyzedAt ?? "—"})`,
+    );
+    logTimesheetDebugDump(sheet, { maxRow: sheet.rawRows.length });
+    console.groupEnd();
+  }, [ejoosSnapshot, session?.analyzedAt]);
 
   const people = session?.people ?? [];
   const queuedPeople = useMemo(

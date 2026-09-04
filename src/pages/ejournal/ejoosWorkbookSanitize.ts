@@ -221,6 +221,14 @@ export const repairBrokenCellOpenTags = (sheetXml: string) =>
     (_all, before, after) => `<c${before}${after}>`,
   );
 
+const VALID_CELL_REF = /\br="[A-Z]{1,3}\d+"(?![0-9A-Za-z])/i;
+
+/** xlsx-populate падає на `<c>` без r="A1" — Cannot read properties of undefined (reading 'columnNumber'). */
+export const stripCellsWithoutValidReference = (sheetXml: string) =>
+  sheetXml.replace(/<c\b[^<>]*?(?:\/>|>[\s\S]*?<\/c>)/gi, (cellXml) =>
+    VALID_CELL_REF.test(cellXml) ? cellXml : "",
+  );
+
 const stripOrphanSharedFormulas = (sheetXml: string) => {
   const masterSharedFormulaIds = new Set<string>();
   for (const formula of sheetXml.matchAll(

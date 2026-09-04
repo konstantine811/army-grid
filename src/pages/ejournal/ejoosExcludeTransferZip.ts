@@ -23,9 +23,17 @@ import {
   type ZipCellWrite,
 } from "./ejoosZipCellWrites";
 import {
+  findDepartureAppendBounds,
+  findTimesheetAppendRowForUnit,
+  stripTimesheetDivisionLabel,
+  timesheetAppendNeedsRowInsert,
+  timesheetRowInExpectedUnitSection,
+} from "./ejoosTimesheetUnitSections";
+import {
   findTimesheetPersonRowsInGrid,
   loadTimesheetGridFromFile,
   mergeTimesheetGrids,
+  placementSheetFromMergedGrid,
   pickTimesheetKeepRow,
   uniqueExcelRows,
 } from "./ejoosTimesheetPersonRows";
@@ -36,6 +44,7 @@ import {
   timesheetTransferMarkForDay,
 } from "./ejoosTimesheetText";
 import { excludeWritePlan } from "./ejoosExcludePolicy";
+import { logTimesheetDebugDump } from "./ejoosTimesheetDebugDump";
 
 const valueOf = (value: CellValue | unknown): string | number | null => {
   if (value === undefined || value === null || value === "") return null;
@@ -60,8 +69,11 @@ const valueOf = (value: CellValue | unknown): string | number | null => {
 const findSheet = (book: ExcelWorkbookSnapshot, pattern: RegExp) =>
   book.sheets.find((sheet) => pattern.test(sheet.sheetName));
 
-const cellText = (sheet: ExcelSheetSnapshot, row: number, column: number) =>
-  String(valueOf(sheet.rawRows[row - 1]?.[column - 1]) ?? "").trim();
+const cellText = (sheet: ExcelSheetSnapshot, row: number, column: number) => {
+  const text = String(valueOf(sheet.rawRows[row - 1]?.[column - 1]) ?? "").trim();
+  if (column === 1 && text) return stripTimesheetDivisionLabel(text);
+  return text;
+};
 
 const nameKey = (value: string) =>
   value.toLocaleLowerCase("uk-UA").replace(/\s+/g, " ").trim();
@@ -140,60 +152,18 @@ const findTimesheetStyleRow = (sheet: ExcelSheetSnapshot) => {
   return 7;
 };
 
-const timesheetRowLooksOccupied = (
-  sheet: ExcelSheetSnapshot,
-  row: number,
-  xmlGrid?: Array<unknown[] | undefined>,
-) => {
-  const xmlRow = xmlGrid?.[row - 1] ?? [];
-  const indexText =
-    cellText(sheet, row, 2) || String(xmlRow[1] ?? "").trim();
-  const titleText =
-    cellText(sheet, row, 1) || String(xmlRow[0] ?? "").trim();
-  if (indexText && !/^\d/.test(indexText) && /[а-яіїєґa-z]/i.test(indexText)) {
-    return true;
-  }
-  if (
-    !indexText &&
-    /рота|взвод|батальйон|відділен|управлінн/i.test(titleText)
-  ) {
-    return true;
-  }
-  if (
-    cellText(sheet, row, 2) ||
-    cellText(sheet, row, 7) ||
-    cellText(sheet, row, 8)
-  ) {
-    return true;
-  }
-  return Boolean(
-    xmlRow[1] ||
-      xmlRow[6] ||
-      xmlRow[7] ||
-      String(xmlRow[1] ?? "").trim() ||
-      String(xmlRow[6] ?? "").trim() ||
-      String(xmlRow[7] ?? "").trim(),
-  );
-};
-
 const nextTimesheetHistoryRow = (
   sheet: ExcelSheetSnapshot,
   sourceRow: number,
   reserved: Set<number>,
-  xmlGrid?: Array<unknown[] | undefined>,
-) => {
-  const last = Math.max(sheet.rawRows.length, xmlGrid?.length ?? 0);
-  for (let row = sourceRow + 1; row <= last + 30; row += 1) {
-    if (reserved.has(row)) continue;
-    if (!timesheetRowLooksOccupied(sheet, row, xmlGrid)) {
-      reserved.add(row);
-      return row;
-    }
-  }
-  const row = last + reserved.size + 1;
-  reserved.add(row);
-  return row;
-};
+  positionTitle = "",
+) =>
+  findTimesheetAppendRowForUnit(sheet, {
+    sourceRow,
+    positionTitle,
+    reserved,
+    placementScope: "company",
+  });
 
 const excludedNumberValue = (
   column: number,
@@ -440,6 +410,10 @@ export async function applyExcludeTransfersWithZip(input: {
     timesheet.rawRows,
     timesheetXmlGrid,
   );
+  const timesheetForPlacement = placementSheetFromMergedGrid(
+    timesheet,
+    timesheetGrid,
+  );
   let excludedRow = nextExcludedRow(excluded);
   const excludedStyleSourceRow = findExcludedStyleSourceRow(
     excluded,
@@ -566,7 +540,21 @@ export async function applyExcludeTransfersWithZip(input: {
       return valueOf(timesheetGrid[row - 1]?.[column - 1]);
     };
     const copyTimesheetRow = (sourceRow: number, targetRow: number) => {
-      for (let column = 1; column <= TIMESHEET_STYLE_LAST_COLUMN; column += 1) {
+      markTimesheetInsertIfNeeded(targetRow);
+      // Колонка A — повтор роти/батальйону на рядку даних (не заголовок наступної секції).
+      timesheetWrites.push({
+        row: targetRow,
+        column: 1,
+        value:
+          timesheetCellValue(sourceRow, 1) ||
+          timesheetCellValue(Math.max(targetRow - 1, 7), 1) ||
+          null,
+        styleSourceRow: sourceRow,
+        styleSourceColumn: 1,
+        copyNeighborStyle: false,
+        keepNeighborStyle: true,
+      });
+      for (let column = 2; column <= TIMESHEET_STYLE_LAST_COLUMN; column += 1) {
         timesheetWrites.push(
           timesheetStyledWrite(
             targetRow,
@@ -579,7 +567,7 @@ export async function applyExcludeTransfersWithZip(input: {
       }
     };
     const clearTimesheetOccupant = (row: number) => {
-      for (const column of [6, 7, 8, 40]) {
+      for (const column of [1, 6, 7, 8, 40]) {
         timesheetWrites.push({
           row,
           column,
@@ -645,31 +633,93 @@ export async function applyExcludeTransfersWithZip(input: {
         timesheetStyledWrite(targetRow, 40, presentDays, styleRow, 40),
       );
     };
+    const unitPlacementTitle = String(op.payload.positionTitle || "").trim();
     const sourceRow = timesheetKeepRow || plannedKeep;
-    if (writePlan.replaceInPlace && sourceRow > 0) {
+    const historyMisplaced =
+      sourceRow > 0 &&
+      Boolean(unitPlacementTitle) &&
+      !timesheetRowInExpectedUnitSection(
+        timesheetForPlacement,
+        sourceRow,
+        unitPlacementTitle,
+      );
+    let insertHistoryRow = false;
+    const markTimesheetInsertIfNeeded = (targetRow: number) => {
+      if (insertHistoryRow || targetRow < 7 || !unitPlacementTitle) return;
+      const bounds = findDepartureAppendBounds(
+        timesheetForPlacement,
+        unitPlacementTitle,
+      );
+      insertHistoryRow = Boolean(
+        bounds &&
+          timesheetAppendNeedsRowInsert(
+            { sheet: timesheetForPlacement },
+            targetRow,
+            bounds,
+          ),
+      );
+    };
+    const stampInsertOnFirstKeepWrite = () => {
+      if (!insertHistoryRow) return;
+      const first = timesheetWrites.find((write) => write.row === timesheetKeepRow);
+      if (first) first.insertRowsBefore = true;
+      insertHistoryRow = false;
+    };
+    if (writePlan.replaceInPlace && sourceRow > 0 && !historyMisplaced) {
       writeHistoryOnRow(sourceRow, sourceRow);
       timesheetKeepRow = sourceRow;
     } else if (sourceRow > 0) {
-      // Навіть якщо план сказав «новий рядок» (createHistory) — копіюємо
-      // від фактичного штатного рядка вниз по роті, а не від R7 шаблону.
       timesheetKeepRow = nextTimesheetHistoryRow(
-        timesheet,
+        timesheetForPlacement,
         sourceRow,
         reservedTimesheetRows,
-        timesheetGrid,
+        unitPlacementTitle,
       );
+      if (timesheetKeepRow < 7) {
+        console.group(
+          `[ЕЖООС Табель] не знайдено рядок вибуття · ${unitPlacementTitle || "—"}`,
+        );
+        logTimesheetDebugDump(timesheetForPlacement, {
+          positionTitle: unitPlacementTitle,
+          sourceRow,
+          maxRow: Math.min(
+            timesheetForPlacement.rawRows.length,
+            Math.max(sourceRow + 40, 220),
+          ),
+        });
+        console.groupEnd();
+        throw new Error(
+          `Не знайдено рядок для історії вибуття в секції підрозділу${unitPlacementTitle ? `: ${unitPlacementTitle}` : ""}. Деталі Табеля — у консолі (F12).`,
+        );
+      }
       copyTimesheetRow(sourceRow, timesheetKeepRow);
       writeHistoryOnRow(timesheetKeepRow, sourceRow);
+      stampInsertOnFirstKeepWrite();
       clearTimesheetOccupant(sourceRow);
     } else if (writePlan.createTimesheetHistory) {
       const styleRow = findTimesheetStyleRow(timesheet);
       timesheetKeepRow = nextTimesheetHistoryRow(
-        timesheet,
+        timesheetForPlacement,
         styleRow,
         reservedTimesheetRows,
-        timesheetGrid,
+        unitPlacementTitle,
       );
+      if (timesheetKeepRow < 7) {
+        console.group(
+          `[ЕЖООС Табель] не знайдено рядок нової історії · ${unitPlacementTitle || "—"}`,
+        );
+        logTimesheetDebugDump(timesheetForPlacement, {
+          positionTitle: unitPlacementTitle,
+          sourceRow: styleRow,
+          maxRow: Math.min(timesheetForPlacement.rawRows.length, 220),
+        });
+        console.groupEnd();
+        throw new Error(
+          `Не знайдено рядок для нової історії вибуття в Табелі${unitPlacementTitle ? `: ${unitPlacementTitle}` : ""}. Деталі Табеля — у консолі (F12).`,
+        );
+      }
       writeHistoryOnRow(timesheetKeepRow, styleRow);
+      stampInsertOnFirstKeepWrite();
     }
     if (timesheetKeepRow > 0) {
       writtenTimesheetByPerson.set(personTimesheetKey, [timesheetKeepRow]);
@@ -677,8 +727,10 @@ export async function applyExcludeTransfersWithZip(input: {
     }
     for (const row of existingTimesheetRows) {
       if (row === timesheetKeepRow) continue;
-      if (isClosedHistoryRow(row)) continue;
-      for (const column of [6, 7, 8, 40]) {
+      if (isClosedHistoryRow(row) && writePlan.replaceInPlace && !historyMisplaced) {
+        continue;
+      }
+      for (const column of [1, 6, 7, 8, 40]) {
         timesheetWrites.push({
           row,
           column,

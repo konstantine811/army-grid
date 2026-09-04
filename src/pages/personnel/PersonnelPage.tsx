@@ -20,7 +20,6 @@ import { ArrowLeftOutlinedIcon } from "@/components/sci/icons";
 import { CalendarMonthOutlinedIcon } from "@/components/sci/icons";
 import { DeleteOutlineOutlinedIcon } from "@/components/sci/icons";
 import { FileUploadOutlinedIcon } from "@/components/sci/icons";
-import { SyncAltOutlinedIcon } from "@/components/sci/icons";
 import { FileDownloadOutlinedIcon } from "@/components/sci/icons";
 import { FormatListBulletedOutlinedIcon } from "@/components/sci/icons";
 import { LoginOutlinedIcon } from "@/components/sci/icons";
@@ -140,11 +139,13 @@ import {
   mergeVkTpvDovidkyRecords,
 } from "./vkTpvDovidkyImport";
 import { runParseVkTpvDovidkyHeavy } from "../anketa-data/runStaffSheetHeavyJobs";
-import { importStaffSheetFromGoogle } from "../anketa-data/staffSheetImport";
-import { staffSheetEditUrl } from "../excel-fill/staffSheet";
-import { STAFF_SHEET_SYNCED_EVENT } from "../../data/staffSheetAutoSync";
+import {
+  importStaffSheetFromFile,
+  loadStaffSheetImport,
+} from "../anketa-data/staffSheetImport";
 import {
   buildRosterOnlyPreviewState,
+  combineRosterRowSources,
   getRosterPersonName,
   isPersonnelInStaffRoster,
   ROSTER_FIELD_PREFIX,
@@ -193,6 +194,14 @@ function PersonCardName({ name }: { name: string }) {
 const PERSONNEL_FOCUS_KEY = "army-grid:focus-personnel";
 const ATTACHMENT_HEAL_SESSION_KEY = "army-grid:attachments-healed-v2";
 const MAX_QUESTIONNAIRE_FILE_BYTES = 350 * 1024 * 1024;
+
+const resolvePersonnelRosterRows = async (
+  dbRows: EjournalPreviewRow[],
+): Promise<EjournalPreviewRow[]> => {
+  const imported = await loadStaffSheetImport();
+  if (imported?.source !== "file" || !imported.rows.length) return dbRows;
+  return combineRosterRowSources(imported.rows, dbRows);
+};
 
 const formatFileSize = (bytes: number) => {
   if (!Number.isFinite(bytes)) return "";
@@ -409,6 +418,7 @@ export function PersonnelPage({
     rowId: string;
     externalId: string;
   } | null>(null);
+  const personnelLoadGenerationRef = useRef(0);
   const holdStatusUntilRef = useRef(0);
   const [query, setQuery] = useState("");
   const [editValues, setEditValues] = useState<Record<string, string>>({});
@@ -1185,7 +1195,7 @@ export function PersonnelPage({
   const loadLatestPersonnelRoster = async (force = false) => {
     const latest = await loadSharedRosterLatest({ force });
     applyRosterMeta(latest);
-    return mapRosterLatestToRows(latest);
+    return latest;
   };
 
   const applyPersonnelPreview = async (
@@ -1196,8 +1206,10 @@ export function PersonnelPage({
       fromCache?: boolean;
       partial?: boolean;
       anketaCreatedRows?: EjournalPreviewRow[];
+      isCancelled?: () => boolean;
     },
   ) => {
+    const loadedOosRows = preview.rows.length;
     let mergedPreview = preview;
     try {
       mergedPreview = await mergeRosterRowsIntoPreviewState(
@@ -1208,6 +1220,7 @@ export function PersonnelPage({
     } catch {
       mergedPreview = preview;
     }
+    if (options?.isCancelled?.()) return preview;
     const rows = mergedPreview.rows.filter(isLikelyPersonnelRow);
     const storedFocus = readPersonnelFocusTarget();
     if (storedFocus.rowId || storedFocus.externalId) {
@@ -1247,7 +1260,7 @@ export function PersonnelPage({
       focusedRow
         ? `Відкрито картку: ${getPersonDisplayName(focusedRow) || "особу"}.`
         : options?.partial
-          ? `Завантажено особовий склад: ${rows.length} з ${mergedPreview.total} · ${sheet.name}. Довантажую…`
+          ? `Завантажено ООС: ${loadedOosRows} з ${mergedPreview.total} · ${sheet.name}. Довантажую…`
           : options?.fromCache
             ? `Кеш: ${rows.length} записів · ${sheet.name}. Оновлюю з БД…`
             : `Завантажено особовий склад з БД: ${rows.length} записів · ${sheet.name}.`,
@@ -1260,19 +1273,28 @@ export function PersonnelPage({
     isCancelled?: () => boolean,
     options?: { force?: boolean },
   ) => {
+    const loadGeneration = ++personnelLoadGenerationRef.current;
+    const isLoadCancelled = () =>
+      loadGeneration !== personnelLoadGenerationRef.current ||
+      Boolean(isCancelled?.());
     setIsLoading(true);
     try {
       // Cache-first: paint roster from IndexedDB before network round-trips.
-      const [cachedImports, cachedRoster, anketaCreatedRows] = await Promise.all([
+      const [cachedImports, cachedRosterInitial, anketaCreatedRows] = await Promise.all([
         readDataCache<BackendEjournalImport[]>(CacheKeys.ejournalImports),
         readDataCache<BackendPersonnelRosterLatest | null>(CacheKeys.rosterLatest),
         loadAnketaCreatedPersonnel(),
       ]);
+      const cachedRoster = cachedRosterInitial;
+
+      const cachedRosterRows = await resolvePersonnelRosterRows(
+        mapRosterLatestToRows(cachedRoster),
+      );
       const cachedSheet = cachedImports
         ? findEjournalPersonnelSheet(cachedImports)
         : null;
       let paintedFromCache = false;
-      if (cachedSheet && cachedImports && !isCancelled?.()) {
+      if (cachedSheet && cachedImports && !isLoadCancelled()) {
         const cachedPreview = await readDataCache<DbPreviewState>(
           sheetRowsCacheKey(cachedSheet),
         );
@@ -1282,15 +1304,15 @@ export function PersonnelPage({
           applyRosterMeta(cachedRoster);
           await applyPersonnelPreview(
             cachedPreview,
-            mapRosterLatestToRows(cachedRoster),
+            cachedRosterRows,
             cachedSheet,
-            { fromCache: true, anketaCreatedRows },
+            { fromCache: true, anketaCreatedRows, isCancelled: isLoadCancelled },
           );
           setIsLoading(false);
         }
-      } else if (!cachedSheet && cachedRoster && !isCancelled?.()) {
+      } else if (!cachedSheet && cachedRoster && !isLoadCancelled()) {
         const rosterPreview = buildRosterOnlyPreviewState(
-          mapRosterLatestToRows(cachedRoster),
+          cachedRosterRows,
           cachedRoster.sheet,
         );
         if (rosterPreview) {
@@ -1298,9 +1320,9 @@ export function PersonnelPage({
           applyRosterMeta(cachedRoster);
           await applyPersonnelPreview(
             rosterPreview,
-            mapRosterLatestToRows(cachedRoster),
+            cachedRosterRows,
             rosterPreview.sheet,
-            { fromCache: true, anketaCreatedRows },
+            { fromCache: true, anketaCreatedRows, isCancelled: isLoadCancelled },
           );
           setIsLoading(false);
         }
@@ -1309,13 +1331,16 @@ export function PersonnelPage({
       const nextImports = await loadSharedEjournalImports({
         force: options?.force,
       });
-      if (isCancelled?.()) return;
+      if (isLoadCancelled()) return;
 
       const sheet = findEjournalPersonnelSheet(nextImports);
       setImports(nextImports);
 
-      let rosterRows: EjournalPreviewRow[] = mapRosterLatestToRows(cachedRoster);
+      let rosterRows: EjournalPreviewRow[] = cachedRosterRows;
       const rosterPromise = loadLatestPersonnelRoster(Boolean(options?.force))
+        .then((latest) =>
+          resolvePersonnelRosterRows(mapRosterLatestToRows(latest)),
+        )
         .then((rows) => {
           rosterRows = rows;
           return rows;
@@ -1324,6 +1349,7 @@ export function PersonnelPage({
 
       if (!sheet) {
         const latestRosterRows = await rosterPromise;
+        if (isLoadCancelled()) return;
         const rosterPreview = buildRosterOnlyPreviewState(
           latestRosterRows,
           cachedRoster?.sheet ?? null,
@@ -1332,6 +1358,7 @@ export function PersonnelPage({
           applyRosterMeta(cachedRoster);
           await applyPersonnelPreview(rosterPreview, latestRosterRows, rosterPreview.sheet, {
             anketaCreatedRows,
+            isCancelled: isLoadCancelled,
           });
           setMessage(
             `Немає імпорту ЕЖООС — показано ${rosterPreview.rows.length} осіб зі Штатки. Імпортуйте ЕЖООС для повних карток ООС.`,
@@ -1344,37 +1371,39 @@ export function PersonnelPage({
       }
 
       const preview = await loadAllEjournalSheetRows(sheet, {
-        isCancelled,
+        isCancelled: isLoadCancelled,
         onPage: paintedFromCache
           ? undefined
           : async (partial) => {
-              if (isCancelled?.()) return;
+              if (isLoadCancelled()) return;
               await applyPersonnelPreview(partial, rosterRows, sheet, {
                 partial: partial.rows.length < partial.total,
                 anketaCreatedRows,
+                isCancelled: isLoadCancelled,
               });
             },
       });
-      if (isCancelled?.()) return;
+      if (isLoadCancelled()) return;
 
       const latestRosterRows = await rosterPromise;
+      if (isLoadCancelled()) return;
       const mergedPreview = await applyPersonnelPreview(
         preview,
         latestRosterRows,
         sheet,
-        { anketaCreatedRows },
+        { anketaCreatedRows, isCancelled: isLoadCancelled },
       );
-      if (!isCancelled?.()) setIsLoading(false);
+      if (!isLoadCancelled()) setIsLoading(false);
 
       const startAttachments = () => {
-        if (isCancelled?.()) return;
+        if (isLoadCancelled()) return;
         const photosPromise = loadPersonnelPhotos();
         const questionnairesPromise = loadPersonnelQuestionnaireIds(
           mergedPreview.rows,
         );
         void healOrphanAttachmentsInBackground(
           mergedPreview.rows,
-          isCancelled,
+          isLoadCancelled,
           photosPromise,
           questionnairesPromise,
         );
@@ -1383,14 +1412,14 @@ export function PersonnelPage({
         window.setTimeout(startAttachments, 0);
       });
     } catch (error) {
-      if (isCancelled?.()) return;
+      if (isLoadCancelled()) return;
       setMessage(
         error instanceof Error
           ? error.message
           : "Не вдалося завантажити особовий склад.",
       );
     } finally {
-      if (!isCancelled?.()) setIsLoading(false);
+      if (!isLoadCancelled()) setIsLoading(false);
     }
   };
 
@@ -1591,70 +1620,27 @@ export function PersonnelPage({
     }
   };
 
-  const syncPersonnelRosterFromGoogle = async () => {
+  const importPersonnelRosterWorkbook = async (file: File | undefined) => {
+    if (!file) return;
     setIsLoading(true);
     try {
-      const previousRecords = personnelRows;
-      setMessage("Завантажую «Штатку» з Google Sheets…");
-      const imported = await importStaffSheetFromGoogle();
-
-      const fresh = await api.getLatestPersonnelRoster();
-      if (fresh) await writeDataCache(CacheKeys.rosterLatest, fresh);
-      const latestRosterRows = mapRosterLatestToRows(fresh);
-      applyRosterMeta(fresh);
-
-      if (!dbPreview) {
-        const rosterPreview = buildRosterOnlyPreviewState(
-          latestRosterRows,
-          fresh?.sheet ?? null,
-        );
-        if (rosterPreview) {
-          setDbPreview(rosterPreview);
-          setMessage(
-            `Штатку оновлено (${imported.personCount} осіб). Показано ${rosterPreview.rows.length} осіб зі Штатки — імпортуйте ЕЖООС для повних карток ООС.`,
-          );
-        } else {
-          setMessage(
-            `Штатку з Google Sheets збережено (${imported.personCount} осіб), але немає імпорту ЕЖООС — картки Особового складу не оновляться. Спочатку імпортуйте ЕЖООС.`,
-          );
-        }
-        return;
-      }
-
-      const nextPreview = await mergeRosterRowsIntoPreviewState(
-        dbPreview,
-        latestRosterRows,
-        await loadAnketaCreatedPersonnel(),
+      setMessage(`Імпортую «${file.name}» у БД персоналу…`);
+      const imported = await importStaffSheetFromFile(file);
+      await loadPersonnel(undefined, { force: true });
+      holdStatusUntilRef.current = Date.now() + 20_000;
+      const hasTsapenko = imported.rows.some((row) =>
+        normalizeRosterText(getRosterPersonName(row)).includes("цапенко"),
       );
-      setDbPreview(nextPreview);
-      setIsLoading(false);
-      await new Promise<void>((resolve) => {
-        window.setTimeout(resolve, 0);
-      });
-
-      const migrationPairs = [
-        ...buildAttachmentMigrationPairs(previousRecords, nextPreview.rows),
-        ...buildSelfAttachmentMigrationPairs(nextPreview.rows),
-      ];
-      const migrationResult = await migrateAttachmentsToNewExternalIds(
-        migrationPairs,
-        true,
-        nextPreview.rows,
-      );
-      sessionStorage.removeItem(ATTACHMENT_HEAL_SESSION_KEY);
-
-      const withStatus = latestRosterRows.filter((row) =>
-        Object.keys(row).some((key) => key.startsWith("fighter_status_")),
-      ).length;
-
       setMessage(
-        `Оновлено з Google Sheets: ${imported.personCount} осіб · зі статусом бійців: ${withStatus} · привʼязок перенесено: ${migrationResult}. Джерело: ${staffSheetEditUrl()}`,
+        `Штатку імпортовано з файлу в БД: ${imported.personCount} осіб · ЦАПЕНКО: ${
+          hasTsapenko ? "знайдено у файлі" : "у файлі не знайдено"
+        }.`,
       );
     } catch (error) {
       setMessage(
         error instanceof Error
           ? error.message
-          : "Не вдалося оновити «Штатку» з Google Sheets.",
+          : "Не вдалося імпортувати файл «Штатка» в БД.",
       );
     } finally {
       setIsLoading(false);
@@ -1668,14 +1654,6 @@ export function PersonnelPage({
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  useEffect(() => {
-    const onSynced = () => {
-      void loadPersonnel(undefined, { force: true });
-    };
-    window.addEventListener(STAFF_SHEET_SYNCED_EVENT, onSynced);
-    return () => window.removeEventListener(STAFF_SHEET_SYNCED_EVENT, onSynced);
   }, []);
 
   const saveSelectedPerson = async () => {
@@ -2157,8 +2135,7 @@ export function PersonnelPage({
             variant="body2"
             color="text.secondary"
           >
-            Список із ЕЖООС · «Штатку» імпортуйте на сторінці «Анкетні дані»
-            (.xlsx) — вона оновить і цей склад.
+            Список із ЕЖООС · ручний файл «Штатка» (.xlsx) імпортується в БД.
           </Typography>
         </Box>
         <Stack className="personnel-topbar-actions" direction="row" spacing={1}>
@@ -2197,13 +2174,23 @@ export function PersonnelPage({
             Пошук усіх анкет
           </Button>
           <Button
+            component="label"
             disabled={isLoading || !canEdit}
-            startIcon={<SyncAltOutlinedIcon />}
+            startIcon={<FileUploadOutlinedIcon />}
             variant="outlined"
-            onClick={() => void syncPersonnelRosterFromGoogle()}
-            title={staffSheetEditUrl()}
+            title="Вибрати файл «Штатка» (.xlsx/.xlsm), імпортувати його та записати в БД"
           >
-            Оновити з Google Sheet
+            Імпорт Штатки в БД
+            <input
+              hidden
+              type="file"
+              accept=".xlsx,.xlsm"
+              disabled={!canEdit || isLoading}
+              onChange={(event) => {
+                void importPersonnelRosterWorkbook(event.target.files?.[0]);
+                event.target.value = "";
+              }}
+            />
           </Button>
           <Button
             variant="outlined"
@@ -2315,6 +2302,13 @@ export function PersonnelPage({
               !activePersonAction
             }
           />
+          {filteredPersonnel.length === 0 && query.trim() ? (
+            <p className="personnel-empty-hint">
+              {staffFilter === "in"
+                ? "Нічого у «У штаті». Спробуйте «Усі» або «Імпорт Штатки в БД»."
+                : "Нічого не знайдено. Спробуйте «Імпорт Штатки в БД»."}
+            </p>
+          ) : null}
         </aside>
 
         <section className="person-card-panel">

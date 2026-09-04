@@ -9,7 +9,6 @@ import {
 import { api } from "../../api";
 import { CacheKeys, readDataCache } from "../../data/idbDataCache";
 import { loadSharedRosterLatest } from "../../data/sharedAppData";
-import { STAFF_SHEET_SYNCED_EVENT } from "../../data/staffSheetAutoSync";
 import {
   type CellValue,
   type ExcelSheetSnapshot,
@@ -36,7 +35,6 @@ import {
 } from "./rosterSourceSnapshot";
 import {
   importStaffSheetFromFile,
-  importStaffSheetFromGoogle,
   rosterLatestToStaffSheetImportSnapshot,
   formatStaffSheetImportSummary,
   type StaffSheetImportSnapshot,
@@ -943,7 +941,7 @@ export function ExcelFillPage() {
       return {
         source: "personnel" as const,
         label: rosterLabel || "Загальний список",
-        detail: "БД персоналу / Google «Штатка»",
+        detail: "БД персоналу / імпортований файл «Штатка»",
         timestamp: rosterImportedAt,
         rows: previewFrom(rosterPreviewRows),
       };
@@ -962,7 +960,7 @@ export function ExcelFillPage() {
     const kindLabel =
       activeRosterSource.kind === "upload"
         ? "Excel-файл на цій сторінці"
-        : "БД персоналу / Google «Штатка»";
+        : "БД персоналу / імпортований файл «Штатка»";
     return {
       label: activeRosterSource.label,
       importedAt: activeRosterSource.importedAt,
@@ -978,14 +976,6 @@ export function ExcelFillPage() {
 
   useEffect(() => {
     void loadSourceFromPersonnel();
-  }, []);
-
-  useEffect(() => {
-    const onSynced = () => {
-      void loadSourceFromPersonnel(true);
-    };
-    window.addEventListener(STAFF_SHEET_SYNCED_EVENT, onSynced);
-    return () => window.removeEventListener(STAFF_SHEET_SYNCED_EVENT, onSynced);
   }, []);
 
   useEffect(() => {
@@ -1067,40 +1057,21 @@ export function ExcelFillPage() {
     }
   };
 
-  const syncStaffSheetFromGoogle = async () => {
-    setIsStaffSheetBusy(true);
-    try {
-      setMessage("Завантажую «Штатку» з Google Sheets у БД…");
-      const imported = await importStaffSheetFromGoogle();
-      setStaffSheetImport(imported);
-      await loadSourceFromPersonnel(true);
-      const report = await refreshStaffEnrichment(imported.rows, {
-        manageBusy: false,
-      });
-      setMessage(
-        report
-          ? `Оновлено з Google Sheets: ${formatStaffSheetImportSummary(imported)} · ${formatStaffSheetEnrichmentReport(report)}.`
-          : `Оновлено з Google Sheets: ${formatStaffSheetImportSummary(imported)}.`,
-      );
-    } catch (error) {
-      setMessage(
-        error instanceof Error
-          ? error.message
-          : "Не вдалося оновити «Штатку» з Google Sheets.",
-      );
-    } finally {
-      setIsStaffSheetBusy(false);
-    }
-  };
-
   const importStaffSheetFile = async (file: File | undefined) => {
     if (!file) return;
     setIsStaffSheetBusy(true);
     try {
       setMessage(`Імпортую «${file.name}»…`);
       const imported = await importStaffSheetFromFile(file);
-      setStaffSheetImport(imported);
       await loadSourceFromPersonnel(true);
+      // Keep the manually selected workbook visible even if the immediate
+      // backend read still returns the previous roster.
+      setStaffSheetImport(imported);
+      setRosterPreviewRows(imported.rows);
+      setRosterRowCount(imported.rows.length);
+      setRosterLabel(imported.fileName);
+      setRosterImportedAt(imported.importedAt);
+      setRosterLoadedAt(new Date().toISOString());
       const report = await refreshStaffEnrichment(imported.rows, {
         manageBusy: false,
       });
@@ -1218,7 +1189,7 @@ export function ExcelFillPage() {
         setRosterImportedAt(null);
         setRosterLoadedAt(null);
         setMessage(
-          "У БД немає «Загального списку». Оновіть «Штатку» з Google Sheets в Особовому складі.",
+          "У БД немає «Загального списку». Імпортуйте файл «Штатка» (.xlsx).",
         );
         return;
       }
@@ -1471,10 +1442,10 @@ export function ExcelFillPage() {
         <section className="panel">
           <div className="panel-heading">1. Джерело · персонал</div>
           <Typography variant="body2" color="text.secondary">
-            Ранковий звіт бере дані з БД (Google «Штатка»). Зараз:{" "}
+            Ранковий звіт бере дані з БД після ручного імпорту «Штатки». Зараз:{" "}
             {morningSourceMeta
               ? `${morningSourceMeta.kindLabel} · ${morningSourceMeta.label} · ${formatSourceTimestamp(morningSourceMeta.importedAt || morningSourceMeta.loadedAt) ?? "—"}`
-              : "немає даних — оновіть «Штатку» з Google Sheets в Особовому складі"}.
+              : "немає даних — імпортуйте файл «Штатка» (.xlsx)"}.
           </Typography>
           <Stack direction="row" spacing={1} sx={{ mt: 2, alignItems: "center", flexWrap: "wrap" }}>
             <Button
@@ -1486,13 +1457,23 @@ export function ExcelFillPage() {
               Оновити з БД
             </Button>
             <Button
+              component="label"
               variant="contained"
               disabled={isStaffSheetBusy}
-              startIcon={<SyncAltOutlinedIcon />}
-              onClick={() => void syncStaffSheetFromGoogle()}
-              title="Завантажити «Штатку» з Google Sheets у БД (через gviz, без прав редактора)"
+              startIcon={<FileUploadOutlinedIcon />}
+              title="Вибрати файл «Штатка» (.xlsx/.xlsm) та записати його в БД"
             >
-              Оновити з Google Sheet
+              Імпорт Штатки в БД
+              <input
+                hidden
+                type="file"
+                accept=".xlsx,.xlsm"
+                disabled={isStaffSheetBusy}
+                onChange={(event) => {
+                  void importStaffSheetFile(event.target.files?.[0]);
+                  event.target.value = "";
+                }}
+              />
             </Button>
             <Typography variant="body2">
               {rosterSource
@@ -1605,7 +1586,7 @@ export function ExcelFillPage() {
                 ? `Файл: ${staffSheetImport.fileName}${staffSheetImport.source === "file" ? " (.xlsx)" : ""}`
                 : rosterPreviewRows.length
                   ? `Штатка з БД · ${formatSourceTimestamp(rosterImportedAt) ?? "—"}`
-                  : "Спочатку імпортуйте «Штатку» (.xlsx) або оновіть з Google"}
+                  : "Спочатку імпортуйте «Штатку» (.xlsx)"}
             </Typography>
             {staffEnrichmentReport ? (
               <Typography variant="body2" color="text.secondary">
@@ -1888,7 +1869,7 @@ export function ExcelFillPage() {
         <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
           {staffSheetPreviewMeta.source === "personnel"
             ? `Джерело: ${staffSheetPreviewMeta.label} · ${staffEnrichmentReport?.totalPositions ?? rosterPreviewRows.length} позицій · ${staffSheetPreviewRows.length} з ПІБ (до 300)${staffEnrichmentReport ? ` · анкета так: ${staffEnrichmentReport.anketaYes}` : ""}.`
-            : "Оновіть «Штатку» з Google Sheets в Особовому складі."}
+            : "Імпортуйте файл «Штатка» (.xlsx)."}
           {staffSheetPreviewMeta.timestamp ? (
             <>
               {" "}

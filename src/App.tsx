@@ -43,7 +43,6 @@ import { UsersAccessPage } from "./pages/users/UsersAccessPage";
 import { ProfilePage } from "./pages/profile/ProfilePage";
 import { WorkTasksPage } from "./pages/work-tasks/WorkTasksPage";
 import { rememberMountedPage } from "./app/pageKeepAlive";
-import { useStaffSheetAutoSync } from "./data/staffSheetAutoSync";
 
 function AppPageSlot({
   page,
@@ -73,9 +72,6 @@ function AppPageSlot({
 function App() {
   const { loading, user, canView, canEdit, canEditArea, isAdmin } = useAuth();
   useAuthScrollLock(loading || !user || !canView);
-  const canSyncStaffSheet =
-    !loading && Boolean(user) && canView && (canEditArea("personnel") || isAdmin);
-  useStaffSheetAutoSync(canSyncStaffSheet);
   const [activePage, setActivePage] = useState<AppPage>(() =>
     getPageFromPath(window.location.pathname),
   );

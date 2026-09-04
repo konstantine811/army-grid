@@ -478,6 +478,9 @@ async function mutateToBlob(
       }
       if (op.payload.type === "PAINT_ARCHIVE") {
         if (!transferCancelUndoBlocksTimesheet(sortedOps, op)) {
+          if (rowNumber > 0 && op.rank) {
+            timesheet.cell(rowNumber, col("F")).value(op.rank);
+          }
           paintTimesheetArchiveDays(timesheet, rowNumber, plan, op.payload);
           repairHistoryTimesheetRow(timesheet, op, plan.timesheetDay);
         }

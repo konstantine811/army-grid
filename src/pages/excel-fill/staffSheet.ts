@@ -1351,6 +1351,7 @@ export const pullStaffSheetRosterImportPayload =
       source: tables.source,
       sourceLabel: `Штатка (${tables.source}) · ${STAFF_SHEET_ID}`,
       fighterStatusTable: tables.fighterStatusTable,
+      includeAllRows: true,
     });
   };
 

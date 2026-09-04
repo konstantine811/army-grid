@@ -3,6 +3,7 @@ import type { EjournalPreviewRow } from "../ejournal/ejournalTypes";
 import {
   extractBirthDateFromPersonName,
   getRosterPersonBirthDate,
+  combineRosterRowSources,
   isPersonnelInStaffRoster,
   mergeRosterRowsIntoPreview,
   ROSTER_FIELD_PREFIX,
@@ -125,18 +126,53 @@ describe("mergeRosterRowsIntoPreview", () => {
     expect(merged[0][`${ROSTER_FIELD_PREFIX}column_19`]).toBe("3129609236");
   });
 
+  it("does not glue Tsapenko onto Kravchuk when a stale card has Tsapenko's ІПН", () => {
+    const preview = {
+      rows: [
+        oosRow("КРАВЧУК Богдан Сергійович", {
+          birthDate: "22.07.1992",
+          id: "2103182",
+          rnokpp: "3380604650",
+        }),
+      ],
+    };
+    const roster = [
+      rosterRow("ЦАПЕНКО Микола Володимирович", {
+        birthDate: "22.07.1992",
+        rnokpp: "3380604650",
+      }),
+    ];
+
+    const merged = mergeRosterRowsIntoPreview(preview, roster);
+    const kravchuk = merged.find((row) => row.id === "2103182");
+    const tsapenko = merged.find(
+      (row) => getPersonDisplayName(row) === "ЦАПЕНКО Микола Володимирович",
+    );
+
+    expect(merged).toHaveLength(2);
+    expect(kravchuk).toBeTruthy();
+    expect(
+      Object.keys(kravchuk ?? {}).some((key) =>
+        key.startsWith(ROSTER_FIELD_PREFIX),
+      ),
+    ).toBe(false);
+    expect(tsapenko?.__dbRowId).toMatch(/^roster:/);
+  });
+
   it("shows ПІБ from штатка when EЖООС прізвище is empty", () => {
     const preview = {
       rows: [
         oosRow("", {
           birthDate: "12.09.1992",
           id: "2103999",
+          rnokpp: "3129609236",
         }),
       ],
     };
     const roster = [
       rosterRow("ЦАПЕНКО Микола Володимирович", {
         birthDate: "12.09.1992",
+        rnokpp: "3129609236",
       }),
     ];
 
@@ -147,6 +183,47 @@ describe("mergeRosterRowsIntoPreview", () => {
     );
     expect(isLikelyPersonnelRow(merged[0]!)).toBe(true);
     expect(isPersonnelInStaffRoster(merged[0]!)).toBe(true);
+  });
+});
+
+describe("combineRosterRowSources", () => {
+  it("adds people present only in staff import cache", () => {
+    const db = [
+      rosterRow("ШЕВЧЕНКО Олександр Володимирович", {
+        birthDate: "07.09.1985",
+      }),
+    ];
+    const imported = [
+      rosterRow("ЦАПЕНКО Микола Володимирович", {
+        __dbRowId: "import:367",
+        birthDate: "22.07.1992",
+      }),
+    ];
+    const combined = combineRosterRowSources(db, imported);
+    expect(combined).toHaveLength(2);
+    expect(
+      combined.some((row) =>
+        String(row.column_14 ?? "").includes("ЦАПЕНКО"),
+      ),
+    ).toBe(true);
+  });
+
+  it("keeps the primary source when the same sheet row changed", () => {
+    const fresh = [
+      rosterRow("НОВИЙ Військовослужбовець", {
+        __rowNumber: 367,
+      }),
+    ];
+    const stale = [
+      rosterRow("СТАРИЙ Військовослужбовець", {
+        __rowNumber: 367,
+      }),
+    ];
+
+    const combined = combineRosterRowSources(fresh, stale);
+
+    expect(combined).toHaveLength(1);
+    expect(combined[0]?.column_14).toBe("НОВИЙ Військовослужбовець");
   });
 });
 
