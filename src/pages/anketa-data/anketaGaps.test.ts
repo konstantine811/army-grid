@@ -11,6 +11,7 @@ import {
   findNextAnketaEmptyCell,
   findNextAnketaPersonEmptyCell,
   listAnketaEmptyCells,
+  removePresentQuestionnairesFromMissingNameKeys,
 } from "./anketaGaps";
 import { createEmptyAnketaRow } from "./anketaSheet";
 
@@ -119,6 +120,26 @@ describe("collectAbsentQuestionnaireCellClears", () => {
         (cell) => cell.columnId,
       ),
     ).toEqual(["rnokpp"]);
+  });
+});
+
+describe("removePresentQuestionnairesFromMissingNameKeys", () => {
+  it("returns a person with a newly found questionnaire to gap search", () => {
+    const found = person("ШЕВЦОВ Дмитро Сергійович");
+    const stillMissing = person("КОВАЛЬ Іван Петрович");
+    const missingKeys = new Set([
+      normalizeAnketaNameKey(found.fullName),
+      normalizeAnketaNameKey(stillMissing.fullName),
+    ]);
+
+    const next = removePresentQuestionnairesFromMissingNameKeys(
+      [found, stillMissing],
+      missingKeys,
+      (row) => row === found,
+    );
+
+    expect(next.has(normalizeAnketaNameKey(found.fullName))).toBe(false);
+    expect(next.has(normalizeAnketaNameKey(stillMissing.fullName))).toBe(true);
   });
 });
 

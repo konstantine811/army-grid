@@ -431,6 +431,8 @@ export const loadAnketaSheetPreferCache = async (options?: {
   mergeEdits?: (
     snapshot: AnketaSheetSnapshot,
   ) => AnketaSheetSnapshot | Promise<AnketaSheetSnapshot>;
+  /** Не звертатися до Google, якщо спільний server/IDB snapshot уже існує. */
+  refreshGoogle?: boolean;
 }) => {
   const merge = async (snapshot: AnketaSheetSnapshot) =>
     options?.mergeEdits ? await options.mergeEdits(snapshot) : snapshot;
@@ -446,12 +448,17 @@ export const loadAnketaSheetPreferCache = async (options?: {
   const fromDb = await loadAnketaSnapshotFromServer();
   const cached = fromDb ?? (await loadCachedAnketaSheet());
   if (cached?.rows?.length) {
-    await options?.onCached?.(
-      await merge({
-        ...cached,
-        source: fromDb ? "db" : "cache",
-      }),
-    );
+    const prepared = await merge({
+      ...cached,
+      source: fromDb ? "db" : "cache",
+    });
+    await options?.onCached?.(prepared);
+    if (options?.refreshGoogle === false) {
+      if (options.mergeEdits) {
+        await persistAnketaSnapshot(prepared);
+      }
+      return prepared;
+    }
   }
 
   try {

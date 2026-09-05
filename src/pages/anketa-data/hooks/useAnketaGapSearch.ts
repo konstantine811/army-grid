@@ -26,6 +26,7 @@ import {
   findNextAnketaEmptyCell,
   findNextAnketaPersonEmptyCell,
   listAnketaPersonGapSkipKeys,
+  removePresentQuestionnairesFromMissingNameKeys,
   type AnketaGapSearchOptions,
   pushAnketaCellToGoogle,
   summarizeAnketaGaps,
@@ -409,25 +410,34 @@ export function useAnketaGapSearch({
     try {
       const [missingList, questionnaires] = await Promise.all([
         loadAnketaMissingNames().catch(() => ({ names: [] as string[] })),
-        api.listPersonQuestionnaires().catch(() => []),
+        api.listPersonQuestionnaires(),
       ]);
       const missingKeys = expandAnketaNameKeySet([
         ...missingQuestionnaireNames,
         ...missingList.names,
       ]);
-      if (missingKeys.size) setMissingQuestionnaireNames(missingKeys);
 
       const hasPdf = (row: AnketaRow) =>
         anketaRowHasQuestionnairePdf(row, questionnaires);
+      const stillMissingKeys =
+        removePresentQuestionnairesFromMissingNameKeys(
+          rows,
+          missingKeys,
+          hasPdf,
+        );
+      setMissingQuestionnaireNames(stillMissingKeys);
       const fills = collectAbsentQuestionnaireCellFills(
         rows,
         gapColumnKeys,
-        missingKeys,
+        stillMissingKeys,
         hasPdf,
       );
+      const allWritableColumnKeys = ANKETA_COLUMNS.map(
+        (column) => column.key,
+      ).filter((key) => !isAnketaColumnReadonly(key));
       const clears = collectAbsentQuestionnaireCellClears(
         rows,
-        gapColumnKeys,
+        allWritableColumnKeys,
         hasPdf,
       );
       const newRows = buildAbsentQuestionnaireAnketaRows(

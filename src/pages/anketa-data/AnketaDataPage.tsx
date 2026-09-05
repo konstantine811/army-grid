@@ -8,7 +8,6 @@ import {
 } from "@/components/sci/SciPrimitives";
 import {
   ArrowRightOutlinedIcon,
-  FileDownloadOutlinedIcon,
   FileUploadOutlinedIcon,
   SkipNextOutlinedIcon,
   SyncAltOutlinedIcon,
@@ -219,52 +218,26 @@ export function AnketaDataPage() {
               </span>
             </Button>
           </div>
-          <div className="anketa-toolbar-group" aria-label="Штатка">
-            <Button
-              component="label"
-              variant="outlined"
-              disabled={!canEdit || sheet.isImportingStaffSheet}
-              startIcon={<FileUploadOutlinedIcon />}
-              title="Імпорт вашої «Штатки» (.xlsx) — для доповнення «Анкета» та «Військовий квиток»"
-            >
-              {sheet.isImportingStaffSheet ? "Імпорт…" : "Імпорт Штатки"}
-              <input
-                hidden
-                type="file"
-                accept=".xlsx,.xlsm"
-                disabled={!canEdit}
-                onChange={(event) => {
-                  void sheet.importStaffSheetFile(event.target.files?.[0]);
-                  event.target.value = "";
-                }}
-              />
-            </Button>
+          <div className="anketa-toolbar-group" aria-label="Злиття даних">
             <Button
               variant="contained"
-              disabled={!canEdit || sheet.isDownloadingStaffSheet}
-              startIcon={<FileDownloadOutlinedIcon />}
-              onClick={() => void sheet.downloadStaffSheetExcel()}
-              title="Доповнити імпортовану «Штатку» — лише колонки «Анкета» та «Військовий квиток»"
+              disabled={
+                !canEdit ||
+                sheet.isLoading ||
+                sheet.isMergingPersonnel ||
+                !sheet.rows.length
+              }
+              startIcon={<SyncAltOutlinedIcon />}
+              onClick={() => void sheet.mergeFromPersonnel()}
+              title="Заповнити пропуски та маркери відсутності в анкетах реальними даними з Особового складу. Наявні реальні анкетні дані не перезаписуються."
             >
               <span className="anketa-label-full">
-                {sheet.isDownloadingStaffSheet
-                  ? "Формую…"
-                  : "Доповнити Штатку"}
+                {sheet.isMergingPersonnel
+                  ? "Доповнюю…"
+                  : "Доповнити з Особового складу"}
               </span>
               <span className="anketa-label-short" aria-hidden="true">
-                {sheet.isDownloadingStaffSheet ? "…" : "↓ Анкета+ВК"}
-              </span>
-            </Button>
-            <Button
-              variant="outlined"
-              disabled={!canEdit || sheet.isPushingStaffSheet || !sheet.staffSheetImportName}
-              startIcon={<SyncAltOutlinedIcon />}
-              onClick={() => void sheet.pushStaffSheetAnketa()}
-              title="Записати «так» у колонку «Анкета» Google «Штатки» (потрібен Apps Script і права редактора)"
-            >
-              <span className="anketa-label-full">→ Google Штатка: Анкета</span>
-              <span className="anketa-label-short" aria-hidden="true">
-                G Анкета
+                {sheet.isMergingPersonnel ? "…" : "ОС → анкети"}
               </span>
             </Button>
           </div>
@@ -303,9 +276,6 @@ export function AnketaDataPage() {
       sheet.isSyncing ||
       sheet.isMergingPersonnel ||
       sheet.isAddingFromEjoos ||
-      sheet.isPushingStaffSheet ||
-      sheet.isDownloadingStaffSheet ||
-      sheet.isImportingStaffSheet ||
       sheet.isImportingVkMilitaryIds ? (
         <LinearProgress sx={{ mb: 1 }} />
       ) : null}
@@ -347,17 +317,6 @@ export function AnketaDataPage() {
               {sheet.dirtyCount ? (
                 <span title="Несинхронізовані в сесії">
                   сесія {sheet.dirtyCount}
-                </span>
-              ) : null}
-              {sheet.staffSheetImportName ? (
-                <span
-                  title={
-                    sheet.staffSheetImportedAt
-                      ? `${sheet.staffSheetImportName} · ${sheet.staffSheetSource || "?"} · ${new Date(sheet.staffSheetImportedAt).toLocaleString("uk-UA")}${sheet.staffSheetPersonCount ? ` · ${sheet.staffSheetPersonCount} осіб` : ""}`
-                      : sheet.staffSheetImportName
-                  }
-                >
-                  штатка ✓{sheet.staffSheetPersonCount ? ` ${sheet.staffSheetPersonCount}` : ""}
                 </span>
               ) : null}
               {sheet.missingQuestionnaireNames.size ? (

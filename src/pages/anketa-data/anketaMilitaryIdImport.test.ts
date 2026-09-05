@@ -2,12 +2,14 @@ import { describe, expect, it } from "vitest";
 import { createEmptyAnketaRow } from "./anketaSheet";
 import {
   ANKETA_MILITARY_ID_ABSENT_VALUE,
+  inferSexFromUkrainianFullName,
   isAnketaRnokppReplaceable,
   planAnketaMilitaryIdMerges,
   resolveAnketaMilitaryIdValue,
   resolveAnketaRnokppValue,
 } from "./anketaMilitaryIdImport";
 import type { VkTpvDovidkyNameEntry } from "../personnel/vkTpvDovidkyImport";
+import { ANKETA_MISSING_VALUE_PRESETS } from "./anketaGaps";
 
 const vkEntry = (
   militaryId: string,
@@ -53,6 +55,36 @@ describe("resolveAnketaMilitaryIdValue", () => {
     const result = resolveAnketaMilitaryIdValue("", vkEntry("АГ 333333"));
     expect(result.action).toBe("from_vk");
     expect(result.value).toBe("АГ 333333");
+  });
+
+  it.each([
+    ...ANKETA_MISSING_VALUE_PRESETS.filter(
+      (value) => value !== ANKETA_MILITARY_ID_ABSENT_VALUE,
+    ),
+    "відсутні",
+    "немає",
+  ])(
+    "normalizes %s to «дані відсутні» when no VK number exists",
+    (current) => {
+      const result = resolveAnketaMilitaryIdValue(current, undefined);
+      expect(result.value).toBe("дані відсутні");
+      expect(result.action).toBe("marked_not_found");
+    },
+  );
+});
+
+describe("inferSexFromUkrainianFullName", () => {
+  it("recognizes a female patronymic", () => {
+    expect(
+      inferSexFromUkrainianFullName("КОВАЛЕНКО Олена Олександрівна"),
+    ).toBe("Ж");
+  });
+
+  it("uses male for a male patronymic and the unit fallback", () => {
+    expect(
+      inferSexFromUkrainianFullName("КІЯНЕНКО Андрій Олександрович"),
+    ).toBe("Ч");
+    expect(inferSexFromUkrainianFullName("КОВАЛЬ Олег")).toBe("Ч");
   });
 });
 
@@ -111,6 +143,12 @@ describe("planAnketaMilitaryIdMerges", () => {
         militaryId: "",
         rnokpp: "",
       },
+      {
+        ...createEmptyAnketaRow(2034),
+        fullName: "КІЯНЕНКО Андрій Олександрович",
+        militaryId: "",
+        rnokpp: "",
+      },
     ];
     const vkIndex = new Map<string, VkTpvDovidkyNameEntry>([
       ["іванов іван іванович", vkEntry("АГ 111111", "1111111111")],
@@ -120,10 +158,11 @@ describe("planAnketaMilitaryIdMerges", () => {
     const { edits, report } = planAnketaMilitaryIdMerges(rows, vkIndex);
 
     expect(report.updatedFromVk).toBe(2);
-    expect(report.markedNotFound).toBe(1);
+    expect(report.markedNotFound).toBe(2);
     expect(report.rnokppUpdatedFromVk).toBe(1);
     expect(report.rnokppKeptAnketa).toBe(1);
-    expect(edits).toHaveLength(4);
+    expect(edits).toHaveLength(9);
+    expect(report.sexUpdated).toBe(4);
     expect(edits.find((edit) => edit.rowNumber === 2 && edit.columnId === "rnokpp")?.value).toBe(
       "1111111111",
     );
@@ -133,5 +172,14 @@ describe("planAnketaMilitaryIdMerges", () => {
     expect(
       edits.find((edit) => edit.rowNumber === 3 && edit.columnId === "rnokpp"),
     ).toBeUndefined();
+    expect(
+      edits.find((edit) => edit.rowNumber === 2 && edit.columnId === "sex")
+        ?.value,
+    ).toBe("Ч");
+    expect(
+      edits.find(
+        (edit) => edit.rowNumber === 2034 && edit.columnId === "militaryId",
+      )?.value,
+    ).toBe("дані відсутні");
   });
 });

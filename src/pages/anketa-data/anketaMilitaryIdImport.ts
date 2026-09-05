@@ -9,7 +9,10 @@ import {
   bulkWriteAnketaCellEdits,
   loadAnketaEdits,
 } from "./anketaEdits";
-import { ANKETA_MISSING_VALUE_PRESETS } from "./anketaGaps";
+import {
+  ANKETA_ABSENT_QUESTIONNAIRE_VALUE,
+  ANKETA_MISSING_VALUE_PRESETS,
+} from "./anketaGaps";
 import { normalizeAnketaNameKey } from "./anketaPersonMatch";
 import {
   loadAnketaSheetPreferCache,
@@ -18,7 +21,8 @@ import {
 } from "./anketaSheet";
 
 /** Позначка «немає військового квитка» в колонці «Військовий квиток». */
-export const ANKETA_MILITARY_ID_ABSENT_VALUE = "відсутній";
+export const ANKETA_MILITARY_ID_ABSENT_VALUE =
+  ANKETA_ABSENT_QUESTIONNAIRE_VALUE;
 
 const ANKETA_RNOKPP_PLACEHOLDER_SET = new Set<string>([
   ...ANKETA_MISSING_VALUE_PRESETS,
@@ -46,6 +50,7 @@ export type AnketaMilitaryIdMergeReport = {
   rnokppUpdatedFromVk: number;
   rnokppKeptAnketa: number;
   rnokppUnchanged: number;
+  sexUpdated: number;
   skippedNoName: number;
   errors: Array<{ name: string; message: string }>;
 };
@@ -113,10 +118,6 @@ export const resolveAnketaMilitaryIdValue = (
     return { value: currentId, action: "kept_anketa" };
   }
 
-  if (current) {
-    return { value: current, action: "kept_anketa" };
-  }
-
   if (vkEntry) {
     if (current === ANKETA_MILITARY_ID_ABSENT_VALUE) {
       return { value: current, action: "unchanged" };
@@ -131,6 +132,34 @@ export const resolveAnketaMilitaryIdValue = (
     value: ANKETA_MILITARY_ID_ABSENT_VALUE,
     action: "marked_not_found",
   };
+};
+
+const normalizedMissingValues = new Set(
+  ANKETA_MISSING_VALUE_PRESETS.map((value) =>
+    value.trim().toLocaleLowerCase("uk-UA"),
+  ),
+);
+
+export const inferSexFromUkrainianFullName = (fullName: unknown): "Ч" | "Ж" => {
+  const parts = String(fullName ?? "")
+    .replace(/\([^)]*\)/g, " ")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  const patronymic = parts[2]?.toLocaleLowerCase("uk-UA") ?? "";
+  if (/(?:івна|ївна|овна|евна|євна|ична)$/u.test(patronymic)) return "Ж";
+  return "Ч";
+};
+
+export const isAnketaSexReplaceable = (value: unknown) => {
+  const normalized = String(value ?? "")
+    .trim()
+    .toLocaleLowerCase("uk-UA");
+  return (
+    !normalized ||
+    normalized === "-" ||
+    normalizedMissingValues.has(normalized)
+  );
 };
 
 export const planAnketaMilitaryIdMerges = (
@@ -155,6 +184,7 @@ export const planAnketaMilitaryIdMerges = (
     rnokppUpdatedFromVk: 0,
     rnokppKeptAnketa: 0,
     rnokppUnchanged: 0,
+    sexUpdated: 0,
     skippedNoName: 0,
     errors: [],
   };
@@ -225,6 +255,17 @@ export const planAnketaMilitaryIdMerges = (
         fullName: row.fullName,
       });
     }
+
+    if (isAnketaSexReplaceable(row.sex)) {
+      edits.push({
+        rowNumber: row.__rowNumber,
+        columnId: "sex",
+        value: inferSexFromUkrainianFullName(row.fullName),
+        externalId: String(row.externalId ?? "").trim() || undefined,
+        fullName: row.fullName,
+      });
+      report.sexUpdated += 1;
+    }
   }
 
   return { edits, report };
@@ -251,6 +292,7 @@ export const formatAnketaMilitaryIdMergeReport = (
     report.rnokppKeptAnketa
       ? `ІПН залишено з анкети: ${report.rnokppKeptAnketa}`
       : "",
+    report.sexUpdated ? `стать визначено: ${report.sexUpdated}` : "",
     report.skippedNoName ? `без ПІБ: ${report.skippedNoName}` : "",
     report.errors.length ? `помилок: ${report.errors.length}` : "",
   ].filter(Boolean);
@@ -261,18 +303,19 @@ export const mergeVkMilitaryIdToAnketa = async (
   snapshot: ExcelWorkbookSnapshot,
   options?: {
     onProgress?: (done: number, total: number) => void;
+    /** Уже reconciled рядки сторінки, включно з доданими з актуального ЕЖООС. */
+    anketaRows?: AnketaRow[];
   },
 ): Promise<AnketaMilitaryIdMergeReport> => {
   const vkIndex = buildVkTpvDovidkyNameIndex(snapshot);
-  const [anketaSnapshot, anketaEdits] = await Promise.all([
-    loadAnketaSheetPreferCache(),
-    loadAnketaEdits(),
-  ]);
-
-  const anketaRows = applyAnketaEditsToRows(
-    anketaSnapshot?.rows ?? [],
-    anketaEdits,
-  );
+  const anketaRows = options?.anketaRows
+    ? options.anketaRows
+    : await Promise.all([
+        loadAnketaSheetPreferCache(),
+        loadAnketaEdits(),
+      ]).then(([anketaSnapshot, anketaEdits]) =>
+        applyAnketaEditsToRows(anketaSnapshot?.rows ?? [], anketaEdits),
+      );
   const { edits, report } = planAnketaMilitaryIdMerges(anketaRows, vkIndex);
 
   if (!edits.length) {

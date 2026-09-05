@@ -6,6 +6,7 @@ import {
 } from "../../excelRoundTrip";
 import {
   findEjoosSheet,
+  norm,
   parseEjoosExcluded,
   parseEjoosOos,
 } from "../ejournal/ejoosParsers";
@@ -17,6 +18,7 @@ import {
 import {
   ANKETA_COLUMNS,
   createEmptyAnketaRow,
+  type AnketaColumnKey,
   type AnketaRow,
   type AnketaSheetSnapshot,
 } from "./anketaSheet";
@@ -27,6 +29,7 @@ export type EjoosAnketaCandidate = {
   rank: string;
   positionIndex: string;
   source: "oos" | "excluded";
+  anketaFields?: Partial<Record<AnketaColumnKey, string>>;
 };
 
 export type ReconcileAnketaWithEjoosReport = {
@@ -84,15 +87,27 @@ export const collectEjoosOosAndExcludedPeople = (
     existing.fullName ||= candidate.fullName;
     existing.rank ||= candidate.rank;
     existing.positionIndex ||= candidate.positionIndex;
+    existing.anketaFields = {
+      ...candidate.anketaFields,
+      ...existing.anketaFields,
+    };
   };
 
   for (const row of parseEjoosOos(oosSheet)) {
+    const rawRow = oosSheet?.rawRows[row.excelRow - 1];
+    const anketaFields = Object.fromEntries(
+      ANKETA_COLUMNS.map((column, index) => [
+        column.key,
+        norm(rawRow?.[index]),
+      ]).filter(([, value]) => Boolean(value)),
+    ) as Partial<Record<AnketaColumnKey, string>>;
     push({
       personId: row.personId.trim(),
       fullName: row.fullName.trim(),
       rank: row.rank.trim(),
       positionIndex: row.positionIndex.trim(),
       source: "oos",
+      anketaFields,
     });
   }
   for (const row of parseEjoosExcluded(excludedSheet)) {
@@ -141,11 +156,24 @@ export const loadEjoosOosAndExcludedPeople =
 };
 
 const candidateFields = (person: EjoosAnketaCandidate) => ({
+  ...person.anketaFields,
   fullName: person.fullName.trim(),
   externalId: person.personId.trim(),
   rank: person.rank.trim(),
   positionIndex: person.positionIndex.trim(),
 });
+
+const inferredSexFromName = (fullName: string): "Ч" | "Ж" => {
+  const patronymic =
+    fullName
+      .replace(/\([^)]*\)/g, " ")
+      .trim()
+      .split(/\s+/)[2]
+      ?.toLocaleLowerCase("uk-UA") ?? "";
+  return /(?:івна|ївна|овна|евна|євна|ична)$/u.test(patronymic)
+    ? "Ж"
+    : "Ч";
+};
 
 const mergeCandidateIntoAnketa = (
   row: AnketaRow,
@@ -256,7 +284,13 @@ export const reconcileAnketaRowsWithEjoos = (
   }
 
   report.removed = rows.length - usedRows.size;
-  return { rows: reconciled, report };
+  return {
+    rows: reconciled.map((row) => ({
+      ...row,
+      sex: inferredSexFromName(row.fullName),
+    })),
+    report,
+  };
 };
 
 export const reconcileAnketaSnapshotWithEjoos = (

@@ -34,6 +34,10 @@ import {
   selectAnketaRowsMissingFromPersonnel,
 } from "./anketaPersonnelRosterCreate";
 import {
+  ANKETA_MISSING_VALUE_PRESETS,
+} from "./anketaGaps";
+import {
+  ANKETA_COLUMNS,
   isAnketaColumnReadonly,
   loadAnketaSheetPreferCache,
   type AnketaColumnKey,
@@ -118,6 +122,74 @@ const normalizeAnketaValueForPersonnel = (
 export type AnketaPersonnelMergePreview = {
   fieldUpdates: Record<string, string>;
   labels: string[];
+};
+
+const normalizeMissingMarker = (value: unknown) =>
+  String(value ?? "")
+    .trim()
+    .toLocaleLowerCase("uk-UA")
+    .replace(/[’ʼ`]/g, "'")
+    .replace(/\s+/g, " ");
+
+const ANKETA_MISSING_MARKERS = new Set([
+  ...ANKETA_MISSING_VALUE_PRESETS.map(normalizeMissingMarker),
+  "немає",
+  "відсутні",
+  "відсутня",
+  "відсутнє",
+  "даних немає",
+]);
+
+export const isReplaceableAnketaMissingValue = (value: unknown) => {
+  const normalized = normalizeMissingMarker(value);
+  return !normalized || ANKETA_MISSING_MARKERS.has(normalized);
+};
+
+export type PersonnelToAnketaMergePreview = {
+  fieldUpdates: Partial<Record<AnketaColumnKey, string>>;
+  labels: string[];
+};
+
+export const buildAnketaSourceFieldUpdates = (
+  source: Partial<Record<AnketaColumnKey, string>>,
+  anketaRow: AnketaRow,
+): PersonnelToAnketaMergePreview => {
+  const fieldUpdates: Partial<Record<AnketaColumnKey, string>> = {};
+  const labels: string[] = [];
+  for (const column of ANKETA_COLUMNS) {
+    if (isAnketaColumnReadonly(column.key)) continue;
+    if (!isReplaceableAnketaMissingValue(anketaRow[column.key])) continue;
+    const sourceValue = String(source[column.key] ?? "").trim();
+    if (!sourceValue || isReplaceableAnketaMissingValue(sourceValue)) continue;
+    fieldUpdates[column.key] = sourceValue;
+    labels.push(column.header);
+  }
+  return { fieldUpdates, labels };
+};
+
+/** Заповнити анкету з Особового складу лише замість порожнього/маркера відсутності. */
+export const buildPersonnelToAnketaFieldUpdates = (
+  personnelRow: EjournalPreviewRow,
+  anketaRow: AnketaRow,
+): PersonnelToAnketaMergePreview => {
+  const fieldUpdates: Partial<Record<AnketaColumnKey, string>> = {};
+  const labels: string[] = [];
+
+  for (const { anketaKey, parts } of ANKETA_PERSONNEL_FIELD_MAP) {
+    if (isAnketaColumnReadonly(anketaKey)) continue;
+    if (!isReplaceableAnketaMissingValue(anketaRow[anketaKey])) continue;
+
+    const field = findPersonFieldDef(parts);
+    const sourceValue = getPersonFieldValue(personnelRow, parts);
+    if (isBlankPersonValue(sourceValue)) continue;
+    const nextValue = normalizeAnketaValueForPersonnel(sourceValue, field);
+    if (!nextValue || isReplaceableAnketaMissingValue(nextValue)) continue;
+
+    fieldUpdates[anketaKey] = nextValue;
+    labels.push(field?.label ?? parts.join(" "));
+  }
+
+  return { fieldUpdates, labels };
 };
 
 /** Побудувати оновлення для ООС: лише порожні поля заповнюються з анкети. */

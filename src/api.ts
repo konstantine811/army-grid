@@ -920,7 +920,7 @@ export const api = {
   listPersonQuestionnaires(options: { signal?: AbortSignal } = {}) {
     return request<BackendPersonQuestionnaireMeta[]>(
       '/ejournals/personnel/questionnaires',
-      { signal: options.signal },
+      { signal: options.signal, cache: 'no-store' },
     )
   },
 

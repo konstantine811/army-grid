@@ -68,7 +68,17 @@ describe("collectEjoosOosAndExcludedPeople", () => {
       sheets: [oos, excluded],
     } satisfies ExcelWorkbookSnapshot;
 
-    expect(collectEjoosOosAndExcludedPeople(workbook)).toEqual([
+    expect(
+      collectEjoosOosAndExcludedPeople(workbook).map(
+        ({ personId, fullName, rank, positionIndex, source }) => ({
+          personId,
+          fullName,
+          rank,
+          positionIndex,
+          source,
+        }),
+      ),
+    ).toEqual([
       candidate({
         personId: "101",
         fullName: "ІВАНЕНКО Іван Іванович",
@@ -215,6 +225,35 @@ describe("reconcileAnketaRowsWithEjoos", () => {
       ],
     );
     expect(result.report.conflicts).toHaveLength(1);
-    expect(result.rows[0]).toEqual(current);
+    expect(result.rows[0]).toEqual({ ...current, sex: "Ч" });
+  });
+
+  it("always restores sex from the patronymic during reconcile", () => {
+    const result = reconcileAnketaRowsWithEjoos(
+      [
+        anketaRow(30, {
+          externalId: "501",
+          fullName: "МИШУК Маргарита Анатоліївна",
+          sex: "-",
+        }),
+        anketaRow(31, {
+          externalId: "502",
+          fullName: "КІЯНЕНКО Андрій Олександрович",
+          sex: "",
+        }),
+      ],
+      [
+        candidate({
+          personId: "501",
+          fullName: "МИШУК Маргарита Анатоліївна",
+        }),
+        candidate({
+          personId: "502",
+          fullName: "КІЯНЕНКО Андрій Олександрович",
+        }),
+      ],
+    );
+
+    expect(result.rows.map((row) => row.sex)).toEqual(["Ж", "Ч"]);
   });
 });

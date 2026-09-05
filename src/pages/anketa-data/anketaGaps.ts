@@ -200,6 +200,20 @@ export const anketaRowHasQuestionnairePdf = (
   return false;
 };
 
+/** Після повторної перевірки прибрати з «без анкет» тих, для кого PDF уже з'явився. */
+export const removePresentQuestionnairesFromMissingNameKeys = (
+  rows: AnketaRow[],
+  missingNameKeys: Set<string>,
+  hasQuestionnaire: (row: AnketaRow) => boolean,
+) => {
+  const presentNameKeys = expandAnketaNameKeySet(
+    rows.filter(hasQuestionnaire).map((row) => row.fullName),
+  );
+  return new Set(
+    [...missingNameKeys].filter((key) => !presentNameKeys.has(key)),
+  );
+};
+
 const shouldFillAbsentQuestionnaireRow = (
   row: AnketaRow,
   excludeNameKeys: Set<string> | null | undefined,
