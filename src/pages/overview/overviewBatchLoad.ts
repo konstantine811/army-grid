@@ -1,6 +1,7 @@
 import { api, type BackendPersonnelOverview } from "../../api";
 
-export const OVERVIEW_PAGE_SIZE = 20;
+/** Fewer network round-trips while keeping a useful first progressive paint. */
+export const OVERVIEW_PAGE_SIZE = 200;
 
 export const mergeOverviewPages = (
   current: BackendPersonnelOverview | null,
@@ -42,6 +43,8 @@ export const overviewHasMorePages = (
 
 export const loadPersonnelOverviewInBatches = async (input: {
   pageSize?: number;
+  force?: boolean;
+  signal?: AbortSignal;
   isCancelled?: () => boolean;
   onPage?: (
     overview: BackendPersonnelOverview,
@@ -54,9 +57,16 @@ export const loadPersonnelOverviewInBatches = async (input: {
 
   const fetchPage = async (limit: number, pageOffset: number) => {
     try {
-      return await api.getPersonnelOverview({ limit, offset: pageOffset });
+      return await api.getPersonnelOverview({
+        limit,
+        offset: pageOffset,
+        force: Boolean(input.force && pageOffset === 0),
+        signal: input.signal,
+      });
     } catch (error) {
-      if (pageOffset === 0) return api.getPersonnelOverview();
+      if (pageOffset === 0) {
+        return api.getPersonnelOverview({ signal: input.signal });
+      }
       throw error;
     }
   };

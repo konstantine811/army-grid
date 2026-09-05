@@ -346,10 +346,8 @@ export function useAnketaSheetLoader() {
   const downloadStaffSheetExcel = async () => {
     setIsDownloadingStaffSheet(true);
     try {
-      let phase = "";
       const report = await downloadEnrichedStaffSheetExcel({
         onProgress: (nextPhase) => {
-          phase = nextPhase;
           setMessage(nextPhase);
         },
       });

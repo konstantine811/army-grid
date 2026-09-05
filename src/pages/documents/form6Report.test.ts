@@ -152,6 +152,15 @@ describe("Form 6 basis from BR", () => {
 });
 
 describe("Form 6 id document merge", () => {
+  it("keeps a valid document RNOKPP when personnel contains a placeholder", () => {
+    const merged = mergeForm6Fields(
+      fields({ rnokpp: "втрачено" }),
+      fields({ rnokpp: "3142223156" }),
+    );
+
+    expect(merged.rnokpp).toBe("3142223156");
+  });
+
   it("does not wipe a saved passport number with the default document title", () => {
     const merged = mergeForm6Fields(
       fields({ idDocument: "Паспорт громадянина України" }),

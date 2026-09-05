@@ -17,6 +17,7 @@ import {
   ListChecks,
   LogOut,
   LogIn,
+  MapPin,
   Maximize2,
   Menu,
   MenuSquare,
@@ -103,6 +104,7 @@ export const InfoOutlinedIcon = withCompatIcon(Info);
 export const LocalHospitalOutlinedIcon = withCompatIcon(Ambulance);
 export const LogoutOutlinedIcon = withCompatIcon(LogOut);
 export const LoginOutlinedIcon = withCompatIcon(LogIn);
+export const LocationOnOutlinedIcon = withCompatIcon(MapPin);
 export const MenuOpenOutlinedIcon = withCompatIcon(MenuSquare);
 export const MenuOutlinedIcon = withCompatIcon(Menu);
 export const MilitaryTechOutlinedIcon = withCompatIcon(Swords);

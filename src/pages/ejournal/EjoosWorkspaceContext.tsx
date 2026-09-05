@@ -9,6 +9,7 @@ import {
   api,
   type BackendEjournalLiveState,
   type BackendEjournalLiveVersion,
+  type BackendEjournalManualOperation,
   type BackendEjournalPbState,
 } from "../../api";
 import {
@@ -44,6 +45,7 @@ import {
   personCanEnterApplyQueue,
   isWorkbookApplyOp,
   mergePersonDecisions,
+  groupOpsIntoPersonChanges,
   patchPersonOpPayload,
   dismissPersonFromSession,
   setPersonDecision,
@@ -51,6 +53,12 @@ import {
   type EjoosDiffSession,
   type PersonChangeDecision,
 } from "./ejoosPersonDiff";
+import {
+  buildManualEjoosOperation,
+  hydrateManualEjoosOperation,
+  manualInputFromBackend,
+  type ManualEjoosOperationInput,
+} from "./ejoosManualOperation";
 import { personOpsBlockApply } from "./ejoosOpRequirements";
 import {
   buildProtocolText,
@@ -58,6 +66,8 @@ import {
   planBlocksWorkbookApply,
   resolveJournalTimesheetDay,
   workbookApplyBlockMessage,
+  type EjoosSyncOp,
+  type EjoosSyncPlan,
 } from "./ejoosSyncPlan";
 import { buildNormalizedSnapshotFromWorkbook } from "./ejoosNormalized";
 import {
@@ -79,6 +89,42 @@ import {
 
 export type { EjoosWorkspaceTab };
 
+const withManualOperations = (
+  session: EjoosDiffSession,
+  manualOps: EjoosSyncOp[],
+  pb: ExcelWorkbookSnapshot | null,
+) => {
+  const autoOps = session.plan.ops.filter(
+    (op) => op.payload.manualOperation !== "1",
+  );
+  const ops = [...autoOps, ...manualOps];
+  const plan: EjoosSyncPlan = {
+    ...session.plan,
+    ops,
+    summary: {
+      ready: ops.filter((op) => op.class === "ready").length,
+      needsInput: ops.filter((op) => op.class === "needs_input").length,
+      conflict: ops.filter((op) => op.class === "conflict").length,
+    },
+  };
+  const grouped = mergePersonDecisions(
+    groupOpsIntoPersonChanges(plan, pb),
+    session,
+  );
+  return {
+    ...grouped,
+    people: grouped.people.map((person) =>
+      person.ops.some(
+        (op) =>
+          op.payload.manualOperation === "1" &&
+          op.payload.manualDecision === "accepted",
+      )
+        ? { ...person, decision: "accepted" as const }
+        : person,
+    ),
+  };
+};
+
 export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
   const [tab, setTabState] = useState<EjoosWorkspaceTab>(getInitialEjoosTab);
   const [live, setLive] = useState<BackendEjournalLiveState | null>(null);
@@ -98,6 +144,8 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
   const pbFileBase64Ref = useRef<string | null>(null);
   const pbLoadPromiseRef =
     useRef<Promise<ExcelWorkbookSnapshot | null> | null>(null);
+  const manualOpsRef = useRef<EjoosSyncOp[]>([]);
+  const manualDraftsRef = useRef<BackendEjournalManualOperation[]>([]);
 
   const refreshLive = useCallback(async () => {
     const state = await api.getEjournalLive("1ПБ");
@@ -365,6 +413,42 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
 
   const sourceAsOfOverrideRef = useRef("");
 
+  const loadPersistedManualOperations = useCallback(
+    async (
+      ejoos: ExcelWorkbookSnapshot,
+      timesheetDay: number,
+      autoOps: EjoosSyncOp[],
+      currentVersionId?: string,
+    ) => {
+      try {
+        const resolvedVersionId =
+          currentVersionId ||
+          (await api.getEjournalLive("1ПБ")).current?.id ||
+          "";
+        const drafts = (await api.listEjournalManualOperations("1ПБ")).filter(
+          (draft) => draft.status === "draft",
+        );
+        const hydrated: EjoosSyncOp[] = [];
+        for (const draft of drafts) {
+          const op = hydrateManualEjoosOperation({
+            draft,
+            ejoos,
+            timesheetDay,
+            existingOps: [...autoOps, ...hydrated],
+            currentVersionId: resolvedVersionId,
+          });
+          if (op) hydrated.push(op);
+        }
+        manualDraftsRef.current = drafts;
+        manualOpsRef.current = hydrated;
+        return hydrated;
+      } catch {
+        return manualOpsRef.current;
+      }
+    },
+    [],
+  );
+
   const rebuildSessionFromSnapshots = useCallback(
     async (
       ejoos: ExcelWorkbookSnapshot,
@@ -373,7 +457,7 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
       sourceAsOfDate?: string,
     ) => {
       const asOf = sourceAsOfDate ?? sourceAsOfOverrideRef.current;
-      return runHeavyJob({
+      const rebuilt = await runHeavyJob({
         type: "ejoosSession",
         ejoos,
         pb,
@@ -383,8 +467,15 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
         sourceAsOfDate: asOf || undefined,
         statusRules: readOperatorSettings().statusRules,
       });
+      const manualOps = await loadPersistedManualOperations(
+        ejoos,
+        rebuilt.plan.timesheetDay,
+        rebuilt.plan.ops,
+        live?.current?.id,
+      );
+      return withManualOperations(rebuilt, manualOps, pb);
     },
-    [],
+    [live?.current?.id, loadPersistedManualOperations],
   );
 
   const buildSessionFromPb = useCallback(
@@ -639,13 +730,101 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
     }
   };
 
+  const persistManualDecision = (
+    personChangeIds: string[],
+    decision: PersonChangeDecision,
+  ) => {
+    const ids = new Set(personChangeIds);
+    const draftIds =
+      session?.people
+        .filter((person) => ids.has(person.id))
+        .flatMap((person) =>
+          person.ops
+            .filter((op) => op.payload.manualDraftId)
+            .map((op) => op.payload.manualDraftId),
+        ) ?? [];
+    if (!draftIds.length) return;
+    if (decision === "rejected") {
+      void Promise.all(
+        draftIds.map((id) => api.cancelEjournalManualOperation(id)),
+      ).catch((err) =>
+        setError(
+          err instanceof Error
+            ? err.message
+            : "Не вдалося скасувати ручну операцію",
+        ),
+      );
+      manualDraftsRef.current = manualDraftsRef.current.filter(
+        (draft) => !draftIds.includes(draft.id),
+      );
+      manualOpsRef.current = manualOpsRef.current.filter(
+        (op) => !draftIds.includes(op.payload.manualDraftId),
+      );
+      return;
+    }
+    const backendDecision = decision === "accepted" ? "accepted" : "pending";
+    for (const draftId of draftIds) {
+      void api
+        .updateEjournalManualOperation(draftId, {
+          decision: backendDecision,
+        })
+        .then((updated) => {
+          manualDraftsRef.current = manualDraftsRef.current.map((draft) =>
+            draft.id === updated.id ? updated : draft,
+          );
+          manualOpsRef.current = manualOpsRef.current.map((op) =>
+            op.payload.manualDraftId === updated.id
+              ? {
+                  ...op,
+                  payload: {
+                    ...op.payload,
+                    manualDecision: updated.decision,
+                  },
+                }
+              : op,
+          );
+        })
+        .catch((err) =>
+          setError(
+            err instanceof Error
+              ? err.message
+              : "Не вдалося зберегти стан черги",
+          ),
+        );
+    }
+  };
+
   const setDecision = (personChangeId: string, decision: PersonChangeDecision) => {
+    persistManualDecision([personChangeId], decision);
     setSession((current) =>
       current ? setPersonDecision(current, personChangeId, decision) : current,
     );
   };
 
   const dismissPerson = (personChangeId: string) => {
+    const manualIds = new Set(
+      session?.people
+        .find((person) => person.id === personChangeId)
+        ?.ops.filter((op) => op.payload.manualOperation === "1")
+        .map((op) => op.id) ?? [],
+    );
+    if (manualIds.size) {
+      for (const id of manualIds) {
+        void api.cancelEjournalManualOperation(id).catch((err) =>
+          setError(
+            err instanceof Error
+              ? err.message
+              : "Не вдалося скасувати ручну операцію",
+          ),
+        );
+      }
+      manualDraftsRef.current = manualDraftsRef.current.filter(
+        (draft) => !manualIds.has(draft.id),
+      );
+      manualOpsRef.current = manualOpsRef.current.filter(
+        (op) => !manualIds.has(op.id),
+      );
+    }
     setSession((current) =>
       current ? dismissPersonFromSession(current, personChangeId) : current,
     );
@@ -660,6 +839,7 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
     personChangeIds: string[],
     decision: PersonChangeDecision,
   ) => {
+    persistManualDecision(personChangeIds, decision);
     setSession((current) =>
       current
         ? setPersonDecisions(current, personChangeIds, decision)
@@ -672,6 +852,36 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
     opId: string,
     payloadPatch: Record<string, string>,
   ) => {
+    const draft = manualDraftsRef.current.find((item) => item.id === opId);
+    const input = draft ? manualInputFromBackend(draft) : null;
+    if (draft && input) {
+      const nextInput: ManualEjoosOperationInput = {
+        ...input,
+        ...(payloadPatch.destination !== undefined
+          ? { destination: payloadPatch.destination }
+          : {}),
+        ...(payloadPatch.orderNumber !== undefined
+          ? { orderNumber: payloadPatch.orderNumber }
+          : {}),
+        ...(payloadPatch.orderDate !== undefined
+          ? { orderDate: payloadPatch.orderDate }
+          : {}),
+      };
+      void api
+        .updateEjournalManualOperation(draft.id, { input: { ...nextInput } })
+        .then((updated) => {
+          manualDraftsRef.current = manualDraftsRef.current.map((item) =>
+            item.id === updated.id ? updated : item,
+          );
+        })
+        .catch((err) =>
+          setError(
+            err instanceof Error
+              ? err.message
+              : "Не вдалося зберегти редагування операції",
+          ),
+        );
+    }
     setSession((current) =>
       current
         ? patchPersonOpPayload(current, personChangeId, opId, payloadPatch)
@@ -679,7 +889,122 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
     );
   };
 
+  const upsertManualOperation = async (
+    values: ManualEjoosOperationInput,
+    existingOpId?: string,
+  ) => {
+    setError("");
+    try {
+      const ejoos = ejoosSnapshot ?? (await ensureEjoosSnapshot());
+      assertEjoosWorkbook(ejoos);
+      if (!live?.current) {
+        throw new Error("Немає поточної версії ЕЖООС для збереження операції");
+      }
+      const inputDay = Number(values.orderDate.split("-")[2]);
+      const timesheetDay =
+        session?.plan.timesheetDay ||
+        (Number.isFinite(inputDay) && inputDay > 0 ? inputDay : 1);
+      const built = buildManualEjoosOperation({
+        ejoos,
+        timesheetDay,
+        values,
+        existingOps:
+          session?.plan.ops.filter((op) => op.id !== existingOpId) ?? [],
+      });
+      const existingDraft = existingOpId
+        ? manualDraftsRef.current.find((item) => item.id === existingOpId)
+        : null;
+      const savedDraft = existingDraft
+        ? await api.updateEjournalManualOperation(existingDraft.id, {
+            input: values,
+            baseVersionId: live.current.id,
+          })
+        : await api.createEjournalManualOperation({
+            unitLabel: "1ПБ",
+            input: values,
+            baseVersionId: live.current.id,
+            decision: "pending",
+          });
+      manualDraftsRef.current = existingDraft
+        ? manualDraftsRef.current.map((item) =>
+            item.id === savedDraft.id ? savedDraft : item,
+          )
+        : [...manualDraftsRef.current, savedDraft];
+      const op: EjoosSyncOp = {
+        ...built,
+        id: savedDraft.id,
+        payload: {
+          ...built.payload,
+          manualDraftId: savedDraft.id,
+          manualDecision: savedDraft.decision,
+          manualBaseVersionId: savedDraft.baseVersionId,
+          manualCreatedBy:
+            savedDraft.createdByDisplayName ||
+            savedDraft.createdByEmail ||
+            "",
+          manualUpdatedAt: savedDraft.updatedAt,
+        },
+      };
+      manualOpsRef.current = existingOpId
+        ? manualOpsRef.current.map((item) =>
+            item.id === existingOpId ? op : item,
+          )
+        : [...manualOpsRef.current, op];
+      const baseSession =
+        session ??
+        groupOpsIntoPersonChanges(
+          {
+            ejoosName: ejoos.fileName,
+            pbName: "Ручні операції",
+            timesheetDay,
+            timesheetDayLabel:
+              op.payload.orderDate || live?.current?.asOfDate || "поточну дату",
+            ops: [],
+            summary: { ready: 0, needsInput: 0, conflict: 0 },
+            limitsNote:
+              "Ручна операція сформована з поточного стану ЕЖООС.",
+          },
+          null,
+        );
+      const next = withManualOperations(
+        baseSession,
+        manualOpsRef.current,
+        pbSnapshot,
+      );
+      setSession(next);
+      const person = next.people.find((item) =>
+        item.ops.some((itemOp) => itemOp.id === op.id),
+      );
+      setSelectedPersonId(person?.id ?? null);
+      setMessage(
+        op.class === "ready"
+          ? `Ручну операцію для «${op.fullName}» ${existingOpId ? "оновлено" : "додано"} в preview. Перевірте картку та додайте її в чергу.`
+          : `Ручну операцію для «${op.fullName}» ${existingOpId ? "оновлено" : "створено"} зі статусом «${op.class}». Перевірте причину в картці.`,
+      );
+      setTab("changes");
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Не вдалося створити ручну операцію",
+      );
+      throw err;
+    }
+  };
+  const addManualOperation = (values: ManualEjoosOperationInput) =>
+    upsertManualOperation(values);
+  const updateManualOperation = (
+    opId: string,
+    values: ManualEjoosOperationInput,
+  ) => upsertManualOperation(values, opId);
+
   const acceptReady = () => {
+    persistManualDecision(
+      session?.people
+        .filter(personCanEnterApplyQueue)
+        .map((person) => person.id) ?? [],
+      "accepted",
+    );
     setSession((current) => (current ? acceptAllReady(current) : current));
   };
 
@@ -693,6 +1018,35 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
     }
     assertEjoosWorkbook(ejoosSnapshot);
     if (!ops.length) throw new Error("Немає підтверджених змін");
+    const manualDraftIds = [
+      ...new Set(
+        ops.map((op) => op.payload.manualDraftId).filter(Boolean),
+      ),
+    ];
+    if (manualDraftIds.length) {
+      const acceptedDrafts = await Promise.all(
+        manualDraftIds.map((id) =>
+          api.updateEjournalManualOperation(id, { decision: "accepted" }),
+        ),
+      );
+      const acceptedById = new Map(
+        acceptedDrafts.map((draft) => [draft.id, draft]),
+      );
+      manualDraftsRef.current = manualDraftsRef.current.map(
+        (draft) => acceptedById.get(draft.id) ?? draft,
+      );
+      manualOpsRef.current = manualOpsRef.current.map((op) =>
+        acceptedById.has(op.payload.manualDraftId)
+          ? {
+              ...op,
+              payload: {
+                ...op.payload,
+                manualDecision: "accepted",
+              },
+            }
+          : op,
+      );
+    }
     const result = await applyConfirmedEjoosOps({
       ejoos: ejoosSnapshot,
       plan: workingSession.plan,
@@ -714,6 +1068,9 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
       sourcePbFileName: pbSnapshot?.fileName || workingSession.pbFileName,
       sourcePbSha256: pbSources?.current?.sha256,
       changeProtocol,
+      appliedManualOperationIds: ops
+        .map((op) => op.payload.manualDraftId)
+        .filter(Boolean),
       notes: note,
     });
     // Не качаємо файл на кожне застосування — експорт лише з вкладки «Експорт».
@@ -843,11 +1200,22 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
               ? ` · пропущено ${skippedNotes} позначок даних`
               : ""),
       );
+      const appliedManualIds = new Set(
+        ops
+          .filter((op) => op.payload.manualOperation === "1")
+          .map((op) => op.id),
+      );
+      manualOpsRef.current = manualOpsRef.current.filter(
+        (op) => !appliedManualIds.has(op.id),
+      );
+      manualDraftsRef.current = manualDraftsRef.current.filter(
+        (draft) => !appliedManualIds.has(draft.id),
+      );
       if (pbSnapshot && nextEjoosSnapshot) {
         const completedIds = new Set([
           ...applicablePeople.map((person) => person.id),
           ...queuedAcceptedPeople
-            .filter(personIsInformationalOnly)
+            .filter((person) => personIsInformationalOnly(person.ops))
             .map((person) => person.id),
         ]);
         const previousForMerge: EjoosDiffSession = {
@@ -966,6 +1334,17 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
           applyOps,
           `${person.fullName} · ${applyOps.length} ops`,
         );
+      const appliedManualIds = new Set(
+        applyOps
+          .filter((op) => op.payload.manualOperation === "1")
+          .map((op) => op.id),
+      );
+      manualOpsRef.current = manualOpsRef.current.filter(
+        (op) => !appliedManualIds.has(op.id),
+      );
+      manualDraftsRef.current = manualDraftsRef.current.filter(
+        (draft) => !appliedManualIds.has(draft.id),
+      );
       // План залежить від стану ЕЖООС: після змін по ХУБАЄВУ конфлікт АТРАХОВА
       // має зникнути одразу, без перезавантаження сторінки.
       if (pbSnapshot && nextEjoosSnapshot) {
@@ -1345,6 +1724,8 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
     dismissPerson,
     setDecisions,
     patchOpPayload,
+    addManualOperation,
+    updateManualOperation,
     acceptReady,
     applyAccepted,
     acceptAndApplyPerson,

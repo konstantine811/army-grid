@@ -261,6 +261,60 @@ describe("buildTimesheetAbsenceSpans / carry-in", () => {
       }),
     ).toBe("+");
   });
+
+  it("ОПАЛЕНИК: лікування and МЕД РОТА stay лік, then ВЛК starts on 19 August", () => {
+    const spans = buildTimesheetAbsenceSpans(
+      [
+        {
+          excelRow: 1,
+          departDate: "01.08.2026",
+          returnDate: "",
+          absenceType: "ЛІКУВАННЯ",
+          departMs: Date.UTC(2026, 7, 1),
+          returnMs: null,
+        },
+        {
+          excelRow: 2,
+          departDate: "10.08.2026",
+          returnDate: "",
+          absenceType: "МЕД РОТА",
+          departMs: Date.UTC(2026, 7, 10),
+          returnMs: null,
+        },
+        {
+          excelRow: 3,
+          departDate: "19.08.2026",
+          returnDate: "",
+          absenceType: "ВЛК",
+          departMs: Date.UTC(2026, 7, 19),
+          returnMs: null,
+        },
+      ],
+      {
+        timesheetDay: 25,
+        monthStartMs: AUG_2026_START,
+        monthEndMs: AUG_2026_END,
+        mapCode: (absenceType) =>
+          /влк/i.test(absenceType)
+            ? "ВЛК"
+            : /мед\s*рот|лікуван/i.test(absenceType)
+              ? "лік"
+              : "",
+        hasReturn: (value) => Boolean(value),
+        confirmOpenCarry: () => true,
+      },
+    );
+    const marks = Array.from({ length: 25 }, (_, index) =>
+      timesheetMarkFromArchive(index + 1, {
+        activeFromDay: 1,
+        lastDay: 25,
+        spans,
+      }),
+    );
+
+    expect(marks.slice(0, 18)).toEqual(Array(18).fill("лік"));
+    expect(marks.slice(18)).toEqual(Array(7).fill("ВЛК"));
+  });
 });
 
 describe("archivePeriodTouchesJournalMonth", () => {

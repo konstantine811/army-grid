@@ -45,18 +45,15 @@ import { runHeavyJob } from "../../workers/runHeavyJob";
 import { Button as SciButton } from "../../components/ui/button/button";
 import {
   type ExcelWorkbookSnapshot,
-  createWorkbookDebugPayload,
   exportBlankWorkbookSheetWithMutations,
   exportTemplateWorkbookWithMutations,
   exportWorkbookWithMutations,
   hasRowData,
-  readWorkbookSnapshot,
 } from "../../excelRoundTrip";
 import {
   getInitialBchsAnalyticsTab,
   type BchsAnalyticsTab,
 } from "../../app/navigation";
-import { cellValueToJson } from "../../shared/format";
 import { BarList, BchsAbsenceDonut } from "../analytics/charts";
 import { CombatStructureScene, type CombatBlock } from "../analytics/combatScene";
 import { CombatModelsPreloader } from "../analytics/combatModelsPreloader";
@@ -91,7 +88,6 @@ import {
   sumBchsComparisonRankListedAvailable,
   createBchsComparisonRow,
   enrichBchsAnalyticsForExport,
-  BCHS_PIB_FILL_VALUE_KEY,
   extractBchsAwayPeopleFromSheet,
   extractBchsNovaPeopleFromSheet,
   filterBchsNovaPeople,
@@ -355,7 +351,7 @@ const writeMainBchsCalculationSheet = (
 export function BchsPage({ active = true }: { active?: boolean }) {
   const { canEditArea } = useAuth();
   const canEdit = canEditArea("bchs");
-  const [snapshot, setSnapshot] = useState<ExcelWorkbookSnapshot | null>(null);
+  const [snapshot] = useState<ExcelWorkbookSnapshot | null>(null);
   const [imports, setImports] = useState<BackendEjournalImport[]>([]);
   const [dbPreview, setDbPreview] = useState<DbPreviewState | null>(null);
   const [selectedImportId, setSelectedImportId] = useState("");
@@ -727,116 +723,6 @@ export function BchsPage({ active = true }: { active?: boolean }) {
     muiTopToolbarProps: { sx: { backgroundColor: "rgba(17,17,15,0.92)" } },
     muiBottomToolbarProps: { sx: { backgroundColor: "rgba(17,17,15,0.92)" } },
   });
-  const workbookPayload = useMemo(() => {
-    if (!snapshot) return null;
-
-    if (dataSheet) {
-      const columns = buildImportColumns(dataSheet);
-      const rows = dataSheet.rows
-        .filter((row) => hasRowData(row.values))
-        .map((row) => {
-          const fill = dataSheet.pibFillByExcelRow?.[row.excelRowNumber];
-          return {
-            excelRowNumber: row.excelRowNumber,
-            values: {
-              ...Object.fromEntries(
-                columns.map((column, index) => [
-                  column.key,
-                  cellValueToJson(row.values[index]),
-                ]),
-              ),
-              ...(fill ? { [BCHS_PIB_FILL_VALUE_KEY]: fill } : {}),
-            },
-          };
-        });
-
-      return {
-        name: snapshot.fileName.replace(/\.xlsx$/i, ""),
-        sourceFileName: snapshot.fileName,
-        notes: JSON.stringify({ source: "BCHS", analytics }),
-        sheets: [
-          {
-            name: dataSheet.sheetName,
-            sheetIndex: dataSheet.sheetIndex,
-            columns,
-            rows,
-          },
-        ],
-      };
-    }
-
-    const personnelSupplement =
-      analytics.supplement?.kind === "personnel-bzvp"
-        ? analytics.supplement
-        : null;
-    if (!personnelSupplement) return null;
-
-    const columns = [
-      { key: "battalion", label: "Батальйон", order: 0 },
-      { key: "unit", label: "Підрозділ", order: 1 },
-      { key: "staff", label: "Штатна кількість О/С", order: 2 },
-      { key: "listed", label: "Кількість за списком", order: 3 },
-      { key: "available", label: "Наявність", order: 4 },
-      { key: "staffedPercent", label: "О/С %", order: 5 },
-      { key: "combatTask", label: "На виконанні б/з", order: 6 },
-      {
-        key: "replacementReserve",
-        label: "Резерв згідно графіку заміни",
-        order: 7,
-      },
-      {
-        key: "taskReserve",
-        label: "Резерв о/с виконання бойових завдань",
-        order: 8,
-      },
-      {
-        key: "commanderReserve",
-        label: "Резерв о/с командира полку",
-        order: 9,
-      },
-      ...personnelSupplement.bzvpBuckets.map((bucket, index) => ({
-        key: `bzvp_${index + 1}`,
-        label: bucket.label,
-        order: 10 + index,
-      })),
-    ];
-    const rows = personnelSupplement.rows.map((row, rowIndex) => ({
-      excelRowNumber: row.rowNumber || rowIndex + 4,
-      values: {
-        battalion: row.battalion,
-        unit: row.unit,
-        staff: row.staff,
-        listed: row.listed,
-        available: row.available,
-        staffedPercent: row.staffedPercent,
-        combatTask: row.combatTask,
-        replacementReserve: row.replacementReserve,
-        taskReserve: row.taskReserve,
-        commanderReserve: row.commanderReserve,
-        ...Object.fromEntries(
-          personnelSupplement.bzvpBuckets.map((_, index) => [
-            `bzvp_${index + 1}`,
-            row.bzvpBuckets[index]?.value ?? 0,
-          ]),
-        ),
-      },
-    }));
-
-    return {
-      name: snapshot.fileName.replace(/\.xlsx$/i, ""),
-      sourceFileName: snapshot.fileName,
-      notes: JSON.stringify({ source: "BCHS", analytics }),
-      sheets: [
-        {
-          name: "Особовий склад + БЗВП",
-          sheetIndex: 0,
-          columns,
-          rows,
-        },
-      ],
-    };
-  }, [analytics, dataSheet, snapshot]);
-
   const loadImports = async () => {
     setIsLoading(true);
     try {
@@ -944,54 +830,6 @@ export function BchsPage({ active = true }: { active?: boolean }) {
       unsubscribe();
     };
   }, []);
-
-  const loadFile = async (file: File | undefined) => {
-    if (!file) return;
-
-    setIsLoading(true);
-    try {
-      const nextSnapshot = await readWorkbookSnapshot(file);
-      setSnapshot(nextSnapshot);
-      setDbPreview(null);
-      setMessage(
-        `Розпарсено БЧС: ${nextSnapshot.fileName}. Вкладок: ${nextSnapshot.sheets.length}.`,
-      );
-      console.groupCollapsed(
-        `[army-grid] Parsed BCHS: ${nextSnapshot.fileName}`,
-      );
-      console.log(createWorkbookDebugPayload(nextSnapshot));
-      console.groupEnd();
-    } catch (error) {
-      setMessage(
-        error instanceof Error
-          ? error.message
-          : "Не вдалося прочитати БЧС Excel.",
-      );
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const saveImport = async () => {
-    if (!workbookPayload) return;
-
-    setIsLoading(true);
-    try {
-      const createdImport = await api.importBchsWorkbook(workbookPayload);
-      setMessage(
-        `БЧС записано в БД: ${createdImport.name}. Рядків: ${createdImport.totalRows}.`,
-      );
-      await loadImports();
-    } catch (error) {
-      setMessage(
-        error instanceof Error
-          ? error.message
-          : "Не вдалося записати БЧС у БД.",
-      );
-    } finally {
-      setIsLoading(false);
-    }
-  };
 
   const deleteSelectedImport = async () => {
     if (!selectedImport) return;

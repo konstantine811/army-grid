@@ -7,6 +7,7 @@ export type EjoosTimesheetCode =
   | "ВП"
   | "лік"
   | "ЛП"
+  | "ВЛК"
   | "СЗЧ"
   | "ЗБ"
   | "пол"
@@ -20,6 +21,7 @@ export const EJOOS_TIMESHEET_CODES: EjoosTimesheetCode[] = [
   "ВП",
   "лік",
   "ЛП",
+  "ВЛК",
   "СЗЧ",
   "ЗБ",
   "пол",
@@ -177,6 +179,17 @@ export const DEFAULT_STATUS_RULES: EjoosStatusRule[] = [
     reason: "СТАТУС містить відпустку → код «від»",
   },
   {
+    id: "medical_board",
+    enabled: true,
+    priority: 49,
+    label: "ВЛК",
+    matchAny: ["влк", "військово-лікар"],
+    timesheetCode: "ВЛК",
+    absenceGround: "ВЛК",
+    confidence: "high",
+    reason: "ВЛК → окремий період відсутності; у Табелі код «ВЛК»",
+  },
+  {
     id: "med_wounded",
     enabled: true,
     priority: 50,
@@ -205,7 +218,7 @@ export const DEFAULT_STATUS_RULES: EjoosStatusRule[] = [
     enabled: true,
     priority: 60,
     label: "Лікування",
-    matchAny: ["лік", "шпит", "хвороб", "медич", "медрот"],
+    matchAny: ["лік", "шпит", "хвороб", "медич", "медрот", "мед рот"],
     timesheetCode: "лік",
     absenceGround: "лікування",
     confidence: "high",

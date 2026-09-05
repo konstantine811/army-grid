@@ -26,6 +26,11 @@ import {
   SOURCE_DATE_UNKNOWN_MESSAGE,
 } from "./ejoosSyncPlan";
 import { logTimesheetDebugDump, isTimesheetVerboseDebugEnabled } from "./ejoosTimesheetDebugDump";
+import {
+  collectManualEjoosPeople,
+  type ManualEjoosOperationInput,
+  type ManualEjoosOperationType,
+} from "./ejoosManualOperation";
 
 type ChangeFilter =
   | "ALL"
@@ -36,6 +41,28 @@ type ChangeFilter =
   | "error";
 
 type ChangesView = "list" | "queue";
+
+const manualTypeLabels: Record<ManualEjoosOperationType, string> = {
+  exclude_transfer: "ПЕРЕВ / вибуття",
+  dismissal: "ЗВІЛЬН / звільнення зі служби",
+  position_change: "Призначення / зміна посади",
+  rank_change: "Зміна звання",
+};
+
+const emptyManualOperation = (): ManualEjoosOperationInput => ({
+  type: "exclude_transfer",
+  personKey: "",
+  orderNumber: "",
+  orderDate: new Date().toISOString().slice(0, 10),
+  destination: "",
+  nextPositionIndex: "",
+  nextRank: "",
+});
+
+const dateForInput = (value: string) => {
+  const match = String(value || "").match(/^(\d{2})\.(\d{2})\.(\d{4})$/);
+  return match ? `${match[3]}-${match[2]}-${match[1]}` : value;
+};
 
 /** Рядки / крапка з комою — список ПІБ або ID для пошуку в операціях. */
 export const parsePastedPersonList = (raw: string) =>
@@ -69,6 +96,7 @@ const FILTERS: { id: ChangeFilter; label: string }[] = [
 export function EjoosChangesPanel() {
   const {
     session,
+    live,
     ejoosSnapshot,
     selectedPersonId,
     setSelectedPersonId,
@@ -76,6 +104,8 @@ export function EjoosChangesPanel() {
     dismissPerson,
     setDecisions,
     patchOpPayload,
+    addManualOperation,
+    updateManualOperation,
     acceptReady,
     applyAccepted,
     acceptAndApplyPerson,
@@ -93,6 +123,272 @@ export function EjoosChangesPanel() {
     reviewOnly?: boolean;
   } | null>(null);
   const [bulkApplyOpen, setBulkApplyOpen] = useState(false);
+  const [manualOpen, setManualOpen] = useState(false);
+  const [manualEditingOpId, setManualEditingOpId] = useState("");
+  const [manualQuery, setManualQuery] = useState("");
+  const [manualValues, setManualValues] =
+    useState<ManualEjoosOperationInput>(emptyManualOperation);
+  const manualPeople = useMemo(
+    () => (ejoosSnapshot ? collectManualEjoosPeople(ejoosSnapshot) : []),
+    [ejoosSnapshot],
+  );
+  const filteredManualPeople = useMemo(() => {
+    const needle = canonicalName(manualQuery) || normKey(manualQuery);
+    if (!needle) return manualPeople.slice(0, 250);
+    return manualPeople
+      .filter((person) =>
+        [
+          canonicalName(person.fullName),
+          normKey(person.personId),
+          normKey(person.positionIndex),
+        ].some((value) => value.includes(needle)),
+      )
+      .slice(0, 250);
+  }, [manualPeople, manualQuery]);
+
+  useEffect(() => {
+    if (!manualOpen || !manualQuery.trim() || filteredManualPeople.length !== 1) {
+      return;
+    }
+    const onlyPerson = filteredManualPeople[0];
+    setManualValues((current) =>
+      current.personKey === onlyPerson.key
+        ? current
+        : { ...current, personKey: onlyPerson.key },
+    );
+  }, [filteredManualPeople, manualOpen, manualQuery]);
+
+  const beginManualCreate = () => {
+    setManualEditingOpId("");
+    setManualQuery("");
+    setManualValues(emptyManualOperation());
+    setManualOpen(true);
+  };
+
+  const beginManualEdit = () => {
+    const op = selectedPerson?.ops.find(
+      (item) => item.payload.manualOperation === "1",
+    );
+    if (
+      !op ||
+      !["exclude_transfer", "position_change", "rank_change"].includes(op.kind)
+    ) {
+      return;
+    }
+    const person = manualPeople.find(
+      (item) =>
+        (op.personId && item.personId === op.personId) ||
+        canonicalName(item.fullName) === canonicalName(op.fullName),
+    );
+    setManualEditingOpId(op.id);
+    setManualQuery(op.fullName);
+    setManualValues({
+      type:
+        op.kind === "exclude_transfer" && op.payload.type === "ЗВІЛЬН"
+          ? "dismissal"
+          : (op.kind as ManualEjoosOperationType),
+      personKey: person?.key || "",
+      orderNumber: op.payload.orderNumber || "",
+      orderDate: dateForInput(op.payload.orderDate || ""),
+      destination: op.payload.destination || "",
+      nextPositionIndex: op.payload.nextIndex || "",
+      nextRank: op.payload.nextRank || "",
+    });
+    setManualOpen(true);
+  };
+
+  const manualDialog = (
+    <Dialog
+      open={manualOpen}
+      onClose={() => setManualOpen(false)}
+      maxWidth="sm"
+      fullWidth
+    >
+      <DialogTitle>
+        {manualEditingOpId
+          ? "Редагувати ручну операцію ЕЖООС"
+          : "Додати ручну операцію ЕЖООС"}
+      </DialogTitle>
+      <DialogContent>
+        <Stack spacing={1.25} sx={{ mt: 0.5 }}>
+          <Typography variant="body2" className="ejoos-muted">
+            Операція спочатку з’явиться як preview-картка. Запис у файл
+            відбудеться лише після додавання в чергу та підтвердженого Apply.
+          </Typography>
+          <label className="ejoos-manual-field">
+            <span>Тип операції</span>
+            <select
+              className="ejoos-search"
+              value={manualValues.type}
+              onChange={(event) =>
+                setManualValues((current) => ({
+                  ...current,
+                  type: event.target.value as ManualEjoosOperationType,
+                }))
+              }
+            >
+              {Object.entries(manualTypeLabels).map(([value, label]) => (
+                <option key={value} value={value}>
+                  {label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="ejoos-manual-field">
+            <span>Пошук особи</span>
+            <input
+              className="ejoos-search"
+              value={manualQuery}
+              onChange={(event) => {
+                setManualQuery(event.target.value);
+                setManualValues((current) => ({
+                  ...current,
+                  personKey: "",
+                }));
+              }}
+              placeholder="ПІБ / ID / індекс"
+            />
+          </label>
+          <label className="ejoos-manual-field">
+            <span>Службовець</span>
+            <select
+              className="ejoos-search"
+              size={Math.min(7, Math.max(3, filteredManualPeople.length))}
+              value={manualValues.personKey}
+              onChange={(event) =>
+                setManualValues((current) => ({
+                  ...current,
+                  personKey: event.target.value,
+                }))
+              }
+            >
+              {filteredManualPeople.map((person) => (
+                <option key={person.key} value={person.key}>
+                  {person.fullName} · {person.rank || "без звання"} ·{" "}
+                  {person.positionIndex || "без індексу"}
+                </option>
+              ))}
+            </select>
+            {!manualValues.personKey ? (
+              <Typography variant="caption" color="warning.main">
+                Оберіть службовця зі списку. Якщо знайдено одну особу, вона
+                вибереться автоматично.
+              </Typography>
+            ) : null}
+          </label>
+          <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
+            <label className="ejoos-manual-field">
+              <span>Номер наказу</span>
+              <input
+                className="ejoos-search"
+                value={manualValues.orderNumber}
+                onChange={(event) =>
+                  setManualValues((current) => ({
+                    ...current,
+                    orderNumber: event.target.value,
+                  }))
+                }
+              />
+            </label>
+            <label className="ejoos-manual-field">
+              <span>Дата наказу</span>
+              <input
+                type="date"
+                className="ejoos-search"
+                value={manualValues.orderDate}
+                onChange={(event) =>
+                  setManualValues((current) => ({
+                    ...current,
+                    orderDate: event.target.value,
+                  }))
+                }
+              />
+            </label>
+          </Stack>
+          {manualValues.type === "exclude_transfer" ||
+          manualValues.type === "dismissal" ? (
+            <label className="ejoos-manual-field">
+              <span>
+                {manualValues.type === "dismissal"
+                  ? "Підстава / куди після звільнення"
+                  : "Куди вибув"}
+              </span>
+              <input
+                className="ejoos-search"
+                value={manualValues.destination}
+                onChange={(event) =>
+                  setManualValues((current) => ({
+                    ...current,
+                    destination: event.target.value,
+                  }))
+                }
+                placeholder={
+                  manualValues.type === "dismissal"
+                    ? "Наприклад: звільнений у запас"
+                    : "Назва частини / установи"
+                }
+              />
+            </label>
+          ) : null}
+          {manualValues.type === "position_change" ? (
+            <label className="ejoos-manual-field">
+              <span>Новий індекс посади</span>
+              <input
+                className="ejoos-search"
+                value={manualValues.nextPositionIndex}
+                onChange={(event) =>
+                  setManualValues((current) => ({
+                    ...current,
+                    nextPositionIndex: event.target.value,
+                  }))
+                }
+              />
+            </label>
+          ) : null}
+          {manualValues.type === "rank_change" ? (
+            <label className="ejoos-manual-field">
+              <span>Нове звання</span>
+              <input
+                className="ejoos-search"
+                value={manualValues.nextRank}
+                onChange={(event) =>
+                  setManualValues((current) => ({
+                    ...current,
+                    nextRank: event.target.value,
+                  }))
+                }
+              />
+            </label>
+          ) : null}
+        </Stack>
+      </DialogContent>
+      <DialogActions>
+        <Button variant="outlined" onClick={() => setManualOpen(false)}>
+          Скасувати
+        </Button>
+        <Button
+          variant="contained"
+          disabled={!manualValues.personKey || isLoading}
+          onClick={() => {
+            const save = manualEditingOpId
+              ? updateManualOperation(manualEditingOpId, manualValues)
+              : addManualOperation(manualValues);
+            void save
+              .then(() => {
+                setManualOpen(false);
+                setManualEditingOpId("");
+                setManualQuery("");
+                setManualValues(emptyManualOperation());
+              })
+              .catch(() => undefined);
+          }}
+          sx={{ color: "#1a1a14" }}
+        >
+          {manualEditingOpId ? "Зберегти зміни" : "Створити preview"}
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
 
   useEffect(() => {
     if (!isTimesheetVerboseDebugEnabled() || !ejoosSnapshot) return;
@@ -226,6 +522,15 @@ export function EjoosChangesPanel() {
         <Button variant="outlined" onClick={() => setTab("import")}>
           Перейти до імпорту 1ПБ
         </Button>
+        <Button
+          variant="contained"
+          disabled={!ejoosSnapshot}
+          onClick={beginManualCreate}
+          sx={{ alignSelf: "flex-start", color: "#1a1a14" }}
+        >
+          Додати ручну операцію
+        </Button>
+        {manualDialog}
       </Stack>
     );
   }
@@ -277,6 +582,14 @@ export function EjoosChangesPanel() {
           ) : null}
         </Box>
         <Stack direction="row" spacing={1} style={{ flexWrap: "wrap" }}>
+          <Button
+            size="small"
+            variant="outlined"
+            disabled={!ejoosSnapshot}
+            onClick={beginManualCreate}
+          >
+            Додати ручну операцію
+          </Button>
           <Button
             size="small"
             variant="outlined"
@@ -446,6 +759,40 @@ export function EjoosChangesPanel() {
         </div>
         <div className="ejoos-change-detail">
           {selectedPerson ? (
+            <>
+            {selectedPerson.ops.find(
+              (op) => op.payload.manualOperation === "1",
+            ) ? (
+              <Stack spacing={0.5} sx={{ mb: 1 }}>
+                <Button
+                  size="small"
+                  variant="outlined"
+                  onClick={beginManualEdit}
+                  sx={{ alignSelf: "flex-start" }}
+                >
+                  Редагувати ручну операцію
+                </Button>
+                <Typography variant="caption" className="ejoos-muted">
+                  Збережено в БД
+                  {selectedPerson.ops.find(
+                    (op) => op.payload.manualCreatedBy,
+                  )?.payload.manualCreatedBy
+                    ? ` · ${selectedPerson.ops.find((op) => op.payload.manualCreatedBy)?.payload.manualCreatedBy}`
+                    : ""}
+                </Typography>
+                {selectedPerson.ops.some(
+                  (op) =>
+                    op.payload.manualBaseVersionId &&
+                    live?.current?.id &&
+                    op.payload.manualBaseVersionId !== live.current.id,
+                ) ? (
+                  <Typography variant="caption" color="warning.main">
+                    Чернетку створено на попередній версії ЕЖООС. Перевірте
+                    перераховані рядки та конфлікти.
+                  </Typography>
+                ) : null}
+              </Stack>
+            ) : null}
             <PersonChangeCard
               person={selectedPerson}
               timesheetDay={session?.plan.timesheetDay ?? 31}
@@ -482,6 +829,7 @@ export function EjoosChangesPanel() {
               }
               isLoading={isLoading}
             />
+            </>
           ) : (
             <Box className="ejoos-change-card is-empty">
               <Typography variant="body2" className="ejoos-muted">
@@ -494,6 +842,7 @@ export function EjoosChangesPanel() {
         </div>
       </div>
       <Divider />
+      {manualDialog}
 
       <Dialog
         open={Boolean(applyConfirm)}

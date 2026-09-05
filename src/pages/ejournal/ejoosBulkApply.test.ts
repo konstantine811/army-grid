@@ -581,6 +581,14 @@ describe("СЗЧ → РОЗПОРЯДЖ then final sh occupant", () => {
     expect(didenkoRows[0].days.slice(10).every((mark) => mark === "-")).toBe(
       true,
     );
+    const maximenkoRow = (ts?.rawRows ?? []).find(
+      (row) => String(row[7] ?? "") === "9905",
+    );
+    const maximenkoDays = Array.from({ length: 25 }, (_, day) =>
+      String(maximenkoRow?.[8 + day] ?? "").trim(),
+    );
+    expect(maximenkoDays.slice(0, 10).every((mark) => mark === "-")).toBe(true);
+    expect(maximenkoDays.slice(10).every((mark) => mark === "+")).toBe(true);
 
     const abs = after.sheets.find((sheet) => /відсут/i.test(sheet.sheetName));
     expect(String(abs?.rawRows[5]?.[2] ?? "").trim()).toBe("11040");

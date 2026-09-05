@@ -11,9 +11,14 @@ import {
 } from "./ejoosTimesheetUnitSections";
 
 const sheetOf = (rows: string[][]): ExcelSheetSnapshot => ({
+  sheetIndex: 0,
   sheetName: "6. Табель",
   rawRows: rows,
+  headerRows: [],
+  rows: [],
+  columnCount: Math.max(0, ...rows.map((row) => row.length)),
   columnIndexes: [],
+  dataStartRow: 1,
 });
 
 describe("ejoosTimesheetUnitSections", () => {

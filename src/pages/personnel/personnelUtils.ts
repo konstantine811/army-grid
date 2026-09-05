@@ -1,7 +1,6 @@
 import type {
   BackendEjournalImport,
   BackendEjournalImportSheet,
-  BackendPersonDocument,
   EjournalRowActionType,
 } from "../../api";
 import { api } from "../../api";
@@ -1629,6 +1628,9 @@ export const loadAllEjournalSheetRows = async (
     onCached?: (preview: DbPreviewState) => void | Promise<void>;
     onPage?: (preview: DbPreviewState) => void | Promise<void>;
     isCancelled?: () => boolean;
+    signal?: AbortSignal;
+    /** Revalidate even when the device-local IndexedDB copy is fresh. */
+    force?: boolean;
   },
 ): Promise<DbPreviewState> => {
   const toPreview = (
@@ -1646,6 +1648,7 @@ export const loadAllEjournalSheetRows = async (
     const firstPage = await api.listEjournalSheetRows(sheet.id, {
       limit: pageSize,
       offset: 0,
+      signal: options?.signal,
     });
     const columns = parseDbColumns(firstPage.columns);
     const items = [...firstPage.items];
@@ -1663,7 +1666,11 @@ export const loadAllEjournalSheetRows = async (
     if (remainingOffsets.length > 0) {
       const pages = await Promise.all(
         remainingOffsets.map((offset) =>
-          api.listEjournalSheetRows(sheet.id, { limit, offset }),
+          api.listEjournalSheetRows(sheet.id, {
+            limit,
+            offset,
+            signal: options?.signal,
+          }),
         ),
       );
       for (const page of pages) items.push(...page.items);
@@ -1678,6 +1685,7 @@ export const loadAllEjournalSheetRows = async (
     const firstPage = await api.listEjournalSheetRows(sheet.id, {
       limit: firstSize,
       offset: 0,
+      signal: options?.signal,
     });
     const columns = parseDbColumns(firstPage.columns);
     const items = [...firstPage.items];
@@ -1690,6 +1698,7 @@ export const loadAllEjournalSheetRows = async (
       const page = await api.listEjournalSheetRows(sheet.id, {
         limit: nextSize,
         offset,
+        signal: options?.signal,
       });
       if (!page.items.length) break;
       items.push(...page.items);
@@ -1710,6 +1719,7 @@ export const loadAllEjournalSheetRows = async (
       fetcher: fetchFreshParallel,
       onCached: options?.onCached,
       isChanged: jsonChanged,
+      force: options?.force,
     });
   }
 

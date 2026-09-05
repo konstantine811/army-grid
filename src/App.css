@@ -2176,6 +2176,30 @@
   text-transform: uppercase;
 }
 
+.person-action-fields > span.person-location-highlight {
+  border-color: rgba(80, 255, 120, 0.62);
+  background:
+    linear-gradient(90deg, rgba(50, 190, 90, 0.16), rgba(50, 190, 90, 0.035)),
+    rgba(10, 18, 11, 0.82);
+  box-shadow:
+    inset 3px 0 0 #58ef7c,
+    0 0 16px rgba(50, 220, 95, 0.1);
+}
+
+.person-action-fields > span.person-location-highlight > strong {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #79f394;
+  letter-spacing: 0.04em;
+}
+
+.person-location-value {
+  color: #f0f6ee;
+  font-size: 15px;
+  font-weight: 650;
+}
+
 .person-action-buttons {
   display: flex;
   flex-wrap: wrap;
@@ -2538,6 +2562,40 @@
 
 .personnel-list-panel > .panel-heading {
   flex: 0 0 auto;
+}
+
+.personnel-list-heading {
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.personnel-list-heading .personnel-questionnaire-summary {
+  color: rgba(224, 213, 190, 0.62);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  text-transform: none;
+}
+
+.personnel-list-preloader {
+  display: grid;
+  align-content: center;
+  gap: 12px;
+  min-height: 220px;
+  padding: 24px;
+  color: rgba(224, 213, 190, 0.68);
+  text-align: center;
+}
+
+.personnel-list-preloader strong {
+  color: #d6d785;
+  font-size: 13px;
+}
+
+.personnel-list-preloader span {
+  font-size: 11px;
+  line-height: 1.5;
 }
 
 .personnel-search {
@@ -4399,6 +4457,22 @@
   display: grid;
   gap: 14px;
   align-content: start;
+}
+
+.document-form-save-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid rgba(0, 255, 85, 0.24);
+  background: rgba(0, 255, 85, 0.045);
+}
+
+.document-form-save-row > span {
+  color: #aaa392;
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .document-placeholder-map {
@@ -12445,6 +12519,20 @@ html.auth-lock .auth-shell {
   min-height: 110px;
   resize: vertical;
   line-height: 1.4;
+}
+
+.ejoos-manual-field {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 5px;
+  color: #aaa392;
+  font-size: 12px;
+}
+
+.ejoos-manual-field select.ejoos-search {
+  width: 100%;
 }
 
 .ejoos-history {

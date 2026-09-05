@@ -15,6 +15,7 @@ import type {
   EjoosDiffSession,
   PersonChangeDecision,
 } from "./ejoosPersonDiff";
+import type { ManualEjoosOperationInput } from "./ejoosManualOperation";
 
 export type { EjoosWorkspaceTab } from "../../app/navigation";
 
@@ -56,6 +57,11 @@ export type EjoosWorkspaceContextValue = {
     opId: string,
     payloadPatch: Record<string, string>,
   ) => void;
+  addManualOperation: (input: ManualEjoosOperationInput) => Promise<void>;
+  updateManualOperation: (
+    opId: string,
+    input: ManualEjoosOperationInput,
+  ) => Promise<void>;
   acceptReady: () => void;
   applyAccepted: (personIds?: string[]) => Promise<void>;
   acceptAndApplyPerson: (personChangeId: string) => Promise<void>;

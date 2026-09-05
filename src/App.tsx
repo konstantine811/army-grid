@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Button, Typography } from "@/components/sci/SciPrimitives";
 import { MenuOutlinedIcon } from "@/components/sci/icons";
 import "./App.css";
@@ -42,7 +42,6 @@ import { useAuthScrollLock } from "./auth/useAuthScrollLock";
 import { UsersAccessPage } from "./pages/users/UsersAccessPage";
 import { ProfilePage } from "./pages/profile/ProfilePage";
 import { WorkTasksPage } from "./pages/work-tasks/WorkTasksPage";
-import { rememberMountedPage } from "./app/pageKeepAlive";
 
 function AppPageSlot({
   page,
@@ -75,21 +74,9 @@ function App() {
   const [activePage, setActivePage] = useState<AppPage>(() =>
     getPageFromPath(window.location.pathname),
   );
-  const [mountedPages, setMountedPages] = useState<Set<AppPage>>(
-    () => new Set([getPageFromPath(window.location.pathname)]),
-  );
-  const mountedPagesRef = useRef(mountedPages);
-  mountedPagesRef.current = mountedPages;
+  const mountedPages = new Set<AppPage>([activePage]);
   const [routeKey, setRouteKey] = useState(getCurrentRouteKey);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
-
-  useEffect(() => {
-    const delay = mountedPagesRef.current.has(activePage) ? 0 : 80;
-    const timer = window.setTimeout(() => {
-      setMountedPages((current) => rememberMountedPage(current, activePage));
-    }, delay);
-    return () => window.clearTimeout(timer);
-  }, [activePage]);
 
   useEffect(() => {
     const handlePopState = () => {
@@ -270,13 +257,6 @@ function App() {
       />
 
       <div className="app-page-host">
-        {activePage && !mountedPages.has(activePage) ? (
-          <div className="app-page-slot is-active app-page-slot--pending">
-            <Typography variant="body2" color="text.secondary">
-              Завантаження…
-            </Typography>
-          </div>
-        ) : null}
         <AppPageSlot
           page="overview"
           activePage={activePage}

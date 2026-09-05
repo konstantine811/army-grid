@@ -15,15 +15,43 @@ import {
   resolvePersonIdentityKey,
   resolvePersonRankTitle,
 } from "./personnelUtils";
+import {
+  isPersonnelFromArchive,
+  ROSTER_ARCHIVE_FLAG_KEY,
+  ROSTER_ARCHIVE_SOURCE_KEY,
+  ROSTER_ARCHIVE_SOURCE_VALUE,
+} from "./staffSheetArchiveMarker";
 
 export const ROSTER_FIELD_PREFIX = "roster__";
 const normalizeRosterText = normalizeRosterMatchText;
 
-/** Особа зі штатки / ранкового «Загального списку», не лише з ЕЖООС. */
+export { isPersonnelFromArchive } from "./staffSheetArchiveMarker";
+
+const withArchiveMarker = (
+  target: EjournalPreviewRow,
+  rosterRow: EjournalPreviewRow,
+): EjournalPreviewRow => {
+  const orderedTarget = {
+    ...target,
+    __rosterOrder:
+      rosterRow.__rosterOrder ?? rosterRow.__rowNumber ?? Number.MAX_SAFE_INTEGER,
+  };
+  if (!isPersonnelFromArchive(rosterRow)) return orderedTarget;
+  return {
+    ...orderedTarget,
+    [ROSTER_ARCHIVE_FLAG_KEY]: true,
+    [ROSTER_ARCHIVE_SOURCE_KEY]: ROSTER_ARCHIVE_SOURCE_VALUE,
+    [`${ROSTER_FIELD_PREFIX}${ROSTER_ARCHIVE_SOURCE_KEY}`]:
+      ROSTER_ARCHIVE_SOURCE_VALUE,
+  };
+};
+
+/** Особа зі штатки / ранкового «Загального списку», не лише з ЕЖООС. Архів — окремий таб. */
 export const isPersonnelInStaffRoster = (
   row: EjournalPreviewRow | null | undefined,
 ) => {
   if (!row) return false;
+  if (isPersonnelFromArchive(row)) return false;
   if (/^roster:/i.test(String(row.__dbRowId ?? ""))) return true;
   return Object.keys(row).some((key) => key.startsWith(ROSTER_FIELD_PREFIX));
 };
@@ -169,23 +197,27 @@ export const buildRosterOnlyPersonnelRow = (rosterRow: EjournalPreviewRow) => {
     ПІБ: name,
   });
   const rowKey = identityKey || normalizeRosterText(name);
+  const archive = isPersonnelFromArchive(rosterRow);
 
-  return {
-    __dbRowId: `roster:${rowKey}`,
-    __rowNumber: rosterRow.__rowNumber,
-    id: identityKey,
-    прізвище: name,
-    ПІБ: name,
-    звання: resolvePersonRankTitle(rosterRow),
-    Звання: resolvePersonRankTitle(rosterRow),
-    позивний: getRosterValue(rosterRow, ["позив"]),
-    Позивний: getRosterValue(rosterRow, ["позив"]),
-    індекс_посади: getRosterValue(rosterRow, ["індекс", "посади"]),
-    "Індекс посади": getRosterValue(rosterRow, ["індекс", "посади"]),
-    місце_дислокації: getRosterValue(rosterRow, ["перебування"]),
-    "Місце дислокації": getRosterValue(rosterRow, ["перебування"]),
-    ...getRosterAdditions(rosterRow),
-  } as EjournalPreviewRow;
+  return withArchiveMarker(
+    {
+      __dbRowId: archive ? `roster:archive:${rowKey}` : `roster:${rowKey}`,
+      __rowNumber: rosterRow.__rowNumber,
+      id: identityKey,
+      прізвище: name,
+      ПІБ: name,
+      звання: resolvePersonRankTitle(rosterRow),
+      Звання: resolvePersonRankTitle(rosterRow),
+      позивний: getRosterValue(rosterRow, ["позив"]),
+      Позивний: getRosterValue(rosterRow, ["позив"]),
+      індекс_посади: getRosterValue(rosterRow, ["індекс", "посади"]),
+      "Індекс посади": getRosterValue(rosterRow, ["індекс", "посади"]),
+      місце_дислокації: getRosterValue(rosterRow, ["перебування"]),
+      "Місце дислокації": getRosterValue(rosterRow, ["перебування"]),
+      ...getRosterAdditions(rosterRow),
+    } as EjournalPreviewRow,
+    rosterRow,
+  );
 };
 
 /** Як на сторінці Персонал: ООС + рядки лише з «Загального списку». */
@@ -260,7 +292,10 @@ export const mergeRosterRowsIntoPreview = (
       const rosterRow = pickRosterForPreviewRow(base);
       if (!rosterRow) return base;
       usedRosterRows.add(rosterRow);
-      return { ...base, ...getRosterAdditions(rosterRow) };
+      return withArchiveMarker(
+        { ...base, ...getRosterAdditions(rosterRow) },
+        rosterRow,
+      );
     } catch {
       return stripRosterEnrichment(row);
     }
@@ -306,6 +341,71 @@ export const mergeRosterRowsIntoPreview = (
     });
 
   return [...mergedRows, ...rosterOnlyRows];
+};
+
+export type PersonnelMergeRowPatch = {
+  index: number;
+  set: Record<string, unknown>;
+  remove: string[];
+};
+
+export type PersonnelMergeDelta = {
+  patches: PersonnelMergeRowPatch[];
+  appended: EjournalPreviewRow[];
+};
+
+/** Compact worker result: only changed fields and roster-only additions. */
+export const buildPersonnelMergeDelta = (
+  preview: Pick<DbPreviewState, "rows">,
+  rosterRows: EjournalPreviewRow[],
+): PersonnelMergeDelta => {
+  const merged = mergeRosterRowsIntoPreview(preview, rosterRows);
+  const patches: PersonnelMergeRowPatch[] = [];
+
+  for (let index = 0; index < preview.rows.length; index += 1) {
+    const before = preview.rows[index];
+    const after = merged[index];
+    if (!after) continue;
+    const set: Record<string, unknown> = {};
+    const remove: string[] = [];
+    for (const key of Object.keys(before)) {
+      if (!(key in after)) remove.push(key);
+    }
+    for (const [key, value] of Object.entries(after)) {
+      if (!(key in before) || !Object.is(before[key], value)) set[key] = value;
+    }
+    if (remove.length || Object.keys(set).length) {
+      patches.push({ index, set, remove });
+    }
+  }
+
+  return {
+    patches,
+    appended: merged.slice(preview.rows.length),
+  };
+};
+
+export const applyPersonnelMergeDelta = (
+  rows: EjournalPreviewRow[],
+  delta: PersonnelMergeDelta | EjournalPreviewRow[],
+): EjournalPreviewRow[] => {
+  // A tab opened during a deployment can still receive the previous worker
+  // response shape (the complete merged array). Accept it until that worker is
+  // naturally replaced instead of breaking the page.
+  if (Array.isArray(delta)) return delta;
+  if (!delta || !Array.isArray(delta.patches) || !Array.isArray(delta.appended)) {
+    return rows;
+  }
+  if (!delta.patches.length && !delta.appended.length) return rows;
+  const patchByIndex = new Map(delta.patches.map((patch) => [patch.index, patch]));
+  const merged = rows.map((row, index) => {
+    const patch = patchByIndex.get(index);
+    if (!patch) return row;
+    const next = { ...row, ...patch.set };
+    for (const key of patch.remove) delete next[key];
+    return next;
+  });
+  return [...merged, ...delta.appended];
 };
 
 /** Доповнює рядки Штатки з БД кешем/Google-імпортом (без дублікатів за ПІБ / рядком). */

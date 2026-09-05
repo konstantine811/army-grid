@@ -440,15 +440,6 @@ const valuesFromLatestRow = (values: unknown): Record<string, unknown> =>
     ? { ...(values as Record<string, unknown>) }
     : {};
 
-const persistAnketaCreatedRows = async (toCreate: AnketaRow[]) => {
-  const newRows = toCreate.map(buildPersonnelRowFromAnketa);
-  const existing = await loadAnketaCreatedPersonnel();
-  await saveAnketaCreatedPersonnel(
-    mergeAnketaCreatedRowsIntoPreview(existing, newRows),
-  );
-  await storeAnketaPhonesForCreated(toCreate);
-};
-
 const tryImportAnketaPeopleIntoRoster = async (toCreate: AnketaRow[]) => {
   const latest = await api.getLatestPersonnelRoster().catch(() => null);
   const parsedColumns = parseDbColumns(latest?.sheet?.columns);
@@ -488,7 +479,7 @@ const tryImportAnketaPeopleIntoRoster = async (toCreate: AnketaRow[]) => {
   if (fresh) await writeDataCache(CacheKeys.rosterLatest, fresh);
 };
 
-/** Записати відсутніх з анкет у список (локально завжди, у Штатку — якщо вийде). */
+/** Записати відсутніх з анкет у серверну Штатку — єдине спільне джерело. */
 export const appendAnketaPeopleToPersonnelRoster = async (
   unmatched: AnketaRow[],
   alreadyVisible: EjournalPreviewRow[] = [],
@@ -503,8 +494,8 @@ export const appendAnketaPeopleToPersonnelRoster = async (
   const skipped = unmatched.length - toCreate.length;
   if (!toCreate.length) return { created: 0, skipped };
 
-  await persistAnketaCreatedRows(toCreate);
-  void tryImportAnketaPeopleIntoRoster(toCreate).catch(() => undefined);
+  await tryImportAnketaPeopleIntoRoster(toCreate);
+  await storeAnketaPhonesForCreated(toCreate);
 
   return { created: toCreate.length, skipped };
 };

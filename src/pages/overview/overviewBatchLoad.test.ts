@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
-import type { BackendPersonnelOverview } from "../../api";
+import { describe, expect, it, vi } from "vitest";
+import { api, type BackendPersonnelOverview } from "../../api";
 import {
+  loadPersonnelOverviewInBatches,
   mergeOverviewPages,
   overviewHasMorePages,
 } from "./overviewBatchLoad";
@@ -76,5 +77,23 @@ describe("overviewHasMorePages", () => {
   it("asks for the next pack while the list is still short", () => {
     const first = page(["a", "b"], 5);
     expect(overviewHasMorePages(first, first.rows.length, 2)).toBe(true);
+  });
+});
+
+describe("loadPersonnelOverviewInBatches", () => {
+  it("bypasses the server cache only for an explicit refresh", async () => {
+    const getOverview = vi
+      .spyOn(api, "getPersonnelOverview")
+      .mockResolvedValue(page(["a"], 1));
+
+    await loadPersonnelOverviewInBatches({ force: true });
+
+    expect(getOverview).toHaveBeenCalledWith({
+      limit: 200,
+      offset: 0,
+      force: true,
+      signal: undefined,
+    });
+    getOverview.mockRestore();
   });
 });

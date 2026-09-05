@@ -13,12 +13,17 @@ import {
   DialogContent,
   DialogTitle,
   LinearProgress,
+  Stack,
   Typography,
 } from "@/components/sci/SciPrimitives";
 import { CloudUploadOutlinedIcon } from "@/components/sci/icons";
 import * as pdfjs from "pdfjs-dist";
 import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { FloatingWindow } from "./FloatingWindow";
+import {
+  fitPhotoDimensions,
+  PHOTO_JPEG_QUALITY,
+} from "./photoCompression";
 
 pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
@@ -49,46 +54,96 @@ export const defaultCropRect: CropRect = {
 type PreviewPage = {
   id: string;
   src: string;
+  pageNumber?: number;
 };
 
-export const renderPdfFileToImageDataUrls = async (
-  file: File,
-  options: { scale?: number } = {},
+const renderPdfPage = async (
+  pdf: Awaited<ReturnType<typeof pdfjs.getDocument>["promise"]>,
+  pageNumber: number,
+  scale: number,
 ) => {
-  const data = new Uint8Array(await file.arrayBuffer());
-  const pdf = await pdfjs.getDocument({ data }).promise;
-  const pages: PreviewPage[] = [];
-  const scale = options.scale ?? 1.7;
+  const page = await pdf.getPage(pageNumber);
+  const viewport = page.getViewport({ scale });
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.floor(viewport.width));
+  canvas.height = Math.max(1, Math.floor(viewport.height));
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("Не вдалося створити canvas для PDF.");
 
-  for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
-    const page = await pdf.getPage(pageNumber);
-    const viewport = page.getViewport({ scale });
-    const canvas = document.createElement("canvas");
-    canvas.width = Math.max(1, Math.floor(viewport.width));
-    canvas.height = Math.max(1, Math.floor(viewport.height));
-    const context = canvas.getContext("2d");
-    if (!context) continue;
-
+  try {
     context.fillStyle = "#ffffff";
     context.fillRect(0, 0, canvas.width, canvas.height);
-
     await page.render({
       canvasContext: context,
       background: "#ffffff",
       viewport,
     }).promise;
-
-    const dataUrl = canvas.toDataURL("image/jpeg", 0.9);
-    if (dataUrl && dataUrl !== "data:,") {
-      pages.push({ id: `page-${pageNumber}`, src: dataUrl });
+    const src = canvas.toDataURL("image/jpeg", 0.86);
+    if (!src || src === "data:,") {
+      throw new Error("Не вдалося відрендерити сторінку PDF.");
     }
+    return {
+      id: `page-${pageNumber}`,
+      pageNumber,
+      src,
+    } satisfies PreviewPage;
+  } finally {
+    page.cleanup();
+    canvas.width = 1;
+    canvas.height = 1;
   }
+};
 
-  if (!pages.length) {
-    throw new Error("Не вдалося відрендерити PDF для вирізання фото.");
+export const renderPdfPageToImageDataUrl = async (
+  file: File,
+  pageNumber: number,
+  options: { scale?: number } = {},
+) => {
+  const data = new Uint8Array(await file.arrayBuffer());
+  const loadingTask = pdfjs.getDocument({ data });
+  const pdf = await loadingTask.promise;
+  const scale = options.scale ?? 1.7;
+
+  try {
+    const safePageNumber = Math.min(
+      pdf.numPages,
+      Math.max(1, Math.floor(pageNumber)),
+    );
+    return {
+      page: await renderPdfPage(pdf, safePageNumber, scale),
+      pageCount: pdf.numPages,
+    };
+  } finally {
+    pdf.cleanup();
+    await pdf.destroy();
   }
+};
 
-  return pages;
+export const visitPdfPagesAsImageDataUrls = async (
+  file: File,
+  visitor: (
+    page: PreviewPage & { pageNumber: number },
+    pageCount: number,
+  ) => void | Promise<void>,
+  options: { scale?: number } = {},
+) => {
+  const data = new Uint8Array(await file.arrayBuffer());
+  const loadingTask = pdfjs.getDocument({ data });
+  const pdf = await loadingTask.promise;
+  const scale = options.scale ?? 1.7;
+
+  try {
+    for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+      const page = await renderPdfPage(pdf, pageNumber, scale);
+      await visitor(
+        { ...page, pageNumber },
+        pdf.numPages,
+      );
+    }
+  } finally {
+    pdf.cleanup();
+    await pdf.destroy();
+  }
 };
 
 export type PhotoCropStageHandle = {
@@ -112,6 +167,8 @@ export const PhotoCropStage = forwardRef<
   const previewRef = useRef<HTMLDivElement | null>(null);
   const imageRefs = useRef<Array<HTMLImageElement | null>>([]);
   const [previewPages, setPreviewPages] = useState<PreviewPage[]>([]);
+  const [activePdfPage, setActivePdfPage] = useState(1);
+  const [pdfPageCount, setPdfPageCount] = useState(1);
   const [isPreparingPreview, setIsPreparingPreview] = useState(false);
   const [cropRect, setCropRect] = useState<CropRect>(defaultCropRect);
   const [isDrawing, setIsDrawing] = useState(false);
@@ -124,6 +181,11 @@ export const PhotoCropStage = forwardRef<
   }, [onReadyChange, ready]);
 
   useEffect(() => {
+    setActivePdfPage(1);
+    setPdfPageCount(1);
+  }, [file]);
+
+  useEffect(() => {
     if (!file || !active) {
       setPreviewPages([]);
       setIsPreparingPreview(false);
@@ -132,6 +194,7 @@ export const PhotoCropStage = forwardRef<
 
     let cancelled = false;
     setIsPreparingPreview(true);
+    setPreviewPages([]);
     setCropRect(defaultCropRect);
     imageRefs.current = [];
 
@@ -149,8 +212,14 @@ export const PhotoCropStage = forwardRef<
         }
 
         if (file.type === "application/pdf") {
-          const rendered = await renderPdfFileToImageDataUrls(file);
-          if (!cancelled) setPreviewPages(rendered);
+          const rendered = await renderPdfPageToImageDataUrl(
+            file,
+            activePdfPage,
+          );
+          if (!cancelled) {
+            setPdfPageCount(rendered.pageCount);
+            setPreviewPages([rendered.page]);
+          }
           return;
         }
 
@@ -174,7 +243,7 @@ export const PhotoCropStage = forwardRef<
     return () => {
       cancelled = true;
     };
-  }, [file, onMessage, active]);
+  }, [file, onMessage, active, activePdfPage]);
 
   const getPointerPosition = (event: PointerEvent<HTMLDivElement>) => {
     const innerRect = event.currentTarget.getBoundingClientRect();
@@ -281,8 +350,9 @@ export const PhotoCropStage = forwardRef<
     );
 
     const canvas = document.createElement("canvas");
-    canvas.width = Math.max(1, Math.round(sourceWidth));
-    canvas.height = Math.max(1, Math.round(sourceHeight));
+    const target = fitPhotoDimensions(sourceWidth, sourceHeight);
+    canvas.width = target.width;
+    canvas.height = target.height;
     const context = canvas.getContext("2d");
     if (!context) return;
 
@@ -297,7 +367,7 @@ export const PhotoCropStage = forwardRef<
       canvas.width,
       canvas.height,
     );
-    onSave(canvas.toDataURL("image/jpeg", 0.92), stageCrop);
+    onSave(canvas.toDataURL("image/jpeg", PHOTO_JPEG_QUALITY), stageCrop);
   };
 
   useImperativeHandle(ref, () => ({ save: saveCrop }), [
@@ -314,6 +384,31 @@ export const PhotoCropStage = forwardRef<
           : "Можна одразу натиснути «Зберегти фото» або протягнути прямокутник для обрізки."}
       </Typography>
       {isPreparingPreview && <LinearProgress color="primary" sx={{ mb: 1 }} />}
+      {isPdf && pdfPageCount > 1 && (
+        <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }}>
+          <Button
+            disabled={activePdfPage <= 1 || isPreparingPreview}
+            onClick={() => setActivePdfPage((page) => Math.max(1, page - 1))}
+            size="small"
+            variant="outlined"
+          >
+            ←
+          </Button>
+          <Typography variant="caption" color="text.secondary">
+            Сторінка {activePdfPage} з {pdfPageCount}
+          </Typography>
+          <Button
+            disabled={activePdfPage >= pdfPageCount || isPreparingPreview}
+            onClick={() =>
+              setActivePdfPage((page) => Math.min(pdfPageCount, page + 1))
+            }
+            size="small"
+            variant="outlined"
+          >
+            →
+          </Button>
+        </Stack>
+      )}
       <div className="photo-crop-stage" ref={previewRef}>
         <div
           className="photo-crop-stage-inner"
@@ -328,7 +423,7 @@ export const PhotoCropStage = forwardRef<
                 <img
                   alt={
                     isPdf
-                      ? `Сторінка PDF ${index + 1} для кадрування`
+                      ? `Сторінка PDF ${page.pageNumber ?? activePdfPage} для кадрування`
                       : "Фото для кадрування"
                   }
                   key={page.id}

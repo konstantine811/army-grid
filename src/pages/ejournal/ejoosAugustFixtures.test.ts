@@ -554,6 +554,104 @@ describe("August fixtures: cancelled transfer still in sh", () => {
   }, 30_000);
 });
 
+describe("contract movements update ООС", () => {
+  it("writes service type and contract dates without changing other sheets", async () => {
+    const XlsxPopulate = await loadPopulate();
+    const pbWorkbook = await XlsxPopulate.fromBlankAsync();
+    pbWorkbook.sheet(0).name("sh").cell(1, 1).value("ID");
+    pbWorkbook.addSheet("archive").cell(1, 1).value("№");
+    const ruh = pbWorkbook.addSheet("РУХ");
+    [
+      "дата створення запису",
+      "№",
+      "СТАТУС",
+      "ID",
+      "ТИП",
+      "звання",
+      "ПІБ",
+      "яка зміна",
+      "наказ",
+      "дата",
+      "команда на рух",
+      "звідки",
+      "куди",
+      "підстава 1",
+      "№",
+      "дата",
+      "№",
+      "дата",
+      "примітка",
+      "індекси посад (попер)",
+      "індекси посад (яка зміна)",
+    ].forEach((header, index) => ruh.cell(1, index + 1).value(header));
+    ruh.cell(2, 1).value("21.08.2026");
+    ruh.cell(2, 2).value("90457");
+    ruh.cell(2, 3).value("В СТРОЮ");
+    ruh.cell(2, 4).value("247");
+    ruh.cell(2, 5).value("МОТИВАЦ КОНТР");
+    ruh.cell(2, 6).value("сержант");
+    ruh.cell(2, 7).value("ВИНОГРАДСЬКИЙ Володимир Андрійович");
+    ruh
+      .cell(2, 8)
+      .value("на 10 (десять) місяців з 09.07.2026 до 09.05.2027");
+    ruh.cell(2, 9).value("242");
+    ruh.cell(2, 10).value("21.08.2026");
+    ruh.cell(2, 12).value("_5 1ПБ");
+    ruh.cell(2, 13).value("_5 1ПБ");
+    ruh.cell(2, 15).value("1089");
+    ruh.cell(2, 16).value("09.07.2026");
+    ruh.cell(2, 20).value("2103439");
+    ruh.cell(2, 21).value("2103439");
+    const pb = await snapshotOf(
+      (await pbWorkbook.outputAsync("blob")) as Blob,
+      "1ПБ_25082026.xlsx",
+    );
+
+    const ejoosWorkbook = await XlsxPopulate.fromBlankAsync();
+    ejoosWorkbook.sheet(0).name("1. ШПО").cell(1, 1).value("1. ШПО");
+    const oos = ejoosWorkbook.addSheet("2. ООС");
+    oos.cell(1, 1).value("2. ООС");
+    oos.cell(6, 1).value("молодший сержант");
+    oos.cell(6, 2).value("ВИНОГРАДСЬКИЙ Володимир Андрійович");
+    oos.cell(6, 3).value("247");
+    oos.cell(6, 4).value("2103439");
+    oos.cell(6, 19).value("мобілізац");
+    ejoosWorkbook.addSheet("3. Виключені");
+    ejoosWorkbook.addSheet("4. Тимчасово прибулі");
+    ejoosWorkbook.addSheet("5. Тимчасово відсутні");
+    ejoosWorkbook
+      .addSheet("6. Табель")
+      .cell(2, 9)
+      .value("Серпень 2026 р.");
+    const ejoos = await snapshotOf(
+      (await ejoosWorkbook.outputAsync("blob")) as Blob,
+      "ЄЖООС_станом_на_25-08-2026.xlsx",
+    );
+
+    const plan = buildEjoosSyncPlan(ejoos, pb, {
+      statusRules: DEFAULT_STATUS_RULES,
+    });
+    const contract = plan.ops.find(
+      (op) => op.kind === "contract_update" && op.personId === "247",
+    );
+    expect(contract?.payload.serviceType).toBe("контракт");
+    expect(contract?.payload.contractFrom).toBe("09.07.2026");
+    expect(contract?.payload.contractTo).toBe("09.05.2027");
+
+    const { blob } = await applyConfirmedEjoosOps({
+      ejoos,
+      plan,
+      ops: contract ? [contract] : [],
+    });
+    const after = await snapshotOf(blob, "після.xlsx");
+    const row = after.sheets.find((sheet) => sheet.sheetName === "2. ООС")
+      ?.rawRows[5];
+    expect(String(row?.[18] ?? "")).toBe("контракт");
+    expect(String(row?.[19] ?? "")).toBe("09.07.2026");
+    expect(String(row?.[20] ?? "")).toBe("09.05.2027");
+  }, 30_000);
+});
+
 describe("August fixtures: active staff row after processed position", () => {
   it("repairs an active row that still contains old departure text", async () => {
     const person = {

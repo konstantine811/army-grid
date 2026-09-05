@@ -152,6 +152,7 @@ export function OverviewVirtualTable({
   rows,
   photos,
   questionnaireByExternalId,
+  questionnaireLoading = false,
   documentsByExternalId,
   onOpenQuestionnaire,
   onNeedPhoto,
@@ -162,6 +163,7 @@ export function OverviewVirtualTable({
   rows: BackendPersonnelOverviewRow[];
   photos: Record<string, string>;
   questionnaireByExternalId?: Record<string, true>;
+  questionnaireLoading?: boolean;
   documentsByExternalId?: Record<string, OverviewPersonDocumentSummary>;
   onOpenQuestionnaire?: (target: OverviewQuestionnaireTarget) => void;
   onNeedPhoto?: (row: BackendPersonnelOverviewRow) => void;
@@ -280,13 +282,19 @@ export function OverviewVirtualTable({
           questionnaireByExternalId?.[row.externalId] ||
           questionnaireByExternalId?.[overviewPersonMatchKey(row.name)]
             ? "Є"
-            : "Немає",
+            : questionnaireLoading
+              ? "Завантаження…"
+              : "Немає",
         Cell: ({ row }) => {
           const hasQuestionnaire = Boolean(
             questionnaireByExternalId?.[row.original.externalId] ||
               questionnaireByExternalId?.[overviewPersonMatchKey(row.original.name)],
           );
-          const label = hasQuestionnaire ? "Є" : "Немає";
+          const label = hasQuestionnaire
+            ? "Є"
+            : questionnaireLoading
+              ? "Завантаження…"
+              : "Немає";
           return (
             <button
               type="button"
@@ -294,9 +302,14 @@ export function OverviewVirtualTable({
               aria-label={
                 hasQuestionnaire
                   ? `Відкрити анкету: ${row.original.name}`
-                  : `Анкети немає — перейти до картки: ${row.original.name}`
+                  : questionnaireLoading
+                    ? `Перевіряю анкету: ${row.original.name}`
+                    : `Анкети немає — перейти до картки: ${row.original.name}`
               }
-              disabled={!row.original.externalId}
+              disabled={
+                !row.original.externalId ||
+                (!hasQuestionnaire && questionnaireLoading)
+              }
               onClick={() => openQuestionnaire(row.original)}
             >
               <Chip
@@ -410,6 +423,7 @@ export function OverviewVirtualTable({
       onNeedPhoto,
       onOpenQuestionnaire,
       questionnaireByExternalId,
+      questionnaireLoading,
       rowNumberById,
     ],
   );

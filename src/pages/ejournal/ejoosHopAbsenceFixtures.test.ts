@@ -284,13 +284,23 @@ const buildCaseWorkbooks = async (person: HopCase) => {
     person.hop && person.hopProcessed
       ? [
           createMovementKey({
+            excelRow: 0,
+            movementNumber: "",
             personId: person.id,
             fullName: person.name,
+            rank: person.rank,
             type: "ПОСАДА",
             orderDate: person.hop.date,
             orderNumber: person.hop.order,
             previousIndex: person.hop.previousIndex,
             nextIndex: person.hop.nextIndex,
+            destination: "",
+            basisNumber: "",
+            basisDate: "",
+            changeText: "",
+            status: "",
+            note: "",
+            arrivedFrom: "",
           }),
         ]
       : [];

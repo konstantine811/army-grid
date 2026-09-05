@@ -13,6 +13,9 @@ import {
 } from './auth/authTypes'
 import { showAppToast, showBackendBlockedToast } from './shared/appToast'
 import { dataUrlToUint8Array } from './shared/browserExport'
+import { createPhotoThumbnailDataUrl } from './pages/personnel/photoCompression'
+import { apiRequestPool, type ApiRequestPriority } from './apiRequestPool'
+import { measuredFetch } from './performance/performanceMonitor'
 
 const resolveApiBaseUrl = () => {
   const fromEnv = import.meta.env.VITE_API_BASE_URL
@@ -121,6 +124,22 @@ export type BackendEjournalPbState = {
   items: BackendEjournalPbSource[]
 }
 
+export type BackendEjournalManualOperation = {
+  id: string
+  unitLabel: string
+  status: 'draft' | 'applied' | 'cancelled'
+  decision: 'pending' | 'accepted'
+  input: JsonRecord
+  baseVersionId: string
+  appliedVersionId?: string | null
+  appliedAt?: string | null
+  createdByUserId?: string | null
+  createdByEmail?: string | null
+  createdByDisplayName?: string | null
+  createdAt: string
+  updatedAt: string
+}
+
 export type BackendEjournalSheetRows = {
   total: number
   limit: number
@@ -136,6 +155,13 @@ export type BackendPersonnelRosterLatest = {
   createdAt: string
   sheet: BackendEjournalImportSheet | null
   rows: BackendEjournalImportRow[]
+}
+
+export type BackendPersonnelRosterVersion = {
+  importId: string
+  createdAt: string
+  sheetUpdatedAt: string | null
+  rowCount: number
 }
 
 export type EjournalRowActionType =
@@ -155,9 +181,35 @@ export type BackendPersonPhoto = {
   fileName?: string | null
   mimeType?: string | null
   photoData: string
+  hasFile?: boolean
+  hasThumbnail?: boolean
   crop?: JsonRecord | null
   createdAt: string
   updatedAt: string
+}
+
+const photoBlobToDataUrl = (blob: Blob) =>
+  new Promise<string>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result || ''))
+    reader.onerror = () => reject(reader.error)
+    reader.readAsDataURL(blob)
+  })
+
+const fetchPersonPhotoData = async (
+  personExternalId: string,
+  thumbnail = false,
+) => {
+  const query = thumbnail ? '?thumbnail=1' : ''
+  return apiRequestPool.run(async () => {
+    const response = await measuredFetch(
+      `${apiBaseUrl()}/ejournals/personnel/photos/${encodeURIComponent(personExternalId)}/file${query}`,
+      { headers: authHeaders() },
+    )
+    if (response.status === 404) return ''
+    if (!response.ok) throw new Error(await parseApiError(response))
+    return photoBlobToDataUrl(await response.blob())
+  })
 }
 
 export type BackendPersonQuestionnaire = {
@@ -178,6 +230,7 @@ export type BackendPersonQuestionnaireMeta = {
 export type BackendPersonDocument = {
   id: string
   personExternalId: string
+  personName?: string | null
   type: string
   title: string
   status?: string | null
@@ -271,6 +324,7 @@ export type BackendPersonnelProfile = {
   ejournal: {
     importId: string | null
     oosRow: JsonRecord | null
+    historicalOosRow?: JsonRecord | null
     absentRows: JsonRecord[]
   }
   roster: {
@@ -413,6 +467,11 @@ export type BackendPersonnelOverview = {
     other: number
   }
   todayUpdates: number
+  cache?: {
+    generatedAt: string
+    expiresAt: string
+    hit: boolean
+  }
 }
 
 const authHeaders = (): HeadersInit => {
@@ -439,105 +498,131 @@ const parseApiError = async (response: Response) => {
   return text || `API request failed: ${response.status}`
 }
 
-type ApiRequestInit = RequestInit & { suppressErrorToast?: boolean }
+type ApiRequestInit = RequestInit & {
+  suppressErrorToast?: boolean
+  poolPriority?: ApiRequestPriority
+}
+
+const requestPriority = (method?: string): ApiRequestPriority =>
+  ['POST', 'PUT', 'PATCH', 'DELETE'].includes((method || 'GET').toUpperCase())
+    ? 'high'
+    : 'normal'
 
 async function request<T>(path: string, options: ApiRequestInit = {}): Promise<T> {
-  const { suppressErrorToast, ...fetchOptions } = options
-  const response = await fetch(`${apiBaseUrl()}${path}`, {
-    ...fetchOptions,
-    headers: {
-      'Content-Type': 'application/json',
-      ...authHeaders(),
-      ...fetchOptions.headers,
-    },
-  })
-
-  if (!response.ok) {
-    const message = await parseApiError(response)
-    const method = (fetchOptions.method || 'GET').toUpperCase()
-    const isWrite = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)
-    if (response.status === 403) {
-      showBackendBlockedToast(message)
-    } else if (
-      isWrite &&
-      response.status >= 400 &&
-      response.status !== 401 &&
-      !suppressErrorToast
-    ) {
-      showAppToast({
-        title: 'Помилка запису',
-        description: message,
-        variant: response.status >= 500 ? 'CRITICAL' : 'WARNING',
+  const { suppressErrorToast, poolPriority, ...fetchOptions } = options
+  return apiRequestPool.run(
+    async () => {
+      const response = await measuredFetch(`${apiBaseUrl()}${path}`, {
+        ...fetchOptions,
+        headers: {
+          'Content-Type': 'application/json',
+          ...authHeaders(),
+          ...fetchOptions.headers,
+        },
       })
-    }
-    throw new Error(message)
-  }
 
-  if (response.status === 204) return undefined as T
-  return response.json() as Promise<T>
+      if (!response.ok) {
+        const message = await parseApiError(response)
+        const method = (fetchOptions.method || 'GET').toUpperCase()
+        const isWrite = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)
+        if (response.status === 403) {
+          showBackendBlockedToast(message)
+        } else if (
+          isWrite &&
+          response.status >= 400 &&
+          response.status !== 401 &&
+          !suppressErrorToast
+        ) {
+          showAppToast({
+            title: 'Помилка запису',
+            description: message,
+            variant: response.status >= 500 ? 'CRITICAL' : 'WARNING',
+          })
+        }
+        throw new Error(message)
+      }
+
+      if (response.status === 204) return undefined as T
+      return response.json() as Promise<T>
+    },
+    {
+      priority: poolPriority ?? requestPriority(fetchOptions.method),
+      signal: fetchOptions.signal ?? undefined,
+    },
+  )
 }
 
 /** GET that returns null on 404 instead of throwing (no error toast). */
 async function requestGetOptional<T>(path: string): Promise<T | null> {
-  const response = await fetch(`${apiBaseUrl()}${path}`, {
-    headers: {
-      'Content-Type': 'application/json',
-      ...authHeaders(),
-    },
-  })
+  return apiRequestPool.run(async () => {
+    const response = await measuredFetch(`${apiBaseUrl()}${path}`, {
+      headers: {
+        'Content-Type': 'application/json',
+        ...authHeaders(),
+      },
+    })
 
-  if (response.status === 404) return null
-  if (!response.ok) {
-    const message = await parseApiError(response)
-    throw new Error(message)
-  }
-  if (response.status === 204) return null
-  return response.json() as Promise<T>
+    if (response.status === 404) return null
+    if (!response.ok) {
+      const message = await parseApiError(response)
+      throw new Error(message)
+    }
+    if (response.status === 204) return null
+    return response.json() as Promise<T>
+  })
 }
 
 async function requestBinary<T>(path: string, body: Blob, options: RequestInit = {}): Promise<T> {
-  const response = await fetch(`${apiBaseUrl()}${path}`, {
-    ...options,
-    body,
-    headers: {
-      ...authHeaders(),
-      ...options.headers,
-    },
-  })
-
-  if (!response.ok) {
-    const text = await response.text()
-    if (response.status === 401) {
-      clearAuthToken()
-      emitAuthLogout()
-    }
-    let message = text || `API request failed: ${response.status}`
-    if (response.status === 413) {
-      message =
-        'PDF завеликий для API. Спробуйте стиснути файл або збільшити QUESTIONNAIRE_BODY_LIMIT на backend.'
-    } else {
-      try {
-        const json = JSON.parse(text) as { message?: string | string[] }
-        if (Array.isArray(json.message)) message = json.message.join(', ')
-        else if (typeof json.message === 'string' && json.message.trim())
-          message = json.message
-      } catch {
-        /* plain text */
-      }
-    }
-    if (response.status === 403) {
-      showBackendBlockedToast(message)
-    } else if (response.status !== 401) {
-      showAppToast({
-        title: 'Помилка запису',
-        description: message,
-        variant: response.status >= 500 ? 'CRITICAL' : 'WARNING',
+  return apiRequestPool.run(
+    async () => {
+      const response = await measuredFetch(`${apiBaseUrl()}${path}`, {
+        ...options,
+        body,
+        headers: {
+          ...authHeaders(),
+          ...options.headers,
+        },
       })
-    }
-    throw new Error(message)
-  }
 
-  return response.json() as Promise<T>
+      if (!response.ok) {
+        const text = await response.text()
+        if (response.status === 401) {
+          clearAuthToken()
+          emitAuthLogout()
+        }
+        let message = text || `API request failed: ${response.status}`
+        if (response.status === 413) {
+          message =
+            'PDF завеликий для API. Спробуйте стиснути файл або збільшити QUESTIONNAIRE_BODY_LIMIT на backend.'
+        } else {
+          try {
+            const json = JSON.parse(text) as { message?: string | string[] }
+            if (Array.isArray(json.message)) message = json.message.join(', ')
+            else if (typeof json.message === 'string' && json.message.trim())
+              message = json.message
+          } catch {
+            /* plain text */
+          }
+        }
+        if (response.status === 403) {
+          showBackendBlockedToast(message)
+        } else if (response.status !== 401) {
+          showAppToast({
+            title: 'Помилка запису',
+            description: message,
+            variant: response.status >= 500 ? 'CRITICAL' : 'WARNING',
+          })
+        }
+        throw new Error(message)
+      }
+
+      return response.json() as Promise<T>
+    },
+    {
+      priority: 'high',
+      signal: options.signal ?? undefined,
+    },
+  )
 }
 
 export const api = {
@@ -605,17 +690,25 @@ export const api = {
     return request<BackendHealth>('/health')
   },
 
-  listEjournalImports() {
-    return request<BackendEjournalImport[]>('/ejournals/imports')
+  listEjournalImports(options: { signal?: AbortSignal } = {}) {
+    return request<BackendEjournalImport[]>('/ejournals/imports', {
+      signal: options.signal,
+    })
   },
 
-  listEjournalSheetRows(sheetId: string, options: { limit?: number; offset?: number } = {}) {
+  listEjournalSheetRows(
+    sheetId: string,
+    options: { limit?: number; offset?: number; signal?: AbortSignal } = {},
+  ) {
     const searchParams = new URLSearchParams({
       limit: String(options.limit ?? 500),
       offset: String(options.offset ?? 0),
     })
 
-    return request<BackendEjournalSheetRows>(`/ejournals/sheets/${sheetId}/rows?${searchParams.toString()}`)
+    return request<BackendEjournalSheetRows>(
+      `/ejournals/sheets/${sheetId}/rows?${searchParams.toString()}`,
+      { signal: options.signal },
+    )
   },
 
   listBchsImports() {
@@ -668,6 +761,7 @@ export const api = {
         'ejournal:sheet-rows:',
         CacheKeys.rosterLatest,
         CacheKeys.overview,
+        CacheKeys.personnelDataset,
       )
       return result
     })
@@ -684,35 +778,64 @@ export const api = {
     })
   },
 
-  getPersonPhoto(personExternalId: string) {
-    return request<BackendPersonPhoto | null>(`/ejournals/personnel/photos/${encodeURIComponent(personExternalId)}`)
+  async getPersonPhoto(personExternalId: string) {
+    const photo = await request<BackendPersonPhoto | null>(
+      `/ejournals/personnel/photos/${encodeURIComponent(personExternalId)}`,
+    )
+    if (!photo || photo.photoData || !photo.hasFile) return photo
+    return {
+      ...photo,
+      photoData: await fetchPersonPhotoData(personExternalId),
+    }
   },
 
-  getPersonnelOverview(options: { limit?: number; offset?: number } = {}) {
+  getPersonPhotoThumbnail(personExternalId: string) {
+    return fetchPersonPhotoData(personExternalId, true)
+  },
+
+  getPersonnelOverview(
+    options: {
+      limit?: number
+      offset?: number
+      force?: boolean
+      signal?: AbortSignal
+    } = {},
+  ) {
     const searchParams = new URLSearchParams()
     if (options.limit != null) searchParams.set('limit', String(options.limit))
     if (options.offset != null) searchParams.set('offset', String(options.offset))
+    if (options.force) searchParams.set('force', '1')
     const query = searchParams.toString()
     return request<BackendPersonnelOverview>(
       `/ejournals/personnel/overview${query ? `?${query}` : ''}`,
+      { signal: options.signal },
     )
   },
 
   listPersonPhotos() {
-    return request<Array<{ personExternalId: string; photoData: string }>>(
+    return request<Array<{
+      personExternalId: string
+      photoData: string
+      hasFile?: boolean
+      hasThumbnail?: boolean
+    }>>(
       '/ejournals/personnel/photos',
     )
   },
 
-  upsertPersonPhoto(personExternalId: string, payload: {
+  async upsertPersonPhoto(personExternalId: string, payload: {
     photoData: string
+    thumbnailData?: string
     fileName?: string
     mimeType?: string
     crop?: JsonRecord
   }) {
+    const thumbnailData =
+      payload.thumbnailData ||
+      (await createPhotoThumbnailDataUrl(payload.photoData).catch(() => undefined))
     return request<BackendPersonPhoto>(`/ejournals/personnel/photos/${encodeURIComponent(personExternalId)}`, {
       method: 'PATCH',
-      body: JSON.stringify(payload),
+      body: JSON.stringify({ ...payload, thumbnailData }),
     })
   },
 
@@ -771,14 +894,19 @@ export const api = {
     fileName?: string,
     download = false,
   ) {
-    const response = await fetch(
-      this.getPersonQuestionnaireFileUrl(personExternalId, fileName, download),
-      { headers: { ...authHeaders() } },
+    return apiRequestPool.run(
+      async () => {
+        const response = await measuredFetch(
+          this.getPersonQuestionnaireFileUrl(personExternalId, fileName, download),
+          { headers: { ...authHeaders() } },
+        )
+        if (!response.ok) {
+          throw new Error(await parseApiError(response))
+        }
+        return response.blob()
+      },
+      { priority: 'high' },
     )
-    if (!response.ok) {
-      throw new Error(await parseApiError(response))
-    }
-    return response.blob()
   },
 
   async getPersonQuestionnaireObjectUrl(
@@ -789,8 +917,11 @@ export const api = {
     return URL.createObjectURL(blob)
   },
 
-  listPersonQuestionnaires() {
-    return request<BackendPersonQuestionnaireMeta[]>('/ejournals/personnel/questionnaires')
+  listPersonQuestionnaires(options: { signal?: AbortSignal } = {}) {
+    return request<BackendPersonQuestionnaireMeta[]>(
+      '/ejournals/personnel/questionnaires',
+      { signal: options.signal },
+    )
   },
 
   searchQuestionnairesOnDisk(payload: {
@@ -808,38 +939,44 @@ export const api = {
       {
         method: 'POST',
         body: JSON.stringify(payload),
+        poolPriority: 'normal',
       },
     )
   },
 
   async getDiskQuestionnaireFile(relativePath: string) {
-    const response = await fetch(
-      `${apiBaseUrl()}/ejournals/personnel/questionnaire-disk/file`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...authHeaders(),
-        },
-        body: JSON.stringify({ relativePath }),
+    return apiRequestPool.run(
+      async () => {
+        const response = await measuredFetch(
+          `${apiBaseUrl()}/ejournals/personnel/questionnaire-disk/file`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              ...authHeaders(),
+            },
+            body: JSON.stringify({ relativePath }),
+          },
+        )
+        if (!response.ok) {
+          if (response.status === 401) {
+            clearAuthToken()
+            emitAuthLogout()
+          }
+          const text = await response.text()
+          let message = text || `API request failed: ${response.status}`
+          try {
+            const parsed = JSON.parse(text) as { message?: string }
+            if (parsed?.message) message = parsed.message
+          } catch {
+            // keep raw text
+          }
+          throw new Error(message)
+        }
+        return response.blob()
       },
+      { priority: 'high' },
     )
-    if (!response.ok) {
-      if (response.status === 401) {
-        clearAuthToken()
-        emitAuthLogout()
-      }
-      const text = await response.text()
-      let message = text || `API request failed: ${response.status}`
-      try {
-        const parsed = JSON.parse(text) as { message?: string }
-        if (parsed?.message) message = parsed.message
-      } catch {
-        // keep raw text
-      }
-      throw new Error(message)
-    }
-    return response.blob()
   },
 
   revealDiskQuestionnaireInFinder(relativePath: string) {
@@ -856,6 +993,10 @@ export const api = {
     personExternalId: string,
     relativePath: string,
     fileName?: string,
+    options?: {
+      suppressErrorToast?: boolean
+      poolPriority?: ApiRequestPriority
+    },
   ) {
     return request<BackendPersonQuestionnaire>(
       `/ejournals/personnel/questionnaire-disk/${encodeURIComponent(personExternalId)}/confirm`,
@@ -865,6 +1006,8 @@ export const api = {
           relativePath,
           ...(fileName ? { fileName } : {}),
         }),
+        suppressErrorToast: options?.suppressErrorToast,
+        poolPriority: options?.poolPriority,
       },
     )
   },
@@ -904,9 +1047,13 @@ export const api = {
     )
   },
 
-  listPersonDocuments(personExternalId: string) {
+  listPersonDocuments(
+    personExternalId: string,
+    options: { full?: boolean } = {},
+  ) {
+    const query = options.full ? '?full=1' : ''
     return request<BackendPersonDocument[]>(
-      `/ejournals/personnel/${encodeURIComponent(personExternalId)}/documents`,
+      `/ejournals/personnel/${encodeURIComponent(personExternalId)}/documents${query}`,
     )
   },
 
@@ -919,8 +1066,10 @@ export const api = {
     )
   },
 
-  listAllPersonDocuments() {
-    return request<BackendPersonDocument[]>('/ejournals/personnel/documents')
+  listAllPersonDocuments(options: { signal?: AbortSignal } = {}) {
+    return request<BackendPersonDocument[]>('/ejournals/personnel/documents', {
+      signal: options.signal,
+    })
   },
 
   createPersonDocument(
@@ -1074,13 +1223,24 @@ export const api = {
       await invalidateDataCache(
         CacheKeys.rosterLatest,
         CacheKeys.overview,
+        CacheKeys.personnelDataset,
       )
       return result
     })
   },
 
-  getLatestPersonnelRoster() {
-    return request<BackendPersonnelRosterLatest | null>('/ejournals/personnel/roster/latest')
+  getLatestPersonnelRoster(options: { signal?: AbortSignal } = {}) {
+    return request<BackendPersonnelRosterLatest | null>(
+      '/ejournals/personnel/roster/latest',
+      { signal: options.signal },
+    )
+  },
+
+  getLatestPersonnelRosterVersion(options: { signal?: AbortSignal } = {}) {
+    return request<BackendPersonnelRosterVersion | null>(
+      '/ejournals/personnel/roster/latest/version',
+      { signal: options.signal },
+    )
   },
 
   getEjournalLive(unitLabel = '1ПБ') {
@@ -1125,12 +1285,58 @@ export const api = {
     sourcePbFileName?: string
     sourcePbSha256?: string
     changeProtocol?: JsonRecord
+    appliedManualOperationIds?: string[]
     notes?: string
   }) {
     return request<BackendEjournalLiveVersion>('/ejournals/live/apply', {
       method: 'POST',
       body: JSON.stringify(payload),
     })
+  },
+
+  listEjournalManualOperations(unitLabel = '1ПБ') {
+    return request<BackendEjournalManualOperation[]>(
+      `/ejournals/manual-operations?unitLabel=${encodeURIComponent(unitLabel)}`,
+    )
+  },
+
+  createEjournalManualOperation(payload: {
+    unitLabel?: string
+    input: JsonRecord
+    baseVersionId: string
+    decision?: 'pending' | 'accepted'
+  }) {
+    return request<BackendEjournalManualOperation>(
+      '/ejournals/manual-operations',
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      },
+    )
+  },
+
+  updateEjournalManualOperation(
+    id: string,
+    payload: {
+      input?: JsonRecord
+      baseVersionId?: string
+      decision?: 'pending' | 'accepted'
+    },
+  ) {
+    return request<BackendEjournalManualOperation>(
+      `/ejournals/manual-operations/${encodeURIComponent(id)}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify(payload),
+      },
+    )
+  },
+
+  cancelEjournalManualOperation(id: string) {
+    return request<BackendEjournalManualOperation>(
+      `/ejournals/manual-operations/${encodeURIComponent(id)}/cancel`,
+      { method: 'POST' },
+    )
   },
 
   rollbackEjournalLive(payload: {

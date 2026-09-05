@@ -54,6 +54,11 @@ import {
   revokeQuestionnairePreviewUrl,
 } from "../personnel/personnelUtils";
 import { FloatingQuestionnairePreview } from "../personnel/FloatingQuestionnairePreview";
+import { compressPhotoFile } from "../personnel/photoCompression";
+import {
+  loadPersonDocumentsForRow,
+  loadPersonQuestionnaireForRow,
+} from "../personnel/personAttachments";
 import {
   PERSON_PHONES_DOCUMENT_TYPE,
   readStoredPersonPhones,
@@ -71,6 +76,7 @@ import {
   type PersonSignatureRecord,
 } from "../personnel/personSignatureStore";
 import { exportDocumentsJournalExcel } from "./documentsJournalExcel";
+import { personNameFromSyntheticDocumentId } from "./documentPersonIdentity";
 import {
   buildUbdNotSubmittedRowFromDocument,
   buildUbdRosterCallSignIndex,
@@ -942,7 +948,8 @@ const mergeUbdFields = (
     basis: formatUbdBasisText(basisNumber, basisDate),
     // Не виводимо з розбіжності дат для старих записів — лише збережений прапор.
     basisNotReady:
-      saved.basisNotReady === true || saved.basisNotReady === "true",
+      saved.basisNotReady === true ||
+      (saved.basisNotReady as unknown) === "true",
     // Always prefer fresh personnel/roster values when document field is empty.
     taskPeriod,
     taskPlace,
@@ -1070,15 +1077,10 @@ const readDocumentPersonStatus = (
   document: BackendPersonDocument,
   overviewById: Record<string, PersonStatusSnapshot>,
 ) => {
-  const fields = document.fields || {};
-  const fromFields =
-    typeof fields.personStatus === "string"
-      ? fields.personStatus
-      : typeof fields.serviceStatus === "string"
-        ? fields.serviceStatus
-        : "";
   const fromOverview = overviewById[document.personExternalId];
-  return compactText(fromOverview?.label || fromFields || "—");
+  // personStatus/serviceStatus у документі — snapshot на момент створення.
+  // Він не є поточним кадровим статусом і не може блокувати роботу як СЗЧ.
+  return compactText(fromOverview?.label || "—");
 };
 
 const CREATE_PERSON_DOCUMENT_TYPES = [
@@ -1511,6 +1513,9 @@ const readDocumentFieldText = (
 };
 
 const getDocumentPersonName = (document: BackendPersonDocument) => {
+  const metadataName = String(document.personName ?? "").trim();
+  if (metadataName) return metadataName;
+
   const fields = (document.fields || {}) as Record<string, unknown>;
   const fullName =
     readDocumentFieldText(fields, "fullName") ||
@@ -1528,6 +1533,11 @@ const getDocumentPersonName = (document: BackendPersonDocument) => {
     .filter(Boolean)
     .join(" ");
   if (assembled) return assembled;
+
+  const syntheticName = personNameFromSyntheticDocumentId(
+    document.personExternalId,
+  );
+  if (syntheticName) return syntheticName;
 
   return document.personExternalId
     ? `ID ${document.personExternalId}`
@@ -1572,9 +1582,6 @@ type JournalReadinessFilter =
   | "READY_TO_SEND"
   | "COMPLETE"
   | "SKIPPED_SZCH";
-
-const cloneSalaryWorkflow = (workflow: SalaryWorkflowState): SalaryWorkflowState =>
-  mergeSalaryWorkflow(JSON.parse(JSON.stringify(workflow)));
 
 const ubdProgressBackupEntryFromDocument = (
   document: BackendPersonDocument,
@@ -3282,9 +3289,33 @@ export function DocumentsPage(_props: {
             });
           }
         }
+        const relatedDocumentMetadata = selectedPerson
+          ? await loadPersonDocumentsForRow(selectedPerson, {
+              anketaFullName: summary.name,
+            })
+          : [];
+        const relatedDocumentIds = new Set([
+          personExternalId,
+          ...relatedDocumentMetadata.map(
+            (document) => document.personExternalId,
+          ),
+        ]);
+        const documentsPromise = Promise.all(
+          [...relatedDocumentIds].map((id) =>
+            api.listPersonDocuments(id, { full: true }).catch(() => []),
+          ),
+        ).then((groups) => {
+          const unique = new Map<string, BackendPersonDocument>();
+          for (const document of groups.flat()) unique.set(document.id, document);
+          return [...unique.values()].sort(
+            (left, right) =>
+              new Date(right.updatedAt).getTime() -
+              new Date(left.updatedAt).getTime(),
+          );
+        });
         const [documents, configuredRecords, personPhoto, questionnaires] =
           await Promise.all([
-            api.listPersonDocuments(personExternalId),
+            documentsPromise,
             targetDocumentType === "ubdRestoreReport"
               ? loadUbdRestoreSignatoryRecords()
               : targetDocumentType === "ubdReport"
@@ -3303,10 +3334,22 @@ export function DocumentsPage(_props: {
             api.getPersonPhoto(personExternalId).catch(() => null),
             api.listPersonQuestionnaires().catch(() => []),
           ]);
-        const questionnaire =
+        let questionnaire =
           questionnaires.find(
             (item) => item.personExternalId === personExternalId,
           ) ?? null;
+        if (!questionnaire && selectedPerson) {
+          const resolved = await loadPersonQuestionnaireForRow(
+            selectedPerson,
+            { anketaFullName: summary.name },
+          );
+          questionnaire = resolved.questionnaire
+            ? {
+                personExternalId: resolved.resolvedExternalId,
+                fileName: resolved.questionnaire.fileName,
+              }
+            : null;
+        }
         const configured = snapshotSignatories(configuredRecords);
         const ubdDefaults = createUbdFields(
           selectedPerson,
@@ -3375,7 +3418,9 @@ export function DocumentsPage(_props: {
         if (!active) {
           const autoCreateKey = `${personExternalId}:${targetDocumentType}`;
           if (autoCreateInFlight.has(autoCreateKey)) {
-            const latest = await api.listPersonDocuments(personExternalId);
+            const latest = await api.listPersonDocuments(personExternalId, {
+              full: true,
+            });
             if (cancelled) return;
             nextDocuments = latest;
             active =
@@ -3578,14 +3623,44 @@ export function DocumentsPage(_props: {
         overview: BackendPersonnelOverview | null,
         fromCache = false,
       ) => {
-        setAllPersonDocuments(documents);
-        setPersonStatusById(
-          Object.fromEntries(
-            (overview?.rows ?? [])
-              .filter((row) => row.externalId)
-              .map((row) => [row.externalId, overviewStatusSnapshot(row)]),
-          ),
+        const normalizeName = (value: string) =>
+          value.toLocaleLowerCase("uk-UA").replace(/\s+/g, " ").trim();
+        const overviewRows = overview?.rows ?? [];
+        const overviewNameById = new Map(
+          overviewRows
+            .filter((row) => row.externalId && row.name)
+            .map((row) => [row.externalId, row.name]),
         );
+        const hydratedDocuments = documents.map((document) => ({
+          ...document,
+          personName:
+            String(document.personName ?? "").trim() ||
+            overviewNameById.get(document.personExternalId) ||
+            null,
+        }));
+        const statusesById = Object.fromEntries(
+          overviewRows
+            .filter((row) => row.externalId)
+            .map((row) => [row.externalId, overviewStatusSnapshot(row)]),
+        );
+        const statusByUniqueName = new Map<string, PersonStatusSnapshot | null>();
+        for (const row of overviewRows) {
+          const key = normalizeName(row.name);
+          if (!key) continue;
+          statusByUniqueName.set(
+            key,
+            statusByUniqueName.has(key) ? null : overviewStatusSnapshot(row),
+          );
+        }
+        for (const document of hydratedDocuments) {
+          if (statusesById[document.personExternalId]) continue;
+          const status = statusByUniqueName.get(
+            normalizeName(getDocumentPersonName(document)),
+          );
+          if (status) statusesById[document.personExternalId] = status;
+        }
+        setAllPersonDocuments(hydratedDocuments);
+        setPersonStatusById(statusesById);
         setDocumentMessage(
           fromCache
             ? `Кеш журналу: ${documents.length} · оновлюю з БД…`
@@ -3610,6 +3685,7 @@ export function DocumentsPage(_props: {
         }),
         fetchWithCache({
           key: CacheKeys.overview,
+          force: true,
           fetcher: () => api.getPersonnelOverview(),
           isChanged: jsonChanged,
         }).catch(() => null),
@@ -3655,8 +3731,102 @@ export function DocumentsPage(_props: {
     setFields((current) => ({ ...current, [key]: value }));
   };
 
-  const openPersonDocument = async (document: BackendPersonDocument) => {
+  const openPersonDocument = async (documentSummary: BackendPersonDocument) => {
+    let document = documentSummary;
+    if (!Object.prototype.hasOwnProperty.call(documentSummary, "files")) {
+      setDocumentMessage("Завантажую повні дані документа…");
+      try {
+        const fullDocuments = await api.listPersonDocuments(
+          documentSummary.personExternalId,
+          { full: true },
+        );
+        const loaded = fullDocuments.find(
+          (item) => item.id === documentSummary.id,
+        );
+        if (!loaded) {
+          throw new Error("Документ не знайдено в БД");
+        }
+        document = {
+          ...documentSummary,
+          ...loaded,
+          personName: loaded.personName || documentSummary.personName,
+        };
+        setAllPersonDocuments((current) =>
+          current.map((item) => (item.id === document.id ? document : item)),
+        );
+        setPersonDocuments((current) =>
+          current.some((item) => item.id === document.id)
+            ? current.map((item) => (item.id === document.id ? document : item))
+            : [document, ...current],
+        );
+      } catch (error) {
+        setDocumentMessage(
+          error instanceof Error
+            ? `Не вдалося завантажити документ: ${error.message}`
+            : "Не вдалося завантажити повні дані документа.",
+        );
+        return;
+      }
+    }
+
     const nextPersonId = String(document.personExternalId || "").trim();
+    const documentPersonName = getDocumentPersonName(document);
+    const normalizePersonName = (value: string) =>
+      value.toLocaleLowerCase("uk-UA").replace(/\s+/g, " ").trim();
+    let personForDocument = selectedPerson;
+    if (
+      documentPersonName &&
+      !documentPersonName.startsWith("ID ") &&
+      normalizePersonName(getPersonDisplayName(selectedPerson)) !==
+        normalizePersonName(documentPersonName)
+    ) {
+      const profile = await api
+        .getPersonnelProfile(nextPersonId, documentPersonName)
+        .catch(() => null);
+      const rowValues = (value: unknown) => {
+        if (!value || typeof value !== "object" || Array.isArray(value)) {
+          return {};
+        }
+        const record = value as Record<string, unknown>;
+        const values = record.values;
+        return values && typeof values === "object" && !Array.isArray(values)
+          ? (values as Record<string, unknown>)
+          : {};
+      };
+      const historical = rowValues(profile?.ejournal?.historicalOosRow);
+      const current = rowValues(profile?.ejournal?.oosRow);
+      const roster = rowValues(profile?.roster?.row);
+      if (
+        Object.keys(historical).length ||
+        Object.keys(current).length ||
+        Object.keys(roster).length
+      ) {
+        personForDocument = {
+          ...historical,
+          ...current,
+          ...roster,
+          __dbRowId:
+            String(
+              (profile?.ejournal?.oosRow as Record<string, unknown> | null)
+                ?.id ?? "",
+            ) || undefined,
+          піб:
+            String(
+              roster.піб ??
+                current[
+                  "прізвище_за_наявності_імя_по_батькові_за_наявності"
+                ] ??
+                historical[
+                  "прізвище_за_наявності_імя_по_батькові_за_наявності"
+                ] ??
+                documentPersonName,
+            ).trim(),
+        };
+        setSelectedPerson(personForDocument);
+      }
+    }
+    const summaryForDocument = buildPersonSummary(personForDocument);
+
     if (isPersonDocumentMode) {
       const currentParams = new URLSearchParams(window.location.search);
       const nextRoute = buildDocumentRoute({
@@ -3693,13 +3863,15 @@ export function DocumentsPage(_props: {
         ? current
         : [document, ...current],
     );
-    void api
-      .getPersonQuestionnaire(document.personExternalId)
-      .then((item) => {
+    void loadPersonQuestionnaireForRow(personForDocument, {
+      anketaFullName: documentPersonName,
+    })
+      .then(({ questionnaire: item, resolvedExternalId }) => {
         setPersonQuestionnaire(
-          item?.personExternalId
+          item
             ? {
-                personExternalId: item.personExternalId,
+                personExternalId:
+                  item.personExternalId || resolvedExternalId,
                 fileName: item.fileName,
               }
             : null,
@@ -3715,8 +3887,8 @@ export function DocumentsPage(_props: {
         await api.listDocumentSignatories("ubdReport"),
       );
       const defaults = createUbdFields(
-        selectedPerson,
-        summary,
+        personForDocument,
+        summaryForDocument,
         configured.length ? configured : legacyUbdSignatories(),
       );
       const merged = mergeUbdFields(defaults, document.fields);
@@ -3726,8 +3898,8 @@ export function DocumentsPage(_props: {
       setMode("form6Report");
       const configured = snapshotSignatories(await loadForm6SignatoryRecords());
       const defaults = createForm6Fields(
-        selectedPerson,
-        summary,
+        personForDocument,
+        summaryForDocument,
         toForm6Signatories(
           configured.length ? configured : legacyUbdSignatories(),
         ),
@@ -3746,8 +3918,8 @@ export function DocumentsPage(_props: {
       setMode("form12Report");
       const configured = snapshotSignatories(await loadForm12SignatoryRecords());
       const defaults = createForm12Fields(
-        selectedPerson,
-        summary,
+        personForDocument,
+        summaryForDocument,
         toForm12Signatories(
           configured.length ? configured : legacyUbdSignatories(),
         ),
@@ -3772,8 +3944,8 @@ export function DocumentsPage(_props: {
         await loadServiceCharacteristicSignatoryRecords(),
       );
       const defaults = createServiceCharacteristicFields(
-        selectedPerson,
-        summary,
+        personForDocument,
+        summaryForDocument,
         toServiceCharacteristicSignatories(
           configured.length ? configured : legacyUbdSignatories(),
         ),
@@ -3789,8 +3961,8 @@ export function DocumentsPage(_props: {
         await loadZhbdCertificateSignatoryRecords(),
       );
       const defaults = createZhbdCertificateFields(
-        selectedPerson,
-        summary,
+        personForDocument,
+        summaryForDocument,
         toZhbdCertificateSignatories(
           configured.length ? configured : legacyUbdSignatories(),
         ),
@@ -3801,7 +3973,7 @@ export function DocumentsPage(_props: {
           ...merged,
           actualFullPosition:
             merged.actualFullPosition.trim() ||
-            getPersonFullPositionTitle(selectedPerson) ||
+            getPersonFullPositionTitle(personForDocument) ||
             readStoredSelectedPersonFullPosition(),
           signatories: defaults.signatories,
         };
@@ -3813,8 +3985,8 @@ export function DocumentsPage(_props: {
         await loadUbdRestoreSignatoryRecords(),
       );
       const defaults = createUbdRestoreFields(
-        selectedPerson,
-        summary,
+        personForDocument,
+        summaryForDocument,
         toUbdRestoreSignatories(
           configured.length ? configured : legacyUbdSignatories(),
         ),
@@ -3840,7 +4012,7 @@ export function DocumentsPage(_props: {
         ? await api.getPersonPhoto(ticketPersonId).catch(() => null)
         : null;
       const defaults = createTemporaryMilitaryIdFields(
-        summary,
+        summaryForDocument,
         personPhoto?.photoData || "",
       );
       const merged = mergeTemporaryMilitaryIdFields(defaults, document.fields);
@@ -3857,8 +4029,8 @@ export function DocumentsPage(_props: {
         await loadLostMilitaryIdSignatoryRecords(),
       );
       const defaults = createLostMilitaryIdFields(
-        selectedPerson,
-        summary,
+        personForDocument,
+        summaryForDocument,
         toLostMilitaryIdSignatories(
           configured.length ? configured : legacyUbdSignatories(),
         ),
@@ -3869,7 +4041,7 @@ export function DocumentsPage(_props: {
       });
       setDocumentFiles(mergeDocumentFiles(document.files));
     } else {
-      const defaults = createSalaryFields(selectedPerson, summary);
+      const defaults = createSalaryFields(personForDocument, summaryForDocument);
       setMode("salaryPowerAttorney");
       setSalaryFields(mergeSalaryFields(defaults, document.fields));
       setDocumentFiles({});
@@ -4764,6 +4936,7 @@ export function DocumentsPage(_props: {
           : null,
         row: selectedPerson,
         patch: { rnokpp: nextFields.rnokpp },
+        overwriteFields: true,
         existingPhones: readStoredPersonPhones()[documentSavePersonId] ?? [],
       })
         .then((enrichment) => {
@@ -4825,6 +4998,7 @@ export function DocumentsPage(_props: {
           : null,
         row: selectedPerson,
         patch: { rnokpp: nextFields.rnokpp },
+        overwriteFields: true,
         existingPhones: readStoredPersonPhones()[documentSavePersonId] ?? [],
       })
         .then((enrichment) => {
@@ -4890,6 +5064,7 @@ export function DocumentsPage(_props: {
           address: nextFields.address,
           phone: nextFields.phone,
         },
+        overwriteFields: true,
         existingPhones: readStoredPersonPhones()[documentSavePersonId] ?? [],
       }).catch(() => null);
 
@@ -5205,32 +5380,6 @@ export function DocumentsPage(_props: {
     });
   };
 
-  const updateUbdBasisPart = (
-    key: "basisNumber" | "basisDate",
-    value: string,
-  ) => {
-    setUbdFields((current) => {
-      const basisNumber =
-        key === "basisNumber" ? value : current.basisNumber;
-      const basisDate = key === "basisDate" ? value : current.basisDate;
-      const next = {
-        ...current,
-        basisNumber,
-        basisDate,
-        basis: formatUbdBasisText(basisNumber, basisDate),
-        basisNotReady: !ubdBasisDateMatchesTaskPeriod(
-          current.taskPeriod,
-          basisDate,
-          current.taskPlace,
-        ),
-      };
-      scheduleDocumentFieldSave(() => {
-        void saveUbdDocument(next);
-      });
-      return next;
-    });
-  };
-
   const updateUbdBasisOrder = (optionKey: string) => {
     const option = findUbdBasisOrderByKey(optionKey);
     if (!option) return;
@@ -5267,6 +5416,7 @@ export function DocumentsPage(_props: {
     key: Exclude<keyof Form6ReportFields, "signatories" | "basisManual">,
     value: string,
   ) => {
+    setDocumentMessage("Є незбережені зміни у Формі 6.");
     setForm6Fields((current) => {
       const next = {
         ...current,
@@ -5304,14 +5454,12 @@ export function DocumentsPage(_props: {
           if (extracted.basisDate) next.basisDate = extracted.basisDate;
         }
       }
-      scheduleDocumentFieldSave(() => {
-        void saveForm6Document(next);
-      });
       return next;
     });
   };
 
   const updateForm6BasisManual = (manual: boolean) => {
+    setDocumentMessage("Є незбережені зміни у Формі 6.");
     setForm6Fields((current) => {
       const next = { ...current, basisManual: manual };
       if (!manual) {
@@ -5325,9 +5473,6 @@ export function DocumentsPage(_props: {
           next.basis = formatForm6BasisText(resolved.number, resolved.date);
         }
       }
-      scheduleDocumentFieldSave(() => {
-        void saveForm6Document(next);
-      });
       return next;
     });
   };
@@ -5335,6 +5480,7 @@ export function DocumentsPage(_props: {
   const updateForm6BasisOrder = (optionKey: string) => {
     const option = findUbdBasisOrderByKey(optionKey);
     if (!option) return;
+    setDocumentMessage("Є незбережені зміни у Формі 6.");
     setForm6Fields((current) => {
       const next = {
         ...current,
@@ -5342,9 +5488,6 @@ export function DocumentsPage(_props: {
         basisDate: option.date,
         basis: formatForm6BasisText(option.number, option.date),
       };
-      scheduleDocumentFieldSave(() => {
-        void saveForm6Document(next);
-      });
       return next;
     });
   };
@@ -5648,11 +5791,11 @@ export function DocumentsPage(_props: {
 
     setIsSavingDocument(true);
     try {
-      const dataUrl = await readFileAsDataUrl(file);
+      const dataUrl = await compressPhotoFile(file);
       const ticketPhoto: UbdScanFile = {
         id: `photo-${Date.now()}`,
-        name: file.name,
-        type: file.type || "image/jpeg",
+        name: file.name.replace(/\.[^.]+$/, "") + ".jpg",
+        type: "image/jpeg",
         dataUrl,
         uploadedAt: new Date().toISOString(),
       };
@@ -5664,8 +5807,8 @@ export function DocumentsPage(_props: {
         await api
           .upsertPersonPhoto(personExternalId, {
             photoData: dataUrl,
-            fileName: file.name,
-            mimeType: file.type || "image/jpeg",
+            fileName: ticketPhoto.name,
+            mimeType: "image/jpeg",
           })
           .catch(() => null);
       }
@@ -5708,8 +5851,8 @@ export function DocumentsPage(_props: {
 
   const openPersonQuestionnaire = () => {
     const targetId = String(
-      selectedDocument?.personExternalId ||
-        personQuestionnaire?.personExternalId ||
+      personQuestionnaire?.personExternalId ||
+        selectedDocument?.personExternalId ||
         personExternalId ||
         "",
     ).trim();
@@ -5778,8 +5921,8 @@ export function DocumentsPage(_props: {
 
   const openPersonQuestionnaireInNewTab = async () => {
     const targetId = String(
-      selectedDocument?.personExternalId ||
-        personQuestionnaire?.personExternalId ||
+      personQuestionnaire?.personExternalId ||
+        selectedDocument?.personExternalId ||
         personExternalId ||
         "",
     ).trim();
@@ -6791,6 +6934,18 @@ export function DocumentsPage(_props: {
       {selectedDocument ? (
         <section className="analytics-panel document-fields">
           <div className="panel-heading">Дані для Форми 6</div>
+          <div className="document-form-save-row">
+            <span>
+              Зміни зберігаються лише після натискання кнопки.
+            </span>
+            <Button
+              variant="contained"
+              disabled={isSavingDocument}
+              onClick={() => void saveForm6Document(form6Fields)}
+            >
+              {isSavingDocument ? "Збереження…" : "Зберегти дані"}
+            </Button>
+          </div>
           <div className="document-placeholder-map salary-document-map ubd-document-map">
             {(
               [

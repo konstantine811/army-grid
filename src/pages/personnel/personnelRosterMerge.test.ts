@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { EjournalPreviewRow } from "../ejournal/ejournalTypes";
 import {
+  applyPersonnelMergeDelta,
+  buildPersonnelMergeDelta,
   extractBirthDateFromPersonName,
   getRosterPersonBirthDate,
   combineRosterRowSources,
+  isPersonnelFromArchive,
   isPersonnelInStaffRoster,
   mergeRosterRowsIntoPreview,
   ROSTER_FIELD_PREFIX,
@@ -49,6 +52,20 @@ describe("extractBirthDateFromPersonName", () => {
 });
 
 describe("mergeRosterRowsIntoPreview", () => {
+  it("adds an archive-only person to all personnel but not to current staff", () => {
+    const merged = mergeRosterRowsIntoPreview({ rows: [] }, [
+      rosterRow("АРХІВНИЙ Петро Іванович", {
+        __rosterArchive: true,
+        джерело: "Архів",
+      }),
+    ]);
+
+    expect(merged).toHaveLength(1);
+    expect(isPersonnelFromArchive(merged[0])).toBe(true);
+    expect(isPersonnelInStaffRoster(merged[0])).toBe(false);
+    expect(String(merged[0].__dbRowId)).toMatch(/^roster:archive:/);
+  });
+
   it("does not glue a 1981 штатка row onto a 1985 namesake", () => {
     const preview = {
       rows: [
@@ -253,5 +270,32 @@ describe("isPersonnelInStaffRoster", () => {
         oosRow("ШЕВЧЕНКО Олександр Володимирович", { id: "2103004" }),
       ),
     ).toBe(false);
+  });
+});
+
+describe("personnel merge worker delta", () => {
+  it("returns changed fields instead of full preview rows", () => {
+    const source = [oosRow("КОВАЛЬ Іван Петрович")];
+    const delta = buildPersonnelMergeDelta(
+      { rows: source },
+      [rosterRow("КОВАЛЬ Іван Петрович", { column_2: "1 рота" })],
+    );
+
+    expect(delta.patches).toHaveLength(1);
+    expect(delta.appended).toHaveLength(0);
+    expect("прізвище" in delta.patches[0].set).toBe(false);
+
+    const merged = applyPersonnelMergeDelta(source, delta);
+    expect(merged[0][`${ROSTER_FIELD_PREFIX}column_2`]).toBe("1 рота");
+    expect(merged[0].прізвище).toBe("КОВАЛЬ Іван Петрович");
+  });
+
+  it("accepts the previous worker result shape during an update", () => {
+    const source = [oosRow("СТАРИЙ Запис")];
+    const legacyWorkerRows = [oosRow("НОВИЙ Запис")];
+
+    expect(applyPersonnelMergeDelta(source, legacyWorkerRows)).toBe(
+      legacyWorkerRows,
+    );
   });
 });

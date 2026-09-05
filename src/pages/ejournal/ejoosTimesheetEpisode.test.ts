@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { isInternalStaffIndexHop } from "./ejoosMovementRules";
-import { resolveTimesheetEpisodeStart } from "./ejoosTimesheetEpisode";
+import {
+  isInternalStaffIndexHop,
+  isOutboundStaffMove,
+} from "./ejoosMovementRules";
+import {
+  resolveExistingTimesheetStartDay,
+  resolveTimesheetArrivalDate,
+  resolveTimesheetEpisodeStart,
+} from "./ejoosTimesheetEpisode";
 
 const hop = (from: string, to: string) => ({
   type: "ПОСАДА",
@@ -12,6 +19,19 @@ const hop = (from: string, to: string) => ({
 });
 
 describe("isInternalStaffIndexHop", () => {
+  it("classifies ЗВІЛЬН as an outbound operation", () => {
+    expect(
+      isOutboundStaffMove({
+        type: "ЗВІЛЬН",
+        destination: "звільнений у запас",
+        changeText: "звільнення з військової служби",
+        previousIndex: "2103117",
+        nextIndex: "",
+        note: "",
+      }),
+    ).toBe(true);
+  });
+
   it("treats 2103535 → 2103207 inside 1ПБ as a hop", () => {
     expect(isInternalStaffIndexHop(hop("2103535", "2103207"))).toBe(true);
   });
@@ -72,6 +92,53 @@ describe("isInternalStaffIndexHop", () => {
         note: "наказ №236 від 15.08.2026",
       }),
     ).toBe(false);
+  });
+});
+
+describe("resolveTimesheetArrivalDate", () => {
+  it("uses temporary-arrival date before a later position appointment", () => {
+    expect(
+      resolveTimesheetArrivalDate({
+        explicitArrivalDate: "",
+        externalStaffArrivalDate: "",
+        temporaryArrivalDate: "02.08.2026",
+        staffAppointmentDate: "08.08.2026",
+      }),
+    ).toBe("02.08.2026");
+  });
+
+  it("keeps an explicit ПРИБУВ movement authoritative", () => {
+    expect(
+      resolveTimesheetArrivalDate({
+        explicitArrivalDate: "12.08.2026",
+        externalStaffArrivalDate: "11.08.2026",
+        temporaryArrivalDate: "10.08.2026",
+        staffAppointmentDate: "15.08.2026",
+      }),
+    ).toBe("12.08.2026");
+  });
+
+  it("uses an external staff arrival before a later internal appointment", () => {
+    expect(
+      resolveTimesheetArrivalDate({
+        explicitArrivalDate: "",
+        externalStaffArrivalDate: "02.08.2026",
+        temporaryArrivalDate: "",
+        staffAppointmentDate: "08.08.2026",
+      }),
+    ).toBe("02.08.2026");
+  });
+});
+
+describe("resolveExistingTimesheetStartDay", () => {
+  it("keeps an earlier proven active boundary from the current Tab row", () => {
+    expect(
+      resolveExistingTimesheetStartDay({
+        calculatedDay: 14,
+        firstPlusDay: 2,
+        hasInactivePrefix: true,
+      }),
+    ).toBe(2);
   });
 });
 
@@ -166,5 +233,19 @@ describe("resolveTimesheetEpisodeStart", () => {
         ],
       }),
     ).toBe("15.08.2026");
+  });
+
+  it("starts ШЕВЧУК's restored row on 02.08 before the later archive period", () => {
+    expect(
+      resolveTimesheetEpisodeStart({
+        monthStartLabel: "01.08.2026",
+        appointmentDate: "02.08.2026",
+        inboundDate: "02.08.2026",
+        hasMonthStartAbsence: false,
+        hasDepartureEvidence: false,
+        leftUnitThisMonth: true,
+        ownUnitMoves: [],
+      }),
+    ).toBe("02.08.2026");
   });
 });

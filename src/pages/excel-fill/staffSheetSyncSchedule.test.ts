@@ -34,21 +34,22 @@ const kyivTime = (
 
 describe("staff sheet auto sync schedule", () => {
   beforeEach(() => {
-    vi.stubGlobal("localStorage", {
+    const localStorageMock = {
       store: {} as Record<string, string>,
       getItem(key: string) {
-        return this.store[key] ?? null;
+        return localStorageMock.store[key] ?? null;
       },
       setItem(key: string, value: string) {
-        this.store[key] = value;
+        localStorageMock.store[key] = value;
       },
       removeItem(key: string) {
-        delete this.store[key];
+        delete localStorageMock.store[key];
       },
       clear() {
-        this.store = {};
+        localStorageMock.store = {};
       },
-    });
+    };
+    vi.stubGlobal("localStorage", localStorageMock);
   });
 
   afterEach(() => {

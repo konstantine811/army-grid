@@ -4,9 +4,10 @@ import {
   type BoundingBox,
 } from "@mediapipe/tasks-vision";
 import {
-  renderPdfFileToImageDataUrls,
+  visitPdfPagesAsImageDataUrls,
   type CropRect,
 } from "./PhotoCropDialog";
+import { PHOTO_JPEG_QUALITY } from "./photoCompression";
 
 type DetectedFace = {
   boundingBox: FaceBox;
@@ -109,7 +110,7 @@ const drawPassportCrop = (image: HTMLImageElement, crop: CropRect) => {
     canvas.height,
   );
 
-  return canvas.toDataURL("image/jpeg", 0.92);
+  return canvas.toDataURL("image/jpeg", PHOTO_JPEG_QUALITY);
 };
 
 const toFaceBox = (box: BoundingBox): FaceBox => ({
@@ -220,43 +221,57 @@ const scoreFaceCandidate = (
 export async function extractPassportPhotoFromPdf(
   file: File,
 ): Promise<PassportPhotoResult | null> {
-  const pages = await renderPdfFileToImageDataUrls(file, {
-    scale: AUTO_RENDER_SCALE,
-  });
   let best:
     | {
-        face: FaceBox;
-        image: HTMLImageElement;
+        dataUrl: string;
+        crop: CropRect;
         pageIndex: number;
         score: number;
       }
     | null = null;
 
-  for (let pageIndex = 0; pageIndex < pages.length; pageIndex += 1) {
-    const image = await loadImage(pages[pageIndex].src);
-    const faces = await detectFaces(image);
-    const bounds = {
-      width: image.naturalWidth,
-      height: image.naturalHeight,
-    };
-    for (const candidate of faces ?? []) {
-      const score = scoreFaceCandidate(candidate, bounds);
-      if (score === null) continue;
-      if (!best || score > best.score) {
-        best = { face: candidate.box, image, pageIndex, score };
+  await visitPdfPagesAsImageDataUrls(
+    file,
+    async (page) => {
+      const image = await loadImage(page.src);
+      try {
+        const faces = await detectFaces(image);
+        const bounds = {
+          width: image.naturalWidth,
+          height: image.naturalHeight,
+        };
+        for (const candidate of faces ?? []) {
+          const score = scoreFaceCandidate(candidate, bounds);
+          if (score === null || (best && score <= best.score)) continue;
+          const crop = cropAroundFace(candidate.box, bounds);
+          best = {
+            dataUrl: drawPassportCrop(image, crop),
+            crop,
+            pageIndex: page.pageNumber - 1,
+            score,
+          };
+        }
+      } finally {
+        image.src = "";
       }
-    }
-  }
+    },
+    { scale: AUTO_RENDER_SCALE },
+  );
 
-  if (!best) return null;
-
-  const crop = cropAroundFace(best.face, {
-    width: best.image.naturalWidth,
-    height: best.image.naturalHeight,
-  });
+  const resolvedBest = best as {
+    dataUrl: string;
+    crop: CropRect;
+    pageIndex: number;
+    score: number;
+  } | null;
+  if (!resolvedBest) return null;
 
   return {
-    dataUrl: drawPassportCrop(best.image, crop),
-    crop: { ...crop, pageIndex: best.pageIndex, auto: true },
+    dataUrl: resolvedBest.dataUrl,
+    crop: {
+      ...resolvedBest.crop,
+      pageIndex: resolvedBest.pageIndex,
+      auto: true,
+    },
   };
 }

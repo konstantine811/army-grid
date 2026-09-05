@@ -1,39 +1,83 @@
-import { useEffect, useState } from "react";
+import { useStore } from "zustand";
 import { api } from "../api";
 import type {
   BackendEjournalImport,
   BackendPersonDocument,
   BackendPersonnelOverview,
   BackendPersonnelRosterLatest,
+  BackendPersonnelRosterVersion,
 } from "../api";
 import {
   CacheKeys,
   fetchWithCache,
   jsonChanged,
-  peekDataCache,
-  subscribeDataCache,
+  readDataCache,
 } from "./idbDataCache";
+import { sharedDataStore } from "./sharedDataStore";
+import type { PersonnelDataset } from "./personnelDataset";
 
 export { SHARED_DATA_TTL_MS } from "./idbDataCache";
 
 type SharedLoadOptions = {
   force?: boolean;
+  signal?: AbortSignal;
 };
 
-export const loadSharedRosterLatest = (
-  options: SharedLoadOptions = {},
-) =>
+export const ROSTER_VERSION_CHECK_TTL_MS = 30_000;
+let rosterVersionCheckedAt = 0;
+
+export const shouldCheckRosterVersion = (
+  checkedAt: number,
+  now = Date.now(),
+) => now - checkedAt >= ROSTER_VERSION_CHECK_TTL_MS;
+
+const fetchSharedRosterLatest = (options: SharedLoadOptions) =>
   fetchWithCache({
     key: CacheKeys.rosterLatest,
-    fetcher: () => api.getLatestPersonnelRoster(),
+    signal: options.signal,
+    fetcher: () => api.getLatestPersonnelRoster({ signal: options.signal }),
     isChanged: jsonChanged,
     force: options.force,
   });
 
+export const isRosterVersionCurrent = (
+  cached: BackendPersonnelRosterLatest,
+  version: BackendPersonnelRosterVersion | null,
+) =>
+  version?.importId === cached.importId &&
+  version.rowCount === (cached.sheet?.rowCount ?? cached.rows.length) &&
+  String(version.sheetUpdatedAt ?? "") ===
+    String(cached.sheet?.updatedAt ?? "");
+
+export const loadSharedRosterLatest = async (
+  options: SharedLoadOptions = {},
+) => {
+  if (options.force) return fetchSharedRosterLatest(options);
+  const cached = await readDataCache<BackendPersonnelRosterLatest | null>(
+    CacheKeys.rosterLatest,
+  );
+  if (!cached) return fetchSharedRosterLatest(options);
+  if (!shouldCheckRosterVersion(rosterVersionCheckedAt)) return cached;
+
+  try {
+    const version = await api.getLatestPersonnelRosterVersion({
+      signal: options.signal,
+    });
+    rosterVersionCheckedAt = Date.now();
+    const sameVersion = isRosterVersionCurrent(cached, version);
+    if (sameVersion) return cached;
+    return fetchSharedRosterLatest({ ...options, force: true });
+  } catch (error) {
+    if (options.signal?.aborted) throw error;
+    return cached;
+  }
+};
+
 export const loadSharedDocumentsAll = (options: SharedLoadOptions = {}) =>
   fetchWithCache({
     key: CacheKeys.documentsAll,
-    fetcher: () => api.listAllPersonDocuments(),
+    signal: options.signal,
+    fetcher: () => api.listAllPersonDocuments({ signal: options.signal }),
     isChanged: jsonChanged,
     force: options.force,
   });
@@ -41,22 +85,15 @@ export const loadSharedDocumentsAll = (options: SharedLoadOptions = {}) =>
 export const loadSharedEjournalImports = (options: SharedLoadOptions = {}) =>
   fetchWithCache({
     key: CacheKeys.ejournalImports,
-    fetcher: () => api.listEjournalImports(),
+    signal: options.signal,
+    fetcher: () => api.listEjournalImports({ signal: options.signal }),
     isChanged: jsonChanged,
     force: options.force,
   });
 
 export const useSharedCacheValue = <T>(key: string) => {
-  const [value, setValue] = useState<T | null>(() => peekDataCache<T>(key));
-
-  useEffect(() => {
-    setValue(peekDataCache<T>(key));
-    return subscribeDataCache(key, () => {
-      setValue(peekDataCache<T>(key));
-    });
-  }, [key]);
-
-  return value;
+  const entry = useStore(sharedDataStore, (state) => state.entries.get(key));
+  return (entry?.value as T | undefined) ?? null;
 };
 
 export const useSharedRosterLatest = () =>
@@ -64,6 +101,9 @@ export const useSharedRosterLatest = () =>
 
 export const useSharedOverview = () =>
   useSharedCacheValue<BackendPersonnelOverview>(CacheKeys.overview);
+
+export const useSharedPersonnelDataset = () =>
+  useSharedCacheValue<PersonnelDataset>(CacheKeys.personnelDataset);
 
 export const useSharedDocumentsAll = () =>
   useSharedCacheValue<BackendPersonDocument[]>(CacheKeys.documentsAll);

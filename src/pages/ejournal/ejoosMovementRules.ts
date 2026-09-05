@@ -188,6 +188,9 @@ export const isFirstPbPositionChange = (
 };
 
 export const classifyStaffMove = (event: StaffMoveEvent): StaffMoveScope => {
+  // ЗВІЛЬН завжди завершує перебування в обліку частини й проходить тим самим
+  // атомарним маршрутом Виключені → Табель → очищення ШПО/ООС.
+  if (event.type === "ЗВІЛЬН") return "outbound";
   if (event.type !== "ПОСАДА" && event.type !== "ПЕРЕВ") return "other";
   const blob = [event.note, event.destination, event.changeText].join(" ");
   // ПЕРЕВ + в/ч А#### у «Куди» / примітці / «Яка зміна» — вибуття з 1ПБ,
@@ -225,11 +228,13 @@ export const isInternalStaffIndexHop = (
     | "arrivedFrom"
   >,
 ) => {
+  const previousIndex = event.previousIndex ?? "";
+  const nextIndex = event.nextIndex ?? "";
   if (
-    !isStaffIndexToken(event.previousIndex) ||
-    !isStaffIndexToken(event.nextIndex) ||
-    normText(event.previousIndex) === normText(event.nextIndex) ||
-    /розпорядж/iu.test(`${event.previousIndex} ${event.changeText}`)
+    !isStaffIndexToken(previousIndex) ||
+    !isStaffIndexToken(nextIndex) ||
+    normText(previousIndex) === normText(nextIndex) ||
+    /розпорядж/iu.test(`${previousIndex} ${event.changeText}`)
   ) {
     return false;
   }

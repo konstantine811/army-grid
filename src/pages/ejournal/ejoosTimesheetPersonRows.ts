@@ -2,6 +2,8 @@ import JSZip from "jszip";
 import {
   EJOOS_SYNC_READ_OPTIONS,
   readWorkbookSnapshot,
+  type CellValue,
+  type ExcelSheetSnapshot,
   type ExcelWorkbookSnapshot,
 } from "../../excelRoundTrip";
 import { canonicalName, normId } from "./ejoosIdentity";
@@ -49,7 +51,7 @@ const decodeSheetCell = (
   cellXml: string,
   attrs: string,
   strings: string[],
-): unknown => {
+): CellValue => {
   const type = attrs.match(/\bt="([^"]*)"/)?.[1] || "";
   if (type === "s") {
     const index = Number(cellXml.match(/<v\b[^>]*>(\d+)<\/v>/i)?.[1]);
@@ -118,7 +120,7 @@ export const findTimesheetPersonRowsInGrid = (
 /** Повний XML аркуша, включно з рядками поза usedRange / dimension. */
 export const buildSheetGridFromXml = (sheetXml: string, sstXml = "") => {
   const strings = parseSharedStrings(sstXml);
-  const rows: unknown[][] = [];
+  const rows: CellValue[][] = [];
   const cellRe =
     /<c\b([^<>]*?\br="([A-Z]{1,3})(\d+)"(?![0-9A-Za-z])[^<>]*?)(\/\s*>|>[\s\S]*?<\/c>)/gi;
   for (const cell of sheetXml.matchAll(cellRe)) {
@@ -157,7 +159,7 @@ export const placementSheetFromMergedGrid = (
 export const mergeTimesheetGrids = (
   ...grids: Array<Array<unknown[] | undefined>>
 ) => {
-  const merged: unknown[][] = [];
+  const merged: CellValue[][] = [];
   for (const grid of grids) {
     for (let index = 0; index < grid.length; index += 1) {
       const row = grid[index];
@@ -165,7 +167,7 @@ export const mergeTimesheetGrids = (
       const target = merged[index] ?? (merged[index] = []);
       for (let column = 0; column < row.length; column += 1) {
         if (row[column] != null && row[column] !== "") {
-          target[column] = row[column];
+          target[column] = row[column] as CellValue;
         }
       }
     }

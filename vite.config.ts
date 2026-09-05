@@ -1,5 +1,6 @@
 /// <reference types="vitest/config" />
-import { defineConfig } from 'vite'
+import { defineConfig, type UserConfig } from 'vite'
+import type { InlineConfig } from 'vitest'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { execFileSync } from 'node:child_process'
@@ -30,7 +31,7 @@ const lanIpv4 = () => {
         Boolean(
           iface &&
             !iface.internal &&
-            (iface.family === 'IPv4' || iface.family === 4),
+            (iface.family === 'IPv4' || String(iface.family) === '4'),
         ),
       )
       .map((iface) => iface.address)
@@ -122,9 +123,13 @@ const loadLanHttps = () => {
 }
 
 const https = process.env.VITE_HTTP === '1' ? undefined : loadLanHttps()
+const test = {
+  environment: 'node',
+  include: ['src/**/*.test.ts'],
+} satisfies InlineConfig
 
 // https://vite.dev/config/
-export default defineConfig({
+const config = {
   plugins: [react(), tailwindcss()],
   resolve: {
     alias: {
@@ -148,8 +153,7 @@ export default defineConfig({
     https,
     proxy: { ...sharedProxy },
   },
-  test: {
-    environment: 'node',
-    include: ['src/**/*.test.ts'],
-  },
-})
+  test,
+} satisfies UserConfig & { test: InlineConfig }
+
+export default defineConfig(config)

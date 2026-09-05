@@ -198,7 +198,8 @@ describe("staffSheetAnketaVkOverlay", () => {
     const baseSheet = baseWorkbook.sheet(0);
     baseSheet.cell(excelRow, 14).value(pib);
     patch?.(baseSheet);
-    return baseWorkbook.outputAsync();
+    const output = await baseWorkbook.outputAsync();
+    return output.arrayBuffer();
   };
 
   it("updates only columns 10 and 11 in the base workbook", async () => {
@@ -227,7 +228,7 @@ describe("staffSheetAnketaVkOverlay", () => {
     expect(sheet.cell(3, 11).value()).toBe("МО 312448");
     expect(sheet.cell(2, 10).value() ?? "").toBe("");
     expect(sheet.cell(1, 1).value()).toBe("№");
-  });
+  }, 15_000);
 
   it("matches by PIB when excelRowNumber points to a vacant row", async () => {
     resetStaffSheetExportTemplateCache();

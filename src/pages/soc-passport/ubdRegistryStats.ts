@@ -244,7 +244,7 @@ const readSheetCellFills = async (
   const workbook = await XlsxPopulate.fromDataAsync(file);
   const sheet =
     workbook.sheets().find((item: { name: () => string }) => item.name() === sheetName) ??
-    workbook.sheet(sheetName);
+    workbook.sheet(sheetName as unknown as number);
   if (!sheet) return {};
   const fills: Record<number, string> = {};
   for (let row = 1; row <= maxRow; row += 1) {

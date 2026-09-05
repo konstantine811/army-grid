@@ -25,4 +25,22 @@ describe("mapPbStatusToEjoosWithRules", () => {
     expect(mapped.ruleId).toBe("on_duty");
     expect(mapped.timesheetCode).toBe("+");
   });
+
+  it("maps ВЛК to a dedicated absence and timesheet code", () => {
+    const mapped = mapPbStatusToEjoosWithRules("ВЛК", DEFAULT_STATUS_RULES);
+
+    expect(mapped.ruleId).toBe("medical_board");
+    expect(mapped.absenceGround).toBe("ВЛК");
+    expect(mapped.timesheetCode).toBe("ВЛК");
+  });
+
+  it("keeps МЕД РОТА as лікування in the timesheet", () => {
+    const mapped = mapPbStatusToEjoosWithRules(
+      "МЕД РОТА",
+      DEFAULT_STATUS_RULES,
+    );
+
+    expect(mapped.ruleId).toBe("med");
+    expect(mapped.timesheetCode).toBe("лік");
+  });
 });

@@ -88,8 +88,6 @@ describe("applyPersonnelAssetsToOverview", () => {
           personExternalId: "2103003",
           type: "form6Report",
           title: "Форма 6",
-          createdAt: "",
-          updatedAt: "",
         },
       ],
     );

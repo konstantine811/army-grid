@@ -33,7 +33,6 @@ function resolvePlacement(
   height: number,
 ) {
   const maxX = Math.max(8, window.innerWidth - width - 8);
-  const maxY = Math.max(8, window.innerHeight - height - 8);
   if (placement === "left") {
     return { x: 8, y: 8 };
   }

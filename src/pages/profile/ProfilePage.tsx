@@ -104,7 +104,7 @@ export function ProfilePage() {
     }> = [];
     for (const row of rosterRows) {
       const summary = buildPersonSummary(row);
-      const fullName = getPersonDisplayName(row) || summary.fullName || "";
+      const fullName = getPersonDisplayName(row) || summary.name || "";
       const externalId = String(summary.externalId || "").trim();
       if (!externalId || !fullName) continue;
       const haystack = normalizeSearch(`${fullName} ${externalId}`);
@@ -294,8 +294,10 @@ export function ProfilePage() {
               value={nickname}
               onChange={(event) => setNickname(event.target.value)}
               fullWidth
-              helperText="Коротке імʼя для журналів і підписів"
             />
+            <Typography variant="caption" color="text.secondary">
+              Коротке імʼя для журналів і підписів
+            </Typography>
             <TextField
               size="small"
               label="Пошук у особовому складі"
@@ -303,18 +305,18 @@ export function ProfilePage() {
               onChange={(event) => setPersonQuery(event.target.value)}
               fullWidth
               placeholder="ПІБ або ID"
-              helperText={
-                loadingRoster
-                  ? "Завантажую список…"
-                  : linkedPersonFullName
-                    ? `Привʼязано: ${linkedPersonFullName}${
-                        linkedPersonExternalId
-                          ? ` · ID ${linkedPersonExternalId}`
-                          : ""
-                      }`
-                    : "Можна підтягнути ПІБ і фото з картки службовця"
-              }
             />
+            <Typography variant="caption" color="text.secondary">
+              {loadingRoster
+                ? "Завантажую список…"
+                : linkedPersonFullName
+                  ? `Привʼязано: ${linkedPersonFullName}${
+                      linkedPersonExternalId
+                        ? ` · ID ${linkedPersonExternalId}`
+                        : ""
+                    }`
+                  : "Можна підтягнути ПІБ і фото з картки службовця"}
+            </Typography>
             {personMatches.length ? (
               <div className="profile-person-matches">
                 {personMatches.map((match) => (

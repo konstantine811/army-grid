@@ -60,7 +60,7 @@ export const useStaffSheetAutoSync = (enabled: boolean) => {
       if (!options?.quiet) {
         showAppToast({
           title: "Штатка оновлена",
-          message: "Завантажено з Google Sheets у БД.",
+          description: "Завантажено з Google Sheets у БД.",
           variant: "INFO",
         });
       }

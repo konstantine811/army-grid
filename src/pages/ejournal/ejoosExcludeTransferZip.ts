@@ -395,11 +395,6 @@ export async function applyExcludeTransfersWithZip(input: {
     throw new Error("У ЕЖООС не знайдено всі аркуші для переведення");
   }
 
-  const excludedWrites: ZipCellWrite[] = [];
-  const oosWrites: ZipCellWrite[] = [];
-  const shpoWrites: ZipCellWrite[] = [];
-  const timesheetWrites: ZipCellWrite[] = [];
-  const arrivalWrites: ZipCellWrite[] = [];
   const arrivalCloseColumns = arrivals
     ? findArrivalCloseColumns(arrivals)
     : null;
@@ -419,6 +414,48 @@ export async function applyExcludeTransfersWithZip(input: {
     excludedRow,
   );
   const shpoRows = parseEjoosShpo(shpo);
+
+  // Atomic preflight: an external transfer must have a safe Timesheet action
+  // before we even start accumulating writes for Excluded/OOS/SHPO.
+  for (const op of ops) {
+    if (op.kind !== "exclude_transfer") continue;
+    const personId = personIdFromShpo(shpoRows, {
+      fullName: op.payload.fromName || op.fullName,
+      positionIndex:
+        op.payload.occupiedPositionIndex ||
+        op.payload.fromPositionIndex ||
+        op.payload.previousIndex ||
+        op.positionIndex,
+      personId: op.payload.fromPersonId || op.personId,
+    });
+    const rows = findTimesheetPersonRowsInGrid(
+      timesheetGrid,
+      personId,
+      op.payload.fromName || op.fullName,
+    );
+    const planned = Number(op.payload.timesheetExcelRow || 0);
+    const sourceRow = planned || rows[0] || 0;
+    const writePlan = excludeWritePlan(op.payload);
+    const timesheetAction =
+      sourceRow > 0
+        ? writePlan.replaceInPlace
+          ? "PATCH_HISTORY"
+          : "MOVE_TO_HISTORY"
+        : writePlan.createTimesheetHistory
+          ? "CREATE_HISTORY_IN_SOURCE_SECTION"
+          : "";
+    if (!timesheetAction) {
+      throw new Error(
+        `TIMESHEET_SOURCE_UNRESOLVED: ${op.fullName || op.personId}`,
+      );
+    }
+  }
+
+  const excludedWrites: ZipCellWrite[] = [];
+  const oosWrites: ZipCellWrite[] = [];
+  const shpoWrites: ZipCellWrite[] = [];
+  const timesheetWrites: ZipCellWrite[] = [];
+  const arrivalWrites: ZipCellWrite[] = [];
 
   for (const op of ops) {
     const personId = personIdFromShpo(shpoRows, {

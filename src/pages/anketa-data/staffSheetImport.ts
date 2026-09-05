@@ -27,6 +27,12 @@ import {
   findFighterStatusAddition,
   findFighterStatusSheet,
 } from "../personnel/fighterStatusImport";
+import {
+  appendArchiveOnlyToRosterRows,
+  archiveOnlyRowsForPersonnelImport,
+  findArchiveSheet,
+  isPersonnelFromArchive,
+} from "../personnel/staffSheetArchive";
 import { buildStaffSheetPreviewRows } from "./staffSheetPreview";
 
 export type StaffSheetImportSnapshot = {
@@ -155,15 +161,20 @@ export const parseStaffSheetImportFile = async (
   }
 
   const columns = buildImportColumns(rosterSheet);
-  const rows = sortRosterRows(
+  const mainRows = sortRosterRows(
     localRowsToPreviewRows(rosterSheet.rows, columns)
       .map((row) => enrichStaffSheetRowColumnNumbers(row, columns))
       .map(sanitizeImportedStaffSheetRow),
   );
 
-  if (!rows.length) {
+  if (!mainRows.length) {
     throw new Error("Аркуш «Загальний список» порожній.");
   }
+
+  const rows = appendArchiveOnlyToRosterRows(
+    mainRows,
+    findArchiveSheet(snapshot.sheets),
+  );
 
   return {
     fileName: snapshot.fileName || file.name,
@@ -240,16 +251,24 @@ export const importStaffSheetFromFile = async (
       };
     });
 
+  const archiveOnlyImportRows = archiveOnlyRowsForPersonnelImport(
+    imported.rows.filter((row) => !isPersonnelFromArchive(row)),
+    findArchiveSheet(snapshot.sheets),
+  );
+
   await api.importPersonnelRoster({
     name: imported.fileName.replace(/\.(xlsx|xlsm)$/i, ""),
     sourceFileName: imported.fileName,
-    notes: "Імпорт «Штатки» (.xlsx) з Анкетних даних.",
+    notes:
+      archiveOnlyImportRows.length > 0
+        ? `Імпорт «Штатки» (.xlsx) з Анкетних даних (+ Архів: ${archiveOnlyImportRows.length}).`
+        : "Імпорт «Штатки» (.xlsx) з Анкетних даних.",
     sheets: [
       {
         name: rosterSheet.sheetName,
         sheetIndex: rosterSheet.sheetIndex,
         columns,
-        rows,
+        rows: [...rows, ...archiveOnlyImportRows],
       },
     ],
   });

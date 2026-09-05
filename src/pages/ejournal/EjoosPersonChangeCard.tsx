@@ -676,6 +676,20 @@ export function PersonChangeCard({
         ))}
       </div>
 
+      {excludeOp?.payload.manualOperation === "1" ? (
+        <Box className="ejoos-sheet-block" sx={{ mt: 1.5 }}>
+          <Typography variant="subtitle2">
+            Технічна перевірка Табеля
+          </Typography>
+          <Typography variant="body2" className="ejoos-muted">
+            action: {excludeOp.payload.timesheetAction || "UNRESOLVED"} ·
+            sourceIndex: {excludeOp.payload.timesheetSourceIndex || "—"} ·
+            sourceRow: {excludeOp.payload.timesheetSourceRow || "—"} ·
+            targetHistoryRow: визначається безпечно в секції під час Apply
+          </Typography>
+        </Box>
+      ) : null}
+
       {sheetRowPreviews.length ? (
         <Box sx={{ mt: 1.5 }}>
           <Typography variant="subtitle2" sx={{ mb: 0.5 }}>

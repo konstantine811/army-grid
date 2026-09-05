@@ -298,10 +298,6 @@ const isDispositionSubsectionDataRow = (
 const looksLikeDispositionStatus = (text: string) =>
   /^(?:ЗБ|СЗЧ|лік|від|\+|-|РОЗПОРЯДЖ)/iu.test(text);
 
-const rowHasDispositionDivision = (sheet: ExcelSheetSnapshot, row: number) =>
-  /РОЗПОРЯДЖ/iu.test(textAt(sheet, row, 1)) ||
-  /РОЗПОРЯДЖ/iu.test(textAt(sheet, row, 2));
-
 const rowTextThrough = (
   sheet: ExcelSheetSnapshot,
   row: number,
@@ -426,33 +422,6 @@ const occupantMatchesOp = (
       currentName &&
       canonicalName(currentName) === canonicalName(op.fullName),
   );
-};
-
-const dispositionRowHasOccupant = (
-  sheet: ExcelSheetSnapshot,
-  row: number,
-  cols: DispositionTimesheetCols,
-) =>
-  Boolean(
-    textAt(sheet, row, cols.name) ||
-      looksLikePersonName(textAt(sheet, row, 6)) ||
-      looksLikePersonName(textAt(sheet, row, 7)) ||
-      textAt(sheet, row, cols.id) ||
-      textAt(sheet, row, cols.rank),
-  );
-
-const rowHasDispositionSectionContent = (
-  sheet: ExcelSheetSnapshot,
-  row: number,
-  cols: DispositionTimesheetCols,
-) => {
-  if (isTimesheetDispositionHeaderRow(sheet, row)) return false;
-  if (isStaffTimesheetRow(sheet, row)) return false;
-  if (rowHasDispositionDivision(sheet, row)) return true;
-  if (dispositionRowHasOccupant(sheet, row, cols)) return true;
-  if (looksLikeDispositionStatus(textAt(sheet, row, cols.status))) return true;
-  if (looksLikeDispositionStatus(textAt(sheet, row, 4))) return true;
-  return rowHasTimesheetDayMarks(sheet, row);
 };
 
 const findTimesheetDispositionSection = (

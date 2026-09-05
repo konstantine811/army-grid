@@ -65,16 +65,17 @@ export const phonesFromPatch = (patch: PersonEnrichmentPatch) =>
 export const buildEmptyPersonFieldUpdates = (
   row: EjournalPreviewRow | null | undefined,
   patch: PersonEnrichmentPatch,
+  options: { overwriteFields?: boolean } = {},
 ): Record<string, string> => {
   if (!row) return {};
   const updates: Record<string, string> = {};
 
   const rnokpp = String(patch.rnokpp ?? "").replace(/\D/g, "").trim();
-  if (rnokpp.length >= 8) {
+  if (rnokpp.length === 10) {
     const current =
       getPersonFieldValue(row, ["рнокпп_за_наявності"]) ||
       getPersonFieldValue(row, ["рнокпп"]);
-    if (isBlankPersonValue(current)) {
+    if (options.overwriteFields || isBlankPersonValue(current)) {
       const key =
         resolvePersonFieldKey(row, ["рнокпп_за_наявності"]) ||
         resolvePersonFieldKey(row, ["рнокпп"]) ||
@@ -95,7 +96,7 @@ export const buildEmptyPersonFieldUpdates = (
       getPersonFieldValue(row, ["зареєстров"]) ||
       getPersonFieldValue(row, ["місце", "проживан"]) ||
       getPersonFieldValue(row, ["адреса"]);
-    if (isBlankPersonValue(current)) {
+    if (options.overwriteFields || isBlankPersonValue(current)) {
       const key =
         resolvePersonFieldKey(row, ["адреса", "проживан"]) ||
         resolvePersonFieldKey(row, ["адреса"]) ||
@@ -122,6 +123,7 @@ export const syncEnrichmentToPerson = async (options: {
   patch: PersonEnrichmentPatch;
   existingPhones?: string[];
   phoneDocument?: BackendPersonDocument | null;
+  overwriteFields?: boolean;
 }): Promise<PersonEnrichmentResult> => {
   const personExternalId = options.personExternalId.trim();
   const incomingPhones = phonesFromPatch(options.patch);
@@ -145,7 +147,7 @@ export const syncEnrichmentToPerson = async (options: {
   let rowId = options.rowId ? String(options.rowId) : "";
 
   // Resolve ООС row when documents opened without a full personnel snapshot.
-  if ((!row || !rowId) && personExternalId) {
+  if ((!row || !isPersistedEjournalRowId(rowId)) && personExternalId) {
     try {
       const profile = await api.getPersonnelProfile(personExternalId);
       if (profile) {
@@ -181,7 +183,9 @@ export const syncEnrichmentToPerson = async (options: {
     }
   }
 
-  const fieldUpdates = buildEmptyPersonFieldUpdates(row, options.patch);
+  const fieldUpdates = buildEmptyPersonFieldUpdates(row, options.patch, {
+    overwriteFields: options.overwriteFields,
+  });
   if (isPersistedEjournalRowId(rowId) && Object.keys(fieldUpdates).length) {
     try {
       await api.updateEjournalRowValues(rowId, fieldUpdates, {

@@ -15,7 +15,32 @@ describe("rememberMountedPage", () => {
   });
 
   it("returns the same set when the page is already kept under the limit", () => {
-    const current = new Set(["overview", "personnel"] as const);
-    expect(rememberMountedPage(current, "overview", 4)).toBe(current);
+    const current = new Set(["profile", "analytics"] as const);
+    expect(rememberMountedPage(current, "analytics", 4)).toBe(current);
+  });
+
+  it("treats a revisited page as the most recently used", () => {
+    const revisited = rememberMountedPage(
+      new Set(["analytics", "profile", "workTasks"]),
+      "analytics",
+      3,
+    );
+    expect([...revisited]).toEqual(["profile", "workTasks", "analytics"]);
+
+    const withNextPage = rememberMountedPage(revisited, "bchs", 3);
+    expect([...withNextPage]).toEqual(["workTasks", "analytics", "bchs"]);
+    expect(withNextPage.has("analytics")).toBe(true);
+  });
+
+  it("unmounts every previous page with the default limit", () => {
+    const personnel = rememberMountedPage(new Set(), "personnel");
+    const ejournal = rememberMountedPage(personnel, "ejournal");
+    const excelFill = rememberMountedPage(ejournal, "excelFill");
+    const profile = rememberMountedPage(excelFill, "profile");
+
+    expect([...personnel]).toEqual(["personnel"]);
+    expect([...ejournal]).toEqual(["ejournal"]);
+    expect([...excelFill]).toEqual(["excelFill"]);
+    expect([...profile]).toEqual(["profile"]);
   });
 });

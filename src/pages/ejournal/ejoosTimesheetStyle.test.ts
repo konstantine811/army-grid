@@ -123,9 +123,15 @@ describe("timesheet occupied styles", () => {
     const workbook = await module.default.fromBlankAsync();
     const sheet = workbook.sheet(0);
     sheet.name("6. Табель");
-    sheet.cell(200, 9).formula("I201+J201");
-    sheet.cell(201, 9).formula("I201+J201");
-    sheet.cell(201, 10).formula("I201+J201");
+    const setFormula = (row: number, column: number, formula: string) =>
+      (
+        sheet.cell(row, column) as unknown as {
+          formula: (value: string) => unknown;
+        }
+      ).formula(formula);
+    setFormula(200, 9, "I201+J201");
+    setFormula(201, 9, "I201+J201");
+    setFormula(201, 10, "I201+J201");
     sheet.cell(201, 1).value("'3 ПІХОТНА РОТА");
     sheet.cell(201, 2).value("2103700");
     const blob = (await workbook.outputAsync("blob")) as Blob;

@@ -2,7 +2,7 @@ import type { BackendPersonnelOverviewRow } from "../../api";
 import type { EjournalPreviewRow } from "../ejournal/ejournalTypes";
 import {
   collectPersonAttachmentLookupIds,
-  loadPersonPhotoForRow,
+  loadPersonPhotoThumbnailForRow,
   parseOrphanAttachmentIdentityId,
 } from "../personnel/personAttachments";
 import {
@@ -65,22 +65,6 @@ export const resolveOverviewPhoto = (
     const photo = photos[key];
     if (photo) return photo;
   }
-
-  const nameFingerprint = buildPersonIdentityFingerprint(
-    cleanPersonDisplayName(row.name) || row.name,
-  );
-  if (!nameFingerprint) return "";
-
-  for (const [id, photo] of Object.entries(photos)) {
-    if (!photo) continue;
-    if (
-      id === nameFingerprint ||
-      id.startsWith(`${nameFingerprint}:`) ||
-      nameFingerprint.startsWith(`${id}:`)
-    ) {
-      return photo;
-    }
-  }
   return "";
 };
 
@@ -108,6 +92,18 @@ export const findOverviewRosterRow = (
 export const indexOverviewRosterRows = (rosterRows: EjournalPreviewRow[]) => {
   const rosterById = new Map<string, EjournalPreviewRow>();
   const rosterByName = new Map<string, EjournalPreviewRow>();
+  const ambiguousNames = new Set<string>();
+
+  const rememberUniqueName = (key: string, row: EjournalPreviewRow) => {
+    if (!key || ambiguousNames.has(key)) return;
+    const existing = rosterByName.get(key);
+    if (existing && existing !== row) {
+      rosterByName.delete(key);
+      ambiguousNames.add(key);
+      return;
+    }
+    rosterByName.set(key, row);
+  };
 
   for (const row of rosterRows) {
     const id = getPersonExternalId(row);
@@ -119,7 +115,7 @@ export const indexOverviewRosterRows = (rosterRows: EjournalPreviewRow[]) => {
       const raw = String(name ?? "").trim();
       if (!raw) continue;
       for (const key of [normalizeOverviewName(raw), normalizeRosterMatchText(raw)]) {
-        if (key) rosterByName.set(key, row);
+        rememberUniqueName(key, row);
       }
     }
   }
@@ -185,7 +181,7 @@ export const buildOverviewPhotoMap = (
         exact.push(data);
       }
     }
-    return exact[0] || "";
+    return exact.length === 1 ? exact[0] : "";
   };
 
   for (const row of rows) {
@@ -255,7 +251,7 @@ export const fillMissingOverviewPhotos = async (
       id: row.externalId,
     } as EjournalPreviewRow;
 
-    const result = await loadPersonPhotoForRow(
+    const result = await loadPersonPhotoThumbnailForRow(
       rosterRow ?? fallbackRow,
       undefined,
     );

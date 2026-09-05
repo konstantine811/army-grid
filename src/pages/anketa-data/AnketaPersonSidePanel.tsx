@@ -57,9 +57,11 @@ export function AnketaPersonSidePanel({
   onMessage,
 }: AnketaPersonSidePanelProps) {
   const panel = useAnketaPersonPanel(anketaRow, onMessage);
-  const nameMismatch =
-    Boolean(panel.match) &&
-    !anketaPersonnelNamesMatch(anketaRow.fullName, panel.match?.summary.name);
+  const nameMismatch = Boolean(
+    anketaRow &&
+      panel.match &&
+      !anketaPersonnelNamesMatch(anketaRow.fullName, panel.match.summary.name),
+  );
 
   const rowGaps = useMemo(() => {
     if (!anketaRow) return [];

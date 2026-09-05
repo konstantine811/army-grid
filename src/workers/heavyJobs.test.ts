@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { BackendPersonnelOverview } from "../api";
 import type { EjournalPreviewRow } from "../pages/ejournal/ejournalTypes";
+import { applyPersonnelMergeDelta } from "../pages/personnel/personnelRosterMerge";
 import { runHeavyJobSync } from "./heavyJobs";
 
 const emptyOverview = (
@@ -91,11 +92,72 @@ describe("runHeavyJobSync", () => {
     const rows = [
       { __dbRowId: "p1", column_14: "КОВАЛЬ Іван Петрович" },
     ] as EjournalPreviewRow[];
-    const merged = runHeavyJobSync({
+    const delta = runHeavyJobSync({
       type: "mergePersonnel",
       preview: { rows },
       rosterRows: [],
     });
+    const merged = applyPersonnelMergeDelta(rows, delta);
     expect(merged).toBe(rows);
+  });
+
+  it("builds questionnaire presence outside the page thread", () => {
+    const presence = runHeavyJobSync({
+      type: "buildQuestionnairePresence",
+      people: [
+        {
+          currentId: "p:коваль іван петрович:1990-01-01",
+          lookupIds: ["p:коваль іван петрович:1990-01-01"],
+          fullName: "КОВАЛЬ Іван Петрович",
+        },
+      ],
+      questionnaires: [
+        {
+          personExternalId: "p:коваль іван петрович:1990-01-01",
+          fileName: "questionnaire.pdf",
+        },
+      ],
+    });
+
+    expect(presence["p:коваль іван петрович:1990-01-01"]).toBe(true);
+  });
+
+  it("matches overview document assets in a worker job", () => {
+    const row = {
+      id: "ejoos:2103001",
+      externalId: "2103001",
+      name: "КОВАЛЬ Іван Петрович",
+      rank: "солдат",
+      unit: "1 рота",
+      status: "ON_DUTY",
+      statusLabel: "На службі",
+      validFrom: null,
+      days: null,
+      plannedReturn: null,
+      place: "",
+      updatedAt: "",
+    };
+    const assets = runHeavyJobSync({
+      type: "applyOverviewAssets",
+      overviewRows: [row],
+      personnelIdentities: [
+        {
+          name: "КОВАЛЬ Іван Петрович",
+          birthKey: "",
+          lookupIds: ["2103001"],
+        },
+      ],
+      questionnaires: [],
+      documents: [
+        {
+          id: "doc-1",
+          personExternalId: "2103001",
+          type: "form6Report",
+          title: "Форма 6",
+        },
+      ],
+    });
+
+    expect(assets.documents["2103001"]?.count).toBe(1);
   });
 });

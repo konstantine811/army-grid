@@ -292,6 +292,13 @@ export const mergeForm6Fields = (
   // Personnel wins when filled; otherwise keep what was entered in the report.
   const pick = (personnel: string, document: string) =>
     String(personnel ?? "").trim() || String(document ?? "").trim();
+  const pickRnokpp = (personnel: string, document: string) => {
+    const personnelDigits = String(personnel ?? "").replace(/\D/g, "");
+    const documentDigits = String(document ?? "").replace(/\D/g, "");
+    if (personnelDigits.length === 10) return personnelDigits;
+    if (documentDigits.length === 10) return documentDigits;
+    return String(document ?? "").trim() || String(personnel ?? "").trim();
+  };
   const fullName = pick(defaults.fullName, merged.fullName);
   const taskPeriod = pick(defaults.taskPeriod, merged.taskPeriod);
   const taskPlace = pick(defaults.taskPlace, merged.taskPlace);
@@ -365,7 +372,7 @@ export const mergeForm6Fields = (
     ),
     birthDate: pick(defaults.birthDate, merged.birthDate),
     idDocument: pickForm6IdDocument(defaults.idDocument, merged.idDocument),
-    rnokpp: pick(defaults.rnokpp, merged.rnokpp),
+    rnokpp: pickRnokpp(defaults.rnokpp, merged.rnokpp),
     address: pick(defaults.address, merged.address),
     phone: pick(defaults.phone, merged.phone),
     taskPeriod,

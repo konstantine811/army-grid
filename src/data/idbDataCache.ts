@@ -3,10 +3,20 @@
  * Pages read the same in-memory copy; network refresh is TTL-gated
  * and de-duplicated across concurrent callers.
  */
+import {
+  clearSharedDataStore,
+  deleteSharedDataEntry,
+  getSharedDataEntry,
+  getSharedDataKeys,
+  setSharedDataEntry,
+} from "./sharedDataStore";
 
 const DB_NAME = "army-grid-data-cache";
 const DB_VERSION = 1;
 const STORE_NAME = "entries";
+export const DATA_CACHE_FORMAT_VERSION = 1;
+export const DATA_CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+export const DATA_CACHE_MAX_SHEET_SNAPSHOTS = 3;
 
 /** Skip a network refresh if the shared copy is newer than this. */
 export const SHARED_DATA_TTL_MS = 5 * 60 * 1000;
@@ -15,12 +25,22 @@ type CacheEntry<T = unknown> = {
   key: string;
   value: T;
   savedAt: number;
+  formatVersion?: number;
 };
 
-const memoryCache = new Map<string, CacheEntry>();
-const inFlight = new Map<string, Promise<unknown>>();
+type InFlightCacheRequest = {
+  promise: Promise<unknown>;
+  signal?: AbortSignal;
+};
+
+const inFlight = new Map<string, InFlightCacheRequest>();
 const cacheGenerations = new Map<string, number>();
 const listeners = new Map<string, Set<() => void>>();
+
+const isCacheEntryExpired = (entry: CacheEntry, now = Date.now()) =>
+  now - entry.savedAt > DATA_CACHE_MAX_AGE_MS ||
+  (entry.formatVersion != null &&
+    entry.formatVersion !== DATA_CACHE_FORMAT_VERSION);
 
 const getCacheGeneration = (key: string) => cacheGenerations.get(key) ?? 0;
 
@@ -44,12 +64,16 @@ export const subscribeDataCache = (key: string, listener: () => void) => {
 };
 
 export const peekDataCache = <T>(key: string): T | null => {
-  const entry = memoryCache.get(key);
+  const entry = getSharedDataEntry(key) as CacheEntry | undefined;
+  if (entry && isCacheEntryExpired(entry)) {
+    deleteSharedDataEntry(key);
+    return null;
+  }
   return entry ? (entry.value as T) : null;
 };
 
 export const getDataCacheAgeMs = (key: string): number | null => {
-  const entry = memoryCache.get(key);
+  const entry = getSharedDataEntry(key);
   return entry ? Date.now() - entry.savedAt : null;
 };
 
@@ -91,21 +115,70 @@ export const CacheKeys = {
   anketaCreatedPersonnel: "personnel:anketa-created:v1",
   staffSheetImport: "anketa:staff-sheet-import",
   staffSheetVkIndex: "anketa:staff-sheet-vk-index",
+  personnelDataset: "personnel:dataset:memory:v3",
   overview: "personnel:overview",
-  documentsAll: "personnel:documents:all",
+  documentsAll: "personnel:documents:meta:v4",
   questionnairesMeta: "personnel:questionnaires:meta",
 } as const;
 
+const isKnownCacheKey = (key: string) =>
+  key === CacheKeys.ejournalImports ||
+  key.startsWith("ejournal:sheet-rows:") ||
+  key === CacheKeys.rosterLatest ||
+  key === CacheKeys.anketaCreatedPersonnel ||
+  key === CacheKeys.staffSheetImport ||
+  key === CacheKeys.staffSheetVkIndex ||
+  key === CacheKeys.personnelDataset ||
+  key === CacheKeys.overview ||
+  key === CacheKeys.documentsAll ||
+  key === CacheKeys.questionnairesMeta;
+
+export const planDataCacheCleanup = (
+  entries: Array<Pick<CacheEntry, "key" | "savedAt" | "formatVersion">>,
+  now = Date.now(),
+): string[] => {
+  const toDelete = new Set<string>();
+  const sheetSnapshots: Array<Pick<CacheEntry, "key" | "savedAt">> = [];
+
+  for (const entry of entries) {
+    if (
+      !isKnownCacheKey(entry.key) ||
+      now - entry.savedAt > DATA_CACHE_MAX_AGE_MS ||
+      (entry.formatVersion != null &&
+        entry.formatVersion !== DATA_CACHE_FORMAT_VERSION)
+    ) {
+      toDelete.add(entry.key);
+      continue;
+    }
+    if (entry.key.startsWith("ejournal:sheet-rows:")) {
+      sheetSnapshots.push(entry);
+    }
+  }
+
+  sheetSnapshots
+    .filter((entry) => !toDelete.has(entry.key))
+    .sort((left, right) => right.savedAt - left.savedAt)
+    .slice(DATA_CACHE_MAX_SHEET_SNAPSHOTS)
+    .forEach((entry) => toDelete.add(entry.key));
+
+  return [...toDelete];
+};
+
 export const readDataCache = async <T>(key: string): Promise<T | null> => {
-  const memory = memoryCache.get(key);
-  if (memory) return memory.value as T;
+  const memory = getSharedDataEntry(key) as CacheEntry<T> | undefined;
+  if (memory && !isCacheEntryExpired(memory)) return memory.value as T;
+  if (memory) deleteSharedDataEntry(key);
 
   try {
     const entry = await withStore<CacheEntry<T> | undefined>("readonly", (store) =>
       store.get(key),
     );
     if (!entry || entry.value === undefined) return null;
-    memoryCache.set(key, entry);
+    if (isCacheEntryExpired(entry)) {
+      void deleteDataCache(key);
+      return null;
+    }
+    setSharedDataEntry(entry);
     notifyDataCache(key);
     return entry.value;
   } catch {
@@ -114,24 +187,110 @@ export const readDataCache = async <T>(key: string): Promise<T | null> => {
 };
 
 export const writeDataCache = async <T>(key: string, value: T): Promise<void> => {
-  const entry: CacheEntry<T> = { key, value, savedAt: Date.now() };
-  memoryCache.set(key, entry);
+  const entry: CacheEntry<T> = {
+    key,
+    value,
+    savedAt: Date.now(),
+    formatVersion: DATA_CACHE_FORMAT_VERSION,
+  };
+  setSharedDataEntry(entry);
   notifyDataCache(key);
   try {
     await withStore("readwrite", (store) => store.put(entry));
   } catch {
-    /* ignore quota / private mode */
+    // A stale workbook snapshot can exhaust the browser quota. Clean first,
+    // then make one best-effort retry for the current value.
+    const removed = await cleanupDataCache();
+    if (removed > 0) {
+      try {
+        await withStore("readwrite", (store) => store.put(entry));
+      } catch {
+        /* ignore private mode / payload larger than available quota */
+      }
+    }
+  }
+};
+
+/** Store a derived payload only in Zustand, avoiding an IndexedDB structured clone. */
+export const writeMemoryDataCache = <T>(key: string, value: T): void => {
+  setSharedDataEntry({
+    key,
+    value,
+    savedAt: Date.now(),
+    formatVersion: DATA_CACHE_FORMAT_VERSION,
+  });
+  notifyDataCache(key);
+};
+
+/** Release heavy L1 values while preserving their persistent IndexedDB copies. */
+export const evictDataCacheMemory = (...keysOrPrefixes: string[]): void => {
+  for (const key of [...getSharedDataKeys()]) {
+    if (
+      keysOrPrefixes.some(
+        (token) => key === token || key.startsWith(token),
+      )
+    ) {
+      deleteSharedDataEntry(key);
+    }
+  }
+};
+
+export const cleanupDataCache = async (): Promise<number> => {
+  try {
+    const db = await openDb();
+    try {
+      const entries = await new Promise<CacheEntry[]>((resolve, reject) => {
+        const request = db
+          .transaction(STORE_NAME, "readonly")
+          .objectStore(STORE_NAME)
+          .getAll();
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+      const keys = planDataCacheCleanup(entries);
+      if (!keys.length) return 0;
+      await new Promise<void>((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, "readwrite");
+        const store = tx.objectStore(STORE_NAME);
+        keys.forEach((key) => store.delete(key));
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      });
+      keys.forEach((key) => {
+        deleteSharedDataEntry(key);
+        invalidateInFlightKey(key);
+        notifyDataCache(key);
+      });
+      return keys.length;
+    } finally {
+      db.close();
+    }
+  } catch {
+    return 0;
+  }
+};
+
+let cleanupScheduled = false;
+
+export const scheduleDataCacheCleanup = () => {
+  if (cleanupScheduled || typeof window === "undefined") return;
+  cleanupScheduled = true;
+  const run = () => void cleanupDataCache();
+  if ("requestIdleCallback" in window) {
+    window.requestIdleCallback(run, { timeout: 5_000 });
+  } else {
+    globalThis.setTimeout(run, 1_000);
   }
 };
 
 export const touchDataCache = (key: string) => {
-  const entry = memoryCache.get(key);
+  const entry = getSharedDataEntry(key);
   if (!entry) return;
-  entry.savedAt = Date.now();
+  setSharedDataEntry({ ...entry, savedAt: Date.now() });
 };
 
 export const deleteDataCache = async (key: string): Promise<void> => {
-  memoryCache.delete(key);
+  deleteSharedDataEntry(key);
   notifyDataCache(key);
   try {
     await withStore("readwrite", (store) => store.delete(key));
@@ -147,14 +306,14 @@ export const invalidateDataCache = async (
   if (keysOrPrefixes.length === 0) return;
 
   const notified = new Set<string>();
-  const activeKeys = new Set([...memoryCache.keys(), ...inFlight.keys()]);
+  const activeKeys = new Set([...getSharedDataKeys(), ...inFlight.keys()]);
   for (const token of keysOrPrefixes) {
-    memoryCache.delete(token);
+    deleteSharedDataEntry(token);
     notified.add(token);
     invalidateInFlightKey(token);
     for (const key of activeKeys) {
       if (key !== token && key.startsWith(token)) {
-        memoryCache.delete(key);
+        deleteSharedDataEntry(key);
         notified.add(key);
         invalidateInFlightKey(key);
       }
@@ -203,6 +362,7 @@ export const invalidatePersonnelCaches = () =>
     CacheKeys.ejournalImports,
     "ejournal:sheet-rows:",
     CacheKeys.rosterLatest,
+    CacheKeys.personnelDataset,
     CacheKeys.overview,
     CacheKeys.documentsAll,
     CacheKeys.questionnairesMeta,
@@ -215,6 +375,7 @@ export const invalidatePersonnelCaches = () =>
 export const fetchWithCache = async <T>(options: {
   key: string;
   fetcher: () => Promise<T>;
+  signal?: AbortSignal;
   onCached?: (data: T) => void | Promise<void>;
   isChanged?: (cached: T, fresh: T) => boolean;
   /** Fresh shared copy younger than this skips the network. */
@@ -223,7 +384,10 @@ export const fetchWithCache = async <T>(options: {
   force?: boolean;
 }): Promise<T> => {
   const pending = inFlight.get(options.key);
-  if (pending) return pending as Promise<T>;
+  if (pending && !pending.signal?.aborted) {
+    return pending.promise as Promise<T>;
+  }
+  if (pending) inFlight.delete(options.key);
 
   const run = async () => {
     const generation = getCacheGeneration(options.key);
@@ -267,17 +431,22 @@ export const fetchWithCache = async <T>(options: {
   };
 
   const promise = run().finally(() => {
-    if (inFlight.get(options.key) === promise) inFlight.delete(options.key);
+    if (inFlight.get(options.key)?.promise === promise) {
+      inFlight.delete(options.key);
+    }
   });
-  inFlight.set(options.key, promise);
+  inFlight.set(options.key, { promise, signal: options.signal });
   return promise as Promise<T>;
 };
 
 /** Test helper: drop in-memory copies between cases. */
 export const resetDataCacheMemory = () => {
-  memoryCache.clear();
+  clearSharedDataStore();
   inFlight.clear();
   cacheGenerations.clear();
+  cleanupScheduled = false;
 };
 
 export { payloadChanged as jsonChanged } from "./payloadFingerprint";
+
+scheduleDataCacheCleanup();

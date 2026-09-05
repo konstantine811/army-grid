@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildSheetImpacts,
+  buildTimesheetPreview,
   isInformationalOp,
   isWorkbookApplyOp,
   personChangesFromOps,
@@ -25,6 +26,62 @@ const op = (partial: Partial<EjoosSyncOp> & Pick<EjoosSyncOp, "kind">): EjoosSyn
   payload: {},
   checkedDefault: false,
   ...partial,
+});
+
+describe("buildTimesheetPreview", () => {
+  it("shows dashes before an external arrival even without absence spans", () => {
+    const preview = buildTimesheetPreview(
+      [
+        op({
+          kind: "position_change",
+          payload: {
+            orderDate: "17.08.2026",
+            timesheetActiveFrom: "17.08.2026",
+            arrivedFrom: "_2 ШБ",
+          },
+        }),
+      ],
+      25,
+    );
+
+    expect(preview?.runs).toEqual([
+      { from: 1, to: 16, mark: "-" },
+      { from: 17, to: 25, mark: "+" },
+    ]);
+  });
+
+  it("shows ШЕВЧУК as inactive on day 1, present from day 2, and ЗБ from day 8", () => {
+    const preview = buildTimesheetPreview(
+      [
+        op({
+          kind: "timesheet_day",
+          payload: {
+            timesheetActiveFrom: "02.08.2026",
+            timesheetAbsenceSpans: "8-17:ЗБ",
+          },
+        }),
+        op({
+          kind: "move_to_disposition",
+          payload: {
+            keepOpenSzchTimesheet: "1",
+            absenceCode: "ЗБ",
+            orderDate: "18.08.2026",
+            destination: "у розпорядження командира військової частини",
+            orderNumber: "239",
+          },
+        }),
+      ],
+      25,
+    );
+
+    expect(preview?.runs).toEqual([
+      { from: 1, to: 1, mark: "-" },
+      { from: 2, to: 7, mark: "+" },
+      { from: 8, to: 17, mark: "ЗБ" },
+      { from: 18, to: 18, mark: "ПЕРЕВ" },
+      { from: 19, to: 25, mark: "-" },
+    ]);
+  });
 });
 
 describe("isWorkbookApplyOp", () => {

@@ -41,7 +41,7 @@ export function BasisOrdersSettings() {
   const saveDraft = () => {
     const number = draft.number.trim();
     const date = draft.date.trim();
-    const location = draft.location.trim();
+    const location = draft.location?.trim() ?? "";
     if (!number || !date || !location) {
       setMessage("Потрібні номер БР, дата БР і локація.");
       return;
@@ -52,9 +52,9 @@ export function BasisOrdersSettings() {
       number,
       date,
       location,
-      validFrom: draft.validFrom.trim() || date,
-      validTo: draft.validTo.trim(),
-      note: draft.note.trim(),
+      validFrom: draft.validFrom?.trim() || date,
+      validTo: draft.validTo?.trim() ?? "",
+      note: draft.note?.trim() ?? "",
     };
     persist(
       draft.id

@@ -5,7 +5,6 @@ import {
   createLostMilitaryIdFields,
   declinedInvestigator,
   instrumentalInvestigatorLine,
-  investigatorFooterBlock,
   investigatorFooterLines,
   investigatorFromPersonnelRow,
   mergeLostMilitaryIdFields,
@@ -23,7 +22,7 @@ const person = (name: string, extra: Record<string, unknown> = {}) =>
     повна_посада: extra.position ?? "командир відділення",
     id: extra.id ?? "11524",
     ...extra,
-  }) as EjournalPreviewRow;
+  }) as unknown as EjournalPreviewRow;
 
 describe("normalizeMilitaryUnitPhrase", () => {
   it("adds prefix when the field holds only the unit number", () => {

@@ -82,11 +82,12 @@ const isRankBeforeExclude = (op: EjoosSyncOp) => op.kind === "rank_change";
 
 const applyKindOrder = (op: EjoosSyncOp) => {
   if (op.kind === "rank_change") return 0;
-  if (op.kind === "absent_close") return 1;
-  if (op.kind === "absent_upsert") return 2;
-  if (op.kind === "move_to_disposition") return 3;
-  if (op.kind === "exclude_transfer") return 4;
-  if (op.kind === "position_change") return 5;
+  if (op.kind === "contract_update") return 1;
+  if (op.kind === "absent_close") return 2;
+  if (op.kind === "absent_upsert") return 3;
+  if (op.kind === "move_to_disposition") return 4;
+  if (op.kind === "exclude_transfer") return 5;
+  if (op.kind === "position_change") return 6;
   if (
     op.kind === "other_manual" &&
     op.payload.type === "TRANSFER_CANCELLED"
@@ -583,6 +584,15 @@ async function mutateToBlob(
           repairHistoryTimesheetRow(timesheet, op, plan.timesheetDay);
         }
       }
+      return;
+    }
+    if (op.kind === "contract_update") {
+      if (!oos) throw new Error("CONTRACT_UPDATE_WITHOUT_OOS_SHEET");
+      const row = Number(op.payload.oosExcelRow || 0);
+      if (row <= 0) throw new Error("CONTRACT_UPDATE_WITHOUT_OOS_ROW");
+      oos.cell(row, col("S")).value(op.payload.serviceType || "контракт");
+      oos.cell(row, col("T")).value(op.payload.contractFrom || null);
+      oos.cell(row, col("U")).value(op.payload.contractTo || null);
       return;
     }
     if (op.kind === "rank_change") {
@@ -1318,6 +1328,8 @@ const touchedSheetNamesForOps = (ops: EjoosSyncOp[]) => {
       names.add("6. Табель");
       if (positionCloseWritesExcluded(op.payload)) names.add("3. Виключені");
       if (op.payload.clearExcludedExcelRow) names.add("3. Виключені");
+    } else if (op.kind === "contract_update") {
+      names.add("2. ООС");
     } else if (
       op.kind === "other_manual" &&
       op.payload.type === "TRANSFER_CANCELLED" &&

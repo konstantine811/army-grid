@@ -16,6 +16,7 @@ import {
   type DiskQuestionnaireSearchPersonResult,
 } from "../../api";
 import { extractPassportPhotoFromPdf } from "./autoPassportPhoto";
+import { createPhotoThumbnailDataUrl } from "./photoCompression";
 import { FloatingWindow } from "./FloatingWindow";
 import { dataUrlToFile, buildQuestionnaireExportFileName } from "./personnelUtils";
 import { sanitizeFileName } from "../../shared/browserExport";
@@ -24,6 +25,7 @@ import {
   isPlausibleDiskQuestionnaireMatch,
   isUniqueSurnameFirstFileNameMatch,
 } from "./questionnaireDiskMatch";
+import { searchQuestionnairesOnDiskInBatches } from "./questionnaireDiskSearchBatch";
 
 type SearchPersonInput = {
   rowId: string;
@@ -42,6 +44,11 @@ type RowState = DiskQuestionnaireSearchPersonResult & {
   autoStatus?: string;
   autoPhotoStatus?: string;
 };
+
+const MAX_AUTO_PHOTOS_PER_SEARCH = 8;
+
+const yieldToBrowser = () =>
+  new Promise<void>((resolve) => window.setTimeout(resolve, 50));
 
 const MATCH_LABEL: Record<DiskQuestionnaireMatchLevel, string> = {
   fio: "ПІБ",
@@ -201,24 +208,42 @@ export function QuestionnaireDiskSearchDialog({
 
     let savedQuestionnaires = 0;
     let savedPhotos = 0;
+    let skippedPhotos = 0;
+    let attemptedPhotos = 0;
 
     for (const row of exactRows) {
+      await yieldToBrowser();
       const match = getAutoMatch(row, nextRows);
       if (!match) continue;
+      const autoConfirm = shouldAutoConfirm(row, nextRows);
+      const wantsPhoto = shouldAutoExtractPhoto(row, nextRows);
+      const allowAutoPhoto =
+        wantsPhoto && attemptedPhotos < MAX_AUTO_PHOTOS_PER_SEARCH;
+      if (wantsPhoto && !allowAutoPhoto) skippedPhotos += 1;
       patchRow(row.rowId, {
-        confirming: shouldAutoConfirm(row, nextRows),
-        autoStatus: shouldAutoConfirm(row, nextRows)
+        confirming: autoConfirm,
+        autoStatus: autoConfirm
           ? "Автозбереження анкети…"
-          : "Анкета вже є. Автообробка фото…",
-        autoPhotoStatus: row.missingPhoto ? "Пошук обличчя в PDF…" : undefined,
+          : allowAutoPhoto
+            ? "Анкета вже є. Автообробка фото…"
+            : row.autoStatus,
+        autoPhotoStatus: allowAutoPhoto
+          ? "Пошук обличчя в PDF…"
+          : wantsPhoto
+            ? "Автофото відкладено, щоб не перевантажувати пристрій."
+            : undefined,
       });
 
-      if (shouldAutoConfirm(row, nextRows)) {
+      if (autoConfirm) {
         try {
           await api.confirmDiskQuestionnaire(
             row.externalId,
             match.relativePath,
             getQuestionnaireSaveFileName(row),
+            {
+              suppressErrorToast: true,
+              poolPriority: "normal",
+            },
           );
           savedQuestionnaires += 1;
           patchRow(row.rowId, {
@@ -244,7 +269,8 @@ export function QuestionnaireDiskSearchDialog({
         }
       }
 
-      if (!row.missingPhoto) continue;
+      if (!row.missingPhoto || !allowAutoPhoto) continue;
+      attemptedPhotos += 1;
 
       try {
         const file = await loadAutoPhotoFile(row);
@@ -257,8 +283,10 @@ export function QuestionnaireDiskSearchDialog({
           continue;
         }
 
+        const thumbnailData = await createPhotoThumbnailDataUrl(photo.dataUrl);
         const savedPhoto = await api.upsertPersonPhoto(row.externalId, {
           photoData: photo.dataUrl,
+          thumbnailData,
           fileName: file.name,
           mimeType: "image/jpeg",
           crop: photo.crop,
@@ -281,7 +309,14 @@ export function QuestionnaireDiskSearchDialog({
     }
 
     setSummary((current) => {
-      const suffix = `Авто: анкет ${savedQuestionnaires}, фото ${savedPhotos}.`;
+      const suffix = [
+        `Авто: анкет ${savedQuestionnaires}, фото ${savedPhotos}.`,
+        skippedPhotos
+          ? `Ще ${skippedPhotos} фото відкладено для стабільності.`
+          : "",
+      ]
+        .filter(Boolean)
+        .join(" ");
       return current ? `${current} · ${suffix}` : suffix;
     });
   };
@@ -302,7 +337,7 @@ export function QuestionnaireDiskSearchDialog({
       setSummary("");
       setRows([]);
       try {
-        const result = await api.searchQuestionnairesOnDisk({
+        const result = await searchQuestionnairesOnDiskInBatches({
           people: snapshot.map(({ externalId, fullName, callSign, missingQuestionnaire, missingPhoto }) => ({
             externalId,
             fullName,
@@ -310,7 +345,13 @@ export function QuestionnaireDiskSearchDialog({
             missingQuestionnaire,
             missingPhoto,
           })),
-          refreshIndex: true,
+          search: (payload) => api.searchQuestionnairesOnDisk(payload),
+          isCancelled: () => cancelled,
+          onProgress: (done, total) => {
+            if (!cancelled) {
+              setSummary(`Пошук анкет: перевірено ${done} з ${total} осіб…`);
+            }
+          },
         });
         if (cancelled) return;
         const nextRows = result.people.map((person, index) => {

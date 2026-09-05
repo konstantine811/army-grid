@@ -1,4 +1,8 @@
-import type { BackendPersonnelOverview, BackendPersonQuestionnaireMeta } from "../api";
+import type {
+  BackendPersonnelOverview,
+  BackendPersonnelOverviewRow,
+  BackendPersonQuestionnaireMeta,
+} from "../api";
 import type { AnketaRow } from "../pages/anketa-data/anketaSheet";
 import type { BchsPersonnelAwayPerson } from "../pages/bchs/bchsTypes";
 import {
@@ -13,7 +17,20 @@ import { groupOpsIntoPersonChanges } from "../pages/ejournal/ejoosPersonDiff";
 import type { EjoosDiffSession } from "../pages/ejournal/ejoosPersonDiff";
 import type { EjoosStatusRule } from "../pages/ejournal/ejoosRules";
 import { mergeRosterRowsIntoOverview } from "../pages/overview/overviewRosterMerge";
-import { mergeRosterRowsIntoPreview } from "../pages/personnel/personnelRosterMerge";
+import {
+  applyPersonnelIdentityAssetsToOverview,
+  type OverviewPersonnelDocumentInput,
+  type OverviewPersonnelIdentity,
+  type OverviewPersonnelAssets,
+} from "../pages/overview/overviewPersonnelAssets";
+import {
+  buildQuestionnairePresenceFromPeople,
+  type QuestionnairePresencePerson,
+} from "../pages/personnel/personAttachments";
+import {
+  buildPersonnelMergeDelta,
+  type PersonnelMergeDelta,
+} from "../pages/personnel/personnelRosterMerge";
 import {
   buildStaffSheetEnrichmentEntries,
   type StaffSheetEnrichmentEntry,
@@ -52,6 +69,22 @@ export type HeavyJob =
       type: "mergePersonnel";
       preview: Pick<DbPreviewState, "rows">;
       rosterRows: EjournalPreviewRow[];
+    }
+  | {
+      type: "buildQuestionnairePresence";
+      people: QuestionnairePresencePerson[];
+      questionnaires: Array<
+        Pick<BackendPersonQuestionnaireMeta, "personExternalId" | "fileName">
+      >;
+    }
+  | {
+      type: "applyOverviewAssets";
+      overviewRows: BackendPersonnelOverviewRow[];
+      personnelIdentities: OverviewPersonnelIdentity[];
+      questionnaires: Array<
+        Pick<BackendPersonQuestionnaireMeta, "personExternalId" | "fileName">
+      >;
+      documents: OverviewPersonnelDocumentInput[];
     }
   | {
       type: "ejoosSyncPlan";
@@ -107,7 +140,9 @@ export type HeavyJobResult = {
     novaCount: number;
   };
   mergeOverview: BackendPersonnelOverview;
-  mergePersonnel: EjournalPreviewRow[];
+  mergePersonnel: PersonnelMergeDelta;
+  buildQuestionnairePresence: Record<string, true>;
+  applyOverviewAssets: OverviewPersonnelAssets;
   ejoosSyncPlan: EjoosSyncPlan;
   ejoosSession: EjoosDiffSession;
   staffSheetEnrichment: StaffSheetEnrichmentEntry[];
@@ -136,9 +171,22 @@ export const runHeavyJobSync = <T extends HeavyJob>(
         job.columns,
       ) as HeavyJobResult[T["type"]];
     case "mergePersonnel":
-      return mergeRosterRowsIntoPreview(
+      return buildPersonnelMergeDelta(
         job.preview,
         job.rosterRows,
+      ) as HeavyJobResult[T["type"]];
+    case "buildQuestionnairePresence":
+      return buildQuestionnairePresenceFromPeople(
+        job.people,
+        job.questionnaires,
+      ) as HeavyJobResult[T["type"]];
+    case "applyOverviewAssets":
+      return applyPersonnelIdentityAssetsToOverview(
+        job.overviewRows,
+        job.personnelIdentities,
+        job.questionnaires,
+        [],
+        job.documents,
       ) as HeavyJobResult[T["type"]];
     case "ejoosSyncPlan":
       return buildEjoosSyncPlan(job.ejoos, job.pb, {
@@ -172,6 +220,8 @@ export const runHeavyJobSync = <T extends HeavyJob>(
       return parseVkTpvDovidkyWorkbook(job.snapshot) as HeavyJobResult[T["type"]];
     case "staffSheetRosterImport":
       return buildStaffSheetRosterImportPayload(job.table, job.meta) as HeavyJobResult[T["type"]];
+    case "staffSheetAnketaVkOverlay":
+      throw new Error(`Unknown heavy job: ${job.type}`);
     default: {
       const neverJob: never = job;
       throw new Error(`Unknown heavy job: ${(neverJob as HeavyJob).type}`);

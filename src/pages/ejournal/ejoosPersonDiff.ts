@@ -344,6 +344,18 @@ export const buildSheetImpacts = (ops: EjoosSyncOp[]): SheetImpactItem[] => {
         : undefined,
     );
   }
+  const contractUpdate = ops.find((op) => op.kind === "contract_update");
+  if (contractUpdate) {
+    setImpact(
+      map,
+      "oos",
+      "edit",
+      `Вид служби: ${contractUpdate.payload.serviceType || "контракт"}; укладено ${contractUpdate.payload.contractFrom || "?"}; закінчення: ${contractUpdate.payload.contractTo || "?"}`,
+      contractUpdate.payload.oosExcelRow
+        ? `R${contractUpdate.payload.oosExcelRow}`
+        : undefined,
+    );
+  }
 
   const exclude = ops.find((op) => op.kind === "exclude_transfer");
   if (exclude) {
@@ -448,7 +460,13 @@ export const buildSheetImpacts = (ops: EjoosSyncOp[]): SheetImpactItem[] => {
   }
 
   ops.forEach((op) => {
-    if (op.kind === "exclude_transfer" || op.kind === "rank_change") return;
+    if (
+      op.kind === "exclude_transfer" ||
+      op.kind === "rank_change" ||
+      op.kind === "contract_update"
+    ) {
+      return;
+    }
     if (exclude && op.kind === "position_change") return;
     if (op.kind === "timesheet_day") {
       if (
@@ -1307,7 +1325,7 @@ export const buildTimesheetPreview = (
       continue;
     }
 
-    const fromArchive = spans.length
+    const fromArchive = spans.length || activeFrom > 1
       ? timesheetMarkFromArchive(day, {
           activeFromDay: activeFrom,
           lastDay,
@@ -1369,6 +1387,16 @@ export const buildSourceInfluences = (
         ref,
         event: `ЗВАННЯ: ${op.payload.previousRank || op.before || "—"} → ${op.payload.nextRank || op.rank || "—"} · наказ №${op.payload.orderNumber || "?"} від ${op.payload.orderDate || "?"}`,
         effect: "ШПО / ООС / Табель: лише звання; дні присутності не змінює",
+      });
+      continue;
+    }
+    if (op.kind === "contract_update") {
+      push({
+        source: "ruh",
+        sourceLabel: SOURCE_LABEL.ruh,
+        ref,
+        event: `КОНТРАКТ: ${op.payload.contractFrom || "?"} → ${op.payload.contractTo || "?"}`,
+        effect: "ООС: вид служби «контракт», дата укладання та строк закінчення",
       });
       continue;
     }
@@ -1782,6 +1810,7 @@ const WORKBOOK_APPLY_KINDS = new Set<EjoosOpKind>([
   "move_to_disposition",
   "position_change",
   "rank_change",
+  "contract_update",
 ]);
 
 /** Є реальний handler у apply; arrival / generic other_manual — ні. */

@@ -52,7 +52,17 @@ describe("buildAnketaStaffStats", () => {
     ];
 
     const stats = buildAnketaStaffStats({
-      morning: { fileName: "morning.xlsx", sheets: [] },
+      morning: {
+        file: {} as File,
+        fileName: "morning.xlsx",
+        sheetName: "",
+        headerRows: [],
+        rows: [],
+        columnCount: 0,
+        columnIndexes: [],
+        dataStartRow: 0,
+        sheets: [],
+      },
       anketaRows,
       year: 2026,
     });

@@ -8,10 +8,6 @@ import { CacheKeys, readDataCache } from "../../data/idbDataCache";
 import { loadSharedEjournalImports } from "../../data/sharedAppData";
 import type { DbPreviewState, EjournalPreviewRow } from "../ejournal/ejournalTypes";
 import {
-  loadAnketaCreatedPersonnel,
-  mergeAnketaCreatedRowsIntoPreview,
-} from "../anketa-data/anketaPersonnelRosterCreate";
-import {
   collectPersonAttachmentLookupIds,
   parseOrphanAttachmentIdentityId,
   personNameMatchesOrphanNameKey,
@@ -36,6 +32,17 @@ export type OverviewPersonnelAssets = {
   questionnairePresence: Record<string, true>;
   questionnaireSourceIds: Record<string, string>;
   documents: Record<string, OverviewPersonDocumentSummary>;
+};
+
+export type OverviewPersonnelDocumentInput = Pick<
+  BackendPersonDocument,
+  "id" | "personExternalId" | "type" | "title"
+>;
+
+export type OverviewPersonnelIdentity = {
+  name: string;
+  birthKey: string;
+  lookupIds: string[];
 };
 
 const stripNameNoise = (value: unknown) =>
@@ -98,6 +105,19 @@ const takeLookup = (row: EjournalPreviewRow) => {
   }
 };
 
+export const buildOverviewPersonnelIdentities = (
+  rows: EjournalPreviewRow[],
+): OverviewPersonnelIdentity[] =>
+  rows.flatMap((row) => {
+    const name = personnelName(row);
+    if (!name) return [];
+    return [{
+      name,
+      birthKey: personnelBirth(row),
+      lookupIds: takeLookup(row),
+    }];
+  });
+
 const asList = <T,>(value: unknown): T[] =>
   Array.isArray(value) ? value : [];
 
@@ -131,6 +151,12 @@ const pickByPerson = (
 /** Same people Особовий склад shows: аркуш ООС + штатка. */
 export const loadPersonnelRowsForOverview = async (
   rosterRows: EjournalPreviewRow[],
+  options?: {
+    mergePersonnel?: (
+      preview: Pick<DbPreviewState, "rows">,
+      rosterRows: EjournalPreviewRow[],
+    ) => Promise<EjournalPreviewRow[]>;
+  },
 ): Promise<EjournalPreviewRow[]> => {
   try {
     const cachedImports = await readDataCache<BackendEjournalImport[]>(
@@ -145,30 +171,29 @@ export const loadPersonnelRowsForOverview = async (
       sheetRowsCacheKey(sheet),
     );
     const preview = cachedPreview ?? (await loadAllEjournalSheetRows(sheet));
-    const createdRows = await loadAnketaCreatedPersonnel();
-    return mergeAnketaCreatedRowsIntoPreview(
-      mergeRosterRowsIntoPreview(preview, rosterRows),
-      createdRows,
-    );
+    const mergedRows = options?.mergePersonnel
+      ? await options.mergePersonnel(preview, rosterRows)
+      : mergeRosterRowsIntoPreview(preview, rosterRows);
+    return mergedRows;
   } catch {
     return rosterRows;
   }
 };
 
 /** Copy Особовий склад анкети / фото / документи onto Overview by ПІБ + дата народження. */
-export const applyPersonnelAssetsToOverview = (
+export const applyPersonnelIdentityAssetsToOverview = (
   overviewRows: BackendPersonnelOverviewRow[],
-  personnelRows: EjournalPreviewRow[],
+  personnelIdentities: OverviewPersonnelIdentity[],
   questionnaires: BackendPersonQuestionnaireMeta[] = [],
   photoList: Array<{ personExternalId?: string; photoData?: string }> = [],
-  documents: BackendPersonDocument[] = [],
+  documents: OverviewPersonnelDocumentInput[] = [],
 ): OverviewPersonnelAssets => {
-  const people = asList<EjournalPreviewRow>(personnelRows).filter(Boolean);
+  const people = asList<OverviewPersonnelIdentity>(personnelIdentities).filter(Boolean);
   const qList = asList<BackendPersonQuestionnaireMeta>(questionnaires);
   const photosIn = asList<{ personExternalId?: string; photoData?: string }>(
     photoList,
   );
-  const docsIn = asList<BackendPersonDocument>(documents);
+  const docsIn = asList<OverviewPersonnelDocumentInput>(documents);
 
   const photoById: Record<string, string> = {};
   for (const item of photosIn) {
@@ -250,12 +275,12 @@ export const applyPersonnelAssetsToOverview = (
     qList.map((item) => String(item.personExternalId ?? "").trim()).filter(Boolean),
   );
 
-  for (const row of people) {
-    const name = personnelName(row);
+  for (const person of people) {
+    const name = person.name;
     const nameKey = nameKeyOf(name);
-    const birthKey = personnelBirth(row);
+    const birthKey = person.birthKey;
     if (!nameKey) continue;
-    const lookup = takeLookup(row);
+    const lookup = person.lookupIds;
     addPersonName(nameKey, birthKey, lookup);
     const qSource = lookup.find((id) => storedQIds.has(id)) || "";
     const photo = lookup.map((id) => photoById[id]).find(Boolean) || "";
@@ -347,3 +372,18 @@ export const applyPersonnelAssetsToOverview = (
     documents: documentsOut,
   };
 };
+
+export const applyPersonnelAssetsToOverview = (
+  overviewRows: BackendPersonnelOverviewRow[],
+  personnelRows: EjournalPreviewRow[],
+  questionnaires: BackendPersonQuestionnaireMeta[] = [],
+  photoList: Array<{ personExternalId?: string; photoData?: string }> = [],
+  documents: OverviewPersonnelDocumentInput[] = [],
+) =>
+  applyPersonnelIdentityAssetsToOverview(
+    overviewRows,
+    buildOverviewPersonnelIdentities(personnelRows),
+    questionnaires,
+    photoList,
+    documents,
+  );

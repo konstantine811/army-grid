@@ -56,9 +56,6 @@ const previewCell = (
   kind,
 });
 
-const compactPreviewText = (value: string | undefined) =>
-  String(value || "").replace(/\s+/g, " ").trim();
-
 const dayHeader = (from: number, to: number) =>
   from === to
     ? String(from).padStart(2, "0")
@@ -306,6 +303,21 @@ const rankPreviews = (op: EjoosSyncOp): SheetRowPreview[] => {
   ];
 };
 
+const contractPreviews = (op: EjoosSyncOp): SheetRowPreview[] => [
+  {
+    sheetKey: "oos",
+    sheetLabel: "2. ООС",
+    role: op.payload.oosExcelRow
+      ? `Заповнити контракт · R${op.payload.oosExcelRow}`
+      : "Заповнити контракт",
+    cells: [
+      previewCell(19, "вид служби", op.payload.serviceType || "контракт"),
+      previewCell(20, "дата укладання", op.payload.contractFrom),
+      previewCell(21, "дата закінчення", op.payload.contractTo),
+    ],
+  },
+];
+
 /** Як виглядатимуть рядки Excel на аркушах, які ця особа змінює. */
 export const buildSheetRowPreviews = (
   ops: EjoosSyncOp[],
@@ -337,7 +349,13 @@ export const buildSheetRowPreviews = (
   }
 
   const rank = ops.find((op) => op.kind === "rank_change");
-  if (rank) return rankPreviews(rank);
+  const contract = ops.find((op) => op.kind === "contract_update");
+  if (rank || contract) {
+    return [
+      ...(rank ? rankPreviews(rank) : []),
+      ...(contract ? contractPreviews(contract) : []),
+    ];
+  }
 
   return [];
 };

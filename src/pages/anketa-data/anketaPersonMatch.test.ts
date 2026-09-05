@@ -116,7 +116,6 @@ describe("matchAnketaRowToPersonnelDetailed", () => {
   });
 
   it("disambiguates duplicate pib by id and birth date", () => {
-    const sharedName = "іваненко іван іванович";
     const personnelRows = [
       {
         __dbRowId: "1",

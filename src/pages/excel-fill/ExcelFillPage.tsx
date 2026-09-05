@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Box, Button, Stack, TextField, Typography } from "@/components/sci/SciPrimitives";
+import { Box, Button, Stack, Typography } from "@/components/sci/SciPrimitives";
 import type { EjournalPreviewRow } from "../ejournal/ejournalTypes";
 import {
   FileDownloadOutlinedIcon,

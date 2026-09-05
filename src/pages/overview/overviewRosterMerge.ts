@@ -250,6 +250,7 @@ export const buildStaffOverviewRowsFromPersonnel = (
   for (const row of personnelRows) {
     if (!isLikelyPersonnelRow(row)) continue;
     const inStaff = isPersonnelInStaffRoster(row);
+    if (!inStaff) continue;
     const battalionLabel = rosterBattalionLabel(undefined, row);
     if (battalion !== "ALL" && battalionLabel !== battalion) continue;
 
@@ -303,6 +304,74 @@ export const buildOverviewMetrics = (rows: BackendPersonnelOverviewRow[]) => ({
       ),
   ).length,
 });
+
+/** Immediate Overview first paint from the same cached roster as Personnel. */
+export const buildRosterOnlyOverview = (
+  rosterRows: EjournalPreviewRow[],
+  rosterLabels: Record<string, string> = {},
+  columns?: Array<{ key: string; letter?: string; originalIndex?: number }>,
+  meta: { importId?: string; importName?: string } = {},
+): BackendPersonnelOverview => {
+  const rows = buildStaffOverviewRowsFromRoster(
+    rosterRows,
+    rosterLabels,
+    columns,
+  );
+  return {
+    importId: meta.importId || "local-roster-cache",
+    importName: meta.importName || "Штатка · локальний кеш",
+    rows,
+    metrics: buildOverviewMetrics(rows),
+    units: collectRosterUnitOptions(rosterRows, columns),
+    critical: [],
+    todayChanges: {
+      total: 0,
+      onDuty: 0,
+      businessTrip: 0,
+      leave: 0,
+      medical: 0,
+      awol: 0,
+      other: 0,
+    },
+    todayUpdates: 0,
+  };
+};
+
+/** Ready-to-render staff Overview produced from Personnel's merged rows. */
+export const buildPersonnelStaffOverview = (
+  personnelRows: EjournalPreviewRow[],
+  rosterLabels: Record<string, string> = {},
+  meta: { importId?: string; importName?: string } = {},
+): BackendPersonnelOverview => {
+  const rows = buildStaffOverviewRowsFromPersonnel(
+    personnelRows,
+    rosterLabels,
+  );
+  return {
+    importId: meta.importId || "personnel-zustand-preview",
+    importName: meta.importName || "Особовий склад · спільний кеш",
+    rows,
+    metrics: buildOverviewMetrics(rows),
+    units: [...new Set(rows.map((row) => row.unit).filter(Boolean))].sort(
+      (left, right) =>
+        left.localeCompare(right, "uk", {
+          numeric: true,
+          sensitivity: "base",
+        }),
+    ),
+    critical: [],
+    todayChanges: {
+      total: 0,
+      onDuty: 0,
+      businessTrip: 0,
+      leave: 0,
+      medical: 0,
+      awol: 0,
+      other: 0,
+    },
+    todayUpdates: 0,
+  };
+};
 
 /** Єдині назви категорій у табличному фільтрі, незалежно від тексту в штатці. */
 export const overviewStatusFilterLabel = (

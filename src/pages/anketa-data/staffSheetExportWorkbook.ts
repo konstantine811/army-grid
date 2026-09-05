@@ -90,31 +90,32 @@ export const resetStaffSheetExportTemplateCache = () => {
   templateCache = null;
 };
 
-type StyleCell = {
-  style: (
-    names?: readonly string[] | Record<string, string | boolean>,
-  ) => Record<string, string | boolean>;
+type XlsxPopulateModule = typeof import(
+  "xlsx-populate/browser/xlsx-populate-no-encryption"
+);
+type StaffSheetExportWorkbook = Awaited<
+  ReturnType<XlsxPopulateModule["default"]["fromDataAsync"]>
+>;
+type StaffSheetExportSheet = ReturnType<StaffSheetExportWorkbook["sheet"]>;
+type StaffSheetExportCell = ReturnType<StaffSheetExportSheet["cell"]>;
+
+const copyCellStyle = (
+  sourceCell: StaffSheetExportCell,
+  targetCell: StaffSheetExportCell,
+) => {
+  const styles = Object.fromEntries(
+    STYLE_PROP_NAMES.map((name) => [name, sourceCell.style(name)]),
+  );
+  targetCell.style(styles);
 };
 
-const copyCellStyle = (sourceCell: StyleCell, targetCell: StyleCell) => {
-  targetCell.style(sourceCell.style([...STYLE_PROP_NAMES]));
-};
-
-const findGeneralListSheet = (workbook: {
-  sheets: () => Array<{ name: () => string }>;
-  sheet: (index: number) => StaffSheetExportSheet;
-}) =>
+const findGeneralListSheet = (
+  workbook: StaffSheetExportWorkbook,
+): StaffSheetExportSheet =>
   workbook
     .sheets()
     .find((item) => /загальний\s*список/i.test(item.name())) ??
   workbook.sheet(0);
-
-type StaffSheetExportSheet = {
-  cell: (
-    row: number,
-    column: number,
-  ) => StyleCell & { value: (value?: unknown) => unknown };
-};
 
 const HEADER_LIKE_FILL_RGB = new Set(["FFC000", "FFFF00"]);
 

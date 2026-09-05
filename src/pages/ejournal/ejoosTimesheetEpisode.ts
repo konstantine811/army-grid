@@ -10,6 +10,29 @@ export type TimesheetEpisodeMove = {
   arrivedFrom?: string;
 };
 
+export const resolveTimesheetArrivalDate = (input: {
+  explicitArrivalDate: string;
+  externalStaffArrivalDate: string;
+  temporaryArrivalDate: string;
+  staffAppointmentDate: string;
+}) =>
+  input.explicitArrivalDate ||
+  input.externalStaffArrivalDate ||
+  input.temporaryArrivalDate ||
+  input.staffAppointmentDate ||
+  "";
+
+export const resolveExistingTimesheetStartDay = (input: {
+  calculatedDay: number;
+  firstPlusDay: number;
+  hasInactivePrefix: boolean;
+}) =>
+  input.hasInactivePrefix &&
+  input.firstPlusDay > 1 &&
+  input.calculatedDay > input.firstPlusDay
+    ? input.firstPlusDay
+    : input.calculatedDay;
+
 /**
  * З якої дати фарбувати активний рядок Табеля.
  * Внутрішня зміна посади (і повернення на стару) не починає новий епізод.

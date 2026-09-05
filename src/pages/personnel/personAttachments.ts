@@ -324,9 +324,117 @@ export const loadPersonPhotoForRow = async (
   return { photoData: "", resolvedExternalId: fallback };
 };
 
+let availablePhotoIdsCache:
+  | { at: number; ids: Set<string> }
+  | null = null;
+let availablePhotoIdsPromise: Promise<Set<string>> | null = null;
+
+export const clearAvailablePersonPhotoIdsCache = () => {
+  availablePhotoIdsCache = null;
+  availablePhotoIdsPromise = null;
+};
+
+export const loadAvailablePersonPhotoIds = async () => {
+  const now = Date.now();
+  if (availablePhotoIdsCache && now - availablePhotoIdsCache.at < 30_000) {
+    return availablePhotoIdsCache.ids;
+  }
+  availablePhotoIdsPromise ??= api
+    .listPersonPhotos()
+    .then(
+      (items) =>
+        new Set(
+          items
+            .filter(
+              (item) =>
+                item.personExternalId &&
+                (item.hasFile ||
+                  item.hasThumbnail ||
+                  Boolean(item.photoData)),
+            )
+            .map((item) => item.personExternalId.trim())
+            .filter(Boolean),
+        ),
+    )
+    .catch(() => new Set<string>())
+    .then((ids) => {
+      availablePhotoIdsCache = { at: Date.now(), ids };
+      return ids;
+    })
+    .finally(() => {
+      availablePhotoIdsPromise = null;
+    });
+  return availablePhotoIdsPromise;
+};
+
+/** Lightweight list/card preview: request the 96×128 thumbnail directly. */
+export const loadPersonPhotoThumbnailForRow = async (
+  row: EjournalPreviewRow | null,
+  hints?: PersonAttachmentLookupHints,
+) => {
+  const fallback = resolvePersonIdentityKey(row);
+  const availableIds = await loadAvailablePersonPhotoIds();
+  const candidateIds = collectPersonAttachmentLookupIds(row, hints).filter(
+    (id) => availableIds.has(id),
+  );
+  for (const id of candidateIds) {
+    try {
+      const photoData = (await api.getPersonPhotoThumbnail(id)).trim();
+      if (photoData) return { photoData, resolvedExternalId: id };
+    } catch {
+      /* try next identity key */
+    }
+  }
+  return { photoData: "", resolvedExternalId: fallback };
+};
+
 export type LoadPersonQuestionnaireOptions = {
   /** Два однофамільці — не підставляти PDF лише за назвою файлу. */
   nameIsAmbiguous?: boolean;
+};
+
+export const loadPersonDocumentsForRow = async (
+  row: EjournalPreviewRow | null,
+  hints?: PersonAttachmentLookupHints,
+  options?: LoadPersonQuestionnaireOptions,
+): Promise<BackendPersonDocument[]> => {
+  const fallback = resolvePersonIdentityKey(row);
+  const lookupIds = collectPersonAttachmentLookupIds(row, hints);
+  const lookupSet = new Set(lookupIds);
+  if (fallback) lookupSet.add(fallback);
+  const expectedNames = [
+    getPersonDisplayName(row),
+    String(hints?.anketaFullName ?? "").trim(),
+  ]
+    .map(normalizeAttachmentNameKey)
+    .filter(Boolean);
+  const [direct, all] = await Promise.all([
+    fallback
+      ? api.listPersonDocuments(fallback).catch(() => [])
+      : Promise.resolve([] as BackendPersonDocument[]),
+    api.listAllPersonDocuments().catch(() => []),
+  ]);
+  const related = all.filter((document) => {
+    if (lookupSet.has(document.personExternalId)) return true;
+    if (options?.nameIsAmbiguous) return false;
+    const metadataName = normalizeAttachmentNameKey(document.personName || "");
+    if (metadataName && expectedNames.includes(metadataName)) return true;
+    const parsed = parseOrphanAttachmentIdentityId(document.personExternalId);
+    return Boolean(
+      parsed &&
+        expectedNames.some((name) =>
+          personNameMatchesOrphanNameKey(name, parsed.nameKey),
+        ),
+    );
+  });
+  const unique = new Map<string, BackendPersonDocument>();
+  for (const document of [...direct, ...related]) {
+    unique.set(document.id, document);
+  }
+  return [...unique.values()].sort(
+    (left, right) =>
+      new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime(),
+  );
 };
 
 export const loadPersonQuestionnaireForRow = async (
@@ -370,8 +478,28 @@ export const loadPersonQuestionnaireForRow = async (
 };
 
 /** PDF is stored under any candidate / legacy identity of this row. */
-export const buildQuestionnairePresenceMap = (
+export type QuestionnairePresencePerson = {
+  currentId: string;
+  lookupIds: string[];
+  fullName: string;
+};
+
+export const buildQuestionnairePresencePeople = (
   rows: EjournalPreviewRow[],
+): QuestionnairePresencePerson[] =>
+  rows.flatMap((row) => {
+    if (!isLikelyPersonnelRow(row)) return [];
+    const currentId = resolvePersonIdentityKey(row);
+    if (!currentId) return [];
+    return [{
+      currentId,
+      lookupIds: collectPersonAttachmentLookupIds(row),
+      fullName: getPersonDisplayName(row),
+    }];
+  });
+
+export const buildQuestionnairePresenceFromPeople = (
+  people: QuestionnairePresencePerson[],
   items: Array<{ personExternalId?: string | null; fileName?: string | null }>,
 ) => {
   const stored = new Set(
@@ -381,29 +509,26 @@ export const buildQuestionnairePresenceMap = (
   );
   const map: Record<string, true> = {};
   for (const id of stored) map[id] = true;
-  const unmatched: EjournalPreviewRow[] = [];
-  for (const row of rows) {
-    if (!isLikelyPersonnelRow(row)) continue;
-    const current = resolvePersonIdentityKey(row);
-    if (!current) continue;
-    if (stored.has(current)) {
-      map[current] = true;
+  const unmatched: QuestionnairePresencePerson[] = [];
+  for (const person of people) {
+    if (stored.has(person.currentId)) {
+      map[person.currentId] = true;
       continue;
     }
-    if (collectPersonAttachmentLookupIds(row).some((id) => stored.has(id))) {
-      map[current] = true;
+    if (person.lookupIds.some((id) => stored.has(id))) {
+      map[person.currentId] = true;
       continue;
     }
-    unmatched.push(row);
+    unmatched.push(person);
   }
 
   if (unmatched.length && items.length) {
-    const rowsByShortName = new Map<string, EjournalPreviewRow[]>();
-    for (const row of unmatched) {
-      const shortKey = nameTokensOf(getPersonDisplayName(row)).slice(0, 2).join(" ");
+    const rowsByShortName = new Map<string, QuestionnairePresencePerson[]>();
+    for (const person of unmatched) {
+      const shortKey = nameTokensOf(person.fullName).slice(0, 2).join(" ");
       if (!shortKey) continue;
       const list = rowsByShortName.get(shortKey) ?? [];
-      list.push(row);
+      list.push(person);
       rowsByShortName.set(shortKey, list);
     }
     for (const item of items) {
@@ -411,16 +536,24 @@ export const buildQuestionnairePresenceMap = (
       if (!fileName) continue;
       const shortKey = nameTokensOf(fileName).slice(0, 2).join(" ");
       const candidates = rowsByShortName.get(shortKey) ?? [];
-      const hits = candidates.filter((row) =>
-        questionnaireFileMatchesPerson(fileName, [getPersonDisplayName(row)]),
+      const hits = candidates.filter((person) =>
+        questionnaireFileMatchesPerson(fileName, [person.fullName]),
       );
       if (hits.length !== 1) continue;
-      const current = resolvePersonIdentityKey(hits[0]);
-      if (current) map[current] = true;
+      map[hits[0].currentId] = true;
     }
   }
   return map;
 };
+
+export const buildQuestionnairePresenceMap = (
+  rows: EjournalPreviewRow[],
+  items: Array<{ personExternalId?: string | null; fileName?: string | null }>,
+) =>
+  buildQuestionnairePresenceFromPeople(
+    buildQuestionnairePresencePeople(rows),
+    items,
+  );
 
 export type OrphanAttachmentIdentity = {
   nameKey: string;
@@ -686,7 +819,12 @@ export const buildOrphanAttachmentMigrationPairs = (
 
 export type PersonAttachmentMigrationOptions = {
   includeDocuments?: boolean;
-  photos?: Array<{ personExternalId: string; photoData: string }>;
+  photos?: Array<{
+    personExternalId: string;
+    photoData: string;
+    hasFile?: boolean;
+    hasThumbnail?: boolean;
+  }>;
   questionnaires?: Array<{ personExternalId: string }>;
   documents?: BackendPersonDocument[];
 };
@@ -727,8 +865,12 @@ const migrateTargetedPersonAttachments = async (
 
       if (!includeDocuments) continue;
       const [oldDocs, newDocs] = await Promise.all([
-        api.listPersonDocuments(pair.fromExternalId).catch(() => []),
-        api.listPersonDocuments(pair.toExternalId).catch(() => []),
+        api
+          .listPersonDocuments(pair.fromExternalId, { full: true })
+          .catch(() => []),
+        api
+          .listPersonDocuments(pair.toExternalId, { full: true })
+          .catch(() => []),
       ]);
       const existing = [...newDocs];
       for (const document of oldDocs) {
@@ -787,8 +929,12 @@ export const migratePersonAttachmentsBetweenIds = async (
 
   const photoById = new Map(
     photos
-      .filter((item) => item.personExternalId && item.photoData)
-      .map((item) => [item.personExternalId, item.photoData]),
+      .filter(
+        (item) =>
+          item.personExternalId &&
+          (item.photoData || item.hasFile || item.hasThumbnail),
+      )
+      .map((item) => [item.personExternalId, item.photoData || ""]),
   );
   const questionnaireIds = new Set(
     questionnaires
@@ -811,14 +957,21 @@ export const migratePersonAttachmentsBetweenIds = async (
         (documentsById.get(pair.fromExternalId)?.length ?? 0) > 0;
       if (!hasWork) continue;
 
-      const oldPhoto = photoById.get(pair.fromExternalId);
-      if (oldPhoto && !photoById.has(pair.toExternalId)) {
-        await api.upsertPersonPhoto(pair.toExternalId, {
-          photoData: oldPhoto,
-          fileName: `${pair.name}.jpg`,
-        });
-        photoById.set(pair.toExternalId, oldPhoto);
-        migrated += 1;
+      const oldPhotoMarker = photoById.get(pair.fromExternalId);
+      if (oldPhotoMarker !== undefined && !photoById.has(pair.toExternalId)) {
+        const oldPhoto =
+          oldPhotoMarker ||
+          (await api.getPersonPhoto(pair.fromExternalId).catch(() => null))
+            ?.photoData ||
+          "";
+        if (oldPhoto) {
+          await api.upsertPersonPhoto(pair.toExternalId, {
+            photoData: oldPhoto,
+            fileName: `${pair.name}.jpg`,
+          });
+          photoById.set(pair.toExternalId, oldPhoto);
+          migrated += 1;
+        }
       }
 
       if (
@@ -842,8 +995,18 @@ export const migratePersonAttachmentsBetweenIds = async (
       }
 
       if (!includeDocuments) continue;
-      const oldDocs = documentsById.get(pair.fromExternalId) ?? [];
-      const newDocs = [...(documentsById.get(pair.toExternalId) ?? [])];
+      const sourceDocumentMarkers =
+        documentsById.get(pair.fromExternalId) ?? [];
+      if (!sourceDocumentMarkers.length) continue;
+      const [oldDocs, loadedNewDocs] = await Promise.all([
+        api
+          .listPersonDocuments(pair.fromExternalId, { full: true })
+          .catch(() => []),
+        api
+          .listPersonDocuments(pair.toExternalId, { full: true })
+          .catch(() => []),
+      ]);
+      const newDocs = [...loadedNewDocs];
       for (const document of oldDocs) {
         const already = newDocs.some(
           (item) => item.type === document.type && item.title === document.title,

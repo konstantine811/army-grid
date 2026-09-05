@@ -300,7 +300,12 @@ export const formatExcludedListBasis = (payload: TransferUnitPayload) => {
   const type = String(payload.type || "");
   const raw = String(payload.exclusionReason || "").replace(/\s+/g, " ").trim();
   const isDisposition = /розпорядж/i.test(type) || /розпорядж/i.test(raw);
-  const title = isDisposition ? "РОЗПОРЯДЖЕННЯ" : "ПЕРЕВЕДЕННЯ";
+  const isDismissal = /звільн/i.test(type) || /звільн/i.test(raw);
+  const title = isDismissal
+    ? "ЗВІЛЬНЕННЯ"
+    : isDisposition
+      ? "РОЗПОРЯДЖЕННЯ"
+      : "ПЕРЕВЕДЕННЯ";
   const unit = shortExcludedTransferUnit(payload);
   return unit ? `${title}\n${unit}` : title;
 };

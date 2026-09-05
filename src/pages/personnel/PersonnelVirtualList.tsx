@@ -7,12 +7,14 @@ export function PersonnelVirtualList({
   items,
   selectedRowId,
   photoByExternalId,
+  onNeedPhotos,
   onSelect,
   keyboardEnabled = true,
 }: {
   items: PersonnelRecord[];
   selectedRowId: string;
   photoByExternalId: Record<string, string>;
+  onNeedPhotos?: (externalIds: string[]) => void;
   onSelect: (rowId: string) => void;
   keyboardEnabled?: boolean;
 }) {
@@ -25,6 +27,16 @@ export function PersonnelVirtualList({
     overscan: 12,
     gap: 8,
   });
+  const virtualItems = rowVirtualizer.getVirtualItems();
+  const visiblePhotoIds = virtualItems
+    .map((item) => items[item.index]?.summary.externalId ?? "")
+    .filter(Boolean)
+    .join("\u0000");
+
+  useEffect(() => {
+    if (!visiblePhotoIds) return;
+    onNeedPhotos?.(visiblePhotoIds.split("\u0000"));
+  }, [onNeedPhotos, visiblePhotoIds]);
 
   useEffect(() => {
     if (!selectedRowId || items.length === 0) return;
@@ -102,7 +114,7 @@ export function PersonnelVirtualList({
         className="personnel-list-virtual"
         style={{ height: `${rowVirtualizer.getTotalSize()}px` }}
       >
-        {rowVirtualizer.getVirtualItems().map((virtualRow) => {
+        {virtualItems.map((virtualRow) => {
           const record = items[virtualRow.index];
           if (!record) return null;
 

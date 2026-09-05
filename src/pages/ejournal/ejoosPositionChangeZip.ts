@@ -138,10 +138,10 @@ const collectWrites = (op: EjoosSyncOp, ctx: PositionChangeContext) => {
   const activeFromDay =
     dayFromOrderLabel(op.payload.timesheetActiveFrom || op.payload.transferCancelDate) ||
     departDay;
+  const oosRow = Number(op.payload.oosExcelRow || 0);
 
   // 1) Виключені — лише коли особа вибула з частини, не внутрішній стрибок.
   if (positionCloseWritesExcluded(op.payload)) {
-    const oosRow = Number(op.payload.oosExcelRow || 0);
     const excludedRow = ctx.takeExcludedRow();
   if (oosRow > 0) {
     for (const [fromColumn, toColumn] of OOS_TO_EXCLUDED_BASE) {

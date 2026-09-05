@@ -20,7 +20,11 @@ import {
   isOwnUnitStaffMove,
   resolveOutboundTransferDestination,
 } from "./ejoosMovementRules";
-import { resolveTimesheetEpisodeStart } from "./ejoosTimesheetEpisode";
+import {
+  resolveExistingTimesheetStartDay,
+  resolveTimesheetArrivalDate,
+  resolveTimesheetEpisodeStart,
+} from "./ejoosTimesheetEpisode";
 import {
   absenceOnlyBlocksExclusion,
   excludedTimesheetWrite,
@@ -79,6 +83,7 @@ export type EjoosOpKind =
   | "data_mismatch"
   | "position_change"
   | "rank_change"
+  | "contract_update"
   | "arrival"
   | "other_manual";
 
@@ -413,6 +418,28 @@ const isRankAssignmentEvent = (event: PbMovement) => {
   return false;
 };
 
+export const isContractMovementType = (type: string) =>
+  type === "КОНТРАКТ" || /МОТИВАЦ.*КОНТР/iu.test(type);
+
+const normalizeContractDate = (value: string) => {
+  const match = norm(value).match(
+    /^(\d{1,2})[./-](\d{1,2})[./-](\d{2}|\d{4})$/,
+  );
+  if (!match) return norm(value);
+  const year = match[3].length === 2 ? `20${match[3]}` : match[3];
+  return `${match[1].padStart(2, "0")}.${match[2].padStart(2, "0")}.${year}`;
+};
+
+export const parseContractDatesFromChangeText = (value: string) => {
+  const match = norm(value).match(
+    /(?:^|\s)(?:з|із)\s+(\d{1,2}[./-]\d{1,2}[./-](?:\d{2}|\d{4}))\s+до\s+(\d{1,2}[./-]\d{1,2}[./-](?:\d{2}|\d{4}))(?:$|[\s,.;])/iu,
+  );
+  return {
+    contractFrom: match ? normalizeContractDate(match[1]) : "",
+    contractTo: match ? normalizeContractDate(match[2]) : "",
+  };
+};
+
 const unitCodeFromMovement = (event: PbMovement) =>
   formatTransferDestinationForTimesheet(
     [event.destination, event.changeText, event.note].join(" "),
@@ -720,6 +747,9 @@ export type EjoosOosRow = {
   fullName: string;
   rank: string;
   positionIndex: string;
+  serviceType: string;
+  contractFrom: string;
+  contractTo: string;
 };
 
 export type EjoosExcludedRow = {
@@ -883,6 +913,67 @@ export const parseEjoosShpo = (
   return rows;
 };
 
+const operationMatchesOccupant = (
+  op: EjoosSyncOp,
+  occupant: EjoosShpoRow,
+) =>
+  Boolean(
+    (occupant.personId &&
+      op.personId &&
+      occupant.personId === op.personId) ||
+      (occupant.fullName &&
+        op.fullName &&
+        canonicalName(occupant.fullName) === canonicalName(op.fullName)),
+  );
+
+export const findUnvacatedTargetOccupant = (
+  op: EjoosSyncOp,
+  shpoRows: EjoosShpoRow[],
+  allOps: EjoosSyncOp[],
+): EjoosShpoRow | null => {
+  if (op.kind !== "position_change") return null;
+  const targetIndex = op.payload.nextIndex || op.positionIndex;
+  if (!targetIndex) return null;
+  const occupant =
+    shpoRows.find(
+      (row) =>
+        row.positionIndex === targetIndex &&
+        Boolean(row.personId || row.fullName),
+    ) ?? null;
+  if (!occupant || operationMatchesOccupant(op, occupant)) return null;
+
+  const hasReadyVacatingOperation = allOps.some((candidate) => {
+    if (candidate === op || candidate.class !== "ready") return false;
+    if (!operationMatchesOccupant(candidate, occupant)) return false;
+    if (candidate.kind === "exclude_transfer") {
+      const sourceIndex =
+        candidate.payload.occupiedPositionIndex ||
+        candidate.payload.fromPositionIndex ||
+        candidate.payload.previousIndex ||
+        candidate.positionIndex;
+      return sourceIndex === targetIndex;
+    }
+    if (candidate.kind === "position_change") {
+      const sourceIndex =
+        candidate.payload.fromPositionIndex ||
+        candidate.payload.previousIndex;
+      const destinationIndex =
+        candidate.payload.nextIndex || candidate.positionIndex;
+      return sourceIndex === targetIndex && destinationIndex !== targetIndex;
+    }
+    if (candidate.kind === "move_to_disposition") {
+      const sourceIndex =
+        candidate.payload.fromPositionIndex ||
+        candidate.payload.previousIndex ||
+        candidate.positionIndex;
+      return sourceIndex === targetIndex;
+    }
+    return false;
+  });
+
+  return hasReadyVacatingOperation ? null : occupant;
+};
+
 export const parseEjoosArrivals = (
   sheet: ExcelSheetSnapshot | undefined,
 ): EjoosArrivalRow[] => {
@@ -930,6 +1021,9 @@ export const parseEjoosOos = (
       fullName,
       rank: norm(row?.[0]),
       positionIndex: norm(row?.[3]),
+      serviceType: norm(row?.[18]),
+      contractFrom: norm(row?.[19]),
+      contractTo: norm(row?.[20]),
     });
   }
   return rows;
@@ -2293,6 +2387,30 @@ export const buildEjoosSyncPlan = (
     staffIndex: string,
   ) => {
     const ownUnitMoves: PbMovement[] = [];
+    // ПРИБУВ може бути відсіяний з effective/active рухів пізнішою ПОСАДА,
+    // але його дата все одно є початком фактичного перебування в підрозділі.
+    const fullMovementChain = movementsAll
+      .filter(
+        (event) =>
+          isSamePerson({ personId, fullName }, event) &&
+          eventInLeadWindow(event),
+      )
+      .sort((left, right) => movementEventTime(left) - movementEventTime(right));
+    const latestOutboundAt = fullMovementChain
+      .filter(isOutboundStaffMove)
+      .reduce(
+        (latest, event) => Math.max(latest, movementEventTime(event)),
+        0,
+      );
+    const explicitArrival = [...fullMovementChain]
+      .reverse()
+      .find(
+        (event) =>
+          event.type === "ПРИБУВ" &&
+          movementEventTime(event) >= latestOutboundAt,
+      );
+    const explicitArrivalDate =
+      explicitArrival?.orderDate || explicitArrival?.basisDate || "";
     let leftUnitThisMonth = false;
     for (const event of activeMovementsAll) {
       if (!isSamePerson({ personId, fullName }, event)) continue;
@@ -2304,9 +2422,21 @@ export const buildEjoosSyncPlan = (
       (personId && arrivalById.get(personId)) ||
       byPersonName(arrivalByName, personId, fullName) ||
       null;
+    const temporaryArrivalDate = dateInLeadWindow(
+      temporaryArrival?.arriveDate || "",
+    )
+      ? temporaryArrival?.arriveDate || ""
+      : "";
+    const externalStaffArrival = [...ownUnitMoves]
+      .filter((event) => !isInternalStaffIndexHop(event))
+      .sort(
+        (left, right) => movementEventTime(right) - movementEventTime(left),
+      )[0];
+    const externalStaffArrivalDate =
+      externalStaffArrival?.orderDate || externalStaffArrival?.basisDate || "";
     const inbound =
       inboundStaffDateFor(personId, fullName) ||
-      temporaryArrival?.arriveDate ||
+      temporaryArrivalDate ||
       "";
     if (inbound) leftUnitThisMonth = true;
     const departed = timesheetRowsOf(personId, fullName).some(
@@ -2314,14 +2444,25 @@ export const buildEjoosSyncPlan = (
     );
     return resolveTimesheetEpisodeStart({
       monthStartLabel: journalMonthStartLabel,
-      appointmentDate: staffAppointmentDateFor(personId, fullName, staffIndex),
+      // Фактичне ПРИБУВ у РУХ починає перебування раніше за наступний наказ
+      // ПОСАДА. ШЕВЧУК: прибув 02.08, посада 06.08, archive з 03.08.
+      appointmentDate: resolveTimesheetArrivalDate({
+        explicitArrivalDate,
+        externalStaffArrivalDate,
+        temporaryArrivalDate,
+        staffAppointmentDate: staffAppointmentDateFor(
+          personId,
+          fullName,
+          staffIndex,
+        ),
+      }),
       inboundDate: inbound,
       hasMonthStartAbsence: augustAbsenceSpansFor(personId, fullName).some(
         (span) => span.fromDay === 1,
       ),
       hasDepartureEvidence: departed,
       leftUnitThisMonth,
-      wasTemporaryArrival: Boolean(temporaryArrival),
+      wasTemporaryArrival: Boolean(temporaryArrivalDate),
       ownUnitMoves,
     });
   };
@@ -2332,16 +2473,40 @@ export const buildEjoosSyncPlan = (
     staffIndex: string,
     activeExcelRow: number,
   ) => {
-    const appointment = timesheetEpisodeStartFor(
+    let appointment = timesheetEpisodeStartFor(
       personId,
       fullName,
       staffIndex,
     );
     const allSpans = augustAbsenceSpansFor(personId, fullName);
     const carryFromMonthStart = allSpans.some((span) => span.fromDay === 1);
-    const activeFromDay = carryFromMonthStart
+    let activeFromDay = carryFromMonthStart
       ? 1
       : journalDayFromDateMs(dateMs(appointment), leadWindowStart);
+    const existingScan = timesheetScanByRow.get(activeExcelRow);
+    const firstPlusDay = existingScan?.plusDays.length
+      ? Math.min(...existingScan.plusDays)
+      : 0;
+    const hasInactivePrefix =
+      firstPlusDay > 1 &&
+      Array.from({ length: firstPlusDay - 1 }, (_, index) => index + 1).every(
+        (day) =>
+          sameTimesheetDayMark(existingScan?.dayCodes[day] || "", "-"),
+      );
+    const resolvedActiveFromDay = resolveExistingTimesheetStartDay({
+      calculatedDay: activeFromDay,
+      firstPlusDay,
+      hasInactivePrefix,
+    });
+    if (resolvedActiveFromDay !== activeFromDay) {
+      activeFromDay = resolvedActiveFromDay;
+      const monthMatch = journalMonthStartLabel.match(
+        /^\d{2}\.(\d{2})\.(\d{4})$/,
+      );
+      if (monthMatch) {
+        appointment = `${String(activeFromDay).padStart(2, "0")}.${monthMatch[1]}.${monthMatch[2]}`;
+      }
+    }
     const activeSpans =
       activeFromDay > 1
         ? clipAbsenceSpansToActiveEpisode(allSpans, activeFromDay)
@@ -2688,6 +2853,19 @@ export const buildEjoosSyncPlan = (
     // Постановку на штат фарбує position_change; окремий timesheet_day тут
     // лише дублює і може зіпсувати коди СЗЧ на початку місяця.
     if (hasPositionEvent) return;
+    const archiveControlsReportDay = augustAbsenceSpansFor(
+      person.personId,
+      person.fullName,
+    ).some(
+      (span) =>
+        Boolean(span.code) &&
+        span.fromDay <= timesheetDay &&
+        span.toDay >= timesheetDay,
+    );
+    // Archive is the chronological authority for an active absence. Its
+    // dedicated paint pass below handles the whole period; a second sh-based
+    // day operation would either duplicate it or ask for a manual code.
+    if (archiveControlsReportDay) return;
     const personTimesheetScan =
       timesheetRowsOf(person.personId, person.fullName).find(
         (row) => !row.hasDepartureText,
@@ -2746,6 +2924,12 @@ export const buildEjoosSyncPlan = (
     const missingFromTimesheet =
       !personTimesheet && onMatchingShpo && mapped.timesheetCode === "+";
     if (missingFromTimesheet) {
+      const restorePaint = staffEpisodePaintPayload(
+        person.personId,
+        person.fullName,
+        person.positionIndex,
+        indexTimesheet?.excelRow || 0,
+      );
       ops.push({
         id: opId(["ts_restore", person.personId || person.positionIndex]),
         kind: "timesheet_day",
@@ -2765,6 +2949,7 @@ export const buildEjoosSyncPlan = (
           : "У ШПО особа вже стоїть на актуальній посаді і в строю, а в Табелі її немає. Кадровий рух не проводимо — лише відновити рядок Табеля після перевірки",
         confidence: "review",
         payload: {
+          type: "PAINT_ARCHIVE",
           timesheetCode: afterCode || "+",
           day: String(timesheetDay),
           excelRow:
@@ -2776,6 +2961,13 @@ export const buildEjoosSyncPlan = (
           nextName: person.fullName,
           nextPersonId: person.personId,
           nextRank: shpoByIndex.get(person.positionIndex)?.rank || "",
+          timesheetActiveFrom: restorePaint.timesheetActiveFrom,
+          timesheetPreserveHistory: restorePaint.timesheetPreserveHistory,
+          timesheetAbsenceSpans: restorePaint.timesheetAbsenceSpans,
+          historyTimesheetExcelRow: restorePaint.historyTimesheetExcelRow,
+          historyTimesheetAbsenceSpans:
+            restorePaint.historyTimesheetAbsenceSpans,
+          timesheetSkipHistory: "1",
         },
         checkedDefault: false,
       });
@@ -3005,6 +3197,51 @@ export const buildEjoosSyncPlan = (
       (canonicalName(open.ground) === canonicalName(period.absenceType) ||
         (isDispositionAbsenceStatus(open.ground) &&
           isDispositionAbsenceStatus(period.absenceType)));
+    const newerDifferentAbsence =
+      open &&
+      !sameAbsenceKind &&
+      !hasActualReturn(open.actualReturn) &&
+      Boolean(dateMs(open.departDate)) &&
+      Boolean(dateMs(period.departDate)) &&
+      dateMs(period.departDate) > dateMs(open.departDate);
+    if (
+      newerDifferentAbsence &&
+      !absenceRowsClosedByMovement.has(open.excelRow) &&
+      !ops.some(
+        (op) =>
+          op.kind === "absent_close" &&
+          Number(op.payload.excelRow || 0) === open.excelRow,
+      )
+    ) {
+      ops.push({
+        id: opId([
+          "close-superseded-absence",
+          period.personId || period.fullName,
+          String(open.excelRow),
+          period.departDate,
+        ]),
+        kind: "absent_close",
+        class: "ready",
+        sheet: "5. Тимчасово відсутні",
+        personId: period.personId || open.personId,
+        fullName: period.fullName || open.fullName,
+        positionIndex: open.positionIndex,
+        rank: period.rank || open.rank,
+        before: `${open.ground} з ${open.departDate || "?"} ще відкритий`,
+        after: `закрити ${period.departDate} — далі ${period.absenceType || "інший період"}`,
+        sourceRef: `archive!R${period.excelRow} · «Тимч. відсутні» R${open.excelRow}`,
+        why: `Новий archive-період «${period.absenceType || "відсутність"}» починається ${period.departDate}; попередній «${open.ground || "період"}» не може залишатися відкритим паралельно.`,
+        confidence: "high",
+        payload: {
+          type: "CLOSE_SUPERSEDED_OPEN_ABSENCE",
+          excelRow: String(open.excelRow),
+          returnDate: period.departDate,
+          returnDay: period.departDate,
+          timesheetSkipHistory: "1",
+        },
+        checkedDefault: true,
+      });
+    }
     if (sameAbsenceKind && !hasActualReturn(period.returnDate)) {
       const later = laterArchivePeriodOf(period);
       const shNow =
@@ -3773,6 +4010,82 @@ export const buildEjoosSyncPlan = (
     if (event.personId) pendingRankByPerson.set(`id:${event.personId}`, rankOp);
   }
 
+  const latestContractEventByPerson = new Map<string, PbMovement>();
+  for (const event of activeMovementsAll) {
+    if (!isContractMovementType(event.type) || !eventInLeadWindow(event)) {
+      continue;
+    }
+    const key = movementPersonKey(event);
+    if (!key) continue;
+    const previous = latestContractEventByPerson.get(key);
+    if (
+      !previous ||
+      movementEventTime(event) > movementEventTime(previous) ||
+      (movementEventTime(event) === movementEventTime(previous) &&
+        event.excelRow > previous.excelRow)
+    ) {
+      latestContractEventByPerson.set(key, event);
+    }
+  }
+  for (const event of latestContractEventByPerson.values()) {
+    if (!personStillInEjoos(event.personId, event.fullName)) continue;
+    const oos =
+      (event.personId && oosPersonById.get(event.personId)) ||
+      byPersonName(oosPersonByName, event.personId, event.fullName) ||
+      null;
+    const parsedDates = parseContractDatesFromChangeText(event.changeText);
+    const isMotivationContract = /МОТИВАЦ.*КОНТР/iu.test(event.type);
+    const contractFrom =
+      parsedDates.contractFrom || event.basisDate || event.orderDate;
+    const contractTo =
+      parsedDates.contractTo || (isMotivationContract ? "" : norm(event.changeText));
+    const serviceType = "контракт";
+    const alreadyApplied = Boolean(
+      oos &&
+        normKey(oos.serviceType) === normKey(serviceType) &&
+        dateMs(oos.contractFrom) === dateMs(contractFrom) &&
+        normKey(oos.contractTo) === normKey(contractTo),
+    );
+    if (alreadyApplied) continue;
+    const canApply = Boolean(oos && contractFrom && contractTo);
+    ops.push({
+      id: opId([
+        "contract",
+        event.personId || event.fullName,
+        event.orderNumber || String(event.excelRow),
+      ]),
+      kind: "contract_update",
+      class: canApply ? "ready" : "needs_input",
+      sheet: "2. ООС",
+      personId: oos?.personId || event.personId,
+      fullName: oos?.fullName || event.fullName,
+      positionIndex:
+        oos?.positionIndex || event.nextIndex || event.previousIndex,
+      rank: oos?.rank || event.rank,
+      before: oos
+        ? `${oos.serviceType || "вид служби не вказано"} · ${oos.contractFrom || "дата не вказана"} · ${oos.contractTo || "строк не вказаний"}`
+        : "рядок ООС не знайдено",
+      after: `${serviceType} · ${contractFrom} · ${contractTo}`,
+      sourceRef: `Рух!R${event.excelRow} №${event.movementNumber} · КОНТРАКТ`,
+      why: canApply
+        ? "Подія КОНТРАКТ заповнює вид служби та строки контракту в колонках 17–19 аркуша ООС"
+        : "Для події КОНТРАКТ не знайдено рядок ООС або дату/строк контракту",
+      confidence: canApply ? "high" : "manual",
+      payload: {
+        oosExcelRow: oos ? String(oos.excelRow) : "",
+        serviceType,
+        contractFrom,
+        contractTo,
+        orderNumber: event.orderNumber,
+        orderDate: event.orderDate,
+        basisNumber: event.basisNumber,
+        basisDate: event.basisDate,
+      },
+      movementKey: createMovementKey(event),
+      checkedDefault: canApply,
+    });
+  }
+
   const latestAbsenceOnlyOf = (personId: string, fullName: string) => {
     let found: PbMovement | null = null;
     for (const event of activeMovementsAll) {
@@ -4185,7 +4498,9 @@ export const buildEjoosSyncPlan = (
             basisDate: event.basisDate,
             shpoExcelRow: String(staffShpoRow?.excelRow || ""),
             timesheetExcelRow: String(staffTimesheetRow?.excelRow || ""),
-            positionTitle: staffShpoRow?.positionTitle || "",
+            positionTitle: staffPositionTitleForIndex(
+              staffShpoRow?.positionIndex || event.previousIndex,
+            ),
             skipShpoDisposition: dispositionInShpo ? "1" : "",
             absenceExcelRow: String(openAbsentRow?.excelRow || ""),
             needsAbsenceRecord: "",
@@ -4392,7 +4707,9 @@ export const buildEjoosSyncPlan = (
       const exclusionReason =
         event.type === "ПЕРЕВ" || event.type === "ПОСАДА"
           ? "ПЕРЕВЕДЕННЯ"
-          : "Розпорядження";
+          : event.type === "ЗВІЛЬН"
+            ? "ЗВІЛЬНЕННЯ"
+            : "Розпорядження";
       const shpoAtOldIndex =
         event.previousIndex || inboundPlacement?.nextIndex
           ? (shpoByIndex.get(
@@ -5785,6 +6102,24 @@ export const buildEjoosSyncPlan = (
       },
       checkedDefault: false,
     });
+  }
+
+  for (const op of ops) {
+    if (op.class !== "ready" || op.kind !== "position_change") continue;
+    const occupant = findUnvacatedTargetOccupant(op, ejoosShpo, ops);
+    if (!occupant) continue;
+    const targetIndex = op.payload.nextIndex || op.positionIndex;
+    op.class = "conflict";
+    op.checkedDefault = false;
+    op.confidence = "manual";
+    op.before = `${op.before} · ціль ${targetIndex} зайнята: ${occupant.rank || "?"} ${occupant.fullName || "без ПІБ"} (ID ${occupant.personId || "—"})`;
+    op.why =
+      `КОНФЛІКТ ЗАЙНЯТОСТІ: індекс ${targetIndex} уже займає ${occupant.fullName || `ID ${occupant.personId}`}. ` +
+      "Для цієї особи немає готової операції вибуття, переміщення з посади або переведення у розпорядження. Спочатку потрібно подати й провести її звільнення з індексу.";
+    op.payload.targetOccupancyConflict = "1";
+    op.payload.targetOccupantName = occupant.fullName;
+    op.payload.targetOccupantId = occupant.personId;
+    op.payload.targetOccupantShpoRow = String(occupant.excelRow);
   }
 
   for (const group of findDuplicateOosById(ejoosOos)) {

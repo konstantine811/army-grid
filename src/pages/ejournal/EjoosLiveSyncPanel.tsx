@@ -1001,7 +1001,7 @@ const OpRow = memo(function OpRow({
             onChange={(event) => onManualCode(String(event.target.value))}
           >
             <MenuItem value="">код…</MenuItem>
-            {["+", "вдр", "від", "ВП", "лік", "ЛП", "СЗЧ", "ЗБ", "пол"].map(
+            {["+", "вдр", "від", "ВП", "лік", "ЛП", "ВЛК", "СЗЧ", "ЗБ", "пол"].map(
               (code) => (
                 <MenuItem key={code} value={code}>
                   {code}

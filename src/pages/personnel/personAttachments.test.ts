@@ -1,9 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { api, type BackendPersonDocument } from "../../api";
 import type { EjournalPreviewRow } from "../ejournal/ejournalTypes";
 import {
   buildOrphanAttachmentMigrationPairs,
   buildQuestionnairePresenceMap,
   collectPersonAttachmentLookupIds,
+  loadPersonDocumentsForRow,
   matchOrphanIdToPersonnelRow,
   parseOrphanAttachmentIdentityId,
   personNameMatchesOrphanNameKey,
@@ -13,6 +15,22 @@ import {
   buildPersonIdentityFingerprint,
   resolvePersonIdentityKey,
 } from "./personnelUtils";
+
+const document = (
+  id: string,
+  personExternalId: string,
+  personName: string,
+): BackendPersonDocument =>
+  ({
+    id,
+    personExternalId,
+    personName,
+    type: "form6Report",
+    title: "Форма 6",
+    status: "draft",
+    updatedAt: "2026-09-05T10:00:00.000Z",
+    createdAt: "2026-09-05T10:00:00.000Z",
+  }) as BackendPersonDocument;
 
 const personRow = (
   name: string,
@@ -90,6 +108,33 @@ describe("buildQuestionnairePresenceMap", () => {
 
     expect(map["2163435"]).toBe(true);
     expect(map[oldKey]).toBe(true);
+  });
+});
+
+describe("loadPersonDocumentsForRow", () => {
+  it("finds Davydenko documents stored under a legacy person ID", async () => {
+    const row = personRow("ДАВИДЕНКО Олександр Володимирович", {
+      id: "current-id",
+      birthDate: "08.03.1985",
+    });
+    vi.spyOn(api, "listPersonDocuments").mockResolvedValue([
+      document("current-doc", "current-id", "ДАВИДЕНКО Олександр Володимирович"),
+    ]);
+    vi.spyOn(api, "listAllPersonDocuments").mockResolvedValue([
+      document(
+        "legacy-doc",
+        "p:давиденко олександр володимирович:1985-03-08",
+        "ДАВИДЕНКО Олександр Володимирович",
+      ),
+    ]);
+
+    const result = await loadPersonDocumentsForRow(row);
+
+    expect(result.map((item) => item.id).sort()).toEqual([
+      "current-doc",
+      "legacy-doc",
+    ]);
+    vi.restoreAllMocks();
   });
 });
 

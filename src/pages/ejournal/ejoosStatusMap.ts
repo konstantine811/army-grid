@@ -108,15 +108,44 @@ export const readOperatorSettings = (): EjoosOperatorSettings => {
     if (!parsed || parsed.version !== 1 || !Array.isArray(parsed.statusRules)) {
       return buildDefaultOperatorSettings();
     }
+    const defaults = buildDefaultOperatorSettings(
+      parsed.unitLabel || "1ПБ",
+    );
+    const medicalBoardRule = defaults.statusRules.find(
+      (rule) => rule.id === "medical_board",
+    );
+    const statusRules = parsed.statusRules.length
+      ? [...parsed.statusRules]
+      : defaults.statusRules;
+    if (medicalBoardRule) {
+      const medicalBoardIndex = statusRules.findIndex(
+        (rule) => rule.id === medicalBoardRule.id,
+      );
+      if (medicalBoardIndex < 0) {
+        statusRules.push(medicalBoardRule);
+      } else if (statusRules[medicalBoardIndex]?.timesheetCode === "лік") {
+        // Migrate the short-lived legacy mapping introduced before ВЛК became
+        // a dedicated Табель code.
+        statusRules[medicalBoardIndex] = medicalBoardRule;
+      }
+    }
+    const medicalIndex = statusRules.findIndex((rule) => rule.id === "med");
+    if (
+      medicalIndex >= 0 &&
+      !statusRules[medicalIndex]?.matchAny.includes("мед рот")
+    ) {
+      statusRules[medicalIndex] = {
+        ...statusRules[medicalIndex],
+        matchAny: [...statusRules[medicalIndex].matchAny, "мед рот"],
+      };
+    }
     return {
-      ...buildDefaultOperatorSettings(parsed.unitLabel || "1ПБ"),
+      ...defaults,
       ...parsed,
-      statusRules: parsed.statusRules.length
-        ? parsed.statusRules
-        : buildDefaultOperatorSettings().statusRules,
+      statusRules,
       fieldAuthorities: parsed.fieldAuthorities?.length
         ? parsed.fieldAuthorities
-        : buildDefaultOperatorSettings().fieldAuthorities,
+        : defaults.fieldAuthorities,
     };
   } catch {
     return buildDefaultOperatorSettings();

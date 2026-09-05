@@ -3,6 +3,8 @@ import type { BackendPersonnelOverview } from "../../api";
 import type { EjournalPreviewRow } from "../ejournal/ejournalTypes";
 import { getRosterPersonName, getRosterUnit, isNovaRosterRow } from "../personnel/personnelRosterMerge";
 import {
+  buildPersonnelStaffOverview,
+  buildRosterOnlyOverview,
   buildStaffOverviewRowsFromPersonnel,
   buildStaffOverviewRowsFromRoster,
   collectRosterUnitOptions,
@@ -162,6 +164,28 @@ describe("buildStaffOverviewRowsFromRoster", () => {
     expect(rows[0]?.fromEjoos).toBe(false);
     expect(rows[0]?.statusLabel).toBe("В строю");
   });
+
+  it("builds an immediate cached overview without a server overview payload", () => {
+    const cached = buildRosterOnlyOverview(
+      [
+        {
+          __dbRowId: "r1",
+          column_1: "нова",
+          column_2: "1 рота",
+          column_14: "КОВАЛЬ Іван Петрович",
+          column_21: "В строю",
+        },
+      ] as EjournalPreviewRow[],
+      {},
+      undefined,
+      { importId: "roster-1", importName: "Штатка 05.09" },
+    );
+
+    expect(cached.importId).toBe("roster-1");
+    expect(cached.rows).toHaveLength(1);
+    expect(cached.metrics.total).toBe(1);
+    expect(cached.units).toContain("1 рота");
+  });
 });
 
 describe("fillDownRosterUnitRows", () => {
@@ -222,7 +246,7 @@ describe("buildStaffOverviewRowsFromPersonnel", () => {
 
     const rows = buildStaffOverviewRowsFromPersonnel(personnelRows);
 
-    expect(rows).toHaveLength(2);
+    expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({
       name: "КОВАЛЬ Іван Петрович",
       rank: "старший солдат",
@@ -230,10 +254,11 @@ describe("buildStaffOverviewRowsFromPersonnel", () => {
       battalion: "нова",
       inStaff: true,
     });
-    expect(rows[1]).toMatchObject({
-      name: "ПЕТРЕНКО Олег Іванович",
-      inStaff: false,
-    });
+    expect(rows.some((row) => row.name.includes("ПЕТРЕНКО"))).toBe(false);
+
+    const cachedOverview = buildPersonnelStaffOverview(personnelRows);
+    expect(cachedOverview.rows).toHaveLength(1);
+    expect(cachedOverview.rows[0]?.staffSheetColumns).toBeTruthy();
   });
 });
 
