@@ -197,9 +197,12 @@ export type AnketaSheetSnapshot = {
   sourceLabel: string;
   columns: AnketaColumnDef[];
   rows: AnketaRow[];
+  ejoosVersionId?: string;
+  reconciledAt?: string;
 };
 
 export const ANKETA_CACHE_KEY = "anketa:google-sheet:v1";
+const ANKETA_SOURCE_CACHE_KEY = "anketa:google-source:v1";
 
 const isAnketaSheetSnapshot = (
   value: unknown,
@@ -228,6 +231,13 @@ export const saveAnketaSnapshotToServer = async (
   } catch {
     return false;
   }
+};
+
+export const persistAnketaSnapshot = async (
+  snapshot: AnketaSheetSnapshot,
+) => {
+  await writeDataCache(ANKETA_CACHE_KEY, snapshot);
+  return saveAnketaSnapshotToServer(snapshot);
 };
 
 export const loadAnketaSnapshotFromServer = async (): Promise<
@@ -397,8 +407,7 @@ export const loadAnketaSheetFromGoogle = async (): Promise<AnketaSheetSnapshot> 
     source: "google",
     sourceLabel: "Google Sheets · Анкети",
   });
-  await writeDataCache(ANKETA_CACHE_KEY, snapshot);
-  void saveAnketaSnapshotToServer(snapshot);
+  await writeDataCache(ANKETA_SOURCE_CACHE_KEY, snapshot);
   return snapshot;
 };
 
@@ -410,8 +419,7 @@ export const loadAnketaSheetFromFile = async (
     source: "file",
     sourceLabel: file.name,
   });
-  await writeDataCache(ANKETA_CACHE_KEY, snapshot);
-  void saveAnketaSnapshotToServer(snapshot);
+  await writeDataCache(ANKETA_SOURCE_CACHE_KEY, snapshot);
   return snapshot;
 };
 
@@ -426,6 +434,13 @@ export const loadAnketaSheetPreferCache = async (options?: {
 }) => {
   const merge = async (snapshot: AnketaSheetSnapshot) =>
     options?.mergeEdits ? await options.mergeEdits(snapshot) : snapshot;
+  const finalize = async (snapshot: AnketaSheetSnapshot) => {
+    const merged = await merge(snapshot);
+    if (options?.mergeEdits) {
+      await persistAnketaSnapshot(merged);
+    }
+    return merged;
+  };
 
   // 1) Shared DB snapshot (same for localhost + LAN), then local IndexedDB.
   const fromDb = await loadAnketaSnapshotFromServer();
@@ -441,19 +456,14 @@ export const loadAnketaSheetPreferCache = async (options?: {
 
   try {
     const fresh = await fetchWithCache({
-      key: ANKETA_CACHE_KEY,
+      key: ANKETA_SOURCE_CACHE_KEY,
       fetcher: loadAnketaSheetFromGoogle,
       isChanged: jsonChanged,
     });
-    // fetchWithCache may return cached google payload without re-running fetcher;
-    // ensure server has the latest shared copy when we have rows.
-    if (fresh.rows?.length && fresh.source !== "cache") {
-      void saveAnketaSnapshotToServer(fresh);
-    }
-    return await merge(fresh);
+    return await finalize(fresh);
   } catch (error) {
     if (cached?.rows?.length) {
-      return await merge({
+      return await finalize({
         ...cached,
         source: fromDb ? ("db" as const) : ("cache" as const),
       });

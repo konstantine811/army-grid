@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   loadAnketaSheetFromFile,
   loadAnketaSheetPreferCache,
+  persistAnketaSnapshot,
   type AnketaSheetSnapshot,
 } from "../anketaSheet";
 import {
@@ -14,8 +15,10 @@ import { readAnketaAppsScriptUrl } from "../anketaGaps";
 import { loadAnketaMissingNameKeys } from "../anketaMissingList";
 import { expandAnketaNameKeySet } from "../anketaPersonMatch";
 import {
-  addMissingEjoosPeopleToCachedAnketa,
-  formatAddMissingEjoosPeopleReport,
+  formatReconcileAnketaWithEjoosReport,
+  loadEjoosOosAndExcludedPeople,
+  reconcileAnketaSnapshotWithEjoos,
+  type ReconcileAnketaWithEjoosReport,
 } from "../anketaEjoosPeople";
 import { readWorkbookSnapshot } from "../../../excelRoundTrip";
 import {
@@ -70,6 +73,9 @@ export function useAnketaSheetLoader() {
   const [staffSheetPersonCount, setStaffSheetPersonCount] = useState(0);
   const [isImportingStaffSheet, setIsImportingStaffSheet] = useState(false);
   const [isImportingVkMilitaryIds, setIsImportingVkMilitaryIds] = useState(false);
+  const lastEjoosReportRef = useRef<ReconcileAnketaWithEjoosReport | null>(
+    null,
+  );
 
   const applyStaffSheetImportMeta = (imported: {
     fileName: string;
@@ -91,7 +97,14 @@ export function useAnketaSheetLoader() {
   const mergeWithEdits = async (base: AnketaSheetSnapshot) => {
     const edits = await loadAnketaEdits();
     setEditsCount(countAnketaEdits(edits));
-    return applyAnketaEditsToSnapshot(base, edits);
+    const withEdits = applyAnketaEditsToSnapshot(base, edits);
+    const authority = await loadEjoosOosAndExcludedPeople();
+    const reconciled = reconcileAnketaSnapshotWithEjoos(
+      withEdits,
+      authority,
+    );
+    lastEjoosReportRef.current = reconciled.report;
+    return reconciled.snapshot;
   };
 
   const persistSnapshot = (
@@ -131,10 +144,13 @@ export function useAnketaSheetLoader() {
       });
       setSnapshot(next);
       setDirtyCount(0);
+      const ejoosSummary = lastEjoosReportRef.current
+        ? ` · ${formatReconcileAnketaWithEjoosReport(lastEjoosReportRef.current)}`
+        : "";
       setMessage(
         next.source === "cache" || next.source === "db"
-          ? `Показано ${next.source === "db" ? "БД" : "кеш"} + правки (${next.rows.length}). Мережа Google недоступна.`
-          : `Оновлено з Google + накладено правки · ${new Date(next.fetchedAt).toLocaleString("uk-UA")}.`,
+          ? `Показано ${next.source === "db" ? "БД" : "кеш"} + правки + ЕЖООС (${next.rows.length}). Мережа Google недоступна.${ejoosSummary}`
+          : `Оновлено з Google + правки + останній ЕЖООС · ${new Date(next.fetchedAt).toLocaleString("uk-UA")}${ejoosSummary}.`,
       );
       return resetGapFocus();
     } catch (error) {
@@ -155,9 +171,12 @@ export function useAnketaSheetLoader() {
     try {
       const base = await loadAnketaSheetFromFile(file);
       const next = await mergeWithEdits(base);
+      await persistAnketaSnapshot(next);
       setSnapshot(next);
       setDirtyCount(0);
-      setMessage(`Імпортовано файл ${file.name}: ${next.rows.length} анкет.`);
+      setMessage(
+        `Імпортовано файл ${file.name} і звірено з ЕЖООС: ${next.rows.length} анкет · ${lastEjoosReportRef.current ? formatReconcileAnketaWithEjoosReport(lastEjoosReportRef.current) : ""}.`,
+      );
       return resetGapFocus();
     } catch (error) {
       setMessage(
@@ -205,15 +224,7 @@ export function useAnketaSheetLoader() {
   const addMissingFromEjoos = async () => {
     setIsAddingFromEjoos(true);
     try {
-      let lastProgressAt = 0;
-      const report = await addMissingEjoosPeopleToCachedAnketa({
-        onProgress: (done, total) => {
-          const now = Date.now();
-          if (done !== total && now - lastProgressAt < 250) return;
-          lastProgressAt = now;
-          setMessage(`Додаю відсутніх з ЕЖООС… ${done}/${total}`);
-        },
-      });
+      setMessage("Звіряю анкети з останнім ЕЖООС…");
       const refreshed = await loadAnketaSheetPreferCache({
         mergeEdits: mergeWithEdits,
       });
@@ -221,15 +232,19 @@ export function useAnketaSheetLoader() {
       const edits = await loadAnketaEdits();
       setEditsCount(countAnketaEdits(edits));
       setMessage(
-        report.added
-          ? `Додано з ЕЖООС (ООС + Виключені) · ${formatAddMissingEjoosPeopleReport(report)}.`
-          : `Нових осіб немає · ${formatAddMissingEjoosPeopleReport(report)}.`,
+        `Анкети синхронізовано з ЕЖООС (ООС + Виключені) · ${
+          lastEjoosReportRef.current
+            ? formatReconcileAnketaWithEjoosReport(
+                lastEjoosReportRef.current,
+              )
+            : refreshed.rows.length
+        }.`,
       );
     } catch (error) {
       setMessage(
         error instanceof Error
           ? error.message
-          : "Не вдалося додати осіб з ЕЖООС.",
+          : "Не вдалося синхронізувати анкети з ЕЖООС.",
       );
     } finally {
       setIsAddingFromEjoos(false);

@@ -913,17 +913,12 @@ export const parseEjoosShpo = (
   return rows;
 };
 
-const operationMatchesOccupant = (
-  op: EjoosSyncOp,
-  occupant: EjoosShpoRow,
-) =>
+const operationMatchesOccupant = (op: EjoosSyncOp, occupant: EjoosShpoRow) =>
   Boolean(
-    (occupant.personId &&
-      op.personId &&
-      occupant.personId === op.personId) ||
-      (occupant.fullName &&
-        op.fullName &&
-        canonicalName(occupant.fullName) === canonicalName(op.fullName)),
+    (occupant.personId && op.personId && occupant.personId === op.personId) ||
+    (occupant.fullName &&
+      op.fullName &&
+      canonicalName(occupant.fullName) === canonicalName(op.fullName)),
   );
 
 export const findUnvacatedTargetOccupant = (
@@ -955,8 +950,7 @@ export const findUnvacatedTargetOccupant = (
     }
     if (candidate.kind === "position_change") {
       const sourceIndex =
-        candidate.payload.fromPositionIndex ||
-        candidate.payload.previousIndex;
+        candidate.payload.fromPositionIndex || candidate.payload.previousIndex;
       const destinationIndex =
         candidate.payload.nextIndex || candidate.positionIndex;
       return sourceIndex === targetIndex && destinationIndex !== targetIndex;
@@ -2395,13 +2389,12 @@ export const buildEjoosSyncPlan = (
           isSamePerson({ personId, fullName }, event) &&
           eventInLeadWindow(event),
       )
-      .sort((left, right) => movementEventTime(left) - movementEventTime(right));
+      .sort(
+        (left, right) => movementEventTime(left) - movementEventTime(right),
+      );
     const latestOutboundAt = fullMovementChain
       .filter(isOutboundStaffMove)
-      .reduce(
-        (latest, event) => Math.max(latest, movementEventTime(event)),
-        0,
-      );
+      .reduce((latest, event) => Math.max(latest, movementEventTime(event)), 0);
     const explicitArrival = [...fullMovementChain]
       .reverse()
       .find(
@@ -2435,9 +2428,7 @@ export const buildEjoosSyncPlan = (
     const externalStaffArrivalDate =
       externalStaffArrival?.orderDate || externalStaffArrival?.basisDate || "";
     const inbound =
-      inboundStaffDateFor(personId, fullName) ||
-      temporaryArrivalDate ||
-      "";
+      inboundStaffDateFor(personId, fullName) || temporaryArrivalDate || "";
     if (inbound) leftUnitThisMonth = true;
     const departed = timesheetRowsOf(personId, fullName).some(
       (row) => row.hasDepartureText,
@@ -2473,11 +2464,7 @@ export const buildEjoosSyncPlan = (
     staffIndex: string,
     activeExcelRow: number,
   ) => {
-    let appointment = timesheetEpisodeStartFor(
-      personId,
-      fullName,
-      staffIndex,
-    );
+    let appointment = timesheetEpisodeStartFor(personId, fullName, staffIndex);
     const allSpans = augustAbsenceSpansFor(personId, fullName);
     const carryFromMonthStart = allSpans.some((span) => span.fromDay === 1);
     let activeFromDay = carryFromMonthStart
@@ -2490,8 +2477,7 @@ export const buildEjoosSyncPlan = (
     const hasInactivePrefix =
       firstPlusDay > 1 &&
       Array.from({ length: firstPlusDay - 1 }, (_, index) => index + 1).every(
-        (day) =>
-          sameTimesheetDayMark(existingScan?.dayCodes[day] || "", "-"),
+        (day) => sameTimesheetDayMark(existingScan?.dayCodes[day] || "", "-"),
       );
     const resolvedActiveFromDay = resolveExistingTimesheetStartDay({
       calculatedDay: activeFromDay,
@@ -4038,13 +4024,14 @@ export const buildEjoosSyncPlan = (
     const contractFrom =
       parsedDates.contractFrom || event.basisDate || event.orderDate;
     const contractTo =
-      parsedDates.contractTo || (isMotivationContract ? "" : norm(event.changeText));
+      parsedDates.contractTo ||
+      (isMotivationContract ? "" : norm(event.changeText));
     const serviceType = "контракт";
     const alreadyApplied = Boolean(
       oos &&
-        normKey(oos.serviceType) === normKey(serviceType) &&
-        dateMs(oos.contractFrom) === dateMs(contractFrom) &&
-        normKey(oos.contractTo) === normKey(contractTo),
+      normKey(oos.serviceType) === normKey(serviceType) &&
+      dateMs(oos.contractFrom) === dateMs(contractFrom) &&
+      normKey(oos.contractTo) === normKey(contractTo),
     );
     if (alreadyApplied) continue;
     const canApply = Boolean(oos && contractFrom && contractTo);
