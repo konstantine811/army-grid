@@ -244,3 +244,16 @@ export const readDocumentSkippedDueToSzch = (
   const value = fields?.skippedDueToSzch;
   return value === true || value === "true";
 };
+
+export const readDocumentSkippedDueToStatus200 = (
+  fields: Record<string, unknown> | null | undefined,
+) => {
+  const value = fields?.skippedDueToStatus200;
+  return value === true || value === "true";
+};
+
+export const readDocumentSkippedFromWork = (
+  fields: Record<string, unknown> | null | undefined,
+) =>
+  readDocumentSkippedDueToSzch(fields) ||
+  readDocumentSkippedDueToStatus200(fields);

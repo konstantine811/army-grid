@@ -99,6 +99,16 @@ export function Sidebar({
     // Non-admins: only the allowlisted pages (hide placeholders without a page).
     return Boolean(item.page && isUserAllowedPage(item.page));
   });
+  const identityLabel =
+    user?.nickname || user?.displayName || user?.email || "Користувач";
+  const roleLabel = isAdmin
+    ? "Адміністратор"
+    : canEdit
+      ? "Редактор"
+      : "Лише перегляд";
+  const showRoleLabel =
+    identityLabel.trim().toLocaleLowerCase("uk-UA") !==
+    roleLabel.toLocaleLowerCase("uk-UA");
 
   return (
     <aside
@@ -142,17 +152,28 @@ export function Sidebar({
           </IconButton>
         </Stack>
         <Box className="brand-status" sx={{ mt: 2 }}>
-          <Typography variant="caption" color="text.secondary">
-            <span className="status-dot" />
-            {user?.nickname || user?.displayName || user?.email || "Користувач"}
-          </Typography>
-          <Typography
-            variant="caption"
-            color="text.secondary"
-            sx={{ display: "block", ml: 2.2 }}
-          >
-            {isAdmin ? "Адміністратор" : canEdit ? "Редактор" : "Лише перегляд"}
-          </Typography>
+          <span className="sidebar-user-avatar">
+            {user?.photoData ? (
+              <img src={user.photoData} alt="" />
+            ) : (
+              <PersonOutlinedIcon aria-hidden />
+            )}
+            <span className="status-dot" aria-hidden />
+          </span>
+          <span className="sidebar-user-copy">
+            <Typography variant="caption" color="text.secondary">
+              {identityLabel}
+            </Typography>
+            {showRoleLabel ? (
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ display: "block" }}
+              >
+                {roleLabel}
+              </Typography>
+            ) : null}
+          </span>
         </Box>
       </div>
 

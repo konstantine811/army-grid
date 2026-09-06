@@ -12,6 +12,8 @@ export type DocumentsJournalExcelRow = {
   documentType: string;
   progressPercent: number;
   status: string;
+  sentAt: string;
+  receivedAt: string;
   note: string;
   files: string;
   formPurpose?: string;
@@ -20,8 +22,8 @@ export type DocumentsJournalExcelRow = {
   updatedAt: string;
 };
 
-const FULL_BASE_COLUMNS = 11;
-const COMPACT_FORM_COLUMNS = 6;
+const FULL_BASE_COLUMNS = 7;
+const COMPACT_FORM_COLUMNS = 7;
 
 const journalColumnCount = ({
   includeUbdExitDate,
@@ -139,25 +141,22 @@ const buildJournalSheet = (
     ? [
         "№",
         "Службовець",
-        "ID",
         "Статус службовця",
         "Документ",
         "Для чого форма",
+        "Відправлено",
+        "Отримали",
       ]
     : [
         "№",
         "Службовець",
-        "ID",
         "Статус службовця",
         "Документ",
-        "Прогрес",
         "Статус документа",
-        "Коментар",
-        "Файли",
+        "Відправлено",
+        "Отримали",
         ...(includeFormPurpose ? ["Для чого форма"] : []),
         ...(includeUbdExitDate ? ["Вихід від"] : []),
-        "Створено",
-        "Оновлено",
       ];
 
   return [
@@ -167,12 +166,9 @@ const buildJournalSheet = (
     headerRow(headers),
     ...rows.map((row, index) => {
       const zebra = index % 2 === 1 ? { backgroundColor: ZEBRA } : { backgroundColor: WHITE };
-      const created = dayjs(row.createdAt);
-      const updated = dayjs(row.updatedAt);
       const lead = [
         cell(index + 1, { type: Number, align: "center", textColor: MUTED, ...zebra }),
         cell(row.personName, { fontWeight: "bold", textColor: TEXT, wrap: true, ...zebra }),
-        cell(row.personId || "—", { align: "left", textColor: MUTED, wrap: true, ...zebra }),
         cell(row.personStatus || "—", { wrap: true, ...zebra }),
         cell(row.documentType, { wrap: true, ...zebra }),
       ];
@@ -180,39 +176,21 @@ const buildJournalSheet = (
         return [
           ...lead,
           cell(row.formPurpose || "—", { wrap: true, ...zebra }),
+          cell(row.sentAt || "—", { align: "center", ...zebra }),
+          cell(row.receivedAt || "—", { align: "center", ...zebra }),
         ];
       }
       return [
         ...lead,
-        cell(row.progressPercent / 100, {
-          type: Number,
-          format: "0%",
-          align: "center",
-          fontWeight: "bold",
-          ...progressFill(row.progressPercent),
-          ...border,
-        }),
         cell(row.status, { wrap: true, ...zebra }),
-        cell(row.note || "—", { wrap: true, ...zebra }),
-        cell(row.files, { align: "center", ...zebra }),
+        cell(row.sentAt || "—", { align: "center", ...zebra }),
+        cell(row.receivedAt || "—", { align: "center", ...zebra }),
         ...(includeFormPurpose
           ? [cell(row.formPurpose || "—", { wrap: true, ...zebra })]
           : []),
         ...(includeUbdExitDate
           ? [cell(row.taskPeriodEnd || "—", { align: "center", ...zebra })]
           : []),
-        cell(created.isValid() ? created.toDate() : row.createdAt, {
-          type: created.isValid() ? Date : String,
-          format: "DD.MM.YYYY HH:mm",
-          align: "center",
-          ...zebra,
-        }),
-        cell(updated.isValid() ? updated.toDate() : row.updatedAt, {
-          type: updated.isValid() ? Date : String,
-          format: "DD.MM.YYYY HH:mm",
-          align: "center",
-          ...zebra,
-        }),
       ];
     }),
   ];
@@ -290,30 +268,27 @@ export const exportDocumentsJournalExcel = async ({
   ].join("  ·  ");
   const periodSuffix =
     periodFilterLabel === "Усі місяці" ? "" : ` ${periodFilterLabel}`;
-  const fileName = `Журнал документів${periodSuffix} ${exportedAt.format("DD.MM.YYYY")}.xlsx`;
+  const fileName = `1ПБ Журнал документів${periodSuffix} ${exportedAt.format("DD.MM.YYYY")}.xlsx`;
   const journalColumns = compactFormExport
     ? [
         { width: 6 },
         { width: 34 },
         { width: 22 },
-        { width: 22 },
         { width: 32 },
         { width: 36 },
+        { width: 20 },
+        { width: 20 },
       ]
     : [
         { width: 6 },
         { width: 34 },
         { width: 22 },
-        { width: 22 },
         { width: 32 },
-        { width: 12 },
         { width: 24 },
-        { width: 36 },
-        { width: 14 },
+        { width: 20 },
+        { width: 20 },
         ...(includeFormPurpose ? [{ width: 28 }] : []),
         ...(includeUbdExitDate ? [{ width: 14 }] : []),
-        { width: 20 },
-        { width: 20 },
       ];
 
   await writeXlsxFile(

@@ -14,8 +14,12 @@ import {
 } from "../pages/personnel/personnelRosterMerge";
 import {
   findEjournalPersonnelSheet,
+  getPersonDisplayName,
+  getPersonExternalId,
   loadAllEjournalSheetRows,
+  normalizePersonBirthKey,
   resolveMorningGeneralListColumnLabel,
+  resolvePersonBirthDate,
 } from "../pages/personnel/personnelUtils";
 import { fillDownRosterUnitRows } from "../pages/overview/overviewRosterMerge";
 import { runHeavyJob } from "../workers/runHeavyJob";
@@ -127,6 +131,71 @@ export const sortPersonnelRowsByRosterOrder = (
     })
     .map(({ row }) => row);
 
+const normalizePersonnelDatasetName = (value: string) =>
+  value
+    .replace(/\(\s*\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\s*р\.?\s*н\.?\s*\)/gi, "")
+    .replace(/[ʼ’']/g, "'")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLocaleLowerCase("uk-UA");
+
+const personnelDatasetDedupeKey = (row: EjournalPreviewRow) => {
+  const name = normalizePersonnelDatasetName(getPersonDisplayName(row));
+  const birthDate = normalizePersonBirthKey(resolvePersonBirthDate(row));
+  if (name && birthDate) return `name-birth:${name}|${birthDate}`;
+  const externalId = getPersonExternalId(row).trim();
+  return externalId ? `id:${externalId}` : "";
+};
+
+const hasDatasetValue = (value: unknown) =>
+  value != null && String(value).trim() !== "";
+
+const mergeDuplicatePersonnelRows = (
+  primary: EjournalPreviewRow,
+  duplicate: EjournalPreviewRow,
+) => {
+  const merged = { ...primary };
+  Object.entries(duplicate).forEach(([key, value]) => {
+    if (!hasDatasetValue(merged[key]) && hasDatasetValue(value)) {
+      merged[key] = value;
+    }
+  });
+  const primaryOrder = Number(primary.__rosterOrder);
+  const duplicateOrder = Number(duplicate.__rosterOrder);
+  if (
+    Number.isFinite(duplicateOrder) &&
+    (!Number.isFinite(primaryOrder) || duplicateOrder < primaryOrder)
+  ) {
+    merged.__rosterOrder = duplicateOrder;
+  }
+  return merged;
+};
+
+export const dedupePersonnelDatasetRows = (
+  rows: EjournalPreviewRow[],
+): EjournalPreviewRow[] => {
+  const result: EjournalPreviewRow[] = [];
+  const indexByKey = new Map<string, number>();
+  rows.forEach((row) => {
+    const key = personnelDatasetDedupeKey(row);
+    if (!key) {
+      result.push(row);
+      return;
+    }
+    const existingIndex = indexByKey.get(key);
+    if (existingIndex == null) {
+      indexByKey.set(key, result.length);
+      result.push(row);
+      return;
+    }
+    result[existingIndex] = mergeDuplicatePersonnelRows(
+      result[existingIndex]!,
+      row,
+    );
+  });
+  return result;
+};
+
 const rosterMetadata = (
   latest: BackendPersonnelRosterLatest | null | undefined,
 ) => {
@@ -165,7 +234,9 @@ const buildDataset = async (
           }),
         )
       : base?.rows ?? [];
-  const rows = sortPersonnelRowsByRosterOrder(mergedRows);
+  const rows = dedupePersonnelDatasetRows(
+    sortPersonnelRowsByRosterOrder(mergedRows),
+  );
   const metadata = rosterMetadata(roster);
   return {
     rows,
@@ -188,11 +259,14 @@ const buildRosterBootstrap = (
   const rosterRows = rosterRowsFromPersonnelLatest(roster);
   const preview = buildRosterOnlyPreviewState(rosterRows, roster.sheet);
   if (!preview) return null;
+  const rows = dedupePersonnelDatasetRows(
+    sortPersonnelRowsByRosterOrder(preview.rows),
+  );
   return {
-    rows: preview.rows,
+    rows,
     sheet: preview.sheet,
     columns: preview.columns,
-    total: preview.rows.length,
+    total: rows.length,
     rosterRows,
     ...rosterMetadata(roster),
     version,

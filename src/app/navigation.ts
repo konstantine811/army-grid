@@ -1,3 +1,8 @@
+import {
+  storePersonnelFocusTarget,
+  type PersonnelFocusTarget,
+} from "../pages/personnel/personnelFocus";
+
 export type AppPage =
   | "overview"
   | "analytics"
@@ -226,6 +231,8 @@ export const buildDocumentRoute = ({
   return query ? `${path}?${query}` : path;
 };
 
+export type { PersonnelFocusTarget };
+
 export const buildPersonnelRoute = ({
   rowId,
   externalId,
@@ -234,11 +241,34 @@ export const buildPersonnelRoute = ({
   externalId?: string;
 }) => {
   const params = new URLSearchParams();
-  if (rowId) params.set("rowId", rowId);
-  if (externalId) params.set("externalId", externalId);
+  const normalizedRowId = String(rowId ?? "").trim();
+  const normalizedExternalId = String(externalId ?? "").trim();
+  if (normalizedRowId) params.set("rowId", normalizedRowId);
+  if (normalizedExternalId) params.set("externalId", normalizedExternalId);
 
   const query = params.toString();
   return query ? `${pagePaths.personnel}?${query}` : pagePaths.personnel;
+};
+
+export const openPersonnelPerson = (
+  target: { rowId?: string; externalId?: string },
+  options?: { newTab?: boolean },
+) => {
+  storePersonnelFocusTarget(target);
+  const url = buildPersonnelRoute(target);
+  if (options?.newTab) {
+    window.open(url, "_blank", "noopener,noreferrer");
+    return url;
+  }
+  window.dispatchEvent(
+    new CustomEvent("army-grid:open-personnel", {
+      detail: {
+        rowId: String(target.rowId ?? "").trim(),
+        externalId: String(target.externalId ?? "").trim(),
+      },
+    }),
+  );
+  return url;
 };
 
 export const openPersonnelInNewTab = ({
@@ -247,7 +277,4 @@ export const openPersonnelInNewTab = ({
 }: {
   rowId?: string;
   externalId?: string;
-}) => {
-  const url = buildPersonnelRoute({ rowId, externalId });
-  window.open(url, "_blank", "noopener,noreferrer");
-};
+}) => openPersonnelPerson({ rowId, externalId }, { newTab: true });

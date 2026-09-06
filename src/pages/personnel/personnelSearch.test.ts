@@ -28,4 +28,13 @@ describe("personnelSearchMatchesQuery", () => {
       ),
     ).toBe(true);
   });
+
+  it("matches Ukrainian і when the query was typed with и", () => {
+    expect(
+      personnelSearchMatchesQuery(
+        "ліга андрій петрович архів",
+        "лига",
+      ),
+    ).toBe(true);
+  });
 });

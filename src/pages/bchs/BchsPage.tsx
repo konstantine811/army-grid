@@ -36,11 +36,13 @@ import {
 import {
   api,
   type BackendEjournalImport,
-  type BackendPersonnelRosterLatest,
 } from "../../api";
 import { useAuth } from "../../auth/AuthProvider";
 import { CacheKeys, peekDataCache, subscribeDataCache } from "../../data/idbDataCache";
-import { loadSharedRosterLatest } from "../../data/sharedAppData";
+import {
+  loadPersonnelDataset,
+  type PersonnelDataset,
+} from "../../data/personnelDataset";
 import { runHeavyJob } from "../../workers/runHeavyJob";
 import { Button as SciButton } from "../../components/ui/button/button";
 import {
@@ -68,6 +70,10 @@ import {
   parseDbColumns,
   previewValueToDisplay,
 } from "../ejournal/ejournalUtils";
+import {
+  isPersonnelInStaffRoster,
+  ROSTER_FIELD_PREFIX,
+} from "../personnel/personnelRosterMerge";
 import {
   applyBchsPersonnelDerivedColumns,
   buildBchsAnalytics,
@@ -777,52 +783,66 @@ export function BchsPage({ active = true }: { active?: boolean }) {
 
   useEffect(() => {
     let cancelled = false;
+    let applySequence = 0;
 
-    const applyRoster = async (latest: BackendPersonnelRosterLatest | null) => {
-      if (!latest?.sheet) {
+    const applyDataset = async (dataset: PersonnelDataset | null) => {
+      const sequence = ++applySequence;
+      if (!dataset) {
         setPersonnelAwayPeople([]);
         return;
       }
 
-      const rows = latest.rows.map((row) =>
-        row.values &&
-        typeof row.values === "object" &&
-        !Array.isArray(row.values)
-          ? row.values
-          : {},
-      );
-      const { people, novaCount } = await runHeavyJob({
+      // Той самий набір, що й default-tab «У штаті» в Особовому складі:
+      // merged OOS + roster, але без архіву. Для BCHS розгортаємо технічний
+      // roster__ prefix назад у ключі колонок Штатки.
+      const personnelRows = dataset.rows
+        .filter(isPersonnelInStaffRoster)
+        .map((row) => {
+          const record = { ...row } as Record<string, unknown>;
+          Object.entries(row).forEach(([key, value]) => {
+            if (!key.startsWith(ROSTER_FIELD_PREFIX)) return;
+            record[key.slice(ROSTER_FIELD_PREFIX.length)] = value;
+          });
+          return record;
+        });
+      const mergedResult = await runHeavyJob({
         type: "bchsExtractPeople",
-        rows,
-        columns: parseDbColumns(latest.sheet.columns),
+        rows: personnelRows,
+        columns: dataset.rosterColumns,
       });
-      if (cancelled) return;
-      const label =
-        latest.sourceFileName?.trim() || latest.importName?.trim() || "Штатка";
+      const { people, novaCount } = mergedResult;
+      if (cancelled || sequence !== applySequence) return;
+      const label = dataset.version.rosterImportId || "PersonnelDataset";
       setPersonnelAwayPeople(people);
       setMessage(
-        `БЧС зі Штатки «${label}»: ${people.length} осіб (нова: ${novaCount}). Аркуш1 — шаблон з БД.`,
+        `БЧС зі спільних даних Особового складу «У штаті»: ${people.length} рядків (нова: ${novaCount}) · ${label}.`,
       );
       console.info(
-        `[BCHS] Люди зі Штатки: ${people.length} (нова: ${novaCount}) · ${label}`,
+        `[BCHS] PersonnelDataset: ${people.length} рядків (нова: ${novaCount}) · ${label}`,
       );
     };
 
-    const loadStaffRosterPeople = async () => {
+    const loadSharedPersonnel = async () => {
       try {
-        const latest = await loadSharedRosterLatest();
+        const dataset = await loadPersonnelDataset({
+          onCached: applyDataset,
+        });
         if (cancelled) return;
-        await applyRoster(latest);
+        await applyDataset(dataset);
       } catch (error) {
-        console.warn("[BCHS] Не вдалося підвантажити Штатку", error);
-        if (!cancelled) setPersonnelAwayPeople([]);
+        console.warn("[BCHS] Не вдалося підвантажити PersonnelDataset", error);
+        if (!cancelled) {
+          setPersonnelAwayPeople([]);
+        }
       }
     };
 
-    void loadStaffRosterPeople();
-    const unsubscribe = subscribeDataCache(CacheKeys.rosterLatest, () => {
+    void loadSharedPersonnel();
+    const unsubscribe = subscribeDataCache(CacheKeys.personnelDataset, () => {
       if (cancelled) return;
-      void applyRoster(peekDataCache<BackendPersonnelRosterLatest | null>(CacheKeys.rosterLatest));
+      void applyDataset(
+        peekDataCache<PersonnelDataset>(CacheKeys.personnelDataset),
+      );
     });
 
     return () => {

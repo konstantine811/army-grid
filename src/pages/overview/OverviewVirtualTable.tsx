@@ -158,6 +158,7 @@ export function OverviewVirtualTable({
   onNeedPhoto,
   onExport,
   onImportantExport,
+  copyTextBuilder,
   emptyMessage = "Немає записів за поточними фільтрами.",
 }: {
   rows: BackendPersonnelOverviewRow[];
@@ -173,6 +174,9 @@ export function OverviewVirtualTable({
   onImportantExport?: (
     context: SciDataTableExportContext<BackendPersonnelOverviewRow>,
   ) => void | Promise<void>;
+  copyTextBuilder?: (
+    context: SciDataTableExportContext<BackendPersonnelOverviewRow>,
+  ) => string | Promise<string>;
   emptyMessage?: string;
 }) {
   const photosRef = useRef(photos);
@@ -435,6 +439,7 @@ export function OverviewVirtualTable({
     exportLabel: "Експорт",
     copyLabel: "Копіювати",
     enableCopyText: true,
+    copyTextBuilder,
     enableGlobalFilter: false,
     getRowId: (row) => row.id,
     getTdProps: ({ columnId }) =>

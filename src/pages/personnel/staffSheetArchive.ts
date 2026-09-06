@@ -89,7 +89,7 @@ const setNamedRosterFields = (
   row: EjournalPreviewRow,
   values: unknown[],
   name: string,
-  nameColumn: 13 | 14,
+  nameColumn: 12 | 13 | 14,
 ) => {
   row.ПІБ = name;
   row.піб = name;
@@ -119,7 +119,9 @@ const setNamedRosterFields = (
   const birth =
     nameColumn === 13
       ? values[13]
-      : [values[14], values[15]].find(isLikelyBirthValue);
+      : [values[nameColumn], values[nameColumn + 1], values[14], values[15]].find(
+          isLikelyBirthValue,
+        );
   if (birth != null && String(birth).trim()) {
     row.column_16 = cellValueToJson(birth);
   }
@@ -136,15 +138,13 @@ const normalizeArchiveRowToRosterShape = (
   sheetRow: WorkbookSheet["rows"][number],
 ): EjournalPreviewRow | null => {
   const values = sheetRow.values;
-  const nameInM = cellText(values, 12);
-  const nameInN = cellText(values, 13);
-  const nameColumn = looksLikePersonnelName(nameInM)
-    ? 13
-    : looksLikePersonnelName(nameInN)
-      ? 14
-      : 0;
+  // Different archive blocks place ПІБ in L, M or N. Prefer the current M
+  // layout, then legacy N, and finally the shifted L layout.
+  const nameColumn = ([13, 14, 12] as const).find((column) =>
+    looksLikePersonnelName(cellText(values, column - 1)),
+  );
   if (!nameColumn) return null;
-  const name = nameColumn === 13 ? nameInM : nameInN;
+  const name = cellText(values, nameColumn - 1);
 
   const row: EjournalPreviewRow = {
     __rowNumber: sheetRow.excelRowNumber,

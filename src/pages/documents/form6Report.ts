@@ -156,8 +156,6 @@ const GIVEN_NAME_GENITIVE: Record<string, string> = {
 
 export const form6WorkflowSteps = [
   { key: "document", title: "Заповнили рапорт" },
-  { key: "account", title: "Фото 3x4 та ІНН" },
-  { key: "scan", title: "Скани паспорта, ІНН та статусу" },
   { key: "ready", title: "Готово до відправки" },
   { key: "sent", title: "Відправили" },
   { key: "received", title: "Отримали" },

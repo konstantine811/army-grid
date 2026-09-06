@@ -5,6 +5,8 @@ import {
   documentHasEmptyInputs,
   documentRequiredFieldIsBlank,
   readDocumentSkippedDueToSzch,
+  readDocumentSkippedDueToStatus200,
+  readDocumentSkippedFromWork,
 } from "./documentFieldReadiness";
 
 describe("documentFieldReadiness", () => {
@@ -125,5 +127,34 @@ describe("documentFieldReadiness", () => {
       false,
     );
     expect(readDocumentSkippedDueToSzch({})).toBe(false);
+  });
+
+  it("reads the status 200 skip flag from document fields", () => {
+    expect(
+      readDocumentSkippedDueToStatus200({ skippedDueToStatus200: true }),
+    ).toBe(true);
+    expect(
+      readDocumentSkippedDueToStatus200({ skippedDueToStatus200: "true" }),
+    ).toBe(true);
+    expect(
+      readDocumentSkippedDueToStatus200({ skippedDueToStatus200: false }),
+    ).toBe(false);
+    expect(readDocumentSkippedDueToStatus200({})).toBe(false);
+  });
+
+  it("treats either skip flag as skipped from work", () => {
+    expect(
+      readDocumentSkippedFromWork({
+        skippedDueToSzch: true,
+        skippedDueToStatus200: false,
+      }),
+    ).toBe(true);
+    expect(
+      readDocumentSkippedFromWork({
+        skippedDueToSzch: false,
+        skippedDueToStatus200: true,
+      }),
+    ).toBe(true);
+    expect(readDocumentSkippedFromWork({})).toBe(false);
   });
 });

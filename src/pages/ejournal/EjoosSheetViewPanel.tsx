@@ -19,8 +19,12 @@ import {
   PushPinOutlinedIcon,
   WrapTextOutlinedIcon,
 } from "@/components/sci/icons";
+import {
+  MaterialReactTable,
+  useMaterialReactTable,
+  type MRT_ColumnDef,
+} from "@/components/sci/SciDataTable";
 import type {
-  CellValue,
   ExcelSheetSnapshot,
   ExcelWorkbookSnapshot,
 } from "../../excelRoundTrip";
@@ -29,6 +33,12 @@ import {
   loadTimesheetGridFromFile,
   mergeTimesheetGrids,
 } from "./ejoosTimesheetPersonRows";
+import {
+  buildEjoosDataTableModel,
+  displayEjoosCell as cellDisplay,
+  type EjoosDataTableModel,
+  type EjoosDataTableRow,
+} from "./ejoosSheetDataTable";
 
 export type EjoosSheetKind =
   | "shpo"
@@ -85,42 +95,6 @@ const COMPACT_COLUMN_WIDTH = 40;
 const DEFAULT_COLUMN_WIDTH = 148;
 const MIN_COLUMN_WIDTH = 32;
 const MAX_COLUMN_WIDTH = 560;
-
-const splitPackedStaffIndexes = (text: string) => {
-  const packed = text.replace(/\s+/g, "");
-  if (/^(?:\d{7}){2,}$/.test(packed)) {
-    return packed.match(/\d{7}/g)?.join("\n") ?? text;
-  }
-  return text;
-};
-
-const cellDisplay = (value: CellValue | undefined): string => {
-  if (value == null) return "";
-  if (value instanceof Date && !Number.isNaN(value.getTime())) {
-    return value.toLocaleDateString("uk-UA");
-  }
-    if (typeof value === "number" && Number.isFinite(value)) {
-    // Staff IDs 20000–39999 overlap Excel serials; keep them as numbers.
-    // Real dates in these journals are 2020+ (serial ≥ 40000).
-    if (value >= 40_000 && value < 60_000) {
-      const epoch = Date.UTC(1899, 11, 30);
-      const date = new Date(epoch + value * 86_400_000);
-      if (!Number.isNaN(date.getTime())) {
-        return date.toLocaleDateString("uk-UA");
-      }
-    }
-    return splitPackedStaffIndexes(String(value));
-  }
-  const text = String(value)
-    .replace(/\r\n/g, "\n")
-    .replace(/\r/g, "\n");
-  if (text.trim() === "[object Object]") return "#N/A";
-  return splitPackedStaffIndexes(text)
-    .split("\n")
-    .map((line) => line.replace(/[^\S\n]+/g, " ").trim())
-    .join("\n")
-    .trim();
-};
 
 const columnWidthsKey = (kind: EjoosSheetKind, sheetName: string) =>
   `ejoos-sheet-column-widths:${kind}:${sheetName}`;
@@ -291,6 +265,71 @@ const buildTable = (sheet: ExcelSheetSnapshot, maxRows: number) => {
   };
 };
 
+function EjoosSciSheetTable({ model }: { model: EjoosDataTableModel }) {
+  const columns = useMemo<Array<MRT_ColumnDef<EjoosDataTableRow>>>(
+    () => [
+      {
+        id: "__excelRowNumber",
+        accessorFn: (row) => row.__excelRowNumber,
+        header: "№",
+        size: 64,
+        pin: "left",
+        enableColumnFilter: false,
+        enableGlobalFilter: false,
+        enableHiding: false,
+      },
+      ...model.columns.map((column) => ({
+        id: column.id,
+        accessorKey: column.id,
+        header: column.label,
+        size:
+          column.id === model.nameColumnId
+            ? 280
+            : column.compact
+              ? 56
+              : 164,
+        pin: column.id === model.nameColumnId ? ("left" as const) : undefined,
+        enableColumnFilter: true,
+        enableGlobalFilter: true,
+        Cell: ({ row }: { row: { original: EjoosDataTableRow } }) => (
+          <span style={{ whiteSpace: "pre-wrap" }}>
+            {String(row.original[column.id] ?? "") || "—"}
+          </span>
+        ),
+      })),
+    ],
+    [model.columns, model.nameColumnId],
+  );
+  const table = useMaterialReactTable({
+    columns,
+    data: model.rows,
+    emptyMessage: "Немає рядків",
+    globalFilterPlaceholder: "Пошук по таблиці…",
+    getRowId: (row) => row.__rowId,
+    enableColumnFilters: true,
+    enableColumnVisibility: true,
+    enableGlobalFilter: true,
+    enableRowVirtualization: true,
+    estimatedRowHeight: 38,
+    initialState: {
+      density: "compact",
+      pagination: { pageIndex: 0, pageSize: 200 },
+      columnPinning: {
+        left: [
+          "__excelRowNumber",
+          ...(model.nameColumnId ? [model.nameColumnId] : []),
+        ],
+      },
+    },
+  });
+
+  return (
+    <div className="ejoos-sheet-data-table-wrap">
+      <MaterialReactTable table={table} />
+    </div>
+  );
+}
+
 export function EjoosSheetViewPanel({ kind }: { kind: EjoosSheetKind }) {
   const {
     ejoosSnapshot,
@@ -344,6 +383,11 @@ export function EjoosSheetViewPanel({ kind }: { kind: EjoosSheetKind }) {
   const table = useMemo(
     () => (sheet ? buildTable(sheet, meta.maxRows) : null),
     [sheet, meta.maxRows],
+  );
+  const usesSharedDataTable = kind === "oos" || kind === "excluded";
+  const dataTableModel = useMemo(
+    () => (sheet && usesSharedDataTable ? buildEjoosDataTableModel(sheet) : null),
+    [sheet, usesSharedDataTable],
   );
 
   const filteredRows = useMemo(() => {
@@ -516,8 +560,12 @@ export function EjoosSheetViewPanel({ kind }: { kind: EjoosSheetKind }) {
         <Chip
           size="small"
           variant="outlined"
-          label={`рядків: ${filteredRows.length}${
-            !query.trim() && table.truncated ? ` (ліміт ${meta.maxRows})` : ""
+          label={`рядків: ${
+            dataTableModel?.rows.length ?? filteredRows.length
+          }${
+            !usesSharedDataTable && !query.trim() && table.truncated
+              ? ` (ліміт ${meta.maxRows})`
+              : ""
           }`}
         />
         <Chip
@@ -525,9 +573,11 @@ export function EjoosSheetViewPanel({ kind }: { kind: EjoosSheetKind }) {
           variant="outlined"
           label={ejoosSnapshot.fileName}
         />
-        <Button size="small" variant="outlined" onClick={resetColumnWidths}>
-          Скинути ширини
-        </Button>
+        {!usesSharedDataTable ? (
+          <Button size="small" variant="outlined" onClick={resetColumnWidths}>
+            Скинути ширини
+          </Button>
+        ) : null}
         {kind === "oos" || kind === "excluded" ? (
           <Button
             size="small"
@@ -559,39 +609,43 @@ export function EjoosSheetViewPanel({ kind }: { kind: EjoosSheetKind }) {
             {isLoading ? "Мердж…" : "Мердж"}
           </Button>
         ) : null}
-        <IconButton
-          size="small"
-          className={wrapText ? "is-active" : undefined}
-          title={wrapText ? "Перенос тексту увімкнено" : "Перенос тексту вимкнено"}
-          aria-label={
-            wrapText ? "Вимкнути перенос тексту" : "Увімкнути перенос тексту"
-          }
-          aria-pressed={wrapText}
-          onClick={toggleWrapText}
-        >
-          <WrapTextOutlinedIcon fontSize="small" />
-        </IconButton>
-        <IconButton
-          size="small"
-          className={pinSecondRow ? "is-active" : undefined}
-          title={
-            pinSecondRow
-              ? "Другий рядок закріплено"
-              : "Другий рядок не закріплено"
-          }
-          aria-label={
-            pinSecondRow
-              ? "Відкріпити другий рядок"
-              : "Закріпити другий рядок"
-          }
-          aria-pressed={pinSecondRow}
-          onClick={togglePinSecondRow}
-        >
-          <PushPinOutlinedIcon fontSize="small" />
-        </IconButton>
+        {!usesSharedDataTable ? (
+          <>
+            <IconButton
+              size="small"
+              className={wrapText ? "is-active" : undefined}
+              title={wrapText ? "Перенос тексту увімкнено" : "Перенос тексту вимкнено"}
+              aria-label={
+                wrapText ? "Вимкнути перенос тексту" : "Увімкнути перенос тексту"
+              }
+              aria-pressed={wrapText}
+              onClick={toggleWrapText}
+            >
+              <WrapTextOutlinedIcon fontSize="small" />
+            </IconButton>
+            <IconButton
+              size="small"
+              className={pinSecondRow ? "is-active" : undefined}
+              title={
+                pinSecondRow
+                  ? "Другий рядок закріплено"
+                  : "Другий рядок не закріплено"
+              }
+              aria-label={
+                pinSecondRow
+                  ? "Відкріпити другий рядок"
+                  : "Закріпити другий рядок"
+              }
+              aria-pressed={pinSecondRow}
+              onClick={togglePinSecondRow}
+            >
+              <PushPinOutlinedIcon fontSize="small" />
+            </IconButton>
+          </>
+        ) : null}
       </Stack>
 
-      <input
+      {!usesSharedDataTable ? <input
         className="ejoos-sheet-search"
         type="search"
         placeholder="Пошук по таблиці…"
@@ -607,8 +661,11 @@ export function EjoosSheetViewPanel({ kind }: { kind: EjoosSheetKind }) {
           background: "rgba(0,0,0,0.25)",
           color: "inherit",
         }}
-      />
+      /> : null}
 
+      {usesSharedDataTable && dataTableModel ? (
+        <EjoosSciSheetTable model={dataTableModel} />
+      ) : (
       <div className="bchs-analytics-table-wrap ejoos-sheet-table-wrap">
         <table
           className={
@@ -689,6 +746,7 @@ export function EjoosSheetViewPanel({ kind }: { kind: EjoosSheetKind }) {
           </tbody>
         </table>
       </div>
+      )}
     </Box>
   );
 }

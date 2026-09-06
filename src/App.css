@@ -51,7 +51,9 @@
       rgba(0, 0, 0, 0.18)
     ),
     radial-gradient(circle at center, transparent 42%, #000 120%);
-  background-size: 100% 4px, auto;
+  background-size:
+    100% 4px,
+    auto;
   opacity: 0.55;
 }
 
@@ -131,7 +133,7 @@
 .brand-block {
   flex: 0 0 auto;
   min-height: 118px;
-  padding: 22px 20px;
+  padding: 10px 10px 8px 20px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }
 
@@ -144,11 +146,65 @@
   background: rgba(214, 215, 133, 0.12) !important;
 }
 
+.brand-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.sidebar-user-avatar {
+  --size: 62px;
+  position: relative;
+  display: grid;
+  flex: 0 0 var(--size);
+  place-items: center;
+  width: var(--size);
+  min-width: var(--size);
+  max-width: var(--size);
+  height: var(--size);
+  min-height: var(--size);
+  max-height: var(--size);
+  aspect-ratio: 1;
+  overflow: visible;
+  color: #83c85b;
+  border: 1px solid rgba(131, 200, 91, 0.38);
+  background: rgba(131, 200, 91, 0.08);
+}
+
+.sidebar-user-avatar img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: cover;
+}
+
+.sidebar-user-avatar > svg {
+  width: 18px;
+  height: 18px;
+}
+
+.sidebar-user-copy {
+  display: block;
+  min-width: 0;
+}
+
+.sidebar-user-copy .MuiTypography-root {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .status-dot {
-  display: inline-block;
+  position: absolute;
+  right: -3px;
+  bottom: -3px;
+  display: block;
   width: 8px;
   height: 8px;
-  margin-right: 9px;
   border-radius: 50%;
   background: #83c85b;
   box-shadow: 0 0 14px rgba(131, 200, 91, 0.8);
@@ -202,7 +258,7 @@
   flex-direction: column;
   align-items: center;
   min-height: auto;
-  padding: 16px 8px;
+  padding: 16px 8px 0 8px;
 }
 
 .sidebar.collapsed .brand-copy,
@@ -2491,7 +2547,10 @@
   }
 
   /* iOS зумить сторінку, якщо в полі шрифт < 16px. */
-  .main-panel.personnel-page input:not([type="checkbox"]):not([type="radio"]):not([type="file"]):not([type="button"]):not([type="submit"]):not([type="hidden"]),
+  .main-panel.personnel-page
+    input:not([type="checkbox"]):not([type="radio"]):not([type="file"]):not(
+      [type="button"]
+    ):not([type="submit"]):not([type="hidden"]),
   .main-panel.personnel-page textarea,
   .main-panel.personnel-page select,
   .person-card-panel input,
@@ -3941,16 +4000,22 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 6px;
   overflow: hidden;
+}
+
+.documents-journal-table-scroll {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
 .documents-journal-table-body {
   display: grid;
   gap: 6px;
-  flex: 1 1 0;
-  min-height: 0;
-  overflow: auto;
+  flex: 0 0 auto;
   align-content: start;
 }
 
@@ -4004,7 +4069,9 @@
   color: inherit;
 }
 
-.documents-journal-bulk-progress-recovery .documents-journal-bulk-progress-toggle code {
+.documents-journal-bulk-progress-recovery
+  .documents-journal-bulk-progress-toggle
+  code {
   color: #a5d6a7;
 }
 
@@ -4138,21 +4205,18 @@
 }
 
 .documents-journal-table {
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 6px;
 }
 
 .documents-journal-row {
   display: grid;
-  grid-template-columns:
-    32px minmax(200px, 1fr) minmax(170px, 0.9fr)
-    minmax(120px, 0.5fr) minmax(120px, 0.55fr) minmax(110px, 0.45fr)
-    minmax(130px, 0.55fr) minmax(140px, 0.65fr) minmax(56px, 0.22fr)
-    minmax(130px, 0.5fr) minmax(130px, 0.5fr) 36px;
+  grid-template-columns: 32px 240px 220px 170px 150px 140px 170px 170px 320px 88px 190px 190px 48px;
   gap: 10px;
   align-items: center;
-  width: 100%;
-  min-width: 0;
+  width: max-content;
+  min-width: 100%;
   padding: 12px 14px;
   color: #d8d3bf;
   text-align: left;
@@ -4162,21 +4226,11 @@
 }
 
 .documents-journal-row-with-exit-date {
-  grid-template-columns:
-    32px minmax(200px, 1fr) minmax(170px, 0.9fr)
-    minmax(120px, 0.5fr) minmax(120px, 0.55fr) minmax(110px, 0.45fr)
-    minmax(130px, 0.55fr) minmax(140px, 0.65fr) minmax(56px, 0.22fr)
-    minmax(100px, 0.38fr)
-    minmax(130px, 0.5fr) minmax(130px, 0.5fr) 36px;
+  grid-template-columns: 32px 240px 220px 170px 150px 140px 170px 170px 320px 88px 150px 190px 190px 48px;
 }
 
 .documents-journal-row-with-form-purpose {
-  grid-template-columns:
-    32px minmax(200px, 1fr) minmax(170px, 0.9fr)
-    minmax(120px, 0.5fr) minmax(120px, 0.55fr) minmax(110px, 0.45fr)
-    minmax(130px, 0.55fr) minmax(140px, 0.65fr) minmax(56px, 0.22fr)
-    minmax(140px, 0.7fr)
-    minmax(130px, 0.5fr) minmax(130px, 0.5fr) 36px;
+  grid-template-columns: 32px 240px 220px 170px 150px 140px 170px 170px 320px 88px 280px 190px 190px 48px;
 }
 
 .documents-journal-author {
@@ -4187,8 +4241,37 @@
 }
 
 .documents-journal-delete-slot {
-  width: 30px;
+  width: 48px;
   height: 30px;
+}
+
+.documents-journal-col-pinned {
+  position: sticky;
+  right: 0;
+  z-index: 2;
+  justify-self: end;
+  background: inherit;
+  box-shadow: -12px 0 16px rgba(0, 0, 0, 0.42);
+}
+
+.documents-journal-row.header {
+  position: sticky;
+  top: 0;
+  z-index: 4;
+  color: #d6d785;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  background: rgba(0, 255, 85, 0.06);
+}
+
+.documents-journal-row.header .documents-journal-col-pinned {
+  z-index: 5;
+  background: rgba(12, 18, 14, 0.98);
+}
+
+.documents-journal-delete.documents-journal-col-pinned {
+  z-index: 3;
 }
 
 /* Чужі документи: лише перегляд — ховаємо небезпечні дії, блокуємо редагування */
@@ -4335,14 +4418,6 @@
   border-color: rgba(190, 190, 185, 0.62);
   background: rgba(52, 52, 50, 0.82);
   box-shadow: inset 3px 0 0 #9a9a94;
-}
-
-.documents-journal-row.header {
-  color: #d6d785;
-  font-size: 11px;
-  font-weight: 700;
-  text-transform: uppercase;
-  background: rgba(0, 255, 85, 0.06);
 }
 
 .documents-journal-sort {
@@ -4934,29 +5009,67 @@
 /* Підписант with floating signature:
    - only table → :last-of-type
    - + ЗАТВЕРДЖУЮ after → :nth-last-of-type(2) */
-.word-document-preview .docx table:nth-last-of-type(2) td:last-child > p:nth-child(2),
-.word-document-preview .docx table:last-of-type:first-of-type td:last-child > p:nth-child(2) {
+.word-document-preview
+  .docx
+  table:nth-last-of-type(2)
+  td:last-child
+  > p:nth-child(2),
+.word-document-preview
+  .docx
+  table:last-of-type:first-of-type
+  td:last-child
+  > p:nth-child(2) {
   text-align: right !important;
   white-space: nowrap;
   position: relative;
   z-index: 2;
 }
 
-.word-document-preview .docx table:nth-last-of-type(2) td:last-child > p:first-child,
-.word-document-preview .docx table:last-of-type:first-of-type td:last-child > p:first-child {
+.word-document-preview
+  .docx
+  table:nth-last-of-type(2)
+  td:last-child
+  > p:first-child,
+.word-document-preview
+  .docx
+  table:last-of-type:first-of-type
+  td:last-child
+  > p:first-child {
   position: relative;
   height: 0;
   margin: 0 !important;
   padding: 0 !important;
 }
 
-.word-document-preview .docx table:nth-last-of-type(2) td:last-child > p:first-child > span,
-.word-document-preview .docx table:last-of-type:first-of-type td:last-child > p:first-child > span {
+.word-document-preview
+  .docx
+  table:nth-last-of-type(2)
+  td:last-child
+  > p:first-child
+  > span,
+.word-document-preview
+  .docx
+  table:last-of-type:first-of-type
+  td:last-child
+  > p:first-child
+  > span {
   position: static !important;
 }
 
-.word-document-preview .docx table:nth-last-of-type(2) td:last-child > p:first-child > span > div,
-.word-document-preview .docx table:last-of-type:first-of-type td:last-child > p:first-child > span > div {
+.word-document-preview
+  .docx
+  table:nth-last-of-type(2)
+  td:last-child
+  > p:first-child
+  > span
+  > div,
+.word-document-preview
+  .docx
+  table:last-of-type:first-of-type
+  td:last-child
+  > p:first-child
+  > span
+  > div {
   position: absolute !important;
   left: -13% !important;
   right: auto !important;
@@ -4969,7 +5082,11 @@
 }
 
 .word-document-preview .docx table:nth-last-of-type(2) td:last-child img,
-.word-document-preview .docx table:last-of-type:first-of-type td:last-child img {
+.word-document-preview
+  .docx
+  table:last-of-type:first-of-type
+  td:last-child
+  img {
   position: relative !important;
   left: 0 !important;
   top: 0 !important;
@@ -5268,7 +5385,8 @@
 
 .document-szch-skip {
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  align-items: flex-start;
   gap: 8px;
   margin: 0;
   color: rgba(230, 230, 220, 0.9);
@@ -7867,6 +7985,27 @@ body.combat-fs-open {
   box-shadow: var(--glow-green);
 }
 
+.ejoos-sheet-data-table-wrap {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: calc(100dvh - 148px);
+  min-height: 0;
+  overflow: hidden;
+}
+
+.ejoos-sheet-data-table-wrap .sci-data-table-shell {
+  flex: 1 1 0;
+  min-height: 0;
+  height: 100%;
+}
+
+.ejoos-sheet-data-table-wrap .sci-data-table-wrap {
+  flex: 1 1 0;
+  max-height: none;
+  min-height: 0;
+}
+
 .ejoos-sheet-table.is-pin-second-row tbody tr.ejoos-second-row td {
   position: sticky;
   top: var(--ejoos-header-height, 40px);
@@ -9921,6 +10060,7 @@ select {
 .sci-data-table-wrap.sci-custom-scroll-target,
 .document-page-preview.sci-custom-scroll-target,
 .document-fields.sci-custom-scroll-target,
+.documents-journal-table-scroll.sci-custom-scroll-target,
 .documents-journal-table-body.sci-custom-scroll-target,
 .ubd-preview-viewport.sci-custom-scroll-target,
 .word-document-preview.sci-custom-scroll-target,
@@ -10483,7 +10623,6 @@ textarea::-webkit-scrollbar-corner {
   border-color: #00ed3f;
 }
 
-
 /* —— Sci live feedback (CodePen-inspired radar / particles / pulse) —— */
 .sci-live-feedback-layer {
   position: fixed;
@@ -10613,7 +10752,6 @@ textarea::-webkit-scrollbar-corner {
   }
 }
 
-
 /* --- CodePen pvbboZx HUD polish: gray borders + corner locks --- */
 .file-card,
 .sci-data-table,
@@ -10742,7 +10880,7 @@ select:focus,
 }
 
 .anketa-workspace.has-person-panel {
-  grid-template-columns: minmax(0, 1.45fr) minmax(300px, 0.85fr);
+  grid-template-columns: minmax(0, 1.45fr) minmax(300px, 0.4fr);
 }
 
 .anketa-person-panel-backdrop {
@@ -10869,6 +11007,11 @@ select:focus,
   flex-wrap: wrap;
   gap: 8px;
   margin-top: 12px;
+}
+
+.anketa-person-side-actions-top {
+  margin-top: 0;
+  margin-bottom: 12px;
 }
 
 .anketa-person-similar-list {
@@ -11460,8 +11603,7 @@ select:focus,
   flex-direction: column;
   align-items: center;
   justify-content: safe center;
-  padding:
-    max(12px, env(safe-area-inset-top, 0px))
+  padding: max(12px, env(safe-area-inset-top, 0px))
     max(16px, env(safe-area-inset-right, 0px))
     max(12px, env(safe-area-inset-bottom, 0px))
     max(16px, env(safe-area-inset-left, 0px));

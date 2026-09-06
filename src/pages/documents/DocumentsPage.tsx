@@ -103,6 +103,8 @@ import {
   isBlankForm6IdDocument,
   isBlankUbdRnokpp,
   readDocumentSkippedDueToSzch,
+  readDocumentSkippedDueToStatus200,
+  readDocumentSkippedFromWork,
   resolveUbdFieldsForGapCheck,
 } from "./documentFieldReadiness";
 import {
@@ -180,8 +182,11 @@ import {
   useWordPreviewBlob,
 } from "./WordDocumentPreview";
 import {
+  capitalizeSignerTitleBlock,
   createUbdRestoreFields,
+  formatPositionTitleBlock,
   mergeUbdRestoreFields,
+  resolveUbdRestoreFolderName,
   ubdRestoreWorkflowSteps,
   type UbdRestoreReportFields,
   type UbdRestoreSignatory,
@@ -240,6 +245,7 @@ type SalaryDocumentFields = {
 
 type SalaryWorkflowState = {
   completed: Record<string, boolean>;
+  completedAt?: Record<string, string>;
   /** Після першого кліку по кроках — лише явно відмічені, без авто-попередніх. */
   independentSteps?: boolean;
   currentStatus: string;
@@ -526,10 +532,48 @@ const toForm12Signatories = (
     signatureData: record.signatureData ?? null,
   }));
 
+const mergeSignatoryRecordsWithUbdFallback = (
+  own: BackendDocumentSignatoryPreset[],
+  fallback: BackendDocumentSignatoryPreset[],
+) => {
+  const merged = own.map((record) => {
+    if (record.signatureData) return record;
+    const matchingFallback = fallback.find(
+      (candidate) =>
+        candidate.blockType === record.blockType &&
+        candidate.fullName.trim().toLocaleLowerCase("uk-UA") ===
+          record.fullName.trim().toLocaleLowerCase("uk-UA") &&
+        candidate.signatureData,
+    );
+    return matchingFallback
+      ? {
+          ...record,
+          signatureData: matchingFallback.signatureData,
+          signatureFileName: matchingFallback.signatureFileName,
+          signatureMimeType: matchingFallback.signatureMimeType,
+        }
+      : record;
+  });
+  const presentBlockTypes = new Set(merged.map((record) => record.blockType));
+  fallback.forEach((record) => {
+    if (!presentBlockTypes.has(record.blockType)) {
+      merged.push(record);
+      presentBlockTypes.add(record.blockType);
+    }
+  });
+  return merged.sort((left, right) => left.sortOrder - right.sortOrder);
+};
+
+const loadSignatoryRecordsWithUbdFallback = async (documentType: string) => {
+  const [own, fallback] = await Promise.all([
+    api.listDocumentSignatories(documentType),
+    api.listDocumentSignatories("ubdReport"),
+  ]);
+  return mergeSignatoryRecordsWithUbdFallback(own, fallback);
+};
+
 const loadForm6SignatoryRecords = async () => {
-  const own = await api.listDocumentSignatories("form6Report");
-  if (own.length) return own;
-  return api.listDocumentSignatories("ubdReport");
+  return loadSignatoryRecordsWithUbdFallback("form6Report");
 };
 
 const toForm6Signatories = (
@@ -582,15 +626,29 @@ const toZhbdCertificateSignatories = (
   }));
 
 const loadForm12SignatoryRecords = async () => {
-  const own = await api.listDocumentSignatories("form12Report");
-  if (own.length) return own;
-  return api.listDocumentSignatories("ubdReport");
+  return loadSignatoryRecordsWithUbdFallback("form12Report");
 };
 
 const loadUbdRestoreSignatoryRecords = async () => {
-  const own = await api.listDocumentSignatories("ubdRestoreReport");
-  if (own.length) return own;
-  return api.listDocumentSignatories("ubdReport");
+  return loadSignatoryRecordsWithUbdFallback("ubdRestoreReport");
+};
+
+const prepareUbdRestoreExportFields = async (
+  fields: UbdRestoreReportFields,
+): Promise<UbdRestoreReportFields> => {
+  const configured = snapshotSignatories(
+    await loadUbdRestoreSignatoryRecords(),
+  );
+  return {
+    ...fields,
+    folderName: resolveUbdRestoreFolderName(
+      fields.fullName,
+      fields.folderName,
+    ),
+    signatories: toUbdRestoreSignatories(
+      configured.length ? configured : legacyUbdSignatories(),
+    ),
+  };
 };
 
 const loadLostMilitaryIdSignatoryRecords = async () => {
@@ -844,6 +902,7 @@ const formatTemporaryIdDispatchText = (fields: TemporaryMilitaryIdFields) =>
 
 const createEmptyWorkflow = (): SalaryWorkflowState => ({
   completed: {},
+  completedAt: {},
   currentStatus: salaryWorkflowSteps[0]?.key ?? "account",
   accountFileName: "",
   signedScanFileName: "",
@@ -1290,7 +1349,9 @@ const documentWorkflowSteps = (type?: string | null) =>
         ? serviceCharacteristicWorkflowSteps
       : type === "zhbdCertificate"
         ? zhbdCertificateWorkflowSteps
-      : type === "ubdReport" || type === "form6Report"
+      : type === "form6Report"
+        ? form6WorkflowSteps
+      : type === "ubdReport"
         ? ubdWorkflowSteps
         : type === "temporaryMilitaryId"
           ? temporaryMilitaryIdWorkflowSteps
@@ -1327,16 +1388,27 @@ const resolveDocumentWorkflowStatus = (
     if (status === "handed") return "forCharacteristic";
     return status ?? "";
   }
+  if (type === "form6Report") {
+    if (
+      status === "account" ||
+      status === "scan" ||
+      status === "print" ||
+      status === "sign"
+    ) {
+      return "ready";
+    }
+    if (status === "sentReport" || status === "sentScans") {
+      return "sent";
+    }
+    return status ?? "";
+  }
   if (
-    (type === "ubdReport" || type === "form6Report") &&
+    type === "ubdReport" &&
     (status === "print" || status === "sign")
   ) {
     return "scan";
   }
-  if (
-    (type === "ubdReport" || type === "form6Report") &&
-    status === "sent"
-  ) {
+  if (type === "ubdReport" && status === "sent") {
     return "sentReport";
   }
   return status ?? "";
@@ -1373,6 +1445,22 @@ const normalizeWorkflowCompletedRecord = (
     raw.sent !== false
   ) {
     raw.sent = true;
+  }
+  if (
+    stepKeys.has("ready") &&
+    !stepKeys.has("scan") &&
+    raw.scan === true &&
+    raw.ready !== false
+  ) {
+    raw.ready = true;
+  }
+  if (
+    stepKeys.has("ready") &&
+    !stepKeys.has("account") &&
+    raw.account === true &&
+    raw.ready !== false
+  ) {
+    raw.ready = true;
   }
   return Object.fromEntries(
     steps.map((step) => [step.key, raw[step.key] === true]),
@@ -1434,6 +1522,44 @@ const documentHighestWorkflowStatusLabel = (
   return lastTitle || documentWorkflowStatusLabel(document);
 };
 
+const JOURNAL_NO_WORKFLOW_STATUS_LABEL = "Без статусу";
+
+const documentHasMarkedWorkflowStatus = (
+  document: BackendPersonDocument,
+  workflowOverride?: SalaryWorkflowState,
+) => {
+  const steps = documentWorkflowSteps(document.type);
+  if (!steps.length) return Boolean(String(document.status ?? "").trim());
+  const workflow = workflowOverride ?? mergeSalaryWorkflow(document.workflow);
+  const completed = resolveWorkflowCompletedMap(
+    workflow,
+    steps,
+    document.type,
+    document.status || workflow.currentStatus,
+  );
+  return steps.some((step) => completed[step.key]);
+};
+
+const documentMatchesJournalStatusFilters = (
+  document: BackendPersonDocument,
+  filters: string[],
+  workflowOverride?: SalaryWorkflowState,
+) => {
+  if (!filters.length) return true;
+  const hasMarkedStatus = documentHasMarkedWorkflowStatus(
+    document,
+    workflowOverride,
+  );
+  const wantsNoStatus = filters.includes(JOURNAL_NO_WORKFLOW_STATUS_LABEL);
+  const selectedStatuses = filters.filter(
+    (item) => item !== JOURNAL_NO_WORKFLOW_STATUS_LABEL,
+  );
+  if (wantsNoStatus && !hasMarkedStatus) return true;
+  if (!selectedStatuses.length) return false;
+  const label = documentHighestWorkflowStatusLabel(document, workflowOverride);
+  return selectedStatuses.includes(label);
+};
+
 const countWorkflowCompletedSteps = (
   workflow: SalaryWorkflowState,
   steps: Array<{ key: string }>,
@@ -1488,7 +1614,38 @@ const mergeBulkStepsIntoWorkflow = (
       merged[step.key] = true;
     }
   }
-  return buildWorkflowFromCompletedMap(existing, steps, merged);
+  const next = buildWorkflowFromCompletedMap(existing, steps, merged);
+  const completedAt = { ...(existing.completedAt ?? {}) };
+  const now = new Date().toISOString();
+  for (const step of steps) {
+    if (
+      bulkSteps[step.key] === true &&
+      !currentMap[step.key] &&
+      !completedAt[step.key]
+    ) {
+      completedAt[step.key] = now;
+    }
+  }
+  return { ...next, completedAt };
+};
+
+const documentWorkflowStepTimestamp = (
+  document: BackendPersonDocument,
+  kind: "sent" | "received",
+) => {
+  const completedAt = mergeSalaryWorkflow(document.workflow).completedAt ?? {};
+  const keys = kind === "sent" ? ["sentReport", "sent"] : ["received"];
+  return keys.map((key) => completedAt[key]).find(Boolean) ?? "";
+};
+
+const formatDocumentWorkflowTimestamp = (
+  document: BackendPersonDocument,
+  kind: "sent" | "received",
+) => {
+  const value = documentWorkflowStepTimestamp(document, kind);
+  if (!value) return "—";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString("uk-UA");
 };
 
 const getDocumentProgressPercent = (document: BackendPersonDocument) => {
@@ -1581,7 +1738,8 @@ type JournalReadinessFilter =
   | "INCOMPLETE"
   | "READY_TO_SEND"
   | "COMPLETE"
-  | "SKIPPED_SZCH";
+  | "SKIPPED_SZCH"
+  | "SKIPPED_STATUS200";
 
 const ubdProgressBackupEntryFromDocument = (
   document: BackendPersonDocument,
@@ -1939,11 +2097,14 @@ export function DocumentsPage(_props: {
   const [isLoadingQuestionnairePreview, setIsLoadingQuestionnairePreview] =
     useState(false);
   const questionnaireLoadSeqRef = useRef(0);
+  const documentOpenSeqRef = useRef(0);
   const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingFieldSaveRef = useRef<(() => void) | null>(null);
   const [selectedDocumentId, setSelectedDocumentId] = useState("");
   const [skippedDueToSzch, setSkippedDueToSzch] = useState(false);
   const skippedDueToSzchRef = useRef(false);
+  const [skippedDueToStatus200, setSkippedDueToStatus200] = useState(false);
+  const skippedDueToStatus200Ref = useRef(false);
   const [documentMessage, setDocumentMessage] = useState("");
   const [isSavingDocument, setIsSavingDocument] = useState(false);
   const [allPersonDocuments, setAllPersonDocuments] = useState<
@@ -2056,7 +2217,9 @@ export function DocumentsPage(_props: {
       return createZhbdCertificateWordBlob(zhbdCertificateFields);
     }
     if (mode === "ubdRestoreReport") {
-      return createUbdRestoreWordBlob(ubdRestoreFields);
+      return prepareUbdRestoreExportFields(ubdRestoreFields).then(
+        createUbdRestoreWordBlob,
+      );
     }
     if (mode === "lostMilitaryId") {
       if (lostMilitaryIdPreviewDoc === "order") {
@@ -2162,7 +2325,11 @@ export function DocumentsPage(_props: {
           break;
       }
     }
-    return { ...live, skippedDueToSzch };
+    return {
+      ...live,
+      skippedDueToSzch,
+      skippedDueToStatus200,
+    };
   };
 
   const filteredJournalDocuments = useMemo(() => {
@@ -2187,8 +2354,10 @@ export function DocumentsPage(_props: {
           : undefined;
       if (
         journalStatusFilters.length > 0 &&
-        !journalStatusFilters.includes(
-          documentHighestWorkflowStatusLabel(document, liveWorkflow),
+        !documentMatchesJournalStatusFilters(
+          document,
+          journalStatusFilters,
+          liveWorkflow,
         )
       ) {
         return false;
@@ -2202,10 +2371,14 @@ export function DocumentsPage(_props: {
       if (journalReadinessFilter !== "ALL") {
         const liveFields = liveJournalFields(document);
         const skippedSzch = readDocumentSkippedDueToSzch(liveFields);
+        const skippedStatus200 = readDocumentSkippedDueToStatus200(liveFields);
         if (journalReadinessFilter === "SKIPPED_SZCH") {
           return skippedSzch;
         }
-        if (skippedSzch) return false;
+        if (journalReadinessFilter === "SKIPPED_STATUS200") {
+          return skippedStatus200;
+        }
+        if (readDocumentSkippedFromWork(liveFields)) return false;
         const complete =
           getDocumentProgressPercent(
             ubdLiveDocument(document, liveWorkflow),
@@ -2273,6 +2446,7 @@ export function DocumentsPage(_props: {
     mode,
     selectedDocumentId,
     skippedDueToSzch,
+    skippedDueToStatus200,
     salaryFields,
     serviceCharacteristicFields,
     ticketFields,
@@ -2288,7 +2462,7 @@ export function DocumentsPage(_props: {
     const blocked = new Set<string>();
     for (const document of filteredJournalDocuments) {
       const liveFields = liveJournalFields(document);
-      if (readDocumentSkippedDueToSzch(liveFields)) {
+      if (readDocumentSkippedFromWork(liveFields)) {
         blocked.add(document.id);
         continue;
       }
@@ -2317,6 +2491,7 @@ export function DocumentsPage(_props: {
     salaryFields,
     serviceCharacteristicFields,
     skippedDueToSzch,
+    skippedDueToStatus200,
     ticketFields,
     ubdFields,
     ubdRestoreFields,
@@ -2524,21 +2699,27 @@ export function DocumentsPage(_props: {
           rows,
           periodFilterLabel,
         });
-        const skippedComplete = [...journalUbdExportBlockedIds].filter(
-          (id) => {
-            const document = filteredJournalDocuments.find(
-              (item) => item.id === id,
-            );
-            if (!document) return false;
-            return !readDocumentSkippedDueToSzch(liveJournalFields(document));
-          },
-        ).length;
-        const skippedSzch = journalUbdExportBlockedIds.size - skippedComplete;
+        let skippedComplete = 0;
+        let skippedSzch = 0;
+        let skippedStatus200 = 0;
+        for (const id of journalUbdExportBlockedIds) {
+          const document = filteredJournalDocuments.find(
+            (item) => item.id === id,
+          );
+          if (!document) continue;
+          const liveFields = liveJournalFields(document);
+          if (readDocumentSkippedDueToSzch(liveFields)) {
+            skippedSzch += 1;
+          } else if (readDocumentSkippedDueToStatus200(liveFields)) {
+            skippedStatus200 += 1;
+          } else {
+            skippedComplete += 1;
+          }
+        }
         const skipParts = [
-          skippedComplete
-            ? `з повним прогресом: ${skippedComplete}`
-            : "",
+          skippedComplete ? `з повним прогресом: ${skippedComplete}` : "",
           skippedSzch ? `СЗЧ: ${skippedSzch}` : "",
+          skippedStatus200 ? `статус 200: ${skippedStatus200}` : "",
         ].filter(Boolean);
         setDocumentMessage(
           skipParts.length
@@ -2574,6 +2755,11 @@ export function DocumentsPage(_props: {
             documentType: salaryDocumentTypeLabel(journalDocument.type),
             progressPercent: getDocumentProgressPercent(journalDocument),
             status: documentWorkflowStatusLabel(journalDocument),
+            sentAt: formatDocumentWorkflowTimestamp(journalDocument, "sent"),
+            receivedAt: formatDocumentWorkflowTimestamp(
+              journalDocument,
+              "received",
+            ),
             note: liveDocumentStatusNote(journalDocument),
             files: getDocumentFileSummary(journalDocument),
             formPurpose: readDocumentFormPurpose(
@@ -2988,12 +3174,18 @@ export function DocumentsPage(_props: {
   );
 
   useEffect(() => {
-    const skipped = readDocumentSkippedDueToSzch(
-      (selectedDocument?.fields || {}) as Record<string, unknown>,
-    );
-    skippedDueToSzchRef.current = skipped;
-    setSkippedDueToSzch(skipped);
-  }, [selectedDocument?.fields?.skippedDueToSzch, selectedDocumentId]);
+    const fields = (selectedDocument?.fields || {}) as Record<string, unknown>;
+    const skippedSzch = readDocumentSkippedDueToSzch(fields);
+    const skippedStatus200 = readDocumentSkippedDueToStatus200(fields);
+    skippedDueToSzchRef.current = skippedSzch;
+    skippedDueToStatus200Ref.current = skippedStatus200;
+    setSkippedDueToSzch(skippedSzch);
+    setSkippedDueToStatus200(skippedStatus200);
+  }, [
+    selectedDocument?.fields?.skippedDueToSzch,
+    selectedDocument?.fields?.skippedDueToStatus200,
+    selectedDocumentId,
+  ]);
   const personExternalId = String(
     summary.externalId ||
       (requestedPersonId && !isUnstablePersonExternalId(requestedPersonId)
@@ -3732,6 +3924,27 @@ export function DocumentsPage(_props: {
   };
 
   const openPersonDocument = async (documentSummary: BackendPersonDocument) => {
+    const openSeq = ++documentOpenSeqRef.current;
+    const isCurrentOpen = () => documentOpenSeqRef.current === openSeq;
+    setSelectedDocumentId(documentSummary.id);
+    if (documentSummary.type === "ubdReport") {
+      setMode("ubdReport");
+      const documentName = getDocumentPersonName(documentSummary);
+      const immediateSummary = {
+        ...buildPersonSummary(null),
+        name: documentName || "Особа не вибрана",
+        externalId: documentSummary.personExternalId || "",
+      };
+      const immediateDefaults = createUbdFields(
+        null,
+        immediateSummary,
+        legacyUbdSignatories(),
+      );
+      setUbdFields(
+        mergeUbdFields(immediateDefaults, documentSummary.fields),
+      );
+      setDocumentFiles(mergeDocumentFiles(documentSummary.files));
+    }
     let document = documentSummary;
     if (!Object.prototype.hasOwnProperty.call(documentSummary, "files")) {
       setDocumentMessage("Завантажую повні дані документа…");
@@ -3743,6 +3956,7 @@ export function DocumentsPage(_props: {
         const loaded = fullDocuments.find(
           (item) => item.id === documentSummary.id,
         );
+        if (!isCurrentOpen()) return;
         if (!loaded) {
           throw new Error("Документ не знайдено в БД");
         }
@@ -3760,6 +3974,7 @@ export function DocumentsPage(_props: {
             : [document, ...current],
         );
       } catch (error) {
+        if (!isCurrentOpen()) return;
         setDocumentMessage(
           error instanceof Error
             ? `Не вдалося завантажити документ: ${error.message}`
@@ -3783,6 +3998,7 @@ export function DocumentsPage(_props: {
       const profile = await api
         .getPersonnelProfile(nextPersonId, documentPersonName)
         .catch(() => null);
+      if (!isCurrentOpen()) return;
       const rowValues = (value: unknown) => {
         if (!value || typeof value !== "object" || Array.isArray(value)) {
           return {};
@@ -3867,6 +4083,7 @@ export function DocumentsPage(_props: {
       anketaFullName: documentPersonName,
     })
       .then(({ questionnaire: item, resolvedExternalId }) => {
+        if (!isCurrentOpen()) return;
         setPersonQuestionnaire(
           item
             ? {
@@ -3878,6 +4095,7 @@ export function DocumentsPage(_props: {
         );
       })
       .catch(() => {
+        if (!isCurrentOpen()) return;
         setPersonQuestionnaire(null);
       });
 
@@ -3886,6 +4104,7 @@ export function DocumentsPage(_props: {
       const configured = snapshotSignatories(
         await api.listDocumentSignatories("ubdReport"),
       );
+      if (!isCurrentOpen()) return;
       const defaults = createUbdFields(
         personForDocument,
         summaryForDocument,
@@ -3897,6 +4116,7 @@ export function DocumentsPage(_props: {
     } else if (document.type === "form6Report") {
       setMode("form6Report");
       const configured = snapshotSignatories(await loadForm6SignatoryRecords());
+      if (!isCurrentOpen()) return;
       const defaults = createForm6Fields(
         personForDocument,
         summaryForDocument,
@@ -3917,6 +4137,7 @@ export function DocumentsPage(_props: {
     } else if (document.type === "form12Report") {
       setMode("form12Report");
       const configured = snapshotSignatories(await loadForm12SignatoryRecords());
+      if (!isCurrentOpen()) return;
       const defaults = createForm12Fields(
         personForDocument,
         summaryForDocument,
@@ -3943,6 +4164,7 @@ export function DocumentsPage(_props: {
       const configured = snapshotSignatories(
         await loadServiceCharacteristicSignatoryRecords(),
       );
+      if (!isCurrentOpen()) return;
       const defaults = createServiceCharacteristicFields(
         personForDocument,
         summaryForDocument,
@@ -3960,6 +4182,7 @@ export function DocumentsPage(_props: {
       const configured = snapshotSignatories(
         await loadZhbdCertificateSignatoryRecords(),
       );
+      if (!isCurrentOpen()) return;
       const defaults = createZhbdCertificateFields(
         personForDocument,
         summaryForDocument,
@@ -3984,6 +4207,7 @@ export function DocumentsPage(_props: {
       const configured = snapshotSignatories(
         await loadUbdRestoreSignatoryRecords(),
       );
+      if (!isCurrentOpen()) return;
       const defaults = createUbdRestoreFields(
         personForDocument,
         summaryForDocument,
@@ -4011,6 +4235,7 @@ export function DocumentsPage(_props: {
       const personPhoto = ticketPersonId
         ? await api.getPersonPhoto(ticketPersonId).catch(() => null)
         : null;
+      if (!isCurrentOpen()) return;
       const defaults = createTemporaryMilitaryIdFields(
         summaryForDocument,
         personPhoto?.photoData || "",
@@ -4028,6 +4253,7 @@ export function DocumentsPage(_props: {
       const configured = snapshotSignatories(
         await loadLostMilitaryIdSignatoryRecords(),
       );
+      if (!isCurrentOpen()) return;
       const defaults = createLostMilitaryIdFields(
         personForDocument,
         summaryForDocument,
@@ -4047,6 +4273,7 @@ export function DocumentsPage(_props: {
       setDocumentFiles({});
     }
 
+    if (!isCurrentOpen()) return;
     setWorkflow(mergeSalaryWorkflow(document.workflow));
     setDocumentMessage(
       `Відкрито документ: ${document.title} · ${new Date(document.updatedAt).toLocaleString("uk-UA")}`,
@@ -4679,6 +4906,7 @@ export function DocumentsPage(_props: {
     ...fields,
     personStatus: nextPersonStatusLabel(),
     skippedDueToSzch: skippedDueToSzchRef.current,
+    skippedDueToStatus200: skippedDueToStatus200Ref.current,
   });
 
   const applyUpdatedDocument = (updated: BackendPersonDocument) => {
@@ -5672,9 +5900,16 @@ export function DocumentsPage(_props: {
     value: string,
   ) => {
     setUbdRestoreFields((current) => {
+      const staffPosition =
+        key === "staffPosition" ? capitalizeReportPosition(value) : current.staffPosition;
       const next = {
         ...current,
-        [key]: key === "staffPosition" ? capitalizeReportPosition(value) : value,
+        [key]: key === "staffPosition" ? staffPosition : value,
+        ...(key === "staffPosition"
+          ? { signerTitle: formatPositionTitleBlock(staffPosition) }
+          : key === "signerTitle"
+            ? { signerTitle: capitalizeSignerTitleBlock(value) }
+            : {}),
       };
       scheduleDocumentFieldSave(() => {
         void saveUbdRestoreDocument(next);
@@ -6154,10 +6389,15 @@ export function DocumentsPage(_props: {
       : stillDone[stillDone.length - 1]?.key ||
         activeWorkflowSteps[0]?.key ||
         targetKey;
+    const completedAt = { ...(workflow.completedAt ?? {}) };
+    if (nextDone && !baseMap[targetKey] && !completedAt[targetKey]) {
+      completedAt[targetKey] = new Date().toISOString();
+    }
 
     updateWorkflow({
       ...workflow,
       completed,
+      completedAt,
       independentSteps: true,
       currentStatus,
     });
@@ -6254,12 +6494,16 @@ export function DocumentsPage(_props: {
 
   const saveUbdRestoreAsWord = async () => {
     setDocumentMessage("Формую Word-документ рапорта на відновлення УБД...");
-    const blob = await createUbdRestoreWordBlob(ubdRestoreFields);
-    const fileName = `${safeFilePart(ubdRestoreFields.folderName)}.docx`;
+    const exportFields = await prepareUbdRestoreExportFields(ubdRestoreFields);
+    const blob = await createUbdRestoreWordBlob(exportFields);
+    const fileName = `${safeFilePart(exportFields.folderName)}.docx`;
     downloadBlob(fileName, blob);
     setDocumentMessage(`Word-файл «${fileName}» збережено.`);
     setWorkflowStep("document", "on");
-    void saveUbdRestoreDocument(ubdRestoreFields);
+    if (exportFields.folderName !== ubdRestoreFields.folderName) {
+      setUbdRestoreFields(exportFields);
+    }
+    void saveUbdRestoreDocument(exportFields);
   };
 
   const saveLostMilitaryIdAsWord = async () => {
@@ -6516,11 +6760,66 @@ export function DocumentsPage(_props: {
     });
   };
 
+  const updateSkippedDueToStatus200 = (next: boolean) => {
+    skippedDueToStatus200Ref.current = next;
+    setSkippedDueToStatus200(next);
+    if (selectedDocumentId) {
+      const patchDocument = (document: BackendPersonDocument) =>
+        document.id !== selectedDocumentId
+          ? document
+          : {
+              ...document,
+              fields: {
+                ...(document.fields && typeof document.fields === "object"
+                  ? document.fields
+                  : {}),
+                skippedDueToStatus200: next,
+              },
+            };
+      setPersonDocuments((current) => current.map(patchDocument));
+      setAllPersonDocuments((current) => current.map(patchDocument));
+    }
+    const activeFields =
+      mode === "ubdReport"
+        ? ubdFields
+        : mode === "form6Report"
+          ? form6Fields
+          : mode === "form12Report"
+            ? form12Fields
+            : mode === "serviceCharacteristic"
+              ? serviceCharacteristicFields
+              : mode === "zhbdCertificate"
+                ? zhbdCertificateFields
+                : mode === "ubdRestoreReport"
+                  ? ubdRestoreFields
+                  : mode === "temporaryMilitaryId"
+                    ? ticketFields
+                    : mode === "lostMilitaryId"
+                      ? lostMilitaryIdFields
+                      : salaryFields;
+    scheduleDocumentFieldSave(() => {
+      saveActiveDocumentWorkflow(activeFields, workflow);
+    });
+  };
+
   const personStatusLooksSzch = /СЗЧ|САМОВІЛ/i.test(
     selectedDocument
       ? readDocumentPersonStatus(selectedDocument, personStatusById)
       : "",
   );
+  const personStatusLooksStatus200 = (() => {
+    const status = selectedDocument
+      ? readDocumentPersonStatus(selectedDocument, personStatusById)
+      : "";
+    const normalized = status.trim().toLocaleLowerCase("uk-UA");
+    return (
+      normalized.includes("загиб") ||
+      normalized.includes("помер") ||
+      /(?:^|\D)200(?:\D|$)/.test(normalized)
+    );
+  })();
+  const documentSkippedFromWork =
+    skippedDueToSzch || skippedDueToStatus200;
 
   const documentStatusNotePanel = (
     value: string,
@@ -6536,13 +6835,25 @@ export function DocumentsPage(_props: {
           }
           label="Не потрібно робити: СЗЧ"
         />
+        <Checkbox
+          checked={skippedDueToStatus200}
+          onCheckedChange={(checked) =>
+            updateSkippedDueToStatus200(checked === true)
+          }
+          label="Не потрібно робити: статус 200"
+        />
       </div>
       {personStatusLooksSzch && !skippedDueToSzch ? (
         <span className="document-field-hint">
           У статусі службовця є СЗЧ — можна зняти документ з роботи.
         </span>
       ) : null}
-      {skippedDueToSzch ? (
+      {personStatusLooksStatus200 && !skippedDueToStatus200 ? (
+        <span className="document-field-hint">
+          У статусі службовця є 200 — можна зняти документ з роботи.
+        </span>
+      ) : null}
+      {documentSkippedFromWork ? (
         <span className="document-field-hint">
           Документ сірий у журналі і не входить в експорт.
         </span>
@@ -6578,13 +6889,21 @@ export function DocumentsPage(_props: {
   };
 
   const documentListStatusNote = (document: BackendPersonDocument) => {
-    const skipped = readDocumentSkippedDueToSzch(liveJournalFields(document));
+    const liveFields = liveJournalFields(document);
+    const skippedSzch = readDocumentSkippedDueToSzch(liveFields);
+    const skippedStatus200 = readDocumentSkippedDueToStatus200(liveFields);
     const note = liveDocumentStatusNote(document);
-    if (!skipped && !note) return null;
-    const text = skipped
+    if (!skippedSzch && !skippedStatus200 && !note) return null;
+    const skipLabel = [
+      skippedSzch ? "Не потрібно: СЗЧ" : "",
+      skippedStatus200 ? "Не потрібно: 200" : "",
+    ]
+      .filter(Boolean)
+      .join(" · ");
+    const text = skipLabel
       ? note
-        ? `СЗЧ · ${note}`
-        : "Не потрібно: СЗЧ"
+        ? `${skipLabel} · ${note}`
+        : skipLabel
       : note;
     return (
       <small className="document-status-note-preview" title={text}>
@@ -6597,7 +6916,7 @@ export function DocumentsPage(_props: {
     [
       "salary-person-document-shell",
       document.id === selectedDocumentId ? "active" : "",
-      readDocumentSkippedDueToSzch(liveJournalFields(document))
+      readDocumentSkippedFromWork(liveJournalFields(document))
         ? "is-skipped-szch"
         : "",
     ]
@@ -8719,6 +9038,17 @@ export function DocumentsPage(_props: {
                     }}
                     label="Усі статуси"
                   />
+                  <Checkbox
+                    checked={journalStatusFilters.includes(
+                      JOURNAL_NO_WORKFLOW_STATUS_LABEL,
+                    )}
+                    onCheckedChange={() =>
+                      toggleJournalStatusFilter(
+                        JOURNAL_NO_WORKFLOW_STATUS_LABEL,
+                      )
+                    }
+                    label={JOURNAL_NO_WORKFLOW_STATUS_LABEL}
+                  />
                   {journalStatusOptions.map((title) => (
                     <Checkbox
                       key={title}
@@ -8764,6 +9094,7 @@ export function DocumentsPage(_props: {
               <MenuItem value="INCOMPLETE">Не готові до відправки</MenuItem>
               <MenuItem value="COMPLETE">Повний прогрес</MenuItem>
               <MenuItem value="SKIPPED_SZCH">Не потрібні: СЗЧ</MenuItem>
+              <MenuItem value="SKIPPED_STATUS200">Не потрібні: 200</MenuItem>
             </TextField>
           </div>
           {journalTypeFilter === "ubdReport" ? (
@@ -8924,6 +9255,7 @@ export function DocumentsPage(_props: {
               .filter(Boolean)
               .join(" ")}
           >
+            <div className="documents-journal-table-scroll sci-custom-scroll-target">
             <div
               className={[
                 "documents-journal-row",
@@ -8978,6 +9310,8 @@ export function DocumentsPage(_props: {
                   : ""}
               </button>
               <span>Статус</span>
+              <span>Відправлено</span>
+              <span>Отримали</span>
               <span>Коментар</span>
               <span>Файли</span>
               {showFormPurposeColumn ? <span>Для чого форма</span> : null}
@@ -9040,7 +9374,10 @@ export function DocumentsPage(_props: {
                     : " ↑"
                   : ""}
               </button>
-              <span />
+              <span
+                aria-hidden
+                className="documents-journal-col-pinned documents-journal-delete-slot"
+              />
             </div>
             <div className="documents-journal-table-body">
             {isLoadingDocumentJournal ? (
@@ -9066,22 +9403,26 @@ export function DocumentsPage(_props: {
                 const progress = getDocumentProgressPercent(journalDocument);
                 const liveFields = liveJournalFields(journalDocument);
                 const skippedSzch = readDocumentSkippedDueToSzch(liveFields);
+                const skippedStatus200 =
+                  readDocumentSkippedDueToStatus200(liveFields);
+                const skippedFromWork = skippedSzch || skippedStatus200;
                 const statusNote = [
                   skippedSzch ? "Не потрібно: СЗЧ" : "",
+                  skippedStatus200 ? "Не потрібно: 200" : "",
                   liveDocumentStatusNote(journalDocument),
                 ]
                   .filter(Boolean)
                   .join(" · ");
-                const isComplete = !skippedSzch && progress >= 100;
+                const isComplete = !skippedFromWork && progress >= 100;
                 const exportBlocked = journalUbdExportBlockedIds.has(
                   document.id,
                 );
                 const hasMissingFields =
-                  !skippedSzch &&
+                  !skippedFromWork &&
                   !isComplete &&
                   documentHasEmptyInputs(journalDocument.type, liveFields);
                 const hasBasisDateMismatch =
-                  !skippedSzch &&
+                  !skippedFromWork &&
                   !isComplete &&
                   !hasMissingFields &&
                   documentHasBasisDateMismatch(
@@ -9114,7 +9455,7 @@ export function DocumentsPage(_props: {
                       isComplete ? "is-complete" : "",
                       hasMissingFields ? "is-incomplete" : "",
                       hasBasisDateMismatch ? "is-basis-mismatch" : "",
-                      skippedSzch ? "is-skipped-szch" : "",
+                      skippedFromWork ? "is-skipped-szch" : "",
                     ]
                       .filter(Boolean)
                       .join(" ")}
@@ -9122,8 +9463,10 @@ export function DocumentsPage(_props: {
                     role="button"
                     tabIndex={0}
                     title={
-                      skippedSzch
-                        ? "Не потрібно робити: СЗЧ — не входить в експорт"
+                      skippedFromWork
+                        ? skippedStatus200
+                          ? "Не потрібно робити: статус 200 — не входить в експорт"
+                          : "Не потрібно робити: СЗЧ — не входить в експорт"
                         : isComplete
                         ? journalDocument.type === "ubdReport"
                           ? "Весь прогрес заповнений — готовий, в експорт «Не подавалися» не входить"
@@ -9144,8 +9487,10 @@ export function DocumentsPage(_props: {
                     <span
                       className="documents-journal-export-check"
                       title={
-                        skippedSzch
-                          ? "Не входить в експорт: документ не потрібен через СЗЧ"
+                        skippedFromWork
+                          ? skippedStatus200
+                            ? "Не входить в експорт: документ не потрібен через статус 200"
+                            : "Не входить в експорт: документ не потрібен через СЗЧ"
                           : exportBlocked
                             ? "Не входить в експорт «Не подавалися»: прогрес заповнений повністю"
                             : undefined
@@ -9190,6 +9535,15 @@ export function DocumentsPage(_props: {
                           : undefined,
                       )}
                     </span>
+                    <span>
+                      {formatDocumentWorkflowTimestamp(journalDocument, "sent")}
+                    </span>
+                    <span>
+                      {formatDocumentWorkflowTimestamp(
+                        journalDocument,
+                        "received",
+                      )}
+                    </span>
                     <span
                       className="documents-journal-note"
                       title={statusNote}
@@ -9221,7 +9575,7 @@ export function DocumentsPage(_props: {
                     </span>
                     <button
                       aria-label="Видалити документ"
-                      className="documents-journal-delete"
+                      className="documents-journal-delete documents-journal-col-pinned"
                       disabled={isSavingDocument}
                       onClick={(event) => {
                         event.stopPropagation();
@@ -9242,6 +9596,7 @@ export function DocumentsPage(_props: {
                   : "Документи ще не створювались."}
               </div>
             )}
+            </div>
             </div>
           </div>
         </section>

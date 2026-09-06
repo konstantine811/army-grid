@@ -1,5 +1,9 @@
 import { useMemo } from "react";
-import { buildPersonnelRoute } from "../../app/navigation";
+import { openPersonnelPerson } from "../../app/navigation";
+import {
+  buildPersonnelFocusTargetFromRow,
+  type PersonnelFocusTarget,
+} from "../personnel/personnelFocus";
 import {
   Button,
   Chip,
@@ -26,6 +30,7 @@ type AnketaPersonSidePanelProps = {
   onClose: () => void;
   onFillMissing?: (value: string) => void;
   onMessage?: (message: string) => void;
+  onOpenPersonnel?: (target: PersonnelFocusTarget) => void;
 };
 
 const FIELD_ROWS: Array<{ key: AnketaColumnKey; label: string }> = [
@@ -55,6 +60,7 @@ export function AnketaPersonSidePanel({
   onClose,
   onFillMissing,
   onMessage,
+  onOpenPersonnel,
 }: AnketaPersonSidePanelProps) {
   const panel = useAnketaPersonPanel(anketaRow, onMessage);
   const nameMismatch = Boolean(
@@ -67,6 +73,22 @@ export function AnketaPersonSidePanel({
     if (!anketaRow) return [];
     return listAnketaEmptyCells([anketaRow], gapColumnKeys);
   }, [anketaRow, gapColumnKeys]);
+
+  const openPersonnelTarget = (target: PersonnelFocusTarget) => {
+    if (onOpenPersonnel) {
+      onOpenPersonnel(target);
+      return;
+    }
+    openPersonnelPerson(target);
+  };
+
+  const openPersonnelForMatch = (match: NonNullable<typeof panel.match>) => {
+    const target = buildPersonnelFocusTargetFromRow(match.row);
+    const attachmentId = panel.personnelExternalId.trim();
+    openPersonnelTarget(
+      attachmentId ? { ...target, externalId: attachmentId } : target,
+    );
+  };
 
   if (!anketaRow) return null;
 
@@ -150,25 +172,11 @@ export function AnketaPersonSidePanel({
                     key={item.summary.externalId || item.row.__dbRowId}
                     type="button"
                     className="anketa-person-similar-item"
-                    onClick={() => {
-                      const target = {
-                        rowId: item.row.__dbRowId,
-                        externalId: item.summary.externalId,
-                      };
-                      try {
-                        window.localStorage.setItem(
-                          "army-grid:focus-personnel",
-                          JSON.stringify(target),
-                        );
-                      } catch {
-                        /* ignore */
-                      }
-                      window.open(
-                        buildPersonnelRoute(target),
-                        "_blank",
-                        "noopener,noreferrer",
-                      );
-                    }}
+                    onClick={() =>
+                      openPersonnelTarget(
+                        buildPersonnelFocusTargetFromRow(item.row),
+                      )
+                    }
                   >
                     {[
                       item.summary.name,
@@ -192,25 +200,11 @@ export function AnketaPersonSidePanel({
                     key={item.summary.externalId || item.row.__dbRowId}
                     type="button"
                     className="anketa-person-similar-item"
-                    onClick={() => {
-                      const target = {
-                        rowId: item.row.__dbRowId,
-                        externalId: item.summary.externalId,
-                      };
-                      try {
-                        window.localStorage.setItem(
-                          "army-grid:focus-personnel",
-                          JSON.stringify(target),
-                        );
-                      } catch {
-                        /* ignore */
-                      }
-                      window.open(
-                        buildPersonnelRoute(target),
-                        "_blank",
-                        "noopener,noreferrer",
-                      );
-                    }}
+                    onClick={() =>
+                      openPersonnelTarget(
+                        buildPersonnelFocusTargetFromRow(item.row),
+                      )
+                    }
                   >
                     {[
                       item.summary.name,
@@ -228,6 +222,48 @@ export function AnketaPersonSidePanel({
         </div>
 
         <div className="person-card-scroll anketa-person-scroll">
+          <div className="anketa-person-side-actions anketa-person-side-actions-top">
+            <Button
+              variant="contained"
+              size="small"
+              disabled={!panel.match || panel.isMerging || !panel.mergePreview?.labels.length}
+              onClick={() => void panel.mergeToPersonnel()}
+            >
+              {panel.isMerging
+                ? "Переношу…"
+                : panel.mergePreview?.labels.length
+                  ? `Перенести в ООС · ${panel.mergePreview.labels.length}`
+                  : "Перенести в ООС"}
+            </Button>
+            <Button
+              variant="outlined"
+              size="small"
+              disabled={!panel.match}
+              onClick={() => {
+                if (!panel.match) return;
+                openPersonnelForMatch(panel.match);
+              }}
+            >
+              Відкрити в особовому складі
+            </Button>
+          </div>
+
+          <div className="person-action-fields">
+            {FIELD_ROWS.map((field) => {
+              const value = String(anketaRow[field.key] ?? "").trim();
+              const isGap = gapColumnKeys.includes(field.key) && !value;
+              return (
+                <span
+                  key={field.key}
+                  className={isGap ? "anketa-person-field-gap" : undefined}
+                >
+                  <strong>{field.label}</strong>
+                  {value || "—"}
+                </span>
+              );
+            })}
+          </div>
+
           {focusedEmpty ? (
             <div className="anketa-person-focus-banner">
               <strong>Порожня комірка</strong>
@@ -254,22 +290,6 @@ export function AnketaPersonSidePanel({
               ) : null}
             </div>
           ) : null}
-
-          <div className="person-action-fields">
-            {FIELD_ROWS.map((field) => {
-              const value = String(anketaRow[field.key] ?? "").trim();
-              const isGap = gapColumnKeys.includes(field.key) && !value;
-              return (
-                <span
-                  key={field.key}
-                  className={isGap ? "anketa-person-field-gap" : undefined}
-                >
-                  <strong>{field.label}</strong>
-                  {value || "—"}
-                </span>
-              );
-            })}
-          </div>
 
           {rowGaps.length ? (
             <div className="person-edit-section">
@@ -315,49 +335,6 @@ export function AnketaPersonSidePanel({
                 </span>
               </div>
             )}
-          </div>
-
-          <div className="anketa-person-side-actions">
-            <Button
-              variant="contained"
-              size="small"
-              disabled={!panel.match || panel.isMerging || !panel.mergePreview?.labels.length}
-              onClick={() => void panel.mergeToPersonnel()}
-            >
-              {panel.isMerging
-                ? "Переношу…"
-                : panel.mergePreview?.labels.length
-                  ? `Перенести в ООС · ${panel.mergePreview.labels.length}`
-                  : "Перенести в ООС"}
-            </Button>
-            <Button
-              variant="outlined"
-              size="small"
-              disabled={!panel.match}
-              onClick={() => {
-                if (!panel.match) return;
-                const target = {
-                  rowId: panel.match.row.__dbRowId,
-                  externalId:
-                    panel.personnelExternalId || panel.match.summary.externalId,
-                };
-                try {
-                  window.localStorage.setItem(
-                    "army-grid:focus-personnel",
-                    JSON.stringify(target),
-                  );
-                } catch {
-                  /* ignore */
-                }
-                window.open(
-                  buildPersonnelRoute(target),
-                  "_blank",
-                  "noopener,noreferrer",
-                );
-              }}
-            >
-              Відкрити в особовому складі
-            </Button>
           </div>
         </div>
       </aside>

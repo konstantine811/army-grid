@@ -7,7 +7,12 @@ import {
   SyncAltOutlinedIcon,
 } from "@/components/sci/icons";
 import { api } from "../../api";
+import { useAuth } from "../../auth/AuthProvider";
 import { CacheKeys, readDataCache } from "../../data/idbDataCache";
+import {
+  loadPersonnelDataset,
+  type PersonnelDataset,
+} from "../../data/personnelDataset";
 import { loadSharedRosterLatest } from "../../data/sharedAppData";
 import {
   type CellValue,
@@ -29,10 +34,11 @@ import {
   type PositionsVozPerson,
 } from "./positionsVozFill";
 import {
-  mapRosterLatestToPreviewRows,
   readRosterColumnValue,
-  rosterLatestToSourceSnapshot,
+  rosterRowsToSourceSnapshot,
 } from "./rosterSourceSnapshot";
+import { isPersonnelInStaffRoster } from "../personnel/personnelRosterMerge";
+import { isLikelyPersonnelRow } from "../personnel/personnelUtils";
 import {
   importStaffSheetFromFile,
   rosterLatestToStaffSheetImportSnapshot,
@@ -324,6 +330,20 @@ const getMorningPersonName = (
   return fromColumn;
 };
 
+const morningPersonDedupeKey = (
+  sheet: ExcelSheetSnapshot,
+  row: CellValue[],
+  name: string,
+) => {
+  const birthFromName = name.match(/\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b/)?.[0] ?? "";
+  const birthDate = getMorningValue(sheet, row, 16) || birthFromName;
+  const normalizedName = normalizeReportText(name)
+    .replace(/\(\s*\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\s*р\.?\s*н\.?\s*\)/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return `${normalizedName}|${normalizeReportText(birthDate)}`;
+};
+
 const makeMorningActivity = (sheet: ExcelSheetSnapshot, row: CellValue[]) =>
   getMorningValue(sheet, row, 22) ||
   getMorningValue(sheet, row, 5) ||
@@ -411,7 +431,7 @@ const findMorningReportTable = (sheet: ExcelSheetSnapshot) => {
   return null;
 };
 
-function analyzeMorningReport(
+export function analyzeMorningReport(
   source?: ExcelWorkbookSnapshot | null,
   submittedBy = "",
 ): MorningReportResult | null {
@@ -419,6 +439,7 @@ function analyzeMorningReport(
   if (!sourceSheet) return null;
 
   const rows: MorningReportRow[] = [];
+  const seenPeople = new Set<string>();
   let skippedRows = 0;
   const existingReportTable = findMorningReportTable(sourceSheet);
 
@@ -455,6 +476,12 @@ function analyzeMorningReport(
           skippedRows += 1;
           return;
         }
+        const personKey = morningPersonDedupeKey(sourceSheet, row, name);
+        if (seenPeople.has(personKey)) {
+          skippedRows += 1;
+          return;
+        }
+        seenPeople.add(personKey);
 
         rows.push({
           sourceRowNumber: excelRow.excelRowNumber,
@@ -517,6 +544,12 @@ function analyzeMorningReport(
       skippedRows += 1;
       return;
     }
+    const personKey = morningPersonDedupeKey(sourceSheet, row, name);
+    if (seenPeople.has(personKey)) {
+      skippedRows += 1;
+      return;
+    }
+    seenPeople.add(personKey);
 
     rows.push({
       sourceRowNumber: excelRow.excelRowNumber,
@@ -810,6 +843,7 @@ function writeMorningReportIntoTemplate(workbook: any, result: MorningReportResu
 }
 
 export function ExcelFillPage() {
+  const { user } = useAuth();
   const [sourceUpload, setSourceUpload] = useState<ExcelWorkbookSnapshot | null>(
     null,
   );
@@ -851,11 +885,19 @@ export function ExcelFillPage() {
     JSON.stringify(loadPositionsVozRules(), null, 2),
   );
   const [positionsRosterLabel, setPositionsRosterLabel] = useState("");
-  const [morningSubmittedBy, setMorningSubmittedBy] = useState("");
+  const [morningSubmittedBy, setMorningSubmittedBy] = useState(() =>
+    toUppercaseCallsign(user?.nickname || ""),
+  );
   const [isBusy, setIsBusy] = useState(false);
   const [message, setMessage] = useState(
     "Завантажте дані з персоналу або файл-джерело Excel.",
   );
+
+  useEffect(() => {
+    const nickname = toUppercaseCallsign(user?.nickname || "");
+    if (!nickname) return;
+    setMorningSubmittedBy((current) => current || nickname);
+  }, [user?.nickname]);
 
   /** Ранковий звіт / заповнення — з найсвіжішого джерела (файл, імпорт Штатки, БД). */
   const activeRosterSource = useMemo((): ActiveRosterSource | null => {
@@ -1139,19 +1181,23 @@ export function ExcelFillPage() {
     }
   };
 
-  const applyRosterLatest = (
+  const applyPersonnelDataset = (
+    dataset: PersonnelDataset,
     latest: NonNullable<Awaited<ReturnType<typeof api.getLatestPersonnelRoster>>>,
-    fromCache = false,
   ) => {
-    const snapshot = rosterLatestToSourceSnapshot(latest);
-    const rows = mapRosterLatestToPreviewRows(latest);
+    const rows = dataset.rows
+      .filter(isLikelyPersonnelRow)
+      .filter(isPersonnelInStaffRoster);
+    const label =
+      latest.sourceFileName || latest.importName || "Загальний список";
+    const snapshot = rosterRowsToSourceSnapshot(rows, label);
     const staffSnapshot = rosterLatestToStaffSheetImportSnapshot(latest);
     setRosterSource(snapshot);
     setSourceUpload(null);
     setSourceUploadLoadedAt(null);
     setRosterPreviewRows(rows);
     setRosterRowCount(rows.length);
-    setRosterLabel(latest.sourceFileName || latest.importName || "Загальний список");
+    setRosterLabel(label);
     setRosterImportedAt(latest.createdAt || null);
     setRosterLoadedAt(new Date().toISOString());
     if (staffSnapshot) {
@@ -1160,9 +1206,7 @@ export function ExcelFillPage() {
     }
     if (snapshot) {
       setMessage(
-        fromCache
-          ? `Кеш персоналу: ${rows.length} рядків · оновлюю з БД…`
-          : `Джерело з БД: ${rows.length} рядків · ${latest.sourceFileName || latest.importName}.`,
+        `Джерело зі спільного Особового складу «У штаті»: ${rows.length} осіб · ${label}.`,
       );
     }
   };
@@ -1170,18 +1214,11 @@ export function ExcelFillPage() {
   const loadSourceFromPersonnel = async (forceRefresh = false) => {
     setIsBusy(true);
     try {
-      if (!forceRefresh) {
-        const cached = await readDataCache<
-          Awaited<ReturnType<typeof api.getLatestPersonnelRoster>>
-        >(CacheKeys.rosterLatest);
-        if (cached?.sheet) {
-          applyRosterLatest(cached, true);
-          setIsBusy(false);
-        }
-      }
-
-      const latest = await loadSharedRosterLatest({ force: forceRefresh });
-      if (!latest?.sheet) {
+      const [dataset, latest] = await Promise.all([
+        loadPersonnelDataset({ force: forceRefresh }),
+        loadSharedRosterLatest({ force: forceRefresh }),
+      ]);
+      if (!latest?.sheet || !dataset.rows.length) {
         setRosterSource(null);
         setRosterPreviewRows([]);
         setRosterRowCount(0);
@@ -1193,7 +1230,7 @@ export function ExcelFillPage() {
         );
         return;
       }
-      applyRosterLatest(latest);
+      applyPersonnelDataset(dataset, latest);
     } catch (error) {
       setMessage(
         error instanceof Error

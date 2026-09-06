@@ -52,6 +52,17 @@ const legacyArchivePerson = (name: string): CellValue[] => {
   return row;
 };
 
+const shiftedArchivePerson = (name: string): CellValue[] => {
+  const row: CellValue[] = Array(34).fill("");
+  row[1] = "управління";
+  row[10] = "солдат";
+  row[11] = name;
+  row[12] = "09.10.1988";
+  row[15] = "ЛІГА";
+  row[20] = "Виключений";
+  return row;
+};
+
 describe("staffSheetArchive", () => {
   it("finds the archive sheet by name", () => {
     const sheet = archiveSheet([[]]);
@@ -88,6 +99,17 @@ describe("staffSheetArchive", () => {
     expect(row.column_15).toBe("РУДИЙ");
     expect(row.column_16).toBe("1985-05-04T00:00:00.000Z");
     expect(row.column_21).toBe("Відком. за межі ПБ");
+  });
+
+  it("reads shifted archive blocks where ПІБ is in column L", () => {
+    const [row] = parseArchiveSheetToRosterRows(
+      archiveSheet([[], shiftedArchivePerson("ЛІГА Андрій Петрович")]),
+    );
+
+    expect(row.ПІБ).toBe("ЛІГА Андрій Петрович");
+    expect(row.column_14).toBe("ЛІГА Андрій Петрович");
+    expect(row.column_16).toBe("09.10.1988");
+    expect(isPersonnelFromArchive(row)).toBe(true);
   });
 
   it("adds only people absent from the general list", () => {

@@ -39,6 +39,14 @@ describe("resolveAnketaMilitaryIdValue", () => {
     expect(result.value).toBe("АГ 111111");
   });
 
+  it.each(["посвідчення офіцера", "ТВК 5734"])(
+    "keeps meaningful document text %s when VK has no number",
+    (current) => {
+      const result = resolveAnketaMilitaryIdValue(current, undefined);
+      expect(result).toEqual({ value: current, action: "kept_anketa" });
+    },
+  );
+
   it("marks absent when cell is empty and person is in VK file without id", () => {
     const result = resolveAnketaMilitaryIdValue("", vkEntry(""));
     expect(result.action).toBe("marked_absent");

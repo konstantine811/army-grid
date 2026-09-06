@@ -93,6 +93,38 @@ export const migrateStoredPersonSignatures = (
 const signatureFromDocumentFields = (fields: unknown) =>
   normalizeRecord(fields);
 
+const documentPersonName = (document: BackendPersonDocument) => {
+  const fields =
+    document.fields &&
+    typeof document.fields === "object" &&
+    !Array.isArray(document.fields)
+      ? (document.fields as Record<string, unknown>)
+      : {};
+  return String(fields.fullName ?? document.personName ?? "").trim();
+};
+
+const signatureMatchesPersonName = (
+  signature: PersonSignatureRecord,
+  fullName: string,
+) => {
+  const expectedSurname = fullName
+    .split(/\s+/)
+    .find(Boolean)
+    ?.replace(/[^\p{L}]/gu, "")
+    .toLocaleLowerCase("uk-UA");
+  if (!expectedSurname) return true;
+  const fileStem = signature.signatureFileName
+    .replace(/\.[^.]+$/, "")
+    .replace(/[ʼ’']/g, "")
+    .toLocaleLowerCase("uk-UA");
+  if (!/(підпис|signature)/u.test(fileStem)) return true;
+  if (fileStem.includes(expectedSurname)) return true;
+  const ownerPart = fileStem
+    .replace(/(?:підпис|signature)/gu, "")
+    .replace(/[_\-\s.]+/g, "");
+  return !ownerPart;
+};
+
 export const extractPersonSignature = (
   documents: BackendPersonDocument[] | undefined,
   personExternalId?: string,
@@ -100,10 +132,23 @@ export const extractPersonSignature = (
   document: BackendPersonDocument | null;
   signature: PersonSignatureRecord | null;
 } => {
-  const list = documents ?? [];
+  const requestedId = personExternalId?.trim() ?? "";
+  const list = requestedId
+    ? (documents ?? []).filter(
+        (item) => item.personExternalId?.trim() === requestedId,
+      )
+    : documents ?? [];
+  const expectedName =
+    list.map(documentPersonName).find((name) => name.length > 0) ?? "";
+  const validSignatureFromFields = (fields: unknown) => {
+    const signature = signatureFromDocumentFields(fields);
+    return signature && signatureMatchesPersonName(signature, expectedName)
+      ? signature
+      : null;
+  };
   const dedicated =
     list.find((item) => item.type === PERSON_SIGNATURE_DOCUMENT_TYPE) ?? null;
-  const fromDedicated = signatureFromDocumentFields(dedicated?.fields);
+  const fromDedicated = validSignatureFromFields(dedicated?.fields);
   if (fromDedicated) {
     return { document: dedicated, signature: fromDedicated };
   }
@@ -111,14 +156,16 @@ export const extractPersonSignature = (
   for (const type of ["form12Report", "ubdRestoreReport"] as const) {
     for (const document of list) {
       if (document.type !== type) continue;
-      const signature = signatureFromDocumentFields(document.fields);
+      const signature = validSignatureFromFields(document.fields);
       if (signature) return { document: dedicated, signature };
     }
   }
 
   if (personExternalId) {
     const stored = getStoredPersonSignature(personExternalId);
-    if (stored) return { document: dedicated, signature: stored };
+    if (stored && signatureMatchesPersonName(stored, expectedName)) {
+      return { document: dedicated, signature: stored };
+    }
   }
 
   return { document: dedicated, signature: null };
@@ -178,8 +225,12 @@ export const persistPersonSignature = async (
   signature: PersonSignatureRecord | null,
   documents?: BackendPersonDocument[],
 ) => {
+  const id = personExternalId.trim();
   const existing =
-    documents?.find((item) => item.type === PERSON_SIGNATURE_DOCUMENT_TYPE) ??
-    extractPersonSignature(documents).document;
+    documents?.find(
+      (item) =>
+        item.type === PERSON_SIGNATURE_DOCUMENT_TYPE &&
+        item.personExternalId?.trim() === id,
+    ) ?? extractPersonSignature(documents, id).document;
   return upsertPersonSignatureDocument(personExternalId, signature, existing);
 };

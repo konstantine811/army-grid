@@ -517,6 +517,8 @@ const matchAnketaByIdOrName = (
 const normalizeFillValue = (anketaKey: AnketaColumnKey, raw: string) => {
   const trimmed = raw.trim().replace(/\r\n/g, "\n").replace(/\r/g, "\n");
   if (!trimmed) return "";
+  // «Доповнити» переносить лише реальні дані, а не заглушки з анкети.
+  if (isPlaceholderText(trimmed)) return "";
   if (anketaKey === "rnokpp") {
     const digits = trimmed.replace(/\D/g, "");
     return digits.length >= 8 ? digits : trimmed;
@@ -694,7 +696,7 @@ export async function fillEjoosSheetFromAnketa(input: {
   const gapKeySet = new Set(gapColumns);
   const label = targetLabel(input.target);
   const snapshot = await withTimeout(
-    loadAnketaSheetPreferCache(),
+    loadAnketaSheetPreferCache({ refreshGoogle: false }),
     20_000,
     "Анкетні дані",
   ).catch(() => loadCachedAnketaSheet().catch(() => null));

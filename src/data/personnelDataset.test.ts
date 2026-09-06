@@ -5,6 +5,7 @@ import type {
 } from "../api";
 import {
   buildPersonnelDatasetVersion,
+  dedupePersonnelDatasetRows,
   personnelDatasetFingerprint,
   personnelDatasetToPreview,
   rosterRowsFromPersonnelLatest,
@@ -125,5 +126,35 @@ describe("personnelDataset", () => {
       "alphabetical-first",
       "outside-roster",
     ]);
+  });
+
+  it("merges technical duplicates with the same name and birth date", () => {
+    const rows = dedupePersonnelDatasetRows([
+      {
+        __dbRowId: "oos-1",
+        ПІБ: "ШЕВЧЕНКО Олександр Володимирович",
+        дата_народження: "11.05.1981",
+        звання: "солдат",
+      },
+      {
+        __dbRowId: "roster-1",
+        ПІБ: "ШЕВЧЕНКО Олександр Володимирович (11.05.1981 р.н.)",
+        roster__column_16: "11.05.1981",
+        roster__column_21: "В строю",
+      },
+      {
+        __dbRowId: "other-person",
+        ПІБ: "ШЕВЧЕНКО Олександр Володимирович",
+        дата_народження: "12.05.1981",
+      },
+    ]);
+
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({
+      __dbRowId: "oos-1",
+      звання: "солдат",
+      roster__column_21: "В строю",
+    });
+    expect(rows[1]?.__dbRowId).toBe("other-person");
   });
 });

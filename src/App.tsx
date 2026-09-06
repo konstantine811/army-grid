@@ -4,6 +4,7 @@ import { MenuOutlinedIcon } from "@/components/sci/icons";
 import "./App.css";
 import {
   buildDocumentRoute,
+  buildPersonnelRoute,
   getCurrentRouteKey,
   getPageFromPath,
   isRetiredPagePath,
@@ -14,6 +15,7 @@ import {
   writeAreaForPage,
   type AppPage,
 } from "./app/navigation";
+import type { PersonnelFocusTarget } from "./pages/personnel/personnelFocus";
 import { Sidebar, APP_PAGE_LABELS } from "./app/layout/Sidebar";
 import { AnalyticsPage } from "./pages/analytics/AnalyticsPage";
 import { PersonnelPage } from "./pages/personnel/PersonnelPage";
@@ -86,6 +88,18 @@ function App() {
 
     window.addEventListener("popstate", handlePopState);
     return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
+
+  useEffect(() => {
+    const handleOpenPersonnel = (event: Event) => {
+      const detail = (event as CustomEvent<PersonnelFocusTarget>).detail;
+      if (!detail) return;
+      applyRoute(pushAppRoute(buildPersonnelRoute(detail), "personnel"));
+    };
+
+    window.addEventListener("army-grid:open-personnel", handleOpenPersonnel);
+    return () =>
+      window.removeEventListener("army-grid:open-personnel", handleOpenPersonnel);
   }, []);
 
   useEffect(() => {

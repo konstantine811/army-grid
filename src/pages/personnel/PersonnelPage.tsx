@@ -20,6 +20,7 @@ import { AddPhotoAlternateOutlinedIcon } from "@/components/sci/icons";
 import { ArticleOutlinedIcon } from "@/components/sci/icons";
 import { ArrowLeftOutlinedIcon } from "@/components/sci/icons";
 import { CalendarMonthOutlinedIcon } from "@/components/sci/icons";
+import { ContentCopyOutlinedIcon } from "@/components/sci/icons";
 import { DeleteOutlineOutlinedIcon } from "@/components/sci/icons";
 import { FileUploadOutlinedIcon } from "@/components/sci/icons";
 import { FileDownloadOutlinedIcon } from "@/components/sci/icons";
@@ -70,6 +71,13 @@ import { parseDbColumns } from "../ejournal/ejournalUtils";
 import { PhotoCropDialog, type CropRect } from "./PhotoCropDialog";
 import { FloatingQuestionnairePreview } from "./FloatingQuestionnairePreview";
 import { PersonnelVirtualList } from "./PersonnelVirtualList";
+import {
+  clearPersonnelFocusTarget,
+  findPersonnelRowByFocusTarget,
+  normalizePersonnelFocusTarget,
+  readPersonnelFocusTarget,
+  type PersonnelFocusTarget,
+} from "./personnelFocus";
 import { QuestionnaireDiskSearchDialog } from "./QuestionnaireDiskSearchDialog";
 import {
   PERSON_CARD_FIELDS,
@@ -206,7 +214,6 @@ function PersonCardName({ name }: { name: string }) {
   );
 }
 
-const PERSONNEL_FOCUS_KEY = "army-grid:focus-personnel";
 const ATTACHMENT_HEAL_SESSION_KEY = "army-grid:attachments-healed-v2";
 const MAX_QUESTIONNAIRE_FILE_BYTES = 350 * 1024 * 1024;
 
@@ -263,48 +270,6 @@ const mergeRosterRowsIntoPreviewState = async (
       anketaCreatedRows,
     ),
   };
-};
-
-const readPersonnelFocusTarget = () => {
-  const params = new URLSearchParams(window.location.search);
-  const fromQuery = {
-    rowId: params.get("rowId")?.trim() || "",
-    externalId: params.get("externalId")?.trim() || "",
-  };
-  if (fromQuery.rowId || fromQuery.externalId) return fromQuery;
-
-  try {
-    const raw = window.localStorage.getItem(PERSONNEL_FOCUS_KEY);
-    if (!raw) return { rowId: "", externalId: "" };
-    const parsed = JSON.parse(raw) as {
-      rowId?: string;
-      externalId?: string;
-    };
-    return {
-      rowId: parsed.rowId?.trim() || "",
-      externalId: parsed.externalId?.trim() || "",
-    };
-  } catch {
-    return { rowId: "", externalId: "" };
-  }
-};
-
-const clearPersonnelFocusTarget = () => {
-  try {
-    window.localStorage.removeItem(PERSONNEL_FOCUS_KEY);
-  } catch {
-    // ignore
-  }
-  const url = new URL(window.location.href);
-  if (url.searchParams.has("rowId") || url.searchParams.has("externalId")) {
-    url.searchParams.delete("rowId");
-    url.searchParams.delete("externalId");
-    window.history.replaceState(
-      { page: "personnel" },
-      "",
-      `${url.pathname}${url.search}${url.hash}`,
-    );
-  }
 };
 
 export function PersonnelPage({
@@ -1277,14 +1242,7 @@ export function PersonnelPage({
       rowId: "",
       externalId: "",
     };
-    const focusedRow =
-      (focusTarget.rowId &&
-        rows.find((row) => row.__dbRowId === focusTarget.rowId)) ||
-      (focusTarget.externalId &&
-        rows.find(
-          (row) => resolvePersonIdentityKey(row) === focusTarget.externalId,
-        )) ||
-      null;
+    const focusedRow = findPersonnelRowByFocusTarget(rows, focusTarget);
 
     setDbPreview(mergedPreview);
     setSelectedRowId((current) => {
@@ -1828,6 +1786,31 @@ export function PersonnelPage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  useEffect(() => {
+    const handleOpenPersonnel = (event: Event) => {
+      const detail = normalizePersonnelFocusTarget(
+        (event as CustomEvent<PersonnelFocusTarget>).detail ?? {},
+      );
+      if (!detail.rowId && !detail.externalId) return;
+      personnelFocusLockRef.current = detail;
+      const rows = (dbPreview?.rows ?? []).filter(isLikelyPersonnelRow);
+      if (!rows.length) return;
+      const focusedRow = findPersonnelRowByFocusTarget(rows, detail);
+      if (!focusedRow?.__dbRowId) return;
+      setSelectedRowId(focusedRow.__dbRowId);
+      setMobilePane("card");
+      setMessage(
+        `Відкрито картку: ${getPersonDisplayName(focusedRow) || "особу"}.`,
+      );
+      personnelFocusLockRef.current = null;
+      clearPersonnelFocusTarget();
+    };
+
+    window.addEventListener("army-grid:open-personnel", handleOpenPersonnel);
+    return () =>
+      window.removeEventListener("army-grid:open-personnel", handleOpenPersonnel);
+  }, [dbPreview]);
+
   const saveSelectedPerson = async () => {
     if (!selectedRow?.__dbRowId) return;
 
@@ -2060,6 +2043,16 @@ export function PersonnelPage({
         ? `Телефон видалено: ${formatUaPhoneDisplay(phone)}.`
         : `Телефон прибрано локально: ${formatUaPhoneDisplay(phone)}. Не вдалося оновити БД.`,
     );
+  };
+
+  const copySelectedPersonPhone = async (phone: string) => {
+    const text = formatUaPhoneDisplay(phone);
+    try {
+      await navigator.clipboard.writeText(text);
+      setMessage(`Скопійовано: ${text}`);
+    } catch {
+      setMessage("Не вдалося скопіювати номер.");
+    }
   };
 
   const deleteSelectedQuestionnaire = async () => {
@@ -2626,6 +2619,14 @@ export function PersonnelPage({
                             color="primary"
                             variant="outlined"
                           />
+                          <button
+                            aria-label={`Копіювати ${formatUaPhoneDisplay(phone)}`}
+                            title="Копіювати номер"
+                            type="button"
+                            onClick={() => void copySelectedPersonPhone(phone)}
+                          >
+                            <ContentCopyOutlinedIcon fontSize="small" />
+                          </button>
                           {isSaved ? (
                             <button
                               aria-label={`Видалити ${formatUaPhoneDisplay(phone)}`}

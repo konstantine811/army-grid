@@ -28,6 +28,10 @@ const ANKETA_RNOKPP_PLACEHOLDER_SET = new Set<string>([
   ...ANKETA_MISSING_VALUE_PRESETS,
   ANKETA_MILITARY_ID_ABSENT_VALUE,
   "квиток відсутній",
+  "немає",
+  "відсутні",
+  "відсутня",
+  "відсутнє",
 ]);
 
 export type AnketaMilitaryIdMergeAction =
@@ -116,6 +120,15 @@ export const resolveAnketaMilitaryIdValue = (
 
   if (currentId) {
     return { value: currentId, action: "kept_anketa" };
+  }
+
+  const normalizedCurrent = current.toLocaleLowerCase("uk-UA");
+  if (
+    current &&
+    current !== "-" &&
+    !ANKETA_RNOKPP_PLACEHOLDER_SET.has(normalizedCurrent)
+  ) {
+    return { value: current, action: "kept_anketa" };
   }
 
   if (vkEntry) {
@@ -220,18 +233,15 @@ export const planAnketaMilitaryIdMerges = (
         break;
     }
 
-    if (
-      militaryResolved.action !== "unchanged" &&
-      militaryResolved.action !== "kept_anketa"
-    ) {
-      edits.push({
-        rowNumber: row.__rowNumber,
-        columnId: "militaryId",
-        value: militaryResolved.value,
-        externalId: String(row.externalId ?? "").trim() || undefined,
-        fullName: row.fullName,
-      });
-    }
+    // Завжди фіксуємо підсумкове значення. Інакше старий порожній cell-edit
+    // може після refresh перекрити реальний номер або «дані відсутні».
+    edits.push({
+      rowNumber: row.__rowNumber,
+      columnId: "militaryId",
+      value: militaryResolved.value,
+      externalId: String(row.externalId ?? "").trim() || undefined,
+      fullName: row.fullName,
+    });
 
     const rnokppResolved = resolveAnketaRnokppValue(row.rnokpp, vkEntry);
     switch (rnokppResolved.action) {

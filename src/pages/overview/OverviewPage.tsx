@@ -95,6 +95,7 @@ import { pullStaffSheetRosterImportPayload } from "../excel-fill/staffSheet";
 import { loadPbWorkbookFromDb } from "../ejournal/loadEjournalWorkbooksFromDb";
 import { parsePbArchive } from "../ejournal/ejoosParsers";
 import type { SciDataTableExportContext } from "@/components/sci/SciDataTable";
+import { buildOverviewWhatsAppCopyText } from "./overviewCopyText";
 
 const SOURCE_FILTERS = [
   { value: "staff", label: "Штатка" },
@@ -970,6 +971,7 @@ export function OverviewPage() {
           onImportantExport={(context) =>
             void exportImportantOverviewColumns(context)
           }
+          copyTextBuilder={buildOverviewWhatsAppCopyText}
         />
         <footer className="overview-table-footer">
           <span>

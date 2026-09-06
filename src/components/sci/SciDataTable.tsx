@@ -84,6 +84,9 @@ type SciTableOptions<TData> = {
   secondaryExportLabel?: string;
   copyLabel?: string;
   enableCopyText?: boolean;
+  copyTextBuilder?: (
+    context: SciDataTableExportContext<TData>,
+  ) => string | Promise<string>;
   onExport?: (
     context: SciDataTableExportContext<TData>,
   ) => void | Promise<void>;
@@ -499,10 +502,21 @@ export function MaterialReactTable<TData>({
                     : "sci-data-table-export"
               }
               onClick={() => {
-                void copyVisibleRowsAsText(
-                  sortedRows,
-                  visibleExportColumns,
-                ).then((ok) => {
+                const context = {
+                  rows: sortedRows,
+                  allRows: table.data,
+                  columns: visibleExportColumns,
+                  filters: activeExportFilters,
+                };
+                const copyPromise = table.copyTextBuilder
+                  ? Promise.resolve(table.copyTextBuilder(context))
+                      .then(copyTextToClipboard)
+                      .catch(() => false)
+                  : copyVisibleRowsAsText(
+                      sortedRows,
+                      visibleExportColumns,
+                    );
+                void copyPromise.then((ok) => {
                   if (copyResetRef.current != null) {
                     window.clearTimeout(copyResetRef.current);
                   }
@@ -1344,7 +1358,10 @@ async function copyVisibleRowsAsText<TData>(
   const lines = rows.map((row) =>
     columns.map((column) => escapeTsvCell(column.value(row) ?? "")).join("\t"),
   );
-  const text = [header, ...lines].join("\n");
+  return copyTextToClipboard([header, ...lines].join("\n"));
+}
+
+async function copyTextToClipboard(text: string) {
   try {
     await navigator.clipboard.writeText(text);
     return true;

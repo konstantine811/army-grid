@@ -199,6 +199,15 @@ const replaceParagraphTexts = (
     });
   });
 
+const removeDrawingByRelId = (documentXml: string, relId: string) =>
+  documentXml.replace(
+    new RegExp(
+      `<w:r\\b[^>]*>(?:(?!<\\/w:r>)[\\s\\S])*?<w:drawing>(?:(?!<\\/w:drawing>)[\\s\\S])*?r:embed="${relId}"(?:(?!<\\/w:drawing>)[\\s\\S])*?<\\/w:drawing>(?:(?!<\\/w:r>)[\\s\\S])*?<\\/w:r>`,
+      "g",
+    ),
+    "",
+  );
+
 export const createForm6WordBlob = async (fields: Form6ReportFields) => {
   const response = await fetch(FORM6_TEMPLATE_URL);
   if (!response.ok) {
@@ -219,7 +228,7 @@ export const createForm6WordBlob = async (fields: Form6ReportFields) => {
   const signerParts = splitForm6Signer(signer);
   const approvalParts = splitForm6Signer(approval);
 
-  const filled = replaceParagraphTexts(documentXml, (text) => {
+  let filled = replaceParagraphTexts(documentXml, (text) => {
     const trimmed = text.trim();
     if (trimmed === SAMPLE.signerTitle1) {
       return signerParts.titleLines[0] || SAMPLE.signerTitle1;
@@ -263,6 +272,10 @@ export const createForm6WordBlob = async (fields: Form6ReportFields) => {
 
   if (signer?.signatureData) {
     await replaceRelImage(zip, "rId8", signer.signatureData, "commander-sign");
+  } else {
+    // Шаблон DOCX містить старий підпис Сидоренка. Не залишаємо його для
+    // нового підписанта, якщо для нього не завантажено зображення підпису.
+    filled = removeDrawingByRelId(filled, "rId8");
   }
 
   zip.file("word/document.xml", filled, { createFolders: false });

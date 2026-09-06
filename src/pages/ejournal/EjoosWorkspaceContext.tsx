@@ -1516,13 +1516,7 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
       });
       await refreshLive();
       const localFile = base64ToFile(fileBase64, fileName);
-      if (ejoosSnapshot) {
-        setEjoosSnapshot({
-          ...ejoosSnapshot,
-          file: localFile,
-          fileName,
-        });
-      }
+      setEjoosSnapshot(await readEjoosWorkbookSnapshot(localFile));
       setMessage(
         `Стилі повернуто з v${source.version} · збережено як v${saved.version}. Перевірте файл у Excel.`,
       );

@@ -68,9 +68,12 @@ const formatSignatoryName = (fullName: string) => {
   return `${given}\u00A0${surname}`;
 };
 
-const shortDate = (value: string) => {
-  const match = value.trim().match(/^(\d{1,2}\.\d{1,2}\.)(\d{2})(\d{2})$/);
-  return match ? `${match[1]}${match[3]}` : value.trim();
+const fullDate = (value: string) => {
+  const text = value.trim();
+  const match = text.match(/^(\d{1,2}\.\d{1,2}\.)(\d{2})$/);
+  if (!match) return text;
+  const year = Number(match[2]);
+  return `${match[1]}${year >= 50 ? 1900 + year : 2000 + year}`;
 };
 
 const positionWithUnit = (position: string) => {
@@ -187,7 +190,7 @@ const setFighterDate = (paragraph: string, value: string) => {
   const texts = listParagraphTexts(paragraph);
   if (!texts.length) return paragraph;
   const current = texts[0];
-  const date = shortDate(value) || SAMPLE.fighterDate;
+  const date = fullDate(value) || "14.08.2026";
   const suffix = current.startsWith(SAMPLE.fighterDate)
     ? current.slice(SAMPLE.fighterDate.length)
     : current.replace(/^\d{1,2}\.\d{1,2}\.\d{2,4}/, "");
@@ -341,7 +344,9 @@ export const createForm12WordBlob = async (fields: Form12ReportFields) => {
       battalionHits += 1;
       const line = signerParts.titleLines[1];
       const next = line.trim();
-      if (!next) return paragraph;
+      if (!next) {
+        return signer ? setLeadingContent(paragraph, "") : paragraph;
+      }
       return setLeadingContent(
         paragraph,
         joined.endsWith(" ") ? `${next} ` : next,
@@ -349,11 +354,19 @@ export const createForm12WordBlob = async (fields: Form12ReportFields) => {
     }
     if (trimmed === normalizeText(SAMPLE.unitLine)) {
       const line = signerParts.titleLines[2];
-      return line.trim() ? setLeadingContent(paragraph, line) : paragraph;
+      return line.trim()
+        ? setLeadingContent(paragraph, line)
+        : signer
+          ? setLeadingContent(paragraph, "")
+          : paragraph;
     }
     if (trimmed === normalizeText(SAMPLE.approvalUnit)) {
       const line = approvalParts.titleLines[1];
-      return line.trim() ? setLeadingContent(paragraph, line) : paragraph;
+      return line.trim()
+        ? setLeadingContent(paragraph, line)
+        : approval
+          ? setLeadingContent(paragraph, "")
+          : paragraph;
     }
     return paragraph;
   });

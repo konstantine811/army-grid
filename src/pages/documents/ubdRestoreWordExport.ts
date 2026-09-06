@@ -3,7 +3,9 @@ import type { UbdRestoreReportFields } from "./ubdRestoreReport";
 import {
   buildUbdRestoreBody,
   buildUbdRestorePetition,
-  formatGivenSurname,
+  resolveApproverParts,
+  resolveCoveringSignerParts,
+  resolveUbdRestoreSignerTitle,
 } from "./ubdRestoreReport";
 import { emuMm } from "./ubdWordFormat";
 import { stripRedColorInWordZip } from "./wordXml";
@@ -64,76 +66,9 @@ const titleLines = (value: string, count: number) => {
   return lines.slice(0, count);
 };
 
-const RANK_TAIL =
-  /(головний майстер-сержант|старший майстер-сержант|майстер-сержант|штаб-сержант|головний сержант|старший сержант|молодший сержант|старший лейтенант|молодший лейтенант|старший солдат|підполковник|полковник|лейтенант|сержант|капітан|майор|солдат|рекрут)$/iu;
-
-const splitCoveringSigner = (signatory: {
-  title: string;
-  rank: string;
-  fullName: string;
-  signatureData?: string | null;
-} | null) => {
-  if (!signatory) {
-    return {
-      titleLines: ["", ""] as [string, string],
-      rank: "",
-      fullName: "",
-      date: "",
-      signatureData: "",
-    };
-  }
-  const lines = signatory.title
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .flatMap((line) => {
-      const match = line.match(/^(.*?)(?:\s+)(\d{1,2}\.\d{1,2}\.\d{4})$/);
-      if (match?.[1]?.trim()) return [match[1].trim(), match[2]];
-      return [line];
-    })
-    .filter(Boolean);
-  const date = lines.find(isDateLine) ?? "";
-  let rank = signatory.rank.trim();
-  const titles: string[] = [];
-  for (const line of lines) {
-    if (isDateLine(line)) continue;
-    const tail = line.match(RANK_TAIL);
-    if (tail && !rank) {
-      rank = tail[1];
-      const head = line.slice(0, -tail[1].length).trim();
-      if (head) titles.push(head);
-      continue;
-    }
-    if (
-      rank &&
-      line.toLocaleLowerCase("uk-UA") === rank.toLocaleLowerCase("uk-UA")
-    ) {
-      continue;
-    }
-    titles.push(line);
-  }
-  if (titles.length === 1) {
-    const split = titles[0].match(/^(.*?)\s+(військової частини\s+\S+.*)$/i);
-    if (split) {
-      titles[0] = split[1].trim();
-      titles[1] = split[2].trim();
-    }
-  }
-  while (titles.length < 2) titles.push("");
-  if (titles.length > 2) {
-    titles.splice(1, titles.length, titles.slice(1).join(" "));
-  }
-  return {
-    titleLines: [titles[0], titles[1]] as [string, string],
-    rank,
-    fullName: formatGivenSurname(signatory.fullName) || signatory.fullName.trim(),
-    date,
-    signatureData: signatory.signatureData?.trim() ?? "",
-  };
-};
-
 const rankNameLine = (rank: string, fullName: string, pad = 16) => {
   const left = withFallback(rank, "звання");
-  const right = formatGivenSurname(fullName) || withFallback(fullName);
+  const right = fullName.trim() || withFallback(fullName);
   return `${left}${" ".repeat(pad)}${right}`;
 };
 
@@ -262,14 +197,16 @@ export const createUbdRestoreWordBlob = async (
     throw new Error("Шаблон рапорта на відновлення УБД пошкоджений.");
   }
 
-  const signer = titleLines(fields.signerTitle || fields.staffPosition, 2);
-  const covering = fields.signatories.find((item) => item.blockType === "SIGNER");
-  const approver = fields.signatories.find(
+  const signer = titleLines(resolveUbdRestoreSignerTitle(fields), 2);
+  const coveringParts = resolveCoveringSignerParts(fields);
+  const approverParts = resolveApproverParts(fields);
+  const hasCoveringSigner = fields.signatories.some(
+    (item) => item.blockType === "SIGNER",
+  );
+  const hasApprover = fields.signatories.some(
     (item) => item.blockType === "APPROVAL",
   );
-  const coveringParts = splitCoveringSigner(covering ?? null);
-  const approverTitle = titleLines(approver?.title ?? "", 2);
-  let unitLineHits = 0;
+  let afterCoveringTitle = false;
 
   const filled = replaceParagraphTexts(documentXml, (text) => {
     const trimmed = text.trim();
@@ -301,35 +238,43 @@ export const createUbdRestoreWordBlob = async (
       return buildUbdRestorePetition(fields);
     }
     if (trimmed === SAMPLE.coveringSignerTitle) {
-      return coveringParts.titleLines[0] || SAMPLE.coveringSignerTitle;
+      afterCoveringTitle = true;
+      return hasCoveringSigner
+        ? coveringParts.titleLines[0] || SAMPLE.coveringSignerTitle
+        : SAMPLE.coveringSignerTitle;
     }
-    if (trimmed === SAMPLE.coveringUnit) {
-      unitLineHits += 1;
-      if (unitLineHits === 3 && coveringParts.titleLines[1]) {
-        return coveringParts.titleLines[1];
-      }
-      return text;
+    if (afterCoveringTitle && trimmed === SAMPLE.coveringUnit) {
+      afterCoveringTitle = false;
+      return hasCoveringSigner
+        ? coveringParts.titleLines[1] || " "
+        : SAMPLE.coveringUnit;
     }
     if (trimmed === SAMPLE.coveringSignerLine) {
-      return covering
-        ? rankNameLine(coveringParts.rank, covering.fullName, 25)
+      return hasCoveringSigner
+        ? rankNameLine(coveringParts.rank, coveringParts.fullName, 25)
         : SAMPLE.coveringSignerLine;
     }
     if (
-      (trimmed === SAMPLE.coveringDate || trimmed === `${SAMPLE.coveringDate}6`) &&
-      coveringParts.date
+      coveringParts.date &&
+      (trimmed === SAMPLE.coveringDate ||
+        trimmed === `${SAMPLE.coveringDate}6` ||
+        trimmed.startsWith(SAMPLE.coveringDate))
     ) {
       return coveringParts.date;
     }
     if (trimmed === SAMPLE.approverTitle1) {
-      return approverTitle[0] || SAMPLE.approverTitle1;
+      return hasApprover
+        ? approverParts.titleLines[0] || " "
+        : SAMPLE.approverTitle1;
     }
     if (trimmed === SAMPLE.approverTitle2) {
-      return approverTitle[1] || SAMPLE.approverTitle2;
+      return hasApprover
+        ? approverParts.titleLines[1] || " "
+        : SAMPLE.approverTitle2;
     }
-    if (trimmed.startsWith("капітан") && trimmed.includes("Олег АДАМОВ")) {
-      return approver
-        ? `${rankNameLine(approver.rank, approver.fullName, 74)}                         `
+    if (trimmed === SAMPLE.approverLine.trim()) {
+      return hasApprover
+        ? `${rankNameLine(approverParts.rank, approverParts.fullName, 74)}                         `
         : text;
     }
     if (trimmed === SAMPLE.date) {
@@ -339,8 +284,8 @@ export const createUbdRestoreWordBlob = async (
   });
 
   const signerLine = rankNameLine(fields.rank, fields.fullName, 16);
-  const coveringLine = covering
-    ? rankNameLine(coveringParts.rank, covering.fullName, 25)
+  const coveringLine = hasCoveringSigner
+    ? rankNameLine(coveringParts.rank, coveringParts.fullName, 25)
     : SAMPLE.coveringSignerLine;
   let withSignature = filled;
   if (fields.signatureData) {
