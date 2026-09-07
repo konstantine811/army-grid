@@ -79,10 +79,8 @@ import { QuestionnaireDiskSearchDialog } from "./QuestionnaireDiskSearchDialog";
 import {
   PERSON_CARD_FIELDS,
   PERSON_SECTION_LABELS,
-  buildPersonListSummary,
   buildPersonSummary,
   buildQuestionnaireExportFileName,
-  collectPersonCallSignFieldValues,
   createDefaultActionForm,
   dataUrlToFile,
   dataUrlToObjectUrl,
@@ -93,15 +91,14 @@ import {
   formatUaPhoneDisplay,
   buildOrphanAttachmentMigrationPairs,
   getPersonDisplayName,
-  getPersonFieldValue,
   inferRosterFieldLabel,
   isLikelyPersonnelRow,
-  resolvePersonDisplayNameFromRoster,
   resolvePersonRosterStatus,
   cleanPersonDisplayName,
   looksLikePersonBirthDate,
   migratePersonAttachmentsBetweenIds,
   normalizePersonBirthKey,
+  normalizePersonnelSearchText,
   normalizeUaPhone,
   pickFullPositionFromPersonRow,
   resolvePersonIdentityKey,
@@ -116,7 +113,6 @@ import {
   type PersonAction,
   type PersonActionForm,
   type PersonFieldDef,
-  type PersonnelRecord,
 } from "./personnelUtils";
 import { downloadBlob, sanitizeFileName } from "../../shared/browserExport";
 import { notifyPersonnelAttachmentChanged } from "../../shared/personnelAttachmentSync";
@@ -154,8 +150,6 @@ import { runParseVkTpvDovidkyHeavy } from "../anketa-data/runStaffSheetHeavyJobs
 import { importStaffSheetFromFile } from "../anketa-data/staffSheetImport";
 import {
   getRosterPersonName,
-  isPersonnelFromArchive,
-  isPersonnelInStaffRoster,
   ROSTER_FIELD_PREFIX,
 } from "./personnelRosterMerge";
 import { runHeavyJob } from "../../workers/runHeavyJob";
@@ -219,16 +213,6 @@ const formatFileSize = (bytes: number) => {
 
 const normalizeRosterText = normalizeRosterMatchText;
 
-const normalizePersonnelSearchText = (value: unknown) =>
-  valueToDisplay(value as Parameters<typeof valueToDisplay>[0])
-    .replace(/[ʼ’']/g, "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .toLocaleLowerCase("uk-UA");
-
-const getRawCallSignSearchValues = (row: EjournalPreviewRow) =>
-  collectPersonCallSignFieldValues(row);
-
 export function PersonnelPage({
   onOpenDocuments,
 }: {
@@ -250,7 +234,15 @@ export function PersonnelPage({
 }) {
   const { canEditArea } = useAuth();
   const canEdit = canEditArea("personnel");
-  const [dbPreview, setDbPreview] = useState<DbPreviewState | null>(null);
+  const personnelAllRowsRef = useRef<EjournalPreviewRow[]>([]);
+  const personnelListIndexRef = useRef<PersonnelListIndex>({
+    records: [],
+    staffCounts: { all: 0, in: 0, archive: 0 },
+  });
+  const questionnairePresencePeopleRef = useRef<
+    ReturnType<typeof buildQuestionnairePresencePeople>
+  >([]);
+  const [personnelDataEpoch, setPersonnelDataEpoch] = useState(0);
   const [rosterLabels, setRosterLabels] = useState<Record<string, string>>({});
   const [selectedRowId, setSelectedRowId] = useState("");
   const [mobilePane, setMobilePane] = useState<"list" | "card" | "side">(
@@ -322,56 +314,22 @@ export function PersonnelPage({
   const [message, setMessage] = useState(`API: ${api.baseUrl}`);
   const [isLoading, setIsLoading] = useState(false);
   const [photoIndexReady, setPhotoIndexReady] = useState(0);
-  const personnelRows = useMemo<PersonnelRecord[]>(() => {
-    const rows = (dbPreview?.rows ?? [])
-      .filter(isLikelyPersonnelRow)
-      .map((row) => ({ row, summary: buildPersonListSummary(row) }));
-    const nameCounts = new Map<string, number>();
-    for (const record of rows) {
-      const key = normalizeRosterText(record.summary.name);
-      if (!key) continue;
-      nameCounts.set(key, (nameCounts.get(key) ?? 0) + 1);
-    }
-    return rows.map((record) => {
-      const key = normalizeRosterText(record.summary.name);
-      if (!key || (nameCounts.get(key) ?? 0) < 2) return record;
-      return {
-        ...record,
-        summary: {
-          ...record.summary,
-          birthDate: resolvePersonBirthDate(record.row),
-        },
-      };
-    });
-  }, [dbPreview]);
+  const personnelRows = useMemo(() => {
+    void personnelDataEpoch;
+    return personnelListIndexRef.current.records;
+  }, [personnelDataEpoch]);
   const deferredQuery = useDeferredValue(query);
   const filteredPersonnel = useMemo(() => {
     const normalizedQuery = normalizePersonnelSearchText(deferredQuery);
 
     return personnelRows.filter((record) => {
-      const inStaff = isPersonnelInStaffRoster(record.row);
-      if (staffFilter === "in" && !inStaff) return false;
-      if (staffFilter === "archive" && !isPersonnelFromArchive(record.row)) {
-        return false;
-      }
+      if (staffFilter === "in" && !record.inStaff) return false;
+      if (staffFilter === "archive" && !record.inArchive) return false;
       if (!normalizedQuery) return true;
 
       const searchableText = normalizePersonnelSearchText(
         [
-          record.summary.name,
-          resolvePersonDisplayNameFromRoster(record.row),
-          getRosterPersonName(record.row),
-          record.summary.callSign,
-          getPersonFieldValue(record.row, ["позивний"]),
-          getPersonFieldValue(record.row, ["позив"]),
-          ...getRawCallSignSearchValues(record.row),
-          record.summary.rank,
-          record.summary.externalId,
-          getPersonFieldValue(record.row, ["індекс", "посади"]),
-          getPersonFieldValue(record.row, ["місце_дислокації"]),
-          getPersonFieldValue(record.row, ["рнокпп_за_наявності"]),
-          getPersonFieldValue(record.row, ["додаткова_інформація"]),
-          getPersonFieldValue(record.row, ["військового", "квитка"]),
+          record.searchBase,
           ...(phonesByExternalId[record.summary.externalId] ?? []),
         ]
           .filter(Boolean)
@@ -392,22 +350,9 @@ export function PersonnelPage({
   }, [filteredPersonnel]);
 
   const staffCounts = useMemo(() => {
-    const inStaff = personnelRows.reduce(
-      (count, record) =>
-        isPersonnelInStaffRoster(record.row) ? count + 1 : count,
-      0,
-    );
-    const archive = personnelRows.reduce(
-      (count, record) =>
-        isPersonnelFromArchive(record.row) ? count + 1 : count,
-      0,
-    );
-    return {
-      all: personnelRows.length,
-      in: inStaff,
-      archive,
-    };
-  }, [personnelRows]);
+    void personnelDataEpoch;
+    return personnelListIndexRef.current.staffCounts;
+  }, [personnelDataEpoch]);
   const questionnaireCounts = useMemo(() => {
     let withQuestionnaire = 0;
     for (const record of filteredPersonnel) {
@@ -1016,15 +961,33 @@ export function PersonnelPage({
     prefetchedItems?: Promise<
       Array<{ personExternalId: string; fileName?: string | null }>
     >,
+    options?: { force?: boolean },
   ) => {
     setQuestionnairePresenceStatus("loading");
     try {
       const items =
         (await prefetchedItems) ??
         (await api.listPersonQuestionnaires({ signal }));
+      const datasetFingerprint = personnelDatasetFingerprintRef.current;
+      const cacheKey = questionnairePresenceCacheKey(datasetFingerprint, items);
+      if (!options?.force) {
+        const cached = await readDataCache<Record<string, true>>(cacheKey);
+        if (cached) {
+          setQuestionnaireByExternalId(cached);
+          setQuestionnairePresenceStatus("ready");
+          return items;
+        }
+      }
+
+      const people =
+        questionnairePresencePeopleRef.current.length > 0
+          ? questionnairePresencePeopleRef.current
+          : buildQuestionnairePresencePeople(
+              rows ?? personnelAllRowsRef.current ?? [],
+            );
       const presence = await runHeavyJob({
         type: "buildQuestionnairePresence",
-        people: buildQuestionnairePresencePeople(rows ?? dbPreview?.rows ?? []),
+        people,
         questionnaires: items.map(({ personExternalId, fileName }) => ({
           personExternalId,
           fileName,
@@ -1032,6 +995,7 @@ export function PersonnelPage({
       });
       setQuestionnaireByExternalId(presence);
       setQuestionnairePresenceStatus("ready");
+      void writeDataCache(cacheKey, presence);
       return items;
     } catch {
       setQuestionnairePresenceStatus("error");
@@ -1068,7 +1032,11 @@ export function PersonnelPage({
     };
     const focusedRow = findPersonnelRowByFocusTarget(rows, focusTarget);
 
-    setDbPreview(safePreview);
+    personnelAllRowsRef.current = safePreview.rows;
+    personnelListIndexRef.current = buildPersonnelListIndex(safePreview.rows);
+    questionnairePresencePeopleRef.current =
+      buildQuestionnairePresencePeople(rows);
+    setPersonnelDataEpoch((value) => value + 1);
     setSelectedRowId((current) => {
       if (focusedRow?.__dbRowId) return focusedRow.__dbRowId;
       if (current && rows.some((row) => row.__dbRowId === current)) {
@@ -1104,7 +1072,7 @@ export function PersonnelPage({
       loadGeneration !== personnelLoadGenerationRef.current ||
       Boolean(signal?.aborted);
     setIsLoading(true);
-    if (!dbPreview?.rows.length) {
+    if (!personnelAllRowsRef.current.length) {
       setMessage(
         "Завантажую актуальну Штатку та готую список особового складу…",
       );
@@ -1162,6 +1130,7 @@ export function PersonnelPage({
           dataset.rows,
           signal,
           questionnaireItemsPromise,
+          { force: options?.force },
         );
         const healAttachments = () => {
           if (isLoadCancelled()) return;
@@ -1420,7 +1389,7 @@ export function PersonnelPage({
       );
       if (!detail.rowId && !detail.externalId) return;
       personnelFocusLockRef.current = detail;
-      const rows = (dbPreview?.rows ?? []).filter(isLikelyPersonnelRow);
+      const rows = personnelAllRowsRef.current.filter(isLikelyPersonnelRow);
       if (!rows.length) return;
       const focusedRow = findPersonnelRowByFocusTarget(rows, detail);
       if (!focusedRow?.__dbRowId) return;
@@ -1439,7 +1408,7 @@ export function PersonnelPage({
         "army-grid:open-personnel",
         handleOpenPersonnel,
       );
-  }, [dbPreview]);
+  }, [personnelDataEpoch]);
 
   const saveSelectedPerson = async () => {
     if (!selectedRow?.__dbRowId) return;
@@ -1466,22 +1435,19 @@ export function PersonnelPage({
         selectedRow.__dbRowId,
         values,
       );
-      setDbPreview((currentPreview) => {
-        if (!currentPreview) return currentPreview;
-
-        return {
-          ...currentPreview,
-          rows: currentPreview.rows.map((row) =>
-            row.__dbRowId === selectedRow.__dbRowId
-              ? {
-                  ...row,
-                  ...updatedRow.values,
-                  __dbRowId: selectedRow.__dbRowId,
-                }
-              : row,
-          ),
-        };
-      });
+      personnelAllRowsRef.current = personnelAllRowsRef.current.map((row) =>
+        row.__dbRowId === selectedRow.__dbRowId
+          ? {
+              ...row,
+              ...updatedRow.values,
+              __dbRowId: selectedRow.__dbRowId,
+            }
+          : row,
+      );
+      personnelListIndexRef.current = buildPersonnelListIndex(
+        personnelAllRowsRef.current,
+      );
+      setPersonnelDataEpoch((value) => value + 1);
       setMessage(`Картку оновлено: ${selectedSummary.name}.`);
     } catch (error) {
       setMessage(

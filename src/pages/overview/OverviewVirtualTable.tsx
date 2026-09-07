@@ -15,7 +15,7 @@ import {
   buildOverviewStaffSheetColumnDefs,
   DEFAULT_OVERVIEW_STAFF_COLUMN_VISIBILITY,
 } from "./overviewStaffSheetColumns";
-import { resolveOverviewPhoto } from "./overviewPhotos";
+import { resolveOverviewPhoto, overviewPhotoPreviewUrl } from "./overviewPhotos";
 import { overviewPersonMatchKey } from "./overviewPersonnelAssets";
 import { overviewStatusFilterLabel } from "./overviewRosterMerge";
 
@@ -119,7 +119,7 @@ function OverviewPersonPhoto({
       Math.max(12, rect.top + rect.height / 2 - PHOTO_HOVER_SIZE / 2),
       window.innerHeight - PHOTO_HOVER_SIZE - 12,
     );
-    setPreview({ src: photo, top, left });
+    setPreview({ src: overviewPhotoPreviewUrl(photo), top, left });
   };
 
   return (

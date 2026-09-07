@@ -13,6 +13,7 @@ import {
 } from './auth/authTypes'
 import { showAppToast, showBackendBlockedToast } from './shared/appToast'
 import { dataUrlToUint8Array } from './shared/browserExport'
+import type { PersonnelDataset } from './data/personnelDatasetCore'
 import { createPhotoThumbnailDataUrl } from './pages/personnel/photoCompression'
 import { apiRequestPool, photoRequestPool, type ApiRequestPriority } from './apiRequestPool'
 import { measuredFetch } from './performance/performanceMonitor'
@@ -1256,6 +1257,47 @@ export const api = {
       '/ejournals/personnel/roster/latest/version',
       { signal: options.signal },
     )
+  },
+
+  getPersonnelDataset(
+    options: { fingerprint?: string; signal?: AbortSignal } = {},
+  ) {
+    const params = new URLSearchParams()
+    if (options.fingerprint?.trim()) {
+      params.set('fingerprint', options.fingerprint.trim())
+    }
+    const query = params.toString()
+    return request<PersonnelDataset | null>(
+      `/ejournals/personnel/dataset${query ? `?${query}` : ''}`,
+      { signal: options.signal },
+    ).catch(() => null)
+  },
+
+  getMergedPersonnelOverview(
+    options: { fingerprint?: string; signal?: AbortSignal } = {},
+  ) {
+    const params = new URLSearchParams()
+    if (options.fingerprint?.trim()) {
+      params.set('fingerprint', options.fingerprint.trim())
+    }
+    const query = params.toString()
+    return request<BackendPersonnelOverview | null>(
+      `/ejournals/personnel/overview/merged${query ? `?${query}` : ''}`,
+      { signal: options.signal },
+    ).catch(() => null)
+  },
+
+  rebuildMergedPersonnelOverview() {
+    return request<BackendPersonnelOverview>(
+      '/ejournals/personnel/overview/merged/rebuild',
+      { method: 'POST' },
+    )
+  },
+
+  rebuildPersonnelDataset() {
+    return request<PersonnelDataset>('/ejournals/personnel/dataset/rebuild', {
+      method: 'POST',
+    })
   },
 
   getEjournalLive(unitLabel = '1ПБ') {

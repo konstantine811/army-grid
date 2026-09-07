@@ -2,9 +2,8 @@ import type { EjournalPreviewRow } from "../ejournal/ejournalTypes";
 import { normalizeRosterMatchText } from "./fighterStatusImport";
 import {
   buildPersonListSummary,
-  getPersonDisplayName,
+  collectPersonCallSignFieldValues,
   getPersonFieldValue,
-  getRawCallSignSearchValues,
   isLikelyPersonnelRow,
   normalizePersonnelSearchText,
   resolvePersonBirthDate,
@@ -40,7 +39,7 @@ const buildSearchBase = (record: PersonnelRecord) =>
       record.summary.callSign,
       getPersonFieldValue(record.row, ["позивний"]),
       getPersonFieldValue(record.row, ["позив"]),
-      ...getRawCallSignSearchValues(record.row),
+      ...collectPersonCallSignFieldValues(record.row),
       record.summary.rank,
       record.summary.externalId,
       getPersonFieldValue(record.row, ["індекс", "посади"]),

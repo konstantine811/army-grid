@@ -41,8 +41,10 @@ import {
   CacheKeys,
   fetchWithCache,
   jsonChanged,
+  overviewAssetsCacheKey,
   peekDataCache,
   readDataCache,
+  writeDataCache,
 } from "../../data/idbDataCache";
 import { STAFF_SHEET_SYNCED_EVENT } from "../../data/staffSheetAutoSync";
 import {
@@ -62,12 +64,15 @@ import {
 } from "./overviewPhotos";
 import {
   buildOverviewPersonnelIdentities,
+  type OverviewPersonnelAssets,
 } from "./overviewPersonnelAssets";
+import { loadAvailablePersonPhotoIds } from "../personnel/personAttachments";
 import { normalizeRosterMatchText } from "../personnel/fighterStatusImport";
 import {
   overviewNameMatchesQuery,
   parseOverviewNameQueries,
 } from "./overviewNameSearch";
+import { overviewMergeCacheKey, overviewMergeFingerprint } from "./overviewMergeCache";
 import {
   OverviewVirtualTable,
   type OverviewPersonDocumentSummary,
@@ -194,6 +199,7 @@ export function OverviewPage() {
     const force = Boolean(options?.force);
     setIsLoading(true);
     try {
+      let rosterFingerprint = "";
       const applyOverview = async (
         overview: BackendPersonnelOverview,
         rosterRows: EjournalPreviewRow[],
@@ -208,23 +214,55 @@ export function OverviewPage() {
       ) => {
         let mergedOverview = overview;
         if (!skipRosterMerge) {
-          try {
-            mergedOverview = await runHeavyJob({
-              type: "mergeOverview",
-              overview,
-              rosterRows,
-              rosterLabels,
-              columns: rosterColumns,
-            });
-          } catch {
-            mergedOverview =
-              source === "staff" && rosterRows.length
-                ? buildRosterOnlyOverview(
-                    rosterRows,
-                    rosterLabels,
-                    rosterColumns,
-                  )
-                : overview;
+          const mergeCacheKey = overviewMergeCacheKey(
+            overview,
+            rosterFingerprint,
+            rosterRows,
+            rosterColumns,
+          );
+          const mergeFingerprint = overviewMergeFingerprint(
+            overview,
+            rosterFingerprint,
+            rosterRows,
+          );
+          if (!force) {
+            const serverMerged = await api
+              .getMergedPersonnelOverview({
+                fingerprint: mergeFingerprint,
+                signal,
+              })
+              .catch(() => null);
+            if (serverMerged?.rows?.length) {
+              mergedOverview = serverMerged;
+            }
+          }
+          if (!force && mergedOverview === overview) {
+            const cachedMerge =
+              await readDataCache<BackendPersonnelOverview>(mergeCacheKey);
+            if (cachedMerge?.rows?.length) {
+              mergedOverview = cachedMerge;
+            }
+          }
+          if (mergedOverview === overview) {
+            try {
+              mergedOverview = await runHeavyJob({
+                type: "mergeOverview",
+                overview,
+                rosterRows,
+                rosterLabels,
+                columns: rosterColumns,
+              });
+              void writeDataCache(mergeCacheKey, mergedOverview);
+            } catch {
+              mergedOverview =
+                source === "staff" && rosterRows.length
+                  ? buildRosterOnlyOverview(
+                      rosterRows,
+                      rosterLabels,
+                      rosterColumns,
+                    )
+                  : overview;
+            }
           }
         }
         if (!alive()) return mergedOverview;
@@ -284,7 +322,32 @@ export function OverviewPage() {
           people: EjournalPreviewRow[],
           documentList: Awaited<typeof documentPromise>,
         ) => {
+          const applyAssets = (assets: OverviewPersonnelAssets) => {
+            setQuestionnaireByExternalId((current) => ({
+              ...current,
+              ...assets.questionnairePresence,
+            }));
+            setQuestionnaireSourceIdByExternalId(assets.questionnaireSourceIds);
+            setDocumentsByExternalId(assets.documents);
+            setQuestionnairePresenceStatus("ready");
+          };
           try {
+            const cacheKey = overviewAssetsCacheKey(
+              dataset.fingerprint,
+              overviewRows,
+              Array.isArray(questionnaireList) ? questionnaireList : [],
+              Array.isArray(documentList) ? documentList : [],
+            );
+            if (!force) {
+              const cached = await readDataCache<OverviewPersonnelAssets>(
+                cacheKey,
+              );
+              if (cached && alive() && seq === assetsSeq) {
+                applyAssets(cached);
+                return;
+              }
+            }
+
             const assets = await runHeavyJob({
               type: "applyOverviewAssets",
               overviewRows,
@@ -307,13 +370,8 @@ export function OverviewPage() {
                 : [],
             });
             if (!alive() || seq !== assetsSeq) return;
-            setQuestionnaireByExternalId((current) => ({
-              ...current,
-              ...assets.questionnairePresence,
-            }));
-            setQuestionnaireSourceIdByExternalId(assets.questionnaireSourceIds);
-            setDocumentsByExternalId(assets.documents);
-            setQuestionnairePresenceStatus("ready");
+            applyAssets(assets);
+            void writeDataCache(cacheKey, assets);
           } catch (error) {
             console.warn("[Огляд] Не вдалося підставити дані з Особового складу", error);
             if (alive() && seq === assetsSeq) {
@@ -344,6 +402,7 @@ export function OverviewPage() {
         readDataCache<PersonnelDataset>(CacheKeys.personnelDataset),
         readDataCache<BackendPersonnelOverview>(CacheKeys.overview),
       ]);
+      rosterFingerprint = cachedDataset?.fingerprint ?? "";
       let rosterRows: EjournalPreviewRow[] = [];
       let rosterLabels: Record<string, string> = {};
       let rosterColumns: Array<{
@@ -384,6 +443,7 @@ export function OverviewPage() {
         signal,
         onCached: async (nextDataset) => {
           if (!alive()) return;
+          rosterFingerprint = nextDataset.fingerprint;
           rosterRows = nextDataset.rosterRows;
           rosterLabels = nextDataset.rosterLabels;
           rosterColumns = nextDataset.rosterColumns;
@@ -411,6 +471,7 @@ export function OverviewPage() {
         },
       })
         .then((nextDataset) => {
+          rosterFingerprint = nextDataset.fingerprint;
           rosterRows = nextDataset.rosterRows;
           rosterLabels = nextDataset.rosterLabels;
           rosterColumns = nextDataset.rosterColumns;
@@ -489,6 +550,7 @@ export function OverviewPage() {
 
   useEffect(() => {
     startLoad();
+    void loadAvailablePersonPhotoIds().catch(() => new Set<string>());
     return () => {
       loadControllerRef.current?.abort();
     };
@@ -672,9 +734,9 @@ export function OverviewPage() {
     });
   }, []);
 
-  useEffect(() => {
-    if (!filteredRows.length || filteredRows.length > 40) return;
-    const missing = filteredRows.filter((row) => {
+  const prefetchOverviewPhotos = useCallback((rows: BackendPersonnelOverviewRow[]) => {
+    if (!rows.length) return;
+    const missing = rows.filter((row) => {
       const requestKey = row.externalId || row.id || row.name;
       if (!requestKey || requestedPhotoKeysRef.current.has(requestKey)) {
         return false;
@@ -698,7 +760,16 @@ export function OverviewPage() {
         return merged;
       });
     });
-  }, [filteredRows, rosterEpoch]);
+  }, []);
+
+  useEffect(() => {
+    prefetchOverviewPhotos(sourceRows.slice(0, 40));
+  }, [prefetchOverviewPhotos, sourceRows, rosterEpoch]);
+
+  useEffect(() => {
+    if (!filteredRows.length || filteredRows.length > 40) return;
+    prefetchOverviewPhotos(filteredRows);
+  }, [filteredRows, prefetchOverviewPhotos, rosterEpoch]);
 
   const exportOverviewTable = async (
     context: SciDataTableExportContext<BackendPersonnelOverviewRow>,

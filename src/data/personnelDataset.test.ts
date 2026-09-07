@@ -2,9 +2,11 @@ import { describe, expect, it } from "vitest";
 import type {
   BackendEjournalImportSheet,
   BackendPersonnelRosterLatest,
+  BackendPersonnelRosterVersion,
 } from "../api";
 import {
   buildPersonnelDatasetVersion,
+  buildPersonnelDatasetVersionFromRosterVersion,
   dedupePersonnelDatasetRows,
   personnelDatasetFingerprint,
   personnelDatasetToPreview,
@@ -84,6 +86,24 @@ describe("personnelDataset", () => {
     expect(same).toBe(first);
     expect(changedOos).not.toBe(first);
     expect(changedRoster).not.toBe(first);
+  });
+
+  it("builds the same fingerprint from roster version metadata as from full roster", () => {
+    const oosSheet = sheet("oos", "2026-09-05T08:00:00.000Z");
+    const latest = roster();
+    const rosterVersion: BackendPersonnelRosterVersion = {
+      importId: latest.importId,
+      createdAt: latest.createdAt,
+      sheetUpdatedAt: latest.sheet?.updatedAt ?? null,
+      rowCount: latest.sheet?.rowCount ?? latest.rows.length,
+    };
+    expect(
+      personnelDatasetFingerprint(
+        buildPersonnelDatasetVersionFromRosterVersion(oosSheet, rosterVersion),
+      ),
+    ).toBe(
+      personnelDatasetFingerprint(buildPersonnelDatasetVersion(oosSheet, latest)),
+    );
   });
 
   it("normalizes merged roster units once for both pages", () => {

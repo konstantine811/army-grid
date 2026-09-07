@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { EjournalPreviewRow } from "../ejournal/ejournalTypes";
+import { ROSTER_ARCHIVE_FLAG_KEY } from "./staffSheetArchiveMarker";
 import { ROSTER_FIELD_PREFIX } from "./personnelRosterMerge";
 import { buildPersonnelListIndex } from "./personnelListIndex";
 
@@ -21,7 +22,7 @@ describe("buildPersonnelListIndex", () => {
       }),
       row("ІВАНЕНКО Іван", {
         __dbRowId: "roster:archive:ivan",
-        __roster_archive: true,
+        [ROSTER_ARCHIVE_FLAG_KEY]: true,
       }),
     ]);
 

@@ -1320,6 +1320,14 @@ const normalizePersonIdentityText = (value: unknown) =>
     .trim()
     .toLocaleLowerCase("uk-UA");
 
+/** Lowercase search corpus for list filter (lighter than identity normalization). */
+export const normalizePersonnelSearchText = (value: unknown) =>
+  previewValueToDisplay(value)
+    .replace(/[ʼ’']/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLocaleLowerCase("uk-UA");
+
 export const normalizePersonBirthKey = (value: string) => {
   const text = formatExcelDateDisplay(value).trim();
   if (!text) return "";

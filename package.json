@@ -8,6 +8,7 @@
     "dev:lan": "vite --host",
     "cert:trust": "bash scripts/setupLanHttps.sh",
     "build": "tsc -b && vite build",
+    "build:personnel-merge": "node scripts/buildPersonnelMerge.mjs",
     "lint": "oxlint",
     "test": "vitest run",
     "test:watch": "vitest",

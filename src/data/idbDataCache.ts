@@ -120,7 +120,38 @@ export const CacheKeys = {
   documentsAll: "personnel:documents:meta:v4",
   questionnairesMeta: "personnel:questionnaires:meta",
   questionnairePresencePrefix: "personnel:questionnaire-presence:v1:",
+  overviewAssetsPrefix: "personnel:overview-assets:v1:",
+  overviewMergePrefix: "personnel:overview-merge:v1:",
 } as const;
+
+const listMetaStamp = (
+  items: Array<{ personExternalId?: string | null; id?: string | null }>,
+  sampleField: "personExternalId" | "id",
+) => {
+  if (!items.length) return "0";
+  return `${items.length}:${items
+    .slice(0, 5)
+    .map((item) => String(item[sampleField] ?? "").trim())
+    .filter(Boolean)
+    .join("|")}`;
+};
+
+export const overviewAssetsCacheKey = (
+  datasetFingerprint: string,
+  overviewRows: Array<{ externalId?: string; id?: string }>,
+  questionnaires: Array<{ personExternalId?: string | null }>,
+  documents: Array<{ id?: string | null }>,
+) => {
+  const overviewStamp =
+    overviewRows.length > 0
+      ? `${overviewRows.length}:${overviewRows
+          .slice(0, 5)
+          .map((row) => String(row.externalId ?? row.id ?? "").trim())
+          .filter(Boolean)
+          .join("|")}`
+      : "0";
+  return `${CacheKeys.overviewAssetsPrefix}${datasetFingerprint}:${overviewStamp}:${listMetaStamp(questionnaires, "personExternalId")}:${listMetaStamp(documents, "id")}`;
+};
 
 export const questionnairePresenceCacheKey = (
   datasetFingerprint: string,
@@ -148,7 +179,9 @@ const isKnownCacheKey = (key: string) =>
   key === CacheKeys.overview ||
   key === CacheKeys.documentsAll ||
   key === CacheKeys.questionnairesMeta ||
-  key.startsWith(CacheKeys.questionnairePresencePrefix);
+  key.startsWith(CacheKeys.questionnairePresencePrefix) ||
+  key.startsWith(CacheKeys.overviewAssetsPrefix) ||
+  key.startsWith(CacheKeys.overviewMergePrefix);
 
 export const planDataCacheCleanup = (
   entries: Array<Pick<CacheEntry, "key" | "savedAt" | "formatVersion">>,
@@ -384,6 +417,8 @@ export const invalidatePersonnelCaches = () =>
     CacheKeys.documentsAll,
     CacheKeys.questionnairesMeta,
     CacheKeys.questionnairePresencePrefix,
+    CacheKeys.overviewAssetsPrefix,
+    CacheKeys.overviewMergePrefix,
   );
 
 /**

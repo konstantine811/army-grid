@@ -5,6 +5,7 @@ import {
   buildOverviewPhotoMap,
   fillMissingOverviewPhotos,
   indexOverviewRosterRows,
+  overviewPhotoPreviewUrl,
   resolveOverviewPhoto,
 } from "./overviewPhotos";
 import { clearAvailablePersonPhotoIdsCache } from "../personnel/personAttachments";
@@ -49,13 +50,13 @@ describe("buildOverviewPhotoMap", () => {
     expect(resolveOverviewPhoto(row, photos)).toBe("data:image/jpeg;base64,abc");
   });
 
-  it("loads a thumbnail rather than the full person photo", async () => {
+  it("builds a thumbnail file url rather than fetching image bytes", async () => {
     const row = overviewRow("ПОЛЬОВИЙ Олексій Геннадійович", {
       externalId: "person-1",
     });
-    const thumbnail = vi
-      .spyOn(api, "getPersonPhotoThumbnail")
-      .mockResolvedValue("data:image/jpeg;base64,thumb");
+    const urlSpy = vi
+      .spyOn(api, "personPhotoFileUrl")
+      .mockReturnValue("http://test/photo?thumbnail=1");
     vi.spyOn(api, "listPersonPhotos").mockResolvedValue([
       {
         personExternalId: "person-1",
@@ -63,22 +64,43 @@ describe("buildOverviewPhotoMap", () => {
         hasThumbnail: true,
       },
     ]);
+    const thumbnail = vi.spyOn(api, "getPersonPhotoThumbnail");
     const fullPhoto = vi.spyOn(api, "getPersonPhoto");
 
     const photos = await fillMissingOverviewPhotos([row], [], {});
 
-    expect(thumbnail).toHaveBeenCalled();
+    expect(urlSpy).toHaveBeenCalledWith("person-1", { thumbnail: true });
+    expect(thumbnail).not.toHaveBeenCalled();
     expect(fullPhoto).not.toHaveBeenCalled();
-    expect(resolveOverviewPhoto(row, photos)).toContain("thumb");
+    expect(resolveOverviewPhoto(row, photos)).toBe(
+      "http://test/photo?thumbnail=1",
+    );
   });
 
-  it("does not probe thumbnail URLs for a person absent from the photo index", async () => {
+  it("maps photo index entries without inline data to thumbnail urls", () => {
+    vi.spyOn(api, "personPhotoFileUrl").mockReturnValue(
+      "http://test/photo?thumbnail=1&access_token=abc",
+    );
+    const { photos } = buildOverviewPhotoMap(
+      [{ personExternalId: "person-1", hasThumbnail: true }],
+      [],
+      [],
+    );
+
+    expect(photos["person-1"]).toBe(
+      "http://test/photo?thumbnail=1&access_token=abc",
+    );
+  });
+
+  it("does not build thumbnail urls for a person absent from the photo index", async () => {
     const row = overviewRow("БЕЗ ФОТО", { externalId: "missing-person" });
     vi.spyOn(api, "listPersonPhotos").mockResolvedValue([]);
+    const urlSpy = vi.spyOn(api, "personPhotoFileUrl");
     const thumbnail = vi.spyOn(api, "getPersonPhotoThumbnail");
 
     await fillMissingOverviewPhotos([row], [], {});
 
+    expect(urlSpy).not.toHaveBeenCalled();
     expect(thumbnail).not.toHaveBeenCalled();
   });
 
@@ -101,5 +123,35 @@ describe("buildOverviewPhotoMap", () => {
         [otherKey]: "data:image/jpeg;base64,wrong",
       }),
     ).toBe("");
+  });
+});
+
+describe("overviewPhotoPreviewUrl", () => {
+  it("removes thumbnail flag for hover preview", () => {
+    expect(
+      overviewPhotoPreviewUrl(
+        "http://test/photo?thumbnail=1&access_token=abc",
+      ),
+    ).toBe("http://test/photo?access_token=abc");
+  });
+
+  it("keeps data urls unchanged", () => {
+    const dataUrl = "data:image/jpeg;base64,abc";
+    expect(overviewPhotoPreviewUrl(dataUrl)).toBe(dataUrl);
+  });
+});
+
+describe("overviewPhotoPreviewUrl", () => {
+  it("removes thumbnail flag for hover preview", () => {
+    expect(
+      overviewPhotoPreviewUrl(
+        "http://test/photo?thumbnail=1&access_token=abc",
+      ),
+    ).toBe("http://test/photo?access_token=abc");
+  });
+
+  it("keeps data urls unchanged", () => {
+    const dataUrl = "data:image/jpeg;base64,abc";
+    expect(overviewPhotoPreviewUrl(dataUrl)).toBe(dataUrl);
   });
 });

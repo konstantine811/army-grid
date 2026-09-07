@@ -86,23 +86,9 @@ const sortBattalionLabels = (labels: string[]) =>
   });
 
 /** Google Sheets може зберігати роту об'єднаною коміркою — заповнюємо її для рядків посад нижче. */
-export const fillDownRosterUnitRows = (
-  rows: EjournalPreviewRow[],
-): EjournalPreviewRow[] => {
-  let currentUnit = "";
-  return rows.map((row) => {
-    const unit = readRosterColumnValue(row, 2).trim();
-    if (unit) {
-      currentUnit = unit;
-      return row;
-    }
-    const isPositionRow = [5, 8, 13, 14].some((columnNumber) =>
-      readRosterColumnValue(row, columnNumber).trim(),
-    );
-    if (!currentUnit || !isPositionRow) return row;
-    return { ...row, column_2: currentUnit };
-  });
-};
+
+/** @deprecated import from rosterRowFill */
+export { fillDownRosterUnitRows } from "../personnel/rosterRowFill";
 
 /** Посади / люди зі Штатки. `battalion = ALL` — усі пункти, не лише «нова». */
 export const summarizeStaffFromRoster = (

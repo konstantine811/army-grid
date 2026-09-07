@@ -1,9 +1,11 @@
-import type { BackendPersonnelOverviewRow } from "../../api";
+import { api, type BackendPersonnelOverviewRow } from "../../api";
 import type { EjournalPreviewRow } from "../ejournal/ejournalTypes";
 import {
   collectPersonAttachmentLookupIds,
-  loadPersonPhotoThumbnailForRow,
+  loadAvailablePersonPhotoIds,
   parseOrphanAttachmentIdentityId,
+  personPhotoThumbnailUrlForRow,
+  resolvePersonPhotoStorageIdForRow,
 } from "../personnel/personAttachments";
 import {
   buildPersonIdentityFingerprint,
@@ -66,6 +68,27 @@ export const resolveOverviewPhoto = (
     if (photo) return photo;
   }
   return "";
+};
+
+/** Full-size preview for hover — drops thumbnail=1 from file URLs. */
+export const overviewPhotoPreviewUrl = (photoUrl: string) => {
+  const trimmed = String(photoUrl ?? "").trim();
+  if (!trimmed || !trimmed.includes("thumbnail=1")) return trimmed;
+  try {
+    const url = new URL(trimmed, "http://local");
+    url.searchParams.delete("thumbnail");
+    const query = url.searchParams.toString();
+    const path = trimmed.startsWith("http")
+      ? `${url.origin}${url.pathname}`
+      : url.pathname;
+    return query ? `${path}?${query}` : path;
+  } catch {
+    return trimmed
+      .replace(/([?&])thumbnail=1&/g, "$1")
+      .replace(/([?&])thumbnail=1$/g, "")
+      .replace(/\?&/, "?")
+      .replace(/\?$/, "");
+  }
 };
 
 export const findOverviewRosterRow = (
@@ -138,6 +161,8 @@ export const buildOverviewPhotoMap = (
     photoData?: string;
     externalId?: string;
     person_external_id?: string;
+    hasFile?: boolean;
+    hasThumbnail?: boolean;
   }>,
   rows: BackendPersonnelOverviewRow[],
   rosterRows: EjournalPreviewRow[],
@@ -148,8 +173,15 @@ export const buildOverviewPhotoMap = (
   for (const item of photoList) {
     const id = photoIdFromListItem(item);
     const data = String(item.photoData ?? "").trim();
-    if (id && data) photos[id] = data;
-    else if (id) idsWithoutData.push(id);
+    if (id && data) {
+      photos[id] = data;
+      continue;
+    }
+    if (id && (item.hasThumbnail || item.hasFile)) {
+      photos[id] = api.personPhotoFileUrl(id, { thumbnail: true });
+      continue;
+    }
+    if (id) idsWithoutData.push(id);
   }
 
   let rosterById = new Map<string, EjournalPreviewRow>();
@@ -208,24 +240,6 @@ export const buildOverviewPhotoMap = (
   return { photos, idsWithoutData };
 };
 
-const runPool = async <T,>(
-  items: T[],
-  limit: number,
-  worker: (item: T) => Promise<void>,
-) => {
-  let index = 0;
-  const size = Math.min(Math.max(limit, 1), items.length || 1);
-  await Promise.all(
-    Array.from({ length: size }, async () => {
-      while (index < items.length) {
-        const current = items[index];
-        index += 1;
-        await worker(current);
-      }
-    }),
-  );
-};
-
 export const fillMissingOverviewPhotos = async (
   rows: BackendPersonnelOverviewRow[],
   rosterRows: EjournalPreviewRow[],
@@ -243,7 +257,9 @@ export const fillMissingOverviewPhotos = async (
   const missing = rows.filter((row) => !resolveOverviewPhoto(row, next));
   if (!missing.length) return next;
 
-  await runPool(missing, 6, async (row) => {
+  const availableIds = await loadAvailablePersonPhotoIds();
+
+  for (const row of missing) {
     const rosterRow = findOverviewRosterRow(row, rosterById, rosterByName);
     const fallbackRow = {
       ПІБ: cleanPersonDisplayName(row.name) || row.name,
@@ -251,21 +267,18 @@ export const fillMissingOverviewPhotos = async (
       id: row.externalId,
     } as EjournalPreviewRow;
 
-    const result = await loadPersonPhotoThumbnailForRow(
-      rosterRow ?? fallbackRow,
-      undefined,
-    );
-    const photo = result.photoData?.trim() || "";
-    if (!photo) return;
+    const targetRow = rosterRow ?? fallbackRow;
+    const photo = personPhotoThumbnailUrlForRow(targetRow, undefined, availableIds);
+    if (!photo) continue;
 
     const keys = [
       ...overviewPhotoLookupKeys(row),
-      result.resolvedExternalId,
+      resolvePersonPhotoStorageIdForRow(targetRow, undefined, availableIds),
       rosterRow ? resolvePersonIdentityKey(rosterRow) : "",
     ].filter(Boolean);
     for (const key of keys) next[key] = photo;
     onProgress?.({ ...next });
-  });
+  }
 
   return next;
 };
