@@ -76,9 +76,20 @@ function App() {
   const [activePage, setActivePage] = useState<AppPage>(() =>
     getPageFromPath(window.location.pathname),
   );
-  const mountedPages = new Set<AppPage>([activePage]);
+  const [mountedPages, setMountedPages] = useState<Set<AppPage>>(
+    () => new Set([getPageFromPath(window.location.pathname)]),
+  );
   const [routeKey, setRouteKey] = useState(getCurrentRouteKey);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+
+  useEffect(() => {
+    setMountedPages((previous) => {
+      if (previous.has(activePage)) return previous;
+      const next = new Set(previous);
+      next.add(activePage);
+      return next;
+    });
+  }, [activePage]);
 
   useEffect(() => {
     const handlePopState = () => {

@@ -301,15 +301,17 @@ export const ubdHasExactBasisForTaskPeriod = (
   return allBasisOrderOptions().some((item) => item.date === wanted);
 };
 
-/** БР ще не готовий: явный прапор або дата БР ≠ «з» періоду. */
+/** БР ще не готовий: лише явний прапор, якщо дати не збігаються. */
 export const ubdBasisIsNotReady = (
   taskPeriod: string,
   basisDate: string,
   explicitFlag?: boolean | string | null,
   location = "",
 ) => {
-  if (explicitFlag === true || explicitFlag === "true") return true;
   if (explicitFlag === false || explicitFlag === "false") return false;
   if (!String(taskPeriod ?? "").trim()) return false;
-  return !ubdBasisDateMatchesTaskPeriod(taskPeriod, basisDate, location);
+  if (ubdBasisDateMatchesTaskPeriod(taskPeriod, basisDate, location)) {
+    return false;
+  }
+  return explicitFlag === true || explicitFlag === "true";
 };

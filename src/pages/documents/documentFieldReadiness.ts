@@ -1,4 +1,4 @@
-import { pickUbdBasisOrderForTaskPeriod, ubdBasisDateMatchesTaskPeriod } from "./ubdBasisOrders";
+import { pickUbdBasisOrderForTaskPeriod, ubdBasisDateMatchesTaskPeriod, ubdBasisIsNotReady } from "./ubdBasisOrders";
 
 /** Типи з вибором бойового розпорядження (дата БР ↔ початок періоду завдань). */
 export const DOCUMENT_TYPES_WITH_BASIS_ORDER = new Set(["ubdReport", "form6Report"]);
@@ -140,6 +140,34 @@ export const resolveUbdFieldsForGapCheck = (
   fields: Record<string, unknown> | null | undefined,
 ) => resolveDocumentFieldsForGapCheck("ubdReport", fields);
 
+/** Нормалізує basisNotReady для журналу / підсвітки (знімає застарілий прапор). */
+export const normalizeUbdReadinessFields = (
+  fields: Record<string, unknown> | null | undefined,
+) => {
+  const resolved = resolveUbdFieldsForGapCheck(fields);
+  const taskPeriod = String(resolved.taskPeriod ?? "").trim();
+  const basisDate = String(resolved.basisDate ?? "").trim();
+  const basisNumber = String(resolved.basisNumber ?? "").trim();
+  const taskPlace = String(resolved.taskPlace ?? "").trim();
+
+  if (
+    !isBlankDocumentInput(basisNumber) &&
+    !isBlankDocumentInput(basisDate)
+  ) {
+    return { ...resolved, basisNotReady: false };
+  }
+
+  return {
+    ...resolved,
+    basisNotReady: ubdBasisIsNotReady(
+      taskPeriod,
+      basisDate,
+      resolved.basisNotReady as boolean | string | null | undefined,
+      taskPlace,
+    ),
+  };
+};
+
 export const documentRequiredInputKeys = (
   type: string,
   fields: Record<string, unknown> | null | undefined,
@@ -201,11 +229,10 @@ export const documentHasBasisDateMismatch = (
   fields: Record<string, unknown> | null | undefined,
 ) => {
   if (!DOCUMENT_TYPES_WITH_BASIS_ORDER.has(type)) return false;
-  const resolved = resolveDocumentFieldsForGapCheck(type, fields);
   if (type === "ubdReport") {
-    const flag = resolved.basisNotReady;
-    if (flag === true || flag === "true") return true;
+    return Boolean(normalizeUbdReadinessFields(fields).basisNotReady);
   }
+  const resolved = resolveDocumentFieldsForGapCheck(type, fields);
   const taskPeriod = String(resolved.taskPeriod ?? "").trim();
   const basisDate = String(resolved.basisDate ?? "").trim();
   if (!taskPeriod || isBlankDocumentInput(basisDate)) return false;

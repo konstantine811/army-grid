@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Alert,
   Button,
@@ -6,13 +6,16 @@ import {
   TextField,
   Typography,
 } from "@/components/sci/SciPrimitives";
-import { DeleteOutlineOutlinedIcon } from "@/components/sci/icons";
+import { DeleteOutlineOutlinedIcon, FileUploadOutlinedIcon } from "@/components/sci/icons";
 import {
   createBasisOrderId,
+  importBasisOrdersFromParsed,
   loadCustomBasisOrders,
+  loadImportedBasisOrders,
   saveCustomBasisOrders,
   type UbdBasisOrderRecord,
 } from "../documents/ubdBasisOrdersDirectory";
+import { parseBasisOrdersFromDocx } from "../documents/ubdBasisOrdersImport";
 
 const emptyDraft = (): UbdBasisOrderRecord => ({
   id: "",
@@ -26,11 +29,16 @@ const emptyDraft = (): UbdBasisOrderRecord => ({
 
 export function BasisOrdersSettings() {
   const [rows, setRows] = useState<UbdBasisOrderRecord[]>([]);
+  const [importedCount, setImportedCount] = useState(0);
   const [draft, setDraft] = useState<UbdBasisOrderRecord>(emptyDraft);
   const [message, setMessage] = useState("");
+  const [messageType, setMessageType] = useState<"success" | "error">("success");
+  const importInputRef = useRef<HTMLInputElement>(null);
+  const [isImporting, setIsImporting] = useState(false);
 
   useEffect(() => {
     setRows(loadCustomBasisOrders());
+    setImportedCount(loadImportedBasisOrders().length);
   }, []);
 
   const persist = (next: UbdBasisOrderRecord[]) => {
@@ -43,6 +51,7 @@ export function BasisOrdersSettings() {
     const date = draft.date.trim();
     const location = draft.location?.trim() ?? "";
     if (!number || !date || !location) {
+      setMessageType("error");
       setMessage("Потрібні номер БР, дата БР і локація.");
       return;
     }
@@ -62,7 +71,38 @@ export function BasisOrdersSettings() {
         : [...rows, record],
     );
     setDraft(emptyDraft());
+    setMessageType("success");
     setMessage("Довідник БР збережено. У рапорті номер підставиться за локацією і датою.");
+  };
+
+  const importFromDocx = async (file: File) => {
+    setIsImporting(true);
+    try {
+      const parsed = await parseBasisOrdersFromDocx(await file.arrayBuffer());
+      if (!parsed.length) {
+        setMessageType("error");
+        setMessage(
+          "У файлі не знайдено рядків формату «№4862/ОКП/123/дск від 01.08.2026».",
+        );
+        return;
+      }
+      const result = importBasisOrdersFromParsed(parsed, file.name);
+      setImportedCount(result.total);
+      setMessageType("success");
+      setMessage(
+        `Імпортовано з «${file.name}»: додано ${result.added}, пропущено ${result.skipped} (вже були). Усього імпортованих: ${result.total}.`,
+      );
+    } catch (error) {
+      setMessageType("error");
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "Не вдалося імпортувати Word-файл із номерами БР.",
+      );
+    } finally {
+      setIsImporting(false);
+      if (importInputRef.current) importInputRef.current.value = "";
+    }
   };
 
   return (
@@ -76,10 +116,40 @@ export function BasisOrdersSettings() {
       </Typography>
 
       {message ? (
-        <Alert severity="success" variant="outlined">
+        <Alert severity={messageType} variant="outlined">
           {message}
         </Alert>
       ) : null}
+
+      <Stack direction="row" spacing={1} className="basis-orders-import-row">
+        <input
+          ref={importInputRef}
+          type="file"
+          accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+          hidden
+          onChange={(event) => {
+            const file = event.target.files?.[0];
+            if (file) void importFromDocx(file);
+          }}
+        />
+        <Button
+          variant="outlined"
+          startIcon={<FileUploadOutlinedIcon />}
+          disabled={isImporting}
+          onClick={() => importInputRef.current?.click()}
+        >
+          {isImporting ? "Імпорт…" : "Імпорт з Word (.docx)"}
+        </Button>
+        {importedCount ? (
+          <Typography variant="body2" color="text.secondary">
+            Імпортовано без локації: {importedCount}
+          </Typography>
+        ) : null}
+      </Stack>
+      <Typography variant="caption" color="text.secondary" component="p">
+        Формат файлу: один рядок на БР, напр. «№4862/ОКП/2223/дск від
+        01.08.2026». Нові номери додаються до існуючих, дублікати пропускаються.
+      </Typography>
 
       <div className="basis-orders-form">
         <TextField

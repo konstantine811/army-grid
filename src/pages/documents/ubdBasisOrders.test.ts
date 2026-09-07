@@ -4,6 +4,7 @@ import {
   findUbdBasisOrdersForLocationPeriod,
   pickUbdBasisOrderForTaskPeriod,
   resolveUbdBasisForTask,
+  ubdBasisIsNotReady,
 } from "./ubdBasisOrders";
 
 const directory: UbdBasisOrderOption[] = [
@@ -72,5 +73,36 @@ describe("БР за локацією + датою", () => {
         "Новоселівка",
       )?.number,
     ).toBe("№151/дск");
+  });
+
+  it("знімає «БР ще не підходить», якщо дата БР збігається з періодом", () => {
+    expect(
+      ubdBasisIsNotReady(
+        "з 04.08.2026-02.09.2026",
+        "04.08.2026",
+        true,
+        "н.п. Шилівка",
+      ),
+    ).toBe(false);
+  });
+
+  it("лишає «БР ще не підходить», якщо дата БР не збігається і прапор явний", () => {
+    expect(
+      ubdBasisIsNotReady(
+        "з 04.08.2026-02.09.2026",
+        "05.08.2026",
+        true,
+      ),
+    ).toBe(true);
+  });
+
+  it("не блокує без явного прапора при розбіжності дат", () => {
+    expect(
+      ubdBasisIsNotReady(
+        "з 04.08.2026-02.09.2026",
+        "05.08.2026",
+        undefined,
+      ),
+    ).toBe(false);
   });
 });

@@ -4,6 +4,7 @@ import {
   documentHasBasisDateMismatch,
   documentHasEmptyInputs,
   documentRequiredFieldIsBlank,
+  normalizeUbdReadinessFields,
   readDocumentSkippedDueToSzch,
   readDocumentSkippedDueToStatus200,
   readDocumentSkippedFromWork,
@@ -71,6 +72,54 @@ describe("documentFieldReadiness", () => {
     ).toBe(false);
   });
 
+  it("clears stale UBD «БР не підходить» when dates match", () => {
+    const fields = {
+      taskPeriod: "з 04.08.2026-02.09.2026",
+      taskPlace: "н.п. Шилівка",
+      basisNumber: "4862/ОКП/2264/дск",
+      basisDate: "04.08.2026",
+      basisNotReady: true,
+    };
+    expect(documentHasBasisDateMismatch("ubdReport", fields)).toBe(false);
+    expect(
+      documentBasisFieldHighlightClass("ubdReport", fields, "basisNumber"),
+    ).toBeUndefined();
+  });
+
+  it("allows manual BR pick when day/month match but years differ", () => {
+    const fields = {
+      taskPeriod: "з 06.08.2025-13.08.2025",
+      taskPlace: "н.п. Садки",
+      basisNumber: "4862/ОКП/2292/дск",
+      basisDate: "06.08.2026",
+      basisNotReady: false,
+    };
+    expect(documentHasBasisDateMismatch("ubdReport", fields)).toBe(false);
+    expect(
+      documentBasisFieldHighlightClass("ubdReport", fields, "basisDate"),
+    ).toBeUndefined();
+  });
+
+  it("clears journal highlight when dates match but stale basisNotReady=true", () => {
+    const fields = {
+      taskPeriod: "з 04.08.2026-02.09.2026",
+      basisNumber: "4862/ОКП/2264/дск",
+      basisDate: "04.08.2026",
+      basisNotReady: true,
+    };
+    expect(documentHasBasisDateMismatch("ubdReport", fields)).toBe(false);
+    expect(normalizeUbdReadinessFields(fields).basisNotReady).toBe(false);
+  });
+
+  it("keeps journal highlight only with explicit basisNotReady on mismatch", () => {
+    const fields = {
+      taskPeriod: "з 04.08.2026-02.09.2026",
+      basisNumber: "4862/ОКП/2292/дск",
+      basisDate: "06.08.2026",
+      basisNotReady: true,
+    };
+    expect(documentHasBasisDateMismatch("ubdReport", fields)).toBe(false);
+  });
   it("requires lost-ID movement locations", () => {
     expect(
       documentHasEmptyInputs("lostMilitaryId", {

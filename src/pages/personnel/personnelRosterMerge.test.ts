@@ -244,6 +244,30 @@ describe("combineRosterRowSources", () => {
   });
 });
 
+describe("mergeRosterRowsIntoPreview roster-only dedupe", () => {
+  it("keeps two different people who share the same mistaken ІПН", () => {
+    const merged = mergeRosterRowsIntoPreview({ rows: [] }, [
+      rosterRow("МАЗУР Дмитро Михайлович", {
+        column_16: "27.12.1999",
+        column_19: "3462502235",
+        __rowNumber: 114,
+      }),
+      rosterRow("КОРОТКОВ Віталій Юрійович", {
+        column_16: "19.10.1994",
+        column_19: "3462502235",
+        __rowNumber: 241,
+      }),
+    ]);
+
+    expect(merged).toHaveLength(2);
+    expect(merged.map((row) => getPersonDisplayName(row))).toEqual([
+      "МАЗУР Дмитро Михайлович",
+      "КОРОТКОВ Віталій Юрійович",
+    ]);
+    expect(merged.every(isPersonnelInStaffRoster)).toBe(true);
+  });
+});
+
 describe("isPersonnelInStaffRoster", () => {
   it("treats a roster-only card as in staff", () => {
     expect(

@@ -90,6 +90,7 @@ import {
   pickUbdBasisOrderForTaskPeriod,
   resolveUbdBasisForTask,
   ubdBasisDateMatchesTaskPeriod,
+  ubdBasisIsNotReady,
   ubdBasisOrderOptionKey,
   ubdHasExactBasisForTaskPeriod,
 } from "./ubdBasisOrders";
@@ -100,12 +101,14 @@ import {
   documentHasBasisDateMismatch,
   documentHasEmptyInputs,
   documentRequiredFieldIsBlank,
+  isBlankDocumentInput,
   isBlankForm6IdDocument,
   isBlankUbdRnokpp,
   readDocumentSkippedDueToSzch,
   readDocumentSkippedDueToStatus200,
   readDocumentSkippedFromWork,
   resolveUbdFieldsForGapCheck,
+  normalizeUbdReadinessFields,
 } from "./documentFieldReadiness";
 import {
   buildFighterTaskPeriodText,
@@ -1005,10 +1008,15 @@ const mergeUbdFields = (
     basisNumber,
     basisDate,
     basis: formatUbdBasisText(basisNumber, basisDate),
-    // Не виводимо з розбіжності дат для старих записів — лише збережений прапор.
     basisNotReady:
-      saved.basisNotReady === true ||
-      (saved.basisNotReady as unknown) === "true",
+      !isBlankDocumentInput(basisNumber) && !isBlankDocumentInput(basisDate)
+        ? false
+        : ubdBasisIsNotReady(
+            taskPeriod,
+            basisDate,
+            saved.basisNotReady,
+            taskPlace,
+          ),
     // Always prefer fresh personnel/roster values when document field is empty.
     taskPeriod,
     taskPlace,
@@ -2287,7 +2295,11 @@ export function DocumentsPage(_props: {
     document: BackendPersonDocument,
   ): Record<string, unknown> => {
     const stored = (document.fields || {}) as Record<string, unknown>;
-    if (document.id !== selectedDocumentId) return stored;
+    if (document.id !== selectedDocumentId) {
+      return document.type === "ubdReport"
+        ? normalizeUbdReadinessFields(stored)
+        : stored;
+    }
     let live = stored;
     if (mode === document.type) {
       switch (document.type) {
@@ -2325,11 +2337,14 @@ export function DocumentsPage(_props: {
           break;
       }
     }
-    return {
+    const withSkipFlags = {
       ...live,
       skippedDueToSzch,
       skippedDueToStatus200,
     };
+    return document.type === "ubdReport"
+      ? normalizeUbdReadinessFields(withSkipFlags)
+      : withSkipFlags;
   };
 
   const filteredJournalDocuments = useMemo(() => {
@@ -2891,7 +2906,7 @@ export function DocumentsPage(_props: {
       });
 
       const skipped = journalExportDocuments.length - completeDocuments.length;
-      const fileName = `УБД рапорт спільний · ${people.length} осіб · ${dayjs().format("DD.MM.YYYY")}.docx`;
+      const fileName = `1ПБ УБД рапорт спільний · ${people.length} осіб · ${dayjs().format("DD.MM.YYYY")}.docx`;
       downloadBlob(fileName, blob);
       setDocumentMessage(
         skipped > 0
@@ -2906,6 +2921,33 @@ export function DocumentsPage(_props: {
       );
     } finally {
       setIsExportingDocumentJournal(false);
+    }
+  };
+
+  const copyJournalExportNames = async () => {
+    if (!journalExportDocuments.length) {
+      setDocumentMessage("Немає вибраних рядків для копіювання ПІБ.");
+      return;
+    }
+
+    const names = journalExportDocuments.map((document) => {
+      if (
+        document.id === selectedDocumentId &&
+        mode === "ubdReport" &&
+        document.type === "ubdReport"
+      ) {
+        const liveName = String(ubdFields.fullName ?? "").trim();
+        if (liveName) return liveName;
+      }
+      return getDocumentPersonName(document);
+    });
+    const text = names.join("\n");
+
+    try {
+      await navigator.clipboard.writeText(text);
+      setDocumentMessage(`Скопійовано ${names.length} ПІБ (окремі рядки).`);
+    } catch {
+      setDocumentMessage("Не вдалося скопіювати. Виділіть текст вручну.");
     }
   };
 
@@ -5617,11 +5659,8 @@ export function DocumentsPage(_props: {
         basisNumber: option.number,
         basisDate: option.date,
         basis: formatUbdBasisText(option.number, option.date),
-        basisNotReady: !ubdBasisDateMatchesTaskPeriod(
-          current.taskPeriod,
-          option.date,
-          current.taskPlace,
-        ),
+        // Користувач явно обрав БР — не блокуємо рапорт через розбіжність дат.
+        basisNotReady: false,
       };
       scheduleDocumentFieldSave(() => {
         void saveUbdDocument(next);
@@ -5639,6 +5678,35 @@ export function DocumentsPage(_props: {
       return next;
     });
   };
+
+  useEffect(() => {
+    if (mode !== "ubdReport") return;
+    if (!ubdFields.basisNotReady) return;
+    if (
+      ubdBasisIsNotReady(
+        ubdFields.taskPeriod,
+        ubdFields.basisDate,
+        ubdFields.basisNotReady,
+        ubdFields.taskPlace,
+      )
+    ) {
+      return;
+    }
+    setUbdFields((current) => {
+      if (!current.basisNotReady) return current;
+      const next = { ...current, basisNotReady: false };
+      scheduleDocumentFieldSave(() => {
+        void saveUbdDocument(next);
+      });
+      return next;
+    });
+  }, [
+    mode,
+    ubdFields.basisNotReady,
+    ubdFields.taskPeriod,
+    ubdFields.basisDate,
+    ubdFields.taskPlace,
+  ]);
 
   const updateForm6Field = (
     key: Exclude<keyof Form6ReportFields, "signatories" | "basisManual">,
@@ -7133,10 +7201,10 @@ export function DocumentsPage(_props: {
                     }
                     label="БР ще не підходить"
                   />
-                  {ubdFields.basisNotReady ||
-                  !ubdBasisDateMatchesTaskPeriod(
+                  {ubdBasisIsNotReady(
                     ubdFields.taskPeriod,
                     ubdFields.basisDate,
+                    ubdFields.basisNotReady,
                     ubdFields.taskPlace,
                   ) ? (
                     <Alert severity="warning" className="ubd-basis-not-ready-alert">
@@ -7149,7 +7217,7 @@ export function DocumentsPage(_props: {
                             )
                               ? ""
                               : " — у списках ще немає БР на цю дату"
-                          }. Поставте «БР ще не підходить», якщо рапорт поки не можна сформувати.`}
+                          }. Оберіть потрібний № у списку або поставте «БР ще не підходить».`}
                     </Alert>
                   ) : null}
                 </div>
@@ -8946,6 +9014,20 @@ export function DocumentsPage(_props: {
                 onClick={() => void exportUbdBulkWordFromJournal()}
               >
                 Word УБД · {journalExportSelectedCount}
+              </Button>
+            ) : null}
+            {journalTypeFilter === "ubdReport" ? (
+              <Button
+                variant="outlined"
+                startIcon={<ContentCopyOutlinedIcon />}
+                disabled={
+                  isLoadingDocumentJournal ||
+                  !journalExportSelectedCount
+                }
+                onClick={() => void copyJournalExportNames()}
+                title="Скопіювати ПІБ обраних рапортів (окремі рядки)"
+              >
+                ПІБ · {journalExportSelectedCount}
               </Button>
             ) : null}
           </Stack>

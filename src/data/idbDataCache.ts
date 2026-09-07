@@ -115,11 +115,27 @@ export const CacheKeys = {
   anketaCreatedPersonnel: "personnel:anketa-created:v1",
   staffSheetImport: "anketa:staff-sheet-import",
   staffSheetVkIndex: "anketa:staff-sheet-vk-index",
-  personnelDataset: "personnel:dataset:memory:v3",
+  personnelDataset: "personnel:dataset:persisted:v4",
   overview: "personnel:overview",
   documentsAll: "personnel:documents:meta:v4",
   questionnairesMeta: "personnel:questionnaires:meta",
+  questionnairePresencePrefix: "personnel:questionnaire-presence:v1:",
 } as const;
+
+export const questionnairePresenceCacheKey = (
+  datasetFingerprint: string,
+  items: Array<{ personExternalId?: string | null }>,
+) => {
+  const stamp =
+    items.length > 0
+      ? `${items.length}:${items
+          .slice(0, 5)
+          .map((item) => String(item.personExternalId ?? "").trim())
+          .filter(Boolean)
+          .join("|")}`
+      : "0";
+  return `${CacheKeys.questionnairePresencePrefix}${datasetFingerprint}:${stamp}`;
+};
 
 const isKnownCacheKey = (key: string) =>
   key === CacheKeys.ejournalImports ||
@@ -131,7 +147,8 @@ const isKnownCacheKey = (key: string) =>
   key === CacheKeys.personnelDataset ||
   key === CacheKeys.overview ||
   key === CacheKeys.documentsAll ||
-  key === CacheKeys.questionnairesMeta;
+  key === CacheKeys.questionnairesMeta ||
+  key.startsWith(CacheKeys.questionnairePresencePrefix);
 
 export const planDataCacheCleanup = (
   entries: Array<Pick<CacheEntry, "key" | "savedAt" | "formatVersion">>,
@@ -366,6 +383,7 @@ export const invalidatePersonnelCaches = () =>
     CacheKeys.overview,
     CacheKeys.documentsAll,
     CacheKeys.questionnairesMeta,
+    CacheKeys.questionnairePresencePrefix,
   );
 
 /**

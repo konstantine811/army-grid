@@ -28,8 +28,8 @@ import {
   CacheKeys,
   deleteDataCache,
   evictDataCacheMemory,
-  peekDataCache,
-  writeMemoryDataCache,
+  readDataCache,
+  writeDataCache,
 } from "./idbDataCache";
 
 export type PersonnelDatasetVersion = {
@@ -63,7 +63,7 @@ type LoadPersonnelDatasetOptions = {
 
 let inFlight: Promise<PersonnelDataset> | null = null;
 let inFlightSignal: AbortSignal | undefined;
-let removedPersistedV1 = false;
+let removedLegacyDatasetCaches = false;
 
 const sheetStamp = (sheet: BackendEjournalImportSheet | null | undefined) =>
   sheet
@@ -293,9 +293,10 @@ export const personnelDatasetToPreview = (
 export const loadPersonnelDataset = async (
   options: LoadPersonnelDatasetOptions = {},
 ): Promise<PersonnelDataset> => {
-  if (!removedPersistedV1) {
-    removedPersistedV1 = true;
+  if (!removedLegacyDatasetCaches) {
+    removedLegacyDatasetCaches = true;
     void deleteDataCache("personnel:dataset:v1");
+    void deleteDataCache("personnel:dataset:memory:v3");
   }
   if (inFlight && !options.force && !inFlightSignal?.aborted) return inFlight;
   if (inFlightSignal?.aborted) {
@@ -304,7 +305,7 @@ export const loadPersonnelDataset = async (
   }
 
   const run = async () => {
-    const cached = peekDataCache<PersonnelDataset>(
+    const cached = await readDataCache<PersonnelDataset>(
       CacheKeys.personnelDataset,
     );
     if (cached) await options.onCached?.(cached);
@@ -340,9 +341,9 @@ export const loadPersonnelDataset = async (
 
     const dataset = await buildDataset(preview, roster, version);
     if (options.signal?.aborted) throw new DOMException("Aborted", "AbortError");
-    writeMemoryDataCache(CacheKeys.personnelDataset, dataset);
+    await writeDataCache(CacheKeys.personnelDataset, dataset);
     // The merged dataset supersedes the wide raw OOS snapshot in RAM. Its
-    // persistent IndexedDB copy remains available for a cold reload.
+    // IndexedDB copy remains available for a cold reload.
     evictDataCacheMemory("ejournal:sheet-rows:");
     return dataset;
   };

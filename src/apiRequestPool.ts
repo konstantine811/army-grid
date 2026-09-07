@@ -77,3 +77,6 @@ export class ApiRequestPool {
 
 export const apiRequestPool = new ApiRequestPool(4);
 
+/** Photo blobs bypass the general API pool so list previews can load in parallel. */
+export const photoRequestPool = new ApiRequestPool(12);
+

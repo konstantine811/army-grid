@@ -9,6 +9,7 @@ import {
   matchOrphanIdToPersonnelRow,
   parseOrphanAttachmentIdentityId,
   personNameMatchesOrphanNameKey,
+  personPhotoThumbnailUrlForRow,
   questionnaireFileMatchesPerson,
 } from "./personAttachments";
 import {
@@ -340,5 +341,23 @@ describe("questionnaireFileMatchesPerson", () => {
         toExternalId: "2103825",
       }),
     ]);
+  });
+});
+
+describe("personPhotoThumbnailUrlForRow", () => {
+  it("returns an authenticated file url without fetching image bytes", () => {
+    const urlSpy = vi
+      .spyOn(api, "personPhotoFileUrl")
+      .mockReturnValue("http://test/photo?thumbnail=1");
+
+    const url = personPhotoThumbnailUrlForRow(
+      personRow("ШЕВЧЕНКО Олександр", { id: "2103004" }),
+      undefined,
+      new Set(["2103004"]),
+    );
+
+    expect(url).toBe("http://test/photo?thumbnail=1");
+    expect(urlSpy).toHaveBeenCalledWith("2103004", { thumbnail: true });
+    urlSpy.mockRestore();
   });
 });

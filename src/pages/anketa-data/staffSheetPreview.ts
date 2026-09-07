@@ -1,5 +1,9 @@
 import type { EjournalPreviewRow } from "../ejournal/ejournalTypes";
 import { readRosterColumnValue } from "../excel-fill/rosterSourceSnapshot";
+import {
+  isPersonnelFromArchive,
+} from "../personnel/personnelRosterMerge";
+import { isLikelyPersonnelRow } from "../personnel/personnelUtils";
 import type { StaffSheetEnrichmentEntry } from "./staffSheetEnrichment";
 
 export const STAFF_SHEET_PREVIEW_COLUMNS = [
@@ -21,7 +25,24 @@ export type StaffSheetPreviewRow = {
 };
 
 const hasPersonName = (row: EjournalPreviewRow) =>
-  readRosterColumnValue(row, 14).trim().length >= 3;
+  Boolean(
+    isLikelyPersonnelRow({
+      ...row,
+      __dbRowId: String(row.__dbRowId ?? `staff:${row.__rowNumber ?? 0}`),
+    }),
+  );
+
+/** Скільки осіб показує особовий склад (той самий фільтр, що isLikelyPersonnelRow). */
+export const countStaffSheetPersons = (rows: EjournalPreviewRow[]) =>
+  rows.filter(hasPersonName).length;
+
+export const countStaffSheetPersonsInRoster = (rows: EjournalPreviewRow[]) =>
+  rows.filter((row) => !isPersonnelFromArchive(row) && hasPersonName(row))
+    .length;
+
+export const countStaffSheetPersonsInArchive = (rows: EjournalPreviewRow[]) =>
+  rows.filter((row) => isPersonnelFromArchive(row) && hasPersonName(row))
+    .length;
 
 export const buildStaffSheetPreviewRows = (
   rows: EjournalPreviewRow[],

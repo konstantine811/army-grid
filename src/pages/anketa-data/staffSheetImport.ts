@@ -1,5 +1,5 @@
 import { api, type BackendPersonnelRosterLatest } from "../../api";
-import { hasRowData, readWorkbookSnapshot } from "../../excelRoundTrip";
+import { readWorkbookSnapshot } from "../../excelRoundTrip";
 import {
   CacheKeys,
   invalidatePersonnelCaches,
@@ -33,7 +33,12 @@ import {
   findArchiveSheet,
   isPersonnelFromArchive,
 } from "../personnel/staffSheetArchive";
-import { buildStaffSheetPreviewRows } from "./staffSheetPreview";
+import {
+  buildStaffSheetPreviewRows,
+  countStaffSheetPersons,
+  countStaffSheetPersonsInArchive,
+  countStaffSheetPersonsInRoster,
+} from "./staffSheetPreview";
 
 export type StaffSheetImportSnapshot = {
   fileName: string;
@@ -44,6 +49,10 @@ export type StaffSheetImportSnapshot = {
   fileData?: ArrayBuffer | null;
   source: "file" | "google";
   personCount: number;
+  /** У «Загальному списку», без аркуша «Архів». */
+  personCountInRoster?: number;
+  /** Лише з аркуша «Архів». */
+  personCountInArchive?: number;
 };
 
 export const rosterRowsFromStaffSheetPayload = (
@@ -77,7 +86,7 @@ export const rosterLatestToStaffSheetImportSnapshot = (
     rows,
     fileData: null,
     source,
-    personCount: buildStaffSheetPreviewRows(rows).length,
+    ...staffSheetPersonCounts(rows),
   };
 };
 
@@ -92,6 +101,43 @@ const sortRosterRows = (rows: EjournalPreviewRow[]) =>
     (left, right) =>
       (Number(left.__rowNumber) || 0) - (Number(right.__rowNumber) || 0),
   );
+
+const previewRowToImportValues = (row: EjournalPreviewRow) => {
+  const values: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(row)) {
+    if (key.startsWith("__")) continue;
+    const normalized = cellValueToJson(value);
+    if (normalized == null || String(normalized).trim() === "") continue;
+    values[key] = normalized;
+  }
+  return values;
+};
+
+const previewRowsToRosterImportRows = (
+  rows: EjournalPreviewRow[],
+  fighterStatusAdditions: Map<string, Record<string, unknown>>,
+) =>
+  rows
+    .filter((row) => !isPersonnelFromArchive(row))
+    .map((row) => {
+      const values = previewRowToImportValues(row);
+      const statusAddition = findFighterStatusAddition(
+        values,
+        fighterStatusAdditions,
+      );
+      if (statusAddition) Object.assign(values, statusAddition);
+      return {
+        excelRowNumber: Number(row.__rowNumber) || 0,
+        values,
+      };
+    })
+    .filter((row) => Object.keys(row.values).length > 0);
+
+const staffSheetPersonCounts = (rows: EjournalPreviewRow[]) => ({
+  personCount: countStaffSheetPersons(rows),
+  personCountInRoster: countStaffSheetPersonsInRoster(rows),
+  personCountInArchive: countStaffSheetPersonsInArchive(rows),
+});
 
 const enrichStaffSheetRowColumnNumbers = (
   row: EjournalPreviewRow,
@@ -141,7 +187,7 @@ export const staffSheetSnapshotFromPayload = (
     rows,
     fileData: null,
     source,
-    personCount: buildStaffSheetPreviewRows(rows).length,
+    ...staffSheetPersonCounts(rows),
   };
 };
 
@@ -183,7 +229,7 @@ export const parseStaffSheetImportFile = async (
     rows,
     fileData,
     source: "file",
-    personCount: buildStaffSheetPreviewRows(rows).length,
+    ...staffSheetPersonCounts(rows),
   };
 };
 
@@ -222,34 +268,10 @@ export const importStaffSheetFromFile = async (
     })),
   ];
 
-  const rows = rosterSheet.rows
-    .filter((row) => hasRowData(row.values))
-    .map((row) => {
-      const values = Object.fromEntries(
-        rosterColumns.map((column, index) => [
-          column.key,
-          cellValueToJson(row.values[index]),
-        ]),
-      );
-      for (const column of rosterColumns) {
-        const columnNumber = (column.originalIndex ?? column.order) + 1;
-        const raw = values[column.key];
-        if (raw == null || String(raw).trim() === "") continue;
-        const columnKey = `column_${columnNumber}`;
-        if (!values[columnKey]) values[columnKey] = raw;
-      }
-      const statusAddition = findFighterStatusAddition(
-        values,
-        fighterStatusAdditions,
-      );
-      return {
-        excelRowNumber: row.excelRowNumber,
-        values: {
-          ...values,
-          ...(statusAddition ?? {}),
-        },
-      };
-    });
+  const rows = previewRowsToRosterImportRows(
+    imported.rows,
+    fighterStatusAdditions,
+  );
 
   const archiveOnlyImportRows = archiveOnlyRowsForPersonnelImport(
     imported.rows.filter((row) => !isPersonnelFromArchive(row)),
@@ -275,6 +297,7 @@ export const importStaffSheetFromFile = async (
 
   const fresh = await api.getLatestPersonnelRoster();
   if (fresh) await writeDataCache(CacheKeys.rosterLatest, fresh);
+  await invalidatePersonnelCaches();
 
   // The selected workbook is authoritative for this import. Stamp it only
   // after the DB write so an immediate stale /roster/latest response cannot

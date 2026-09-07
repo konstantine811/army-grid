@@ -14,7 +14,7 @@ import {
 import { showAppToast, showBackendBlockedToast } from './shared/appToast'
 import { dataUrlToUint8Array } from './shared/browserExport'
 import { createPhotoThumbnailDataUrl } from './pages/personnel/photoCompression'
-import { apiRequestPool, type ApiRequestPriority } from './apiRequestPool'
+import { apiRequestPool, photoRequestPool, type ApiRequestPriority } from './apiRequestPool'
 import { measuredFetch } from './performance/performanceMonitor'
 
 const resolveApiBaseUrl = () => {
@@ -37,7 +37,20 @@ const resolveApiBaseUrl = () => {
 }
 
 /** Resolve per call — hostname differs on localhost vs phone/LAN. */
-const apiBaseUrl = () => resolveApiBaseUrl()
+export const apiBaseUrl = () => resolveApiBaseUrl()
+
+export const personPhotoFileUrl = (
+  personExternalId: string,
+  options?: { thumbnail?: boolean },
+) => {
+  const params = new URLSearchParams()
+  if (options?.thumbnail) params.set('thumbnail', '1')
+  const token = getAuthToken()
+  if (token) params.set('access_token', token)
+  const query = params.toString()
+  const path = `${apiBaseUrl()}/ejournals/personnel/photos/${encodeURIComponent(personExternalId)}/file`
+  return query ? `${path}?${query}` : path
+}
 
 type JsonRecord = Record<string, unknown>
 
@@ -201,7 +214,7 @@ const fetchPersonPhotoData = async (
   thumbnail = false,
 ) => {
   const query = thumbnail ? '?thumbnail=1' : ''
-  return apiRequestPool.run(async () => {
+  return photoRequestPool.run(async () => {
     const response = await measuredFetch(
       `${apiBaseUrl()}/ejournals/personnel/photos/${encodeURIComponent(personExternalId)}/file${query}`,
       { headers: authHeaders() },
@@ -629,6 +642,8 @@ export const api = {
   get baseUrl() {
     return apiBaseUrl()
   },
+
+  personPhotoFileUrl,
 
   register(body: { email: string; password: string; displayName: string }) {
     return request<AuthSession>('/auth/register', {

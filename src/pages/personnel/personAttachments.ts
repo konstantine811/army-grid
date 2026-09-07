@@ -4,6 +4,7 @@ import type {
   BackendPersonQuestionnaireMeta,
 } from "../../api";
 import { api } from "../../api";
+import { loadSharedDocumentsAll } from "../../data/sharedAppData";
 import { sanitizeFileName } from "../../shared/browserExport";
 import type { EjournalPreviewRow } from "../ejournal/ejournalTypes";
 import { readRosterColumnValue } from "../excel-fill/rosterSourceSnapshot";
@@ -367,6 +368,43 @@ export const loadAvailablePersonPhotoIds = async () => {
   return availablePhotoIdsPromise;
 };
 
+export const peekAvailablePersonPhotoIds = () =>
+  availablePhotoIdsCache?.ids ?? null;
+
+/** DB / filesystem key under which the photo is stored (may differ from roster externalId). */
+export const resolvePersonPhotoStorageIdForRow = (
+  row: EjournalPreviewRow | null,
+  hints?: PersonAttachmentLookupHints,
+  availableIds?: Set<string> | null,
+) => {
+  const ids = availableIds ?? peekAvailablePersonPhotoIds();
+  if (!ids?.size) return "";
+  for (const id of collectPersonAttachmentLookupIds(row, hints)) {
+    if (ids.has(id)) return id;
+  }
+  return "";
+};
+
+export const personPhotoThumbnailUrlForRow = (
+  row: EjournalPreviewRow | null,
+  hints?: PersonAttachmentLookupHints,
+  availableIds?: Set<string> | null,
+) => {
+  const storageId = resolvePersonPhotoStorageIdForRow(row, hints, availableIds);
+  return storageId
+    ? api.personPhotoFileUrl(storageId, { thumbnail: true })
+    : "";
+};
+
+export const personPhotoFullUrlForRow = (
+  row: EjournalPreviewRow | null,
+  hints?: PersonAttachmentLookupHints,
+  availableIds?: Set<string> | null,
+) => {
+  const storageId = resolvePersonPhotoStorageIdForRow(row, hints, availableIds);
+  return storageId ? api.personPhotoFileUrl(storageId) : "";
+};
+
 /** Lightweight list/card preview: request the 96×128 thumbnail directly. */
 export const loadPersonPhotoThumbnailForRow = async (
   row: EjournalPreviewRow | null,
@@ -412,7 +450,7 @@ export const loadPersonDocumentsForRow = async (
     fallback
       ? api.listPersonDocuments(fallback).catch(() => [])
       : Promise.resolve([] as BackendPersonDocument[]),
-    api.listAllPersonDocuments().catch(() => []),
+    loadSharedDocumentsAll().catch(() => [] as BackendPersonDocument[]),
   ]);
   const related = all.filter((document) => {
     if (lookupSet.has(document.personExternalId)) return true;

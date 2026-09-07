@@ -308,6 +308,17 @@ export const mergeRosterRowsIntoPreview = (
     [...usedRosterRows].map((row) => getRosterPersonRnokpp(row)).filter(Boolean),
   );
 
+  const rosterOnlyIdentityKey = (
+    nameKey: string,
+    birth: string,
+    rnokpp: string,
+  ) =>
+    nameKey && birth
+      ? `${nameKey}|${birth}`
+      : rnokpp
+        ? `${rnokpp}|${nameKey || birth}`
+        : nameKey || birth;
+
   const seenExtraKeys = new Set<string>();
   const rosterOnlyRows = rosterRows
     .filter((row) => !usedRosterRows.has(row))
@@ -316,7 +327,23 @@ export const mergeRosterRowsIntoPreview = (
       const nameKey = normalizeRosterText(getRosterPersonName(row));
       const rnokpp = getRosterPersonRnokpp(row);
       const birth = getRosterPersonBirthDate(row);
-      if (rnokpp && usedRnokpp.has(rnokpp)) return false;
+      if (rnokpp && usedRnokpp.has(rnokpp)) {
+        const usedWithRnokpp = [...usedRosterRows].filter(
+          (item) => getRosterPersonRnokpp(item) === rnokpp,
+        );
+        const usedNameKeysForRnokpp = usedWithRnokpp.map((item) =>
+          normalizeRosterText(getRosterPersonName(item)),
+        );
+        // Shared ІПН across different ПІБ is a spreadsheet mistake — keep both.
+        if (
+          !nameKey ||
+          usedNameKeysForRnokpp.some(
+            (usedNameKey) => !usedNameKey || usedNameKey === nameKey,
+          )
+        ) {
+          return false;
+        }
+      }
       if (usedNameKeys.has(nameKey)) {
         const usedWithName = [...usedRosterRows].filter(
           (item) => normalizeRosterText(getRosterPersonName(item)) === nameKey,
@@ -326,10 +353,9 @@ export const mergeRosterRowsIntoPreview = (
           return false;
         }
       }
-      const extraKey = rnokpp || `${nameKey}|${birth}`;
+      const extraKey = rosterOnlyIdentityKey(nameKey, birth, rnokpp);
       if (seenExtraKeys.has(extraKey)) return false;
       seenExtraKeys.add(extraKey);
-      if (rnokpp) seenExtraKeys.add(`${nameKey}|${birth}`);
       return true;
     })
     .flatMap((row) => {
