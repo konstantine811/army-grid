@@ -12,17 +12,23 @@ import {
 import { canonicalName, normId } from "./ejoosIdentity";
 import {
   dayFromOrderLabel,
+  dispositionTimesheetPaintLastDay,
   formatDispositionTimesheetDeparture,
   formatTimesheetDeparture,
   formatTimesheetMonthHeader,
+  journalDayFromDateMs,
+  journalMonthStartMsFromLabel,
+  parseDateLabelMs,
   parseTimesheetAbsenceSpans,
   parseTimesheetMonthHeaderText,
+  staffTimesheetMarkReturnThenDisposition,
   timesheetMarkForOpenDispositionDay,
   timesheetMarkFromArchive,
   timesheetMonthHeaderTextFromCell,
 } from "./ejoosTimesheetText";
 import {
   applyInlineStringWritesToWorkbook,
+  restyleWrittenRowsFromZip,
   type ZipCellWrite,
 } from "./ejoosZipCellWrites";
 import {
@@ -710,6 +716,7 @@ const shpoDispositionMark = (op: EjoosSyncOp) => {
 
 type DispositionContext = {
   plan: EjoosSyncPlan;
+  allOps: EjoosSyncOp[];
   shpo: ExcelSheetSnapshot;
   absent: ExcelSheetSnapshot;
   timesheet: ExcelSheetSnapshot;
@@ -721,6 +728,22 @@ type DispositionContext = {
   reservedAbsentRows: Set<number>;
   reservedTimesheetRows: Set<number>;
 };
+
+const samePersonOp = (left: EjoosSyncOp, right: EjoosSyncOp) =>
+  Boolean(
+    (left.personId && right.personId && left.personId === right.personId) ||
+      (left.fullName &&
+        right.fullName &&
+        canonicalName(left.fullName) === canonicalName(right.fullName)),
+  );
+
+const staffReturnPlacementOp = (op: EjoosSyncOp, allOps: EjoosSyncOp[]) =>
+  allOps.find(
+    (candidate) =>
+      candidate.kind === "position_change" &&
+      candidate.payload.returningFromDisposition === "1" &&
+      samePersonOp(candidate, op),
+  );
 
 const collectWrites = (op: EjoosSyncOp, ctx: DispositionContext) => {
   const { plan, shpo, absent, timesheet } = ctx;
@@ -752,6 +775,9 @@ const collectWrites = (op: EjoosSyncOp, ctx: DispositionContext) => {
         column,
         value: value || null,
         styleSourceRow: target.styleRow,
+        styleSourceColumn: column,
+        keepNeighborStyle: true,
+        copyNeighborStyle: false,
       });
     }
   }
@@ -809,7 +835,13 @@ const collectWrites = (op: EjoosSyncOp, ctx: DispositionContext) => {
   const staffTimesheetRow =
     Number(op.payload.timesheetExcelRow || 0) ||
     findStaffTimesheetRow(timesheet, op);
-  const lastDay = Math.min(31, plan.timesheetDay);
+  const timesheetMonthStartMs = journalMonthStartMsFromLabel(plan.timesheetDayLabel);
+  const dispositionOrderDateMs = parseDateLabelMs(op.payload.orderDate || "");
+  const lastDay = dispositionTimesheetPaintLastDay(
+    plan.timesheetDay,
+    op.payload.orderDate || "",
+    timesheetMonthStartMs,
+  );
   const absenceCode = op.payload.absenceCode || statusMark;
   const absenceSpans = parseTimesheetAbsenceSpans(
     op.payload.timesheetAbsenceSpans || "",
@@ -831,23 +863,37 @@ const collectWrites = (op: EjoosSyncOp, ctx: DispositionContext) => {
     row: number,
     styleSourceRow: number,
     idColumn: number,
+    dayStyleSourceRow = 0,
   ) => {
+    const orderDayInSheet =
+      (dispositionOrderDateMs &&
+        timesheetMonthStartMs &&
+        journalDayFromDateMs(dispositionOrderDateMs, timesheetMonthStartMs)) ||
+      dispositionOrderDay;
     for (let day = 1; day <= lastDay; day += 1) {
       const value = timesheetMarkForOpenDispositionDay(day, {
         dispositionOrderDay,
+        dispositionOrderDateMs,
+        timesheetMonthStartMs,
         dispositionDeparture,
         absenceCode,
+        beforeOrderMark:
+          op.payload.keepOpenSzchTimesheet === "1" ? absenceCode : "+",
         lastDay,
         absenceSpans: absenceSpans.length ? absenceSpans : undefined,
       });
-    timesheetWrites.push({
+      const useStaffDayStyle =
+        dayStyleSourceRow > 0 &&
+        orderDayInSheet > 0 &&
+        day < orderDayInSheet;
+      const dayStyleRow = useStaffDayStyle ? dayStyleSourceRow : styleSourceRow;
+      timesheetWrites.push({
         row,
         column: 8 + day,
         value,
-        styleSourceRow,
+        styleSourceRow: dayStyleRow,
         styleSourceColumn: 8 + day,
-        keepNeighborStyle: day !== dispositionOrderDay,
-        wrapText: day === dispositionOrderDay,
+        keepNeighborStyle: true,
         copyNeighborStyle: false,
       });
     }
@@ -897,16 +943,64 @@ const collectWrites = (op: EjoosSyncOp, ctx: DispositionContext) => {
             undefined
         : op.payload.positionTitle,
     );
-    paintOpenSzch(target.row, target.styleRow, target.cols.id);
+    paintOpenSzch(
+      target.row,
+      target.styleRow,
+      target.cols.id,
+      keepOpenSzch && staffTimesheetRow > 0 ? staffTimesheetRow : 0,
+    );
     if (
       staffTimesheetRow > 0 &&
       occupantMatchesOp(timesheet, staffTimesheetRow, 7, 8, op)
     ) {
-      clearTimesheetStaffOccupant(
-        timesheetWrites,
-        staffTimesheetRow,
-        lastDay,
-      );
+      const staffEpisodeOp = staffReturnPlacementOp(op, ctx.allOps);
+      const orderDayInSheet =
+        (dispositionOrderDateMs &&
+          timesheetMonthStartMs &&
+          journalDayFromDateMs(dispositionOrderDateMs, timesheetMonthStartMs)) ||
+        dispositionOrderDay;
+      if (staffEpisodeOp) {
+        const activeFromDay =
+          journalDayFromDateMs(
+            parseDateLabelMs(
+              staffEpisodeOp.payload.timesheetActiveFrom ||
+                staffEpisodeOp.payload.orderDate ||
+                "",
+            ),
+            timesheetMonthStartMs,
+          ) ||
+          dayFromOrderLabel(
+            staffEpisodeOp.payload.timesheetActiveFrom ||
+              staffEpisodeOp.payload.orderDate ||
+              "",
+          );
+        const staffSpans = parseTimesheetAbsenceSpans(
+          staffEpisodeOp.payload.timesheetAbsenceSpans || "",
+        );
+        for (let day = 1; day <= lastDay; day += 1) {
+          timesheetWrites.push({
+            row: staffTimesheetRow,
+            column: 8 + day,
+            value: staffTimesheetMarkReturnThenDisposition(day, {
+              activeFromDay,
+              lastDay,
+              spans: staffSpans,
+              dispositionOrderDay: orderDayInSheet,
+              dispositionDeparture,
+            }),
+            styleSourceRow: staffTimesheetRow,
+            styleSourceColumn: 8 + day,
+            keepNeighborStyle: true,
+            copyNeighborStyle: false,
+          });
+        }
+      } else {
+        clearTimesheetStaffOccupant(
+          timesheetWrites,
+          staffTimesheetRow,
+          lastDay,
+        );
+      }
     }
     return;
   }
@@ -979,6 +1073,9 @@ const collectWrites = (op: EjoosSyncOp, ctx: DispositionContext) => {
           timesheet.rawRows[sourceTimesheetRow - 1]?.[column - 1],
         ),
         styleSourceRow: sourceTimesheetRow,
+        styleSourceColumn: column,
+        keepNeighborStyle: true,
+        copyNeighborStyle: false,
       });
     }
     stampInsertBeforeOnFirstWrite(timesheetWrites, historyRow, insertHistoryRow);
@@ -1014,7 +1111,9 @@ const collectWrites = (op: EjoosSyncOp, ctx: DispositionContext) => {
         column: 8 + day,
         value,
         styleSourceRow: sourceTimesheetRow,
-        wrapText: typeof value === "string" && /вибув/iu.test(value),
+        styleSourceColumn: 8 + day,
+        keepNeighborStyle: true,
+        copyNeighborStyle: false,
       });
       timesheetWrites.push({
         row: sourceTimesheetRow,
@@ -1050,8 +1149,10 @@ export async function applyDispositionWithZip(input: {
   ejoos: ExcelWorkbookSnapshot;
   plan: EjoosSyncPlan;
   ops: EjoosSyncOp[];
+  /** Повна картка (ПОСАДА + РОЗПОРЯДЖ) — для staffReturnPlacementOp. */
+  allOps?: EjoosSyncOp[];
 }) {
-  const { ejoos, plan, ops } = input;
+  const { ejoos, plan, ops, allOps = ops } = input;
   const shpo = findSheet(ejoos, /шпо|штатно.?посад/i);
   const absent = findSheet(ejoos, /тимчасов.*відсут/i);
   const timesheet = findSheet(ejoos, /табель/i);
@@ -1067,6 +1168,7 @@ export async function applyDispositionWithZip(input: {
 
   const ctx: DispositionContext = {
     plan,
+    allOps,
     shpo,
     absent,
     timesheet: timesheetView,
@@ -1097,5 +1199,10 @@ export async function applyDispositionWithZip(input: {
     timesheet.sheetName,
     timesheetWrites,
   );
+  blob = await restyleWrittenRowsFromZip(blob, [
+    { sheet: shpo.sheetName, writes: shpoWrites },
+    { sheet: absent.sheetName, writes: absentWrites },
+    { sheet: timesheet.sheetName, writes: timesheetWrites },
+  ]);
   return blob;
 }

@@ -16,7 +16,7 @@ import {
   toUkrainianInstrumentalRank,
   toUkrainianNominativePosition,
 } from "./lostMilitaryIdCases";
-import { toUkrainianDativePosition } from "./form12Report";
+import { toUkrainianDativePosition, looksLikeUaDateToken } from "./form12Report";
 import { capitalizeReportPosition } from "./reportPosition";
 import { formatPositionTitleBlock } from "./ubdRestoreReport";
 
@@ -47,6 +47,8 @@ export type LostMilitaryIdFields = {
   lossDate: string;
   isExactDate: boolean;
   circumstanceKind: "movement" | "custom";
+  /** Місце події (с. Гришене тощо) — коли не переміщення. */
+  lossLocation: string;
   fromLocation: string;
   toLocation: string;
   customCircumstances: string;
@@ -63,7 +65,9 @@ export type LostMilitaryIdFields = {
   reportDate: string;
   orderNumber: string;
   orderDate: string;
+  approvalDate: string;
   reportNumber: string;
+  personnelChiefName: string;
   birthDate: string;
   enlistedDate: string;
   enlistedOrder: string;
@@ -90,6 +94,10 @@ const DEFAULT_REPORTER_TITLE =
   "Тимчасово виконуючий обов’язки командира 1 піхотного батальйону військової частини А4862";
 const DEFAULT_REPORTER_RANK = "старший лейтенант";
 const DEFAULT_REPORTER_NAME = "Андрій КІЯНЕНКО";
+const DEFAULT_ORDER_COMMANDER_TITLE =
+  "Тимчасово виконуючий обов’язки\nкомандира військової частини А4862";
+const DEFAULT_ORDER_COMMANDER_RANK = "капітан";
+const DEFAULT_ORDER_COMMANDER_NAME = "Олег АДАМОВ";
 const DEFAULT_SEARCH_RESULT = "військовий квиток не знайдено";
 
 const MONTHS_UK = [
@@ -181,12 +189,13 @@ export const investigatorFromPersonnelRow = (
 ) => {
   const summary = buildPersonSummary(row);
   const name = summary.name !== "Особа не вибрана" ? summary.name : "";
-  const position = getPersonFullPositionTitle(row);
+  const rawPosition = getPersonFullPositionTitle(row);
   return {
     investigatorFullName: name,
     investigatorRank: summary.rank || "",
     investigatorPosition:
-      toUkrainianDativePosition(position) || capitalizeReportPosition(position),
+      toUkrainianDativePosition(rawPosition) ||
+      capitalizeReportPosition(rawPosition),
     investigatorPersonId: summary.externalId || "",
     investigatorManual: false,
     investigatorDativeManual: "",
@@ -213,13 +222,60 @@ export const lossDateText = (fields: LostMilitaryIdFields) => {
   return fields.isExactDate ? date : `орієнтовно ${date}`;
 };
 
-export const circumstancesText = (fields: LostMilitaryIdFields) => {
-  if (fields.circumstanceKind === "custom") {
-    return fields.customCircumstances.trim() || "______";
+/** Чи заповнено сценарій «переміщення з → до». */
+export const usesMovementCircumstances = (fields: LostMilitaryIdFields) =>
+  fields.circumstanceKind === "movement" &&
+  Boolean(fields.fromLocation.trim() || fields.toLocation.trim());
+
+export const formatLossLocationPhrase = (location: string) => {
+  const text = location.trim();
+  if (!text) return "";
+  if (/^(с\.|село|м\.|місто|смт|с-ще|п\.|пгт|на\s|у\s|в\s)/iu.test(text)) {
+    return text;
   }
+  return `у ${text}`;
+};
+
+/** Дата + місце + обставини (коли немає переміщення). */
+export const buildLossEventCircumstancesPhrase = (fields: LostMilitaryIdFields) => {
+  const location = formatLossLocationPhrase(fields.lossLocation);
+  const details = fields.customCircumstances.trim();
+  if (location && details) {
+    const detail =
+      details.charAt(0).toLocaleLowerCase("uk-UA") + details.slice(1);
+    return `${location}, ${detail}`;
+  }
+  if (location) return location;
+  if (details) return details;
+  return "за встановлених обставин";
+};
+
+export const buildMovementCircumstancesPhrase = (fields: LostMilitaryIdFields) => {
   const from = fields.fromLocation.trim() || "______";
   const to = fields.toLocation.trim() || "______";
   return `під час переміщення з ${from} до ${to}`;
+};
+
+export const circumstancesText = (fields: LostMilitaryIdFields) => {
+  if (usesMovementCircumstances(fields)) {
+    return buildMovementCircumstancesPhrase(fields);
+  }
+  return buildLossEventCircumstancesPhrase(fields);
+};
+
+const documentLikelyDestroyed = (fields: LostMilitaryIdFields) =>
+  /(згор|спал|уничтож|знищ|fpv|фпв|дрон|каб|арт)/iu.test(
+    `${fields.customCircumstances} ${fields.lossLocation}`,
+  );
+
+export const lossDocumentFateHint = (fields: LostMilitaryIdFields) => {
+  if (documentLikelyDestroyed(fields)) {
+    return "документ, ймовірно, знищено під час події";
+  }
+  if (usesMovementCircumstances(fields)) {
+    return "документ, ймовірно, загублено під час переміщення або серед особистих речей";
+  }
+  return "документ, ймовірно, загублено або знищено за вказаних обставин";
 };
 
 const RANK_IN_TITLE =
@@ -239,6 +295,9 @@ export const approvalSignatoryOf = (fields: LostMilitaryIdFields) =>
 const RANK_IN_SIGNATORY_TITLE =
   /(головний майстер-сержант|старший майстер-сержант|майстер-сержант|штаб-сержант|головний сержант|старший сержант|молодший сержант|старший лейтенант|молодший лейтенант|старший солдат|підполковник|полковник|лейтенант|сержант|капітан|майор|солдат)$/iu;
 
+export const isLostMilitaryIdDateLine = (value: string) =>
+  /^\d{1,2}\.\d{1,2}\.\d{4}$/.test(value.trim());
+
 export const splitLostMilitaryIdSignatory = (
   signatory: LostMilitaryIdSignatory | null,
 ) => {
@@ -257,6 +316,7 @@ export const splitLostMilitaryIdSignatory = (
   let rank = signatory.rank.trim();
   const titleLines: string[] = [];
   for (const line of lines) {
+    if (isLostMilitaryIdDateLine(line)) continue;
     const tail = line.match(RANK_IN_SIGNATORY_TITLE);
     if (tail && !rank) {
       rank = tail[1];
@@ -280,11 +340,78 @@ export const splitLostMilitaryIdSignatory = (
   };
 };
 
-export const actApprovalDateLine = (fields: LostMilitaryIdFields) => {
-  const long = formatUaLongDate(fields.orderDate || fields.reportDate);
-  const match = long.match(/^(\d{1,2})\s+(\S+)\s+(\d{4})/);
-  if (!match) return "«____» ______________ ______ року";
-  return `«${match[1].padStart(2, " ")}»  ${match[2]}  ${match[3]} року`;
+/** Дата під підписом: день — вручну, місяць і рік — поточні. */
+export const buildManualSignatoryDateLine = (value: Date = new Date()) => {
+  const monthName = MONTHS_UK[value.getMonth()];
+  if (!monthName) return "«  »  ____________  20___ року";
+  return `«  »  ${monthName}  ${value.getFullYear()} року`;
+};
+
+export const actApprovalDateLine = (_fields?: LostMilitaryIdFields) =>
+  buildManualSignatoryDateLine();
+
+const signatoryFooterParts = (signatory: LostMilitaryIdSignatory) => {
+  const parts = splitLostMilitaryIdSignatory(signatory);
+  const rank = parts.rank || signatory.rank.trim();
+  const titleLines =
+    parts.titleLines.length > 0
+      ? parts.titleLines
+      : formatReporterTitleLines(signatory.title, rank);
+  return {
+    titleLines,
+    rank,
+    name:
+      parts.fullName ||
+      formatNominativeGivenSurname(signatory.fullName),
+    signatureData: signatory.signatureData?.trim() ?? "",
+  };
+};
+
+const isUsableCommanderSignatory = (
+  signatory: LostMilitaryIdSignatory | null,
+) => {
+  if (!signatory || isIncompleteLostMilitaryIdSignatory(signatory)) return false;
+  const parts = splitLostMilitaryIdSignatory(signatory);
+  const rank = (parts.rank || signatory.rank).trim();
+  const name = (parts.fullName || signatory.fullName).trim();
+  return Boolean(rank && name);
+};
+
+export const approvalFooterBlock = (fields: LostMilitaryIdFields) => {
+  const approval = approvalSignatoryOf(fields);
+  if (approval && !isIncompleteLostMilitaryIdSignatory(approval)) {
+    return signatoryFooterParts(approval);
+  }
+  const unitTitle = `Командир ${normalizeMilitaryUnitPhrase(fields.militaryUnit)}`;
+  return {
+    titleLines: [unitTitle],
+    rank: "",
+    name: "",
+    signatureData: approval?.signatureData?.trim() ?? "",
+  };
+};
+
+/** Підпис командира в наказі — APPROVAL, інакше SIGNER, інакше типові дані. */
+export const orderFooterBlock = (fields: LostMilitaryIdFields) => {
+  const approval = approvalSignatoryOf(fields);
+  const signer = reportSignerOf(fields);
+  for (const candidate of [approval, signer]) {
+    if (isUsableCommanderSignatory(candidate)) {
+      return signatoryFooterParts(candidate!);
+    }
+  }
+  return {
+    titleLines: formatReporterTitleLines(
+      DEFAULT_ORDER_COMMANDER_TITLE,
+      DEFAULT_ORDER_COMMANDER_RANK,
+    ),
+    rank: DEFAULT_ORDER_COMMANDER_RANK,
+    name: formatNominativeGivenSurname(DEFAULT_ORDER_COMMANDER_NAME),
+    signatureData:
+      approval?.signatureData?.trim() ||
+      signer?.signatureData?.trim() ||
+      "",
+  };
 };
 
 export const instrumentalInvestigatorLine = (fields: LostMilitaryIdFields) => {
@@ -345,6 +472,7 @@ export const formatReporterTitleLines = (title: string, rank = "") => {
   if (explicit.length > 1) {
     return explicit.filter(
       (line) =>
+        !isLostMilitaryIdDateLine(line) &&
         line.toLocaleLowerCase("uk-UA") !== rank.trim().toLocaleLowerCase("uk-UA"),
     );
   }
@@ -378,32 +506,105 @@ export const extractRankFromTitle = (title: string, fallback = "") => {
   return title.match(RANK_IN_TITLE)?.[1] ?? "";
 };
 
+export const isLostMilitaryIdSignatoryPlaceholder = (value: string) => {
+  const text = value.trim();
+  if (!text) return true;
+  if (/_{2,}/.test(text)) return true;
+  if (/прізвище\s+та\s+ініціали/i.test(text)) return true;
+  return false;
+};
+
+export const isIncompleteLostMilitaryIdSignatory = (
+  signatory: LostMilitaryIdSignatory | null,
+) => {
+  if (!signatory) return true;
+  const parts = splitLostMilitaryIdSignatory(signatory);
+  const titleLines = signatory.title
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const titlePlaceholder =
+    titleLines.some(isLostMilitaryIdSignatoryPlaceholder) ||
+    parts.titleLines.some(isLostMilitaryIdSignatoryPlaceholder);
+  const rank = (parts.rank || signatory.rank).trim();
+  const name = (parts.fullName || signatory.fullName).trim();
+  return (
+    titlePlaceholder ||
+    isLostMilitaryIdSignatoryPlaceholder(rank) ||
+    isLostMilitaryIdSignatoryPlaceholder(name)
+  );
+};
+
+const fallbackReporterField = (value: string, fallback: string) =>
+  isLostMilitaryIdSignatoryPlaceholder(value) ? fallback : value.trim();
+
+const resolveReporterFields = (fields: LostMilitaryIdFields) => {
+  const signer = reportSignerOf(fields);
+  const signatureData = signer?.signatureData?.trim() ?? "";
+
+  if (signer && !isIncompleteLostMilitaryIdSignatory(signer)) {
+    const parts = splitLostMilitaryIdSignatory(signer);
+    const rank =
+      parts.rank || signer.rank.trim() || fields.reporterRank.trim();
+    const titleLines =
+      parts.titleLines.length > 0
+        ? parts.titleLines
+        : formatReporterTitleLines(signer.title, rank);
+    const reporterFullName =
+      parts.fullName ||
+      formatNominativeGivenSurname(signer.fullName) ||
+      fields.reporterFullName;
+    return {
+      reporterTitle: titleLines.join("\n"),
+      reporterRank: rank,
+      reporterFullName,
+      titleLines,
+      signatureData,
+    };
+  }
+
+  const reporterTitle = fallbackReporterField(
+    fields.reporterTitle,
+    DEFAULT_REPORTER_TITLE,
+  );
+  const reporterRank = fallbackReporterField(
+    fields.reporterRank,
+    DEFAULT_REPORTER_RANK,
+  );
+  const reporterFullName = fallbackReporterField(
+    fields.reporterFullName,
+    DEFAULT_REPORTER_NAME,
+  );
+  return {
+    reporterTitle,
+    reporterRank,
+    reporterFullName,
+    titleLines: formatReporterTitleLines(reporterTitle, reporterRank),
+    signatureData,
+  };
+};
+
 export const applyReporterFromSignatory = (
   fields: LostMilitaryIdFields,
 ): LostMilitaryIdFields => {
-  const signer = reportSignerOf(fields);
-  if (!signer) return fields;
-  const rank = extractRankFromTitle(signer.title, signer.rank);
-  const titleLines = formatReporterTitleLines(signer.title, rank);
+  const resolved = resolveReporterFields(fields);
   return {
     ...fields,
-    reporterTitle: titleLines.join("\n") || fields.reporterTitle,
-    reporterRank: rank || fields.reporterRank,
-    reporterFullName: signer.fullName.trim() || fields.reporterFullName,
+    reporterTitle: resolved.reporterTitle || fields.reporterTitle,
+    reporterRank: resolved.reporterRank || fields.reporterRank,
+    reporterFullName: resolved.reporterFullName || fields.reporterFullName,
   };
 };
 
 export const reporterHeaderBlock = (fields: LostMilitaryIdFields) => {
-  const applied = applyReporterFromSignatory(fields);
-  const lines = formatReporterTitleLines(
-    applied.reporterTitle,
-    applied.reporterRank,
-  );
+  const resolved = resolveReporterFields(fields);
   const genitiveRank =
-    toUkrainianGenitiveRank(applied.reporterRank) || applied.reporterRank;
-  const genitiveName = toUkrainianGenitiveGivenSurname(applied.reporterFullName);
+    toUkrainianGenitiveRank(resolved.reporterRank) || resolved.reporterRank;
+  const genitiveName = toUkrainianGenitiveGivenSurname(
+    resolved.reporterFullName,
+  );
   return [
-    ...lines.map((line, index) =>
+    ...resolved.titleLines.map((line, index) =>
       index === 0
         ? line
             .replace(/^Тимчасово виконуючий/iu, "Тимчасово виконуючого")
@@ -415,16 +616,12 @@ export const reporterHeaderBlock = (fields: LostMilitaryIdFields) => {
 };
 
 export const reporterFooterBlock = (fields: LostMilitaryIdFields) => {
-  const applied = applyReporterFromSignatory(fields);
-  const signer = reportSignerOf(applied);
+  const resolved = resolveReporterFields(fields);
   return {
-    titleLines: formatReporterTitleLines(
-      applied.reporterTitle,
-      applied.reporterRank,
-    ),
-    rank: applied.reporterRank.trim(),
-    name: formatNominativeGivenSurname(applied.reporterFullName),
-    signatureData: signer?.signatureData || "",
+    titleLines: resolved.titleLines,
+    rank: resolved.reporterRank.trim(),
+    name: formatNominativeGivenSurname(resolved.reporterFullName),
+    signatureData: resolved.signatureData,
   };
 };
 
@@ -474,6 +671,89 @@ export const buildLostMilitaryIdOrderText = (fields: LostMilitaryIdFields) => {
   ].join("\n\n");
 };
 
+export const reportAuthorLine = (fields: LostMilitaryIdFields) => {
+  const resolved = resolveReporterFields(fields);
+  return joinSpaced(
+    resolved.titleLines.join(" "),
+    resolved.reporterRank,
+    formatNominativeGivenSurname(resolved.reporterFullName),
+  );
+};
+
+const formatBirthDateLabel = (value: string) => {
+  const text = value.trim();
+  if (!text) return "";
+  if (/р\.?\s*н\.?/i.test(text)) return `Народився ${text.replace(/\s+/g, " ")}`;
+  return `Народився ${text}р.н.`;
+};
+
+export const buildLostMilitaryIdPersonExplanation = (
+  fields: LostMilitaryIdFields,
+) => {
+  const person = declinedPerson(fields);
+  const date = fields.lossDate.trim() || "______";
+  const circumstances = circumstancesText(fields);
+  const searchNote = fields.searchConducted
+    ? documentLikelyDestroyed(fields)
+      ? " Пошуки квитка результату не дали."
+      : " Пошуки квитка ні до чого не призвели."
+    : "";
+  const reportNote = reportAuthorLine(fields)
+    ? " Про дану подію командир підрозділу доповів рапортом."
+    : "";
+  return `${person.rankInstrumental} ${person.nominative} пояснив, що втрата військового квитка сталася ${date} ${circumstances}. Куди міг зникнути документ, військовослужбовець пояснити не може.${searchNote}${reportNote}`;
+};
+
+export const buildLostMilitaryIdActAttachments = (
+  fields: LostMilitaryIdFields,
+) => {
+  const person = declinedPerson(fields);
+  const unit = normalizeMilitaryUnitPhrase(fields.militaryUnit);
+  const unitNumber = militaryUnitLabel(fields.militaryUnit);
+  const orderNumber = fields.orderNumber.trim() || "______";
+  const orderDate = fields.orderDate.trim() || "____.____.______";
+  const reportNumber = fields.reportNumber.trim();
+  const reportDate = fields.reportDate.trim() || "____.____.______";
+  const reporter = reportAuthorLine(fields);
+  const enlistedOrder = fields.enlistedOrder.trim();
+  const enlistedDate = fields.enlistedDate.trim() || "____.____.______";
+
+  return [
+    `1. Витяг з наказу командира ${unit} (з адміністративно-господарської діяльності) №${orderNumber} від ${orderDate} про призначення службового розслідування за фактом втрати військового квитка ${person.rankGenitive} ${person.genitive}.`,
+    reporter
+      ? `2. Копію рапорту ${reporter}${
+          reportNumber ? ` №${reportNumber}` : ""
+        } від ${reportDate} про втрату військового квитка ${person.rankInstrumental} ${person.instrumental}.`
+      : `2. Копію рапорту про втрату військового квитка ${person.rankInstrumental} ${person.instrumental} від ${reportDate}.`,
+    enlistedOrder
+      ? `3. Витяг із наказу командира ${unit} (по стройовій частині) ${enlistedOrder} про зарахування ${person.rankGenitive} ${person.genitive} до ${unit}.`
+      : `3. Витяг із наказу командира ${unit} (по стройовій частині) від ${enlistedDate} про зарахування ${person.rankGenitive} ${person.genitive} до ${unitNumber}.`,
+    `4. Бланк з отриманими поясненнями ${person.rankGenitive} ${person.genitive}.`,
+  ];
+};
+
+export const buildLostMilitaryIdActDutySection = (fields: LostMilitaryIdFields) => {
+  const person = declinedPerson(fields);
+  const date = fields.lossDate.trim() || "______";
+  const eventPhrase = usesMovementCircumstances(fields)
+    ? buildMovementCircumstancesPhrase(fields).replace(/^під час /iu, "")
+    : buildLossEventCircumstancesPhrase(fields);
+  const searchClause = fields.searchConducted
+    ? documentLikelyDestroyed(fields)
+      ? "У поясненні військовослужбовець зазначив, що документ знищено під час події."
+      : usesMovementCircumstances(fields)
+        ? "У поясненні військовослужбовець зазначив, що документ, ймовірно, загублено під час переміщення."
+        : "У поясненні військовослужбовець зазначив, що документ загублено за вказаних обставин."
+    : "";
+  return [
+    `5.1. Дії військовослужбовця:`,
+    `Втрата військового квитка ${person.rankInstrumental} ${person.instrumental} відбулася ${eventPhrase}. ${searchClause} ${reportAuthorLine(fields) ? "Доповів рапортом." : ""}`.trim(),
+    `Зв'язок правопорушення з виконанням військовослужбовцем обов'язків військової служби:`,
+    `Військовослужбовець сумлінно виконує свої службові обов'язки.`,
+    `${date} втрата військового квитка ${person.rankInstrumental} ${person.instrumental} відбулася внаслідок особистої недбалості.`,
+    `Заперечення, заяви та клопотання особи, стосовно якої проведено службове розслідування, мотиви їх відхилення чи підстави для задоволення: не надходило.`,
+  ];
+};
 export const buildLostMilitaryIdActCircumstances = (
   fields: LostMilitaryIdFields,
 ) => {
@@ -481,19 +761,23 @@ export const buildLostMilitaryIdActCircumstances = (
     return fields.actCircumstancesOverride.trim();
   }
   const person = declinedPerson(fields);
-  const unit = normalizeMilitaryUnitPhrase(fields.militaryUnit);
   const longDate = formatUaLongDate(fields.lossDate) || lossDateText(fields);
+  const reporter = reportAuthorLine(fields);
   return [
     `Службове розслідування проводиться за фактом втрати військового квитка військовослужбовцем ${person.instrumental}.`,
-    `${longDate} ${person.rankInstrumental} ${person.nominative} ${circumstancesText(fields)} втратив військовий квиток.`,
+    `${longDate} ${person.rankInstrumental} ${person.nominative} ${circumstancesText(fields)} втратив військовий квиток. Зі слів військовослужбовця, ${lossDocumentFateHint(fields)}.`,
     fields.searchConducted
       ? `Пошук військового квитка в районі розташування підрозділу та серед особистих речей результату не дав: ${
           fields.searchResult.trim() || DEFAULT_SEARCH_RESULT
         }.`
       : "Пошукові заходи не проводились.",
-    `Про втрату документа командир 1 піхотного батальйону ${unit} доповів рапортом${
-      fields.reportDate.trim() ? ` від ${fields.reportDate.trim()}` : ""
-    }.`,
+    reporter
+      ? `Про втрату документа ${reporter} доповів рапортом${
+          fields.reportNumber.trim() ? ` №${fields.reportNumber.trim()}` : ""
+        }${fields.reportDate.trim() ? ` від ${fields.reportDate.trim()}` : ""}.`
+      : `Про втрату документа доповідено рапортом${
+          fields.reportDate.trim() ? ` від ${fields.reportDate.trim()}` : ""
+        }.`,
   ].join("\n\n");
 };
 
@@ -501,26 +785,29 @@ export const buildLostMilitaryIdPersonCard = (fields: LostMilitaryIdFields) => {
   const person = declinedPerson(fields);
   const unit = normalizeMilitaryUnitPhrase(fields.militaryUnit);
   const unitNumber = militaryUnitLabel(fields.militaryUnit);
+  const birth = formatBirthDateLabel(fields.birthDate);
+  const personal = [
+    birth,
+    fields.citizenship.trim() || "громадянин України",
+    fields.education.trim() ? `Освіта: ${fields.education.trim()}` : "",
+    fields.maritalStatus.trim() || "",
+    fields.address.trim() ? `адреса реєстрації: ${fields.address.trim()}` : "",
+  ]
+    .filter(Boolean)
+    .join(", ");
+  const enlisted = fields.enlistedDate.trim()
+    ? `В ЗСУ з ${fields.enlistedDate.trim()}. До списків частини ${unitNumber} зарахований ${fields.enlistedDate.trim()}${
+        fields.enlistedOrder.trim()
+          ? ` відповідно до ${fields.enlistedOrder.trim()}`
+          : ""
+      }.`
+    : "";
   return [
     `${person.nominative}, ${fields.rank.trim() || "______"}, ${
       capitalizeReportPosition(fields.staffPosition) || "______"
     } ${unit}.`,
-    fields.enlistedDate.trim()
-      ? `В ЗСУ з ${fields.enlistedDate}. До списків частини ${unitNumber} зарахований ${fields.enlistedDate}${
-          fields.enlistedOrder.trim()
-            ? ` відповідно до ${fields.enlistedOrder}`
-            : ""
-        }.`
-      : "",
-    [
-      fields.birthDate.trim() ? `Народився ${fields.birthDate}` : "",
-      fields.citizenship.trim() || "громадянин України",
-      fields.education.trim() ? `освіта: ${fields.education}` : "",
-      fields.maritalStatus.trim() || "",
-      fields.address.trim() ? `адреса реєстрації: ${fields.address}` : "",
-    ]
-      .filter(Boolean)
-      .join(", "),
+    enlisted,
+    personal,
   ]
     .filter(Boolean)
     .join(" ");
@@ -546,10 +833,11 @@ export const buildLostMilitaryIdActProposals = (fields: LostMilitaryIdFields) =>
     fields.orderNumber.trim() && fields.orderDate.trim()
       ? `наказу командира ${unit} від ${fields.orderDate} №${fields.orderNumber}`
       : `наказу командира ${unit} про призначення службового розслідування`;
+  const chief = fields.personnelChiefName.trim() || "начальнику відділення персоналу та стройового штабу";
   return [
     `1. Розслідування стосовно ${order} вважати завершеним.`,
     `2. З урахуванням матеріалів службового розслідування та частини 1 пункту 6 Положення про військовий квиток осіб рядового, сержантського і старшинського складу, затвердженого Указом Президента України від 30 грудня 2016 року № 582/2016, за допущену втрату військового квитка ${person.rankGenitive} ${person.genitive} притягнути до дисциплінарної відповідальності.`,
-    `3. Начальнику відділення персоналу та стройового штабу ${unit} забезпечити направлення у встановленому порядку документів для відновлення військового квитка ${person.rankGenitive} ${person.genitive}.`,
+    `3. ${chief} ${unit} забезпечити направлення у встановленому порядку документів для відновлення військового квитка ${person.rankGenitive} ${person.genitive}.`,
   ].join("\n");
 };
 
@@ -571,12 +859,13 @@ export const createLostMilitaryIdFields = (
     staffPosition: capitalizeReportPosition(staffPosition),
     unitLabel: pickPersonnel(row, ["підрозділ"]) || "",
     lossDate: "",
-    isExactDate: false,
-    circumstanceKind: "movement",
+    isExactDate: true,
+    circumstanceKind: "custom",
+    lossLocation: "",
     fromLocation: "",
     toLocation: "",
     customCircumstances: "",
-    searchConducted: true,
+    searchConducted: false,
     searchResult: DEFAULT_SEARCH_RESULT,
     reporterTitle: DEFAULT_REPORTER_TITLE,
     reporterRank: DEFAULT_REPORTER_RANK,
@@ -589,7 +878,9 @@ export const createLostMilitaryIdFields = (
     reportDate: formatUaDate(new Date()),
     orderNumber: "",
     orderDate: "",
+    approvalDate: "",
     reportNumber: "",
+    personnelChiefName: "",
     birthDate: summary.birthDate || pickPersonnel(row, ["дата_народження"]),
     enlistedDate:
       pickPersonnel(row, ["дата_зарахування"]) ||
@@ -662,7 +953,11 @@ export const mergeLostMilitaryIdFields = (
         : [],
     fullName,
     staffPosition: capitalizeReportPosition(merged.staffPosition),
-    investigatorPosition: capitalizeReportPosition(merged.investigatorPosition),
+    investigatorPosition: (() => {
+      const text = String(merged.investigatorPosition ?? "").trim();
+      if (!text || looksLikeUaDateToken(text.replace(/у$/iu, ""))) return "";
+      return capitalizeReportPosition(text);
+    })(),
     folderName:
       !currentFolder ||
       (/втрата військового квитка/i.test(currentFolder) &&

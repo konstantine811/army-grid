@@ -6,6 +6,7 @@ import {
   resolveApproverParts,
   resolveCoveringSignerParts,
   resolveUbdRestoreSignerTitle,
+  resolveUbdRestoreReportDate,
 } from "./ubdRestoreReport";
 import { emuMm } from "./ubdWordFormat";
 import { stripRedColorInWordZip } from "./wordXml";
@@ -200,6 +201,7 @@ export const createUbdRestoreWordBlob = async (
   const signer = titleLines(resolveUbdRestoreSignerTitle(fields), 2);
   const coveringParts = resolveCoveringSignerParts(fields);
   const approverParts = resolveApproverParts(fields);
+  const reportDate = resolveUbdRestoreReportDate(fields);
   const hasCoveringSigner = fields.signatories.some(
     (item) => item.blockType === "SIGNER",
   );
@@ -255,12 +257,11 @@ export const createUbdRestoreWordBlob = async (
         : SAMPLE.coveringSignerLine;
     }
     if (
-      coveringParts.date &&
-      (trimmed === SAMPLE.coveringDate ||
-        trimmed === `${SAMPLE.coveringDate}6` ||
-        trimmed.startsWith(SAMPLE.coveringDate))
+      trimmed === SAMPLE.coveringDate ||
+      trimmed === `${SAMPLE.coveringDate}6` ||
+      trimmed.startsWith(SAMPLE.coveringDate)
     ) {
-      return coveringParts.date;
+      return coveringParts.date.trim() || reportDate;
     }
     if (trimmed === SAMPLE.approverTitle1) {
       return hasApprover
@@ -278,7 +279,7 @@ export const createUbdRestoreWordBlob = async (
         : text;
     }
     if (trimmed === SAMPLE.date) {
-      return withFallback(fields.date);
+      return reportDate;
     }
     return text;
   });

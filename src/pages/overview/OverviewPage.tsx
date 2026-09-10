@@ -1,12 +1,15 @@
 import {
+  startTransition,
   useCallback,
   useDeferredValue,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
 import writeXlsxFile, { type SheetData } from "write-excel-file/browser";
+import { MagneticTapePreloader } from "@/components/sci/MagneticTapePreloader";
 import {
   Alert,
   Box,
@@ -31,17 +34,21 @@ import {
   type BackendPersonnelOverviewRow,
 } from "../../api";
 import {
-  openPersonnelInNewTab,
+  openPersonnelFromOverview,
 } from "../../app/navigation";
 import {
   loadPersonnelDataset,
   type PersonnelDataset,
 } from "../../data/personnelDataset";
 import {
+  loadPersonnelBootstrapMeta,
+  loadPersonnelVersionProbe,
+} from "../../data/personnelVersion";
+import {
   CacheKeys,
   fetchWithCache,
   jsonChanged,
-  overviewAssetsCacheKey,
+  overviewStaffCacheKey,
   peekDataCache,
   readDataCache,
   writeDataCache,
@@ -63,14 +70,22 @@ import {
   resolveOverviewPhoto,
 } from "./overviewPhotos";
 import {
-  buildOverviewPersonnelIdentities,
-  type OverviewPersonnelAssets,
-} from "./overviewPersonnelAssets";
-import { loadAvailablePersonPhotoIds } from "../personnel/personAttachments";
+  directQuestionnairePresence,
+  fetchOverviewPersonnelAssets,
+} from "./overviewAssetsLoad";
+import { fetchMergedOverviewSnapshot, fetchOverviewStaffSnapshot } from "./overviewServerSnapshots";
+import {
+  canSkipOverviewDatasetReload,
+  canUseOverviewWarmCacheOnly,
+  persistOverviewStaffCache,
+  readBootstrapStaffPayload,
+} from "./overviewWarmLoad";
+import { OVERVIEW_DEFERRED_ASSET_COLUMN_IDS } from "./overviewStaffSheetColumns";
 import { normalizeRosterMatchText } from "../personnel/fighterStatusImport";
 import {
   overviewNameMatchesQuery,
   parseOverviewNameQueries,
+  buildOverviewRowSearchText,
 } from "./overviewNameSearch";
 import { overviewMergeCacheKey, overviewMergeFingerprint } from "./overviewMergeCache";
 import {
@@ -87,6 +102,7 @@ import {
   buildStaffOverviewRowsFromRoster,
   fillDownRosterUnitRows,
   summarizeStaffFromRoster,
+  summarizeNovaStaffForUnits,
 } from "./overviewRosterMerge";
 import {
   buildImportantOverviewExportFileName,
@@ -100,7 +116,13 @@ import { pullStaffSheetRosterImportPayload } from "../excel-fill/staffSheet";
 import { loadPbWorkbookFromDb } from "../ejournal/loadEjournalWorkbooksFromDb";
 import { parsePbArchive } from "../ejournal/ejoosParsers";
 import type { SciDataTableExportContext } from "@/components/sci/SciDataTable";
-import { buildOverviewWhatsAppCopyText } from "./overviewCopyText";
+import {
+  buildOverviewRotaCopyText,
+  buildOverviewWhatsAppCopyText,
+} from "./overviewCopyText";
+import { exportOverviewPpdLocationReport } from "./overviewPpdLocationExport";
+import { exportOverviewRotaBchsMorningReport } from "./overviewRotaBchsMorningExport";
+import { exportOverviewRotaGudzReport } from "./overviewRotaGudzExport";
 
 const SOURCE_FILTERS = [
   { value: "staff", label: "Штатка" },
@@ -110,17 +132,16 @@ const SOURCE_FILTERS = [
 
 type OverviewSourceFilter = (typeof SOURCE_FILTERS)[number]["value"];
 
-const normalizeRosterText = normalizeRosterMatchText;
+type OverviewLoadMode = "full" | "dataset-only" | "ejoos-only";
 
-const directQuestionnairePresence = (
-  items: BackendPersonQuestionnaireMeta[] | null | undefined,
-) =>
-  Object.fromEntries(
-    (Array.isArray(items) ? items : [])
-      .map((item) => item.personExternalId?.trim())
-      .filter(Boolean)
-      .map((id) => [id, true] as const),
-  ) as Record<string, true>;
+const scheduleIdleTask = (task: () => void, timeout = 5000) => {
+  if (typeof requestIdleCallback === "function") {
+    return requestIdleCallback(task, { timeout });
+  }
+  return window.setTimeout(task, Math.min(timeout, 3000));
+};
+
+const normalizeRosterText = normalizeRosterMatchText;
 
 const withStaffOverviewStatus = (
   row: BackendPersonnelOverviewRow,
@@ -141,6 +162,26 @@ const formatStaffSourceLabel = (updatedAt: string | null) => {
   return stamp ? `Штатка · ${stamp}` : "Штатка";
 };
 
+const staffOverviewDatasetMeta = (dataset: PersonnelDataset) => ({
+  importId: dataset.version.rosterImportId,
+  importName: "Особовий склад · спільний dataset",
+});
+
+const resolveStaffOverviewForDataset = async (
+  dataset: PersonnelDataset,
+): Promise<BackendPersonnelOverview> => {
+  const staffKey = overviewStaffCacheKey(dataset.fingerprint);
+  const peeked = peekDataCache<BackendPersonnelOverview>(staffKey);
+  if (peeked?.rows?.length) return peeked;
+  const cached = await readDataCache<BackendPersonnelOverview>(staffKey);
+  if (cached?.rows?.length) return cached;
+  return buildPersonnelStaffOverview(
+    dataset.rows,
+    dataset.rosterLabels,
+    staffOverviewDatasetMeta(dataset),
+  );
+};
+
 const buildCallSignByExternalId = (rosterRows: EjournalPreviewRow[]) => {
   const map: Record<string, string> = {};
   for (const row of rosterRows) {
@@ -152,7 +193,7 @@ const buildCallSignByExternalId = (rosterRows: EjournalPreviewRow[]) => {
   return map;
 };
 
-export function OverviewPage() {
+export function OverviewPage({ active = true }: { active?: boolean }) {
   const cachedQuestionnaires = peekDataCache<BackendPersonQuestionnaireMeta[]>(
     CacheKeys.questionnairesMeta,
   );
@@ -162,7 +203,7 @@ export function OverviewPage() {
     Record<string, true>
   >(() => directQuestionnairePresence(cachedQuestionnaires));
   const [questionnairePresenceStatus, setQuestionnairePresenceStatus] =
-    useState<"loading" | "ready">("loading");
+    useState<"idle" | "loading" | "ready">("idle");
   const [
     questionnaireSourceIdByExternalId,
     setQuestionnaireSourceIdByExternalId,
@@ -175,9 +216,19 @@ export function OverviewPage() {
   >({});
   const [query, setQuery] = useState("");
   const [source, setSource] = useState<OverviewSourceFilter>("staff");
+  const sourceRef = useRef<OverviewSourceFilter>("staff");
+  sourceRef.current = source;
   const [rosterUpdatedAt, setRosterUpdatedAt] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [message, setMessage] = useState(`API: ${api.baseUrl}`);
+  const ejoosLoadedRef = useRef(false);
+  const datasetFingerprintRef = useRef("");
+  const personnelOverviewRowsCacheRef = useRef<{
+    key: string;
+    rows: BackendPersonnelOverviewRow[];
+  }>({ key: "", rows: [] });
+  const serverStaffRowsRef = useRef<BackendPersonnelOverviewRow[]>([]);
+  const [staffOverviewEpoch, setStaffOverviewEpoch] = useState(0);
   const rosterRowsRef = useRef<EjournalPreviewRow[]>([]);
   const personnelRowsRef = useRef<EjournalPreviewRow[]>([]);
   const rosterColumnsRef = useRef<
@@ -187,19 +238,126 @@ export function OverviewPage() {
   const photosRef = useRef<Record<string, string>>({});
   const requestedPhotoKeysRef = useRef(new Set<string>());
   const loadControllerRef = useRef<AbortController | null>(null);
+  const loadSeqRef = useRef(0);
+  const staffSyncReloadTimerRef = useRef(0);
+  const ejoosControllerRef = useRef<AbortController | null>(null);
+  const assetsStartedForFingerprintRef = useRef("");
+  const staffAssetsContextRef = useRef<{
+    rows: BackendPersonnelOverviewRow[];
+    dataset: PersonnelDataset;
+  } | null>(null);
+  const assetsControllerRef = useRef<AbortController | null>(null);
+  const assetsLoadSeqRef = useRef(0);
   const [rosterEpoch, setRosterEpoch] = useState(0);
   const [personnelEpoch, setPersonnelEpoch] = useState(0);
   photosRef.current = photos;
 
+  const resolveLoadMode = (): OverviewLoadMode =>
+    sourceRef.current === "staff" ? "dataset-only" : "full";
+
+  const questionnairePresenceStatusRef = useRef(questionnairePresenceStatus);
+  questionnairePresenceStatusRef.current = questionnairePresenceStatus;
+
+  const runOverviewAssetsLoad = useCallback(
+    async (
+      overviewRows: BackendPersonnelOverviewRow[],
+      dataset: PersonnelDataset,
+      options?: { force?: boolean },
+    ) => {
+      assetsControllerRef.current?.abort();
+      const controller = new AbortController();
+      assetsControllerRef.current = controller;
+      const seq = ++assetsLoadSeqRef.current;
+      const alive = () =>
+        seq === assetsLoadSeqRef.current && !controller.signal.aborted;
+
+      assetsStartedForFingerprintRef.current = dataset.fingerprint;
+      setQuestionnairePresenceStatus("loading");
+      try {
+        const assets = await fetchOverviewPersonnelAssets({
+          overviewRows,
+          dataset,
+          signal: controller.signal,
+          force: options?.force,
+        });
+        if (!alive()) return;
+        startTransition(() => {
+          setQuestionnaireByExternalId((current) => ({
+            ...current,
+            ...assets.questionnairePresence,
+          }));
+          setQuestionnaireSourceIdByExternalId(assets.questionnaireSourceIds);
+          setDocumentsByExternalId(assets.documents);
+          setQuestionnairePresenceStatus("ready");
+        });
+      } catch (error) {
+        console.warn("[Огляд] Не вдалося підставити дані з Особового складу", error);
+        if (alive()) setQuestionnairePresenceStatus("ready");
+      }
+    },
+    [],
+  );
+
+  const ensureOverviewAssets = useCallback(
+    (options?: { force?: boolean }) => {
+      const ctx = staffAssetsContextRef.current;
+      if (!ctx) return;
+      if (
+        !options?.force &&
+        assetsStartedForFingerprintRef.current === ctx.dataset.fingerprint &&
+        questionnairePresenceStatusRef.current === "ready"
+      ) {
+        return;
+      }
+      void runOverviewAssetsLoad(ctx.rows, ctx.dataset, options);
+    },
+    [runOverviewAssetsLoad],
+  );
+
+  const handleColumnVisibilityChange = useCallback(
+    (visibility: Record<string, boolean>) => {
+      if (sourceRef.current !== "staff") return;
+      const needsAssets = OVERVIEW_DEFERRED_ASSET_COLUMN_IDS.some(
+        (columnId) => visibility[columnId] !== false,
+      );
+      if (needsAssets) ensureOverviewAssets();
+    },
+    [ensureOverviewAssets],
+  );
+
   const load = async (
     signal?: AbortSignal,
-    options?: { force?: boolean },
+    options?: {
+      force?: boolean;
+      refreshStaffServer?: boolean;
+      mode?: OverviewLoadMode;
+      seq?: number;
+    },
   ) => {
-    const alive = () => !signal?.aborted;
+    const seq = options?.seq ?? loadSeqRef.current;
+    const alive = () =>
+      !signal?.aborted && seq === loadSeqRef.current;
     const force = Boolean(options?.force);
-    setIsLoading(true);
+    const refreshStaffServer = Boolean(options?.refreshStaffServer);
+    const mode = options?.mode ?? resolveLoadMode();
+    const loadDataset = mode !== "ejoos-only";
+    const loadEjoos = mode !== "dataset-only";
+    if (force) {
+      assetsStartedForFingerprintRef.current = "";
+      serverStaffRowsRef.current = [];
+      personnelOverviewRowsCacheRef.current = { key: "", rows: [] };
+      staffAssetsContextRef.current = null;
+      assetsControllerRef.current?.abort();
+      if (sourceRef.current === "staff") {
+        setQuestionnairePresenceStatus("idle");
+      }
+      setStaffOverviewEpoch((value) => value + 1);
+    }
+    const hasWarmStaffRows =
+      sourceRef.current === "staff" && serverStaffRowsRef.current.length > 0;
+    if (!hasWarmStaffRows) setIsLoading(true);
     try {
-      let rosterFingerprint = "";
+      let rosterFingerprint = datasetFingerprintRef.current;
       const applyOverview = async (
         overview: BackendPersonnelOverview,
         rosterRows: EjournalPreviewRow[],
@@ -225,16 +383,13 @@ export function OverviewPage() {
             rosterFingerprint,
             rosterRows,
           );
-          if (!force) {
-            const serverMerged = await api
-              .getMergedPersonnelOverview({
-                fingerprint: mergeFingerprint,
-                signal,
-              })
-              .catch(() => null);
-            if (serverMerged?.rows?.length) {
-              mergedOverview = serverMerged;
-            }
+          const serverMerged = await fetchMergedOverviewSnapshot({
+            mergeFingerprint,
+            signal,
+          });
+          if (serverMerged?.rows?.length) {
+            mergedOverview = serverMerged;
+            void writeDataCache(mergeCacheKey, serverMerged);
           }
           if (!force && mergedOverview === overview) {
             const cachedMerge =
@@ -290,175 +445,135 @@ export function OverviewPage() {
         return mergedOverview;
       };
 
-      let assetsSeq = 0;
-      const applyPersonnelAssets = async (
-        overviewRows: BackendPersonnelOverviewRow[],
+      const loadServerStaffOverview = async (
         dataset: PersonnelDataset,
+        bootstrap?: import("../../api").BackendPersonnelBootstrap | null,
       ) => {
-        const seq = ++assetsSeq;
-        setQuestionnairePresenceStatus("loading");
-        const questionnairePromise = fetchWithCache({
-            key: CacheKeys.questionnairesMeta,
-            force,
-            signal,
-            fetcher: () => api.listPersonQuestionnaires({ signal }),
-            isChanged: jsonChanged,
-          }).catch(() => []);
-        const documentPromise = fetchWithCache({
-            key: CacheKeys.documentsAll,
-            force,
-            signal,
-            fetcher: () => api.listAllPersonDocuments({ signal }),
-            isChanged: jsonChanged,
-          }).catch(() => []);
-        const questionnaireList = await questionnairePromise;
-        if (!alive() || seq !== assetsSeq) return;
-        setQuestionnaireByExternalId((current) => ({
-          ...current,
-          ...directQuestionnairePresence(questionnaireList),
-        }));
-
-        const paintAssets = async (
-          people: EjournalPreviewRow[],
-          documentList: Awaited<typeof documentPromise>,
-        ) => {
-          const applyAssets = (assets: OverviewPersonnelAssets) => {
-            setQuestionnaireByExternalId((current) => ({
-              ...current,
-              ...assets.questionnairePresence,
-            }));
-            setQuestionnaireSourceIdByExternalId(assets.questionnaireSourceIds);
-            setDocumentsByExternalId(assets.documents);
-            setQuestionnairePresenceStatus("ready");
-          };
-          try {
-            const cacheKey = overviewAssetsCacheKey(
-              dataset.fingerprint,
-              overviewRows,
-              Array.isArray(questionnaireList) ? questionnaireList : [],
-              Array.isArray(documentList) ? documentList : [],
-            );
-            if (!force) {
-              const cached = await readDataCache<OverviewPersonnelAssets>(
-                cacheKey,
-              );
-              if (cached && alive() && seq === assetsSeq) {
-                applyAssets(cached);
-                return;
-              }
-            }
-
-            const assets = await runHeavyJob({
-              type: "applyOverviewAssets",
-              overviewRows,
-              personnelIdentities: buildOverviewPersonnelIdentities(people),
-              questionnaires: Array.isArray(questionnaireList)
-                ? questionnaireList.map(({ personExternalId, fileName }) => ({
-                    personExternalId,
-                    fileName,
-                  }))
-                : [],
-              documents: Array.isArray(documentList)
-                ? documentList.map(
-                    ({ id, personExternalId, type, title }) => ({
-                      id,
-                      personExternalId,
-                      type,
-                      title,
-                    }),
-                  )
-                : [],
-            });
-            if (!alive() || seq !== assetsSeq) return;
-            applyAssets(assets);
-            void writeDataCache(cacheKey, assets);
-          } catch (error) {
-            console.warn("[Огляд] Не вдалося підставити дані з Особового складу", error);
-            if (alive() && seq === assetsSeq) {
-              setQuestionnairePresenceStatus("ready");
-            }
-          }
+        const staff = await fetchOverviewStaffSnapshot({
+          fingerprint: dataset.fingerprint,
+          signal,
+          force: true,
+          bootstrap,
+          allowRebuild: true,
+        });
+        if (!alive() || !staff?.rows?.length) return;
+        serverStaffRowsRef.current = staff.rows.map(withStaffOverviewStatus);
+        personnelOverviewRowsCacheRef.current = {
+          key: `${dataset.fingerprint}:${rosterEpoch}`,
+          rows: serverStaffRowsRef.current,
         };
-
-        const personnelRows = dataset.rows;
-        if (!alive() || seq !== assetsSeq) return;
-        personnelRowsRef.current = personnelRows;
-        setPersonnelEpoch((value) => value + 1);
-        // Questionnaire badges must not wait for the document metadata request.
-        await paintAssets(personnelRowsRef.current, []);
-        const documentList = await documentPromise;
-        if (!alive() || seq !== assetsSeq) return;
-        await paintAssets(personnelRowsRef.current, documentList);
+        void persistOverviewStaffCache(dataset.fingerprint, staff, bootstrap);
+        setStaffOverviewEpoch((value) => value + 1);
       };
-      const startDatasetAssets = (dataset: PersonnelDataset) => {
-        const staffRows = buildStaffOverviewRowsFromPersonnel(
-          dataset.rows,
-          dataset.rosterLabels,
+
+      const bindDatasetStaffContext = (dataset: PersonnelDataset) => {
+        const staffRows = resolveStaffOverviewRows(dataset);
+        staffAssetsContextRef.current = { rows: staffRows, dataset };
+        if (sourceRef.current !== "staff") {
+          void runOverviewAssetsLoad(staffRows, dataset, { force });
+        }
+      };
+
+      const ensureLocalStaffSnapshot = async (dataset: PersonnelDataset) => {
+        if (serverStaffRowsRef.current.length) return;
+        const staffOverview = await resolveStaffOverviewForDataset(dataset);
+        if (!alive()) return;
+        rememberStaffSnapshotRows(staffOverview, dataset.fingerprint);
+      };
+
+  const rememberStaffSnapshotRows = (
+    staff: BackendPersonnelOverview,
+    fingerprint: string,
+  ) => {
+    serverStaffRowsRef.current = staff.rows.map(withStaffOverviewStatus);
+    personnelOverviewRowsCacheRef.current = {
+      key: `${fingerprint}:${rosterEpoch}`,
+      rows: serverStaffRowsRef.current,
+    };
+    setStaffOverviewEpoch((value) => value + 1);
+    void persistOverviewStaffCache(fingerprint, staff, null);
+  };
+
+      const resolveStaffOverviewRows = (dataset: PersonnelDataset) => {
+        const cacheKey = `${dataset.fingerprint}:${rosterEpoch}`;
+        const cachedStaffRows =
+          serverStaffRowsRef.current.length &&
+          personnelOverviewRowsCacheRef.current.key === cacheKey
+            ? serverStaffRowsRef.current
+            : personnelOverviewRowsCacheRef.current.key === cacheKey
+              ? personnelOverviewRowsCacheRef.current.rows
+              : null;
+        return (
+          cachedStaffRows ??
+          buildStaffOverviewRowsFromPersonnel(
+            dataset.rows,
+            dataset.rosterLabels,
+          )
         );
-        void applyPersonnelAssets(staffRows, dataset);
       };
 
-      const [cachedDataset] = await Promise.all([
-        readDataCache<PersonnelDataset>(CacheKeys.personnelDataset),
-        readDataCache<BackendPersonnelOverview>(CacheKeys.overview),
-      ]);
-      rosterFingerprint = cachedDataset?.fingerprint ?? "";
-      let rosterRows: EjournalPreviewRow[] = [];
-      let rosterLabels: Record<string, string> = {};
+      const startDatasetStaff = async (
+        dataset: PersonnelDataset,
+        bootstrap?: import("../../api").BackendPersonnelBootstrap | null,
+      ) => {
+        await ensureLocalStaffSnapshot(dataset);
+        if (!alive()) return;
+        bindDatasetStaffContext(dataset);
+        if (refreshStaffServer) {
+          await loadServerStaffOverview(dataset, bootstrap);
+        }
+      };
+
+      const rememberDatasetFingerprint = (fingerprint: string) => {
+        if (
+          datasetFingerprintRef.current &&
+          datasetFingerprintRef.current !== fingerprint
+        ) {
+          ejoosLoadedRef.current = false;
+          serverStaffRowsRef.current = [];
+        }
+        datasetFingerprintRef.current = fingerprint;
+      };
+
+      rosterFingerprint = datasetFingerprintRef.current;
+      let rosterRows: EjournalPreviewRow[] = rosterRowsRef.current;
+      let rosterLabels: Record<string, string> = rosterLabelsRef.current;
       let rosterColumns: Array<{
         key: string;
         letter?: string;
         originalIndex?: number;
-      }> = [];
-      rosterRows = cachedDataset?.rosterRows ?? [];
-      rosterLabels = cachedDataset?.rosterLabels ?? {};
-      rosterColumns = cachedDataset?.rosterColumns ?? [];
+      }> = rosterColumnsRef.current;
       let paintedFromCache = false;
-      if (cachedDataset?.rows?.length) {
-        personnelRowsRef.current = cachedDataset.rows;
-        setPersonnelEpoch((value) => value + 1);
-        setRosterUpdatedAt(cachedDataset.rosterUpdatedAt);
-        await applyOverview(
-          buildPersonnelStaffOverview(
-            cachedDataset.rows,
-            cachedDataset.rosterLabels,
-            {
-              importId: cachedDataset.version.rosterImportId,
-              importName: "Особовий склад · спільний dataset",
-            },
-          ),
-          rosterRows,
-          rosterLabels,
-          rosterColumns,
-          true,
-          true,
-        );
-        paintedFromCache = true;
-        setIsLoading(false);
-        startDatasetAssets(cachedDataset);
-      }
+      let datasetPromise: Promise<PersonnelDataset | null | undefined>;
 
-      const datasetPromise = loadPersonnelDataset({
-        force,
-        signal,
-        onCached: async (nextDataset) => {
-          if (!alive()) return;
-          rosterFingerprint = nextDataset.fingerprint;
-          rosterRows = nextDataset.rosterRows;
-          rosterLabels = nextDataset.rosterLabels;
-          rosterColumns = nextDataset.rosterColumns;
-          personnelRowsRef.current = nextDataset.rows;
+      if (loadDataset) {
+        const datasetOnly = !loadEjoos;
+        const cachedDataset = await readDataCache<PersonnelDataset>(
+          CacheKeys.personnelDataset,
+        );
+        if (loadEjoos) {
+          void readDataCache<BackendPersonnelOverview>(CacheKeys.overview);
+        }
+        rosterFingerprint = cachedDataset?.fingerprint ?? "";
+        if (rosterFingerprint) rememberDatasetFingerprint(rosterFingerprint);
+        rosterRows = cachedDataset?.rosterRows ?? [];
+        rosterLabels = cachedDataset?.rosterLabels ?? {};
+        rosterColumns = cachedDataset?.rosterColumns ?? [];
+
+        if (cachedDataset?.rows?.length) {
+          personnelRowsRef.current = cachedDataset.rows;
           setPersonnelEpoch((value) => value + 1);
-          setRosterUpdatedAt(nextDataset.rosterUpdatedAt);
+          setRosterUpdatedAt(cachedDataset.rosterUpdatedAt);
+          const staffOverview =
+            await resolveStaffOverviewForDataset(cachedDataset);
+          if (!alive()) return;
+          rememberStaffSnapshotRows(staffOverview, cachedDataset.fingerprint);
+          staffAssetsContextRef.current = {
+            rows: serverStaffRowsRef.current,
+            dataset: cachedDataset,
+          };
           await applyOverview(
-            buildPersonnelStaffOverview(
-              nextDataset.rows,
-              nextDataset.rosterLabels,
-              {
-                importId: nextDataset.version.rosterImportId,
-                importName: "Особовий склад · спільний dataset",
-              },
-            ),
+            staffOverview,
             rosterRows,
             rosterLabels,
             rosterColumns,
@@ -467,21 +582,136 @@ export function OverviewPage() {
           );
           paintedFromCache = true;
           setIsLoading(false);
-          startDatasetAssets(nextDataset);
-        },
-      })
-        .then((nextDataset) => {
-          rosterFingerprint = nextDataset.fingerprint;
-          rosterRows = nextDataset.rosterRows;
-          rosterLabels = nextDataset.rosterLabels;
-          rosterColumns = nextDataset.rosterColumns;
-          personnelRowsRef.current = nextDataset.rows;
-          setPersonnelEpoch((value) => value + 1);
-          setRosterUpdatedAt(nextDataset.rosterUpdatedAt);
-          startDatasetAssets(nextDataset);
-          return nextDataset;
-        })
-        .catch(() => cachedDataset);
+        }
+
+        if (
+          canUseOverviewWarmCacheOnly({ force, datasetOnly, cachedDataset }) &&
+          cachedDataset
+        ) {
+          scheduleIdleTask(() => {
+            void (async () => {
+              const probe = await loadPersonnelVersionProbe().catch(() => null);
+              if (
+                !probe?.snapshot?.matchesLive ||
+                probe.fingerprint !== cachedDataset.fingerprint
+              ) {
+                startLoad(true);
+              }
+            })();
+          }, 6_000);
+          return;
+        }
+
+        const [bootstrap, versionProbe] = await Promise.all([
+          loadPersonnelBootstrapMeta({ force, signal }),
+          loadPersonnelVersionProbe({ force, signal }),
+        ]);
+        if (!alive()) return;
+
+        const skipDatasetReload = canSkipOverviewDatasetReload({
+          force,
+          datasetOnly,
+          cachedDataset,
+          versionProbe,
+        });
+
+        if (skipDatasetReload && cachedDataset) {
+          const bootstrapStaff = readBootstrapStaffPayload(
+            bootstrap,
+            cachedDataset.fingerprint,
+          );
+          if (bootstrapStaff) {
+            rememberStaffSnapshotRows(
+              bootstrapStaff,
+              cachedDataset.fingerprint,
+            );
+            void persistOverviewStaffCache(
+              cachedDataset.fingerprint,
+              bootstrapStaff,
+              bootstrap,
+            );
+          }
+          await startDatasetStaff(cachedDataset, bootstrap);
+          if (datasetOnly) return;
+          datasetPromise = Promise.resolve(cachedDataset);
+        } else {
+          datasetPromise = loadPersonnelDataset({
+            force,
+            signal,
+            versionProbe,
+            bootstrapMeta: bootstrap,
+            onCached: async (nextDataset) => {
+              if (!alive()) return;
+              rosterFingerprint = nextDataset.fingerprint;
+              rememberDatasetFingerprint(nextDataset.fingerprint);
+              rosterRows = nextDataset.rosterRows;
+              rosterLabels = nextDataset.rosterLabels;
+              rosterColumns = nextDataset.rosterColumns;
+              personnelRowsRef.current = nextDataset.rows;
+              setPersonnelEpoch((value) => value + 1);
+              setRosterUpdatedAt(nextDataset.rosterUpdatedAt);
+              const staffOverview =
+                await resolveStaffOverviewForDataset(nextDataset);
+              if (!alive()) return;
+              rememberStaffSnapshotRows(staffOverview, nextDataset.fingerprint);
+              await applyOverview(
+                staffOverview,
+                rosterRows,
+                rosterLabels,
+                rosterColumns,
+                true,
+                true,
+              );
+              paintedFromCache = true;
+              setIsLoading(false);
+            },
+          })
+            .then(async (nextDataset) => {
+              if (!alive()) return nextDataset;
+              rosterFingerprint = nextDataset.fingerprint;
+              rememberDatasetFingerprint(nextDataset.fingerprint);
+              rosterRows = nextDataset.rosterRows;
+              rosterLabels = nextDataset.rosterLabels;
+              rosterColumns = nextDataset.rosterColumns;
+              personnelRowsRef.current = nextDataset.rows;
+              setPersonnelEpoch((value) => value + 1);
+              setRosterUpdatedAt(nextDataset.rosterUpdatedAt);
+              await startDatasetStaff(nextDataset, bootstrap);
+              return nextDataset;
+            })
+            .catch(() => cachedDataset ?? null);
+        }
+
+        if (!loadEjoos) {
+          const dataset = await datasetPromise;
+          if (!alive()) return;
+          if (!dataset?.rows.length || !rosterRows.length) {
+            setMessage(
+              "Не вдалося завантажити Штатку. Огляд ООС не показано, щоб не відображати неправильні 2000+ записів.",
+            );
+          }
+          return;
+        }
+      } else {
+        rosterFingerprint = datasetFingerprintRef.current;
+        rosterRows = rosterRowsRef.current;
+        rosterLabels = rosterLabelsRef.current;
+        rosterColumns = rosterColumnsRef.current;
+        datasetPromise = readDataCache<PersonnelDataset>(
+          CacheKeys.personnelDataset,
+        );
+        if (mode === "ejoos-only" && !personnelRowsRef.current.length) {
+          const cachedDataset = await datasetPromise;
+          if (cachedDataset?.rows.length) {
+            rememberDatasetFingerprint(cachedDataset.fingerprint);
+            personnelRowsRef.current = cachedDataset.rows;
+            rosterRows = cachedDataset.rosterRows;
+            rosterLabels = cachedDataset.rosterLabels;
+            rosterColumns = cachedDataset.rosterColumns;
+            rosterFingerprint = cachedDataset.fingerprint;
+          }
+        }
+      }
 
       const overview = await fetchWithCache({
         key: CacheKeys.overview,
@@ -501,7 +731,8 @@ export function OverviewPage() {
                     rosterRows,
                     rosterLabels,
                     rosterColumns,
-                    !meta.complete,
+                    false,
+                    true,
                   );
                   if (meta.complete) return;
                   setMessage(
@@ -527,9 +758,11 @@ export function OverviewPage() {
         rosterLabels,
         rosterColumns,
       );
+      ejoosLoadedRef.current = true;
 
-      if (source !== "staff") {
-        void applyPersonnelAssets(mergedOverview.rows, dataset);
+      staffAssetsContextRef.current = { rows: mergedOverview.rows, dataset };
+      if (sourceRef.current !== "staff") {
+        void runOverviewAssetsLoad(mergedOverview.rows, dataset, { force });
       }
     } catch (error) {
       if (!alive()) return;
@@ -541,28 +774,99 @@ export function OverviewPage() {
     }
   };
 
-  const startLoad = (force = false) => {
+  const startLoad = (
+    force = false,
+    options?: { refreshStaffServer?: boolean },
+  ) => {
+    const seq = ++loadSeqRef.current;
     loadControllerRef.current?.abort();
     const controller = new AbortController();
     loadControllerRef.current = controller;
-    void load(controller.signal, { force });
+    void load(controller.signal, {
+      force,
+      refreshStaffServer: options?.refreshStaffServer,
+      mode: resolveLoadMode(),
+      seq,
+    });
   };
 
-  useEffect(() => {
-    startLoad();
-    void loadAvailablePersonPhotoIds().catch(() => new Set<string>());
-    return () => {
-      loadControllerRef.current?.abort();
+  const startEjoosLoad = () => {
+    ejoosControllerRef.current?.abort();
+    const controller = new AbortController();
+    ejoosControllerRef.current = controller;
+    void load(controller.signal, { mode: "ejoos-only" });
+  };
+
+  useLayoutEffect(() => {
+    if (!active) return;
+    const dataset = peekDataCache<PersonnelDataset>(CacheKeys.personnelDataset);
+    if (!dataset?.rows?.length) return;
+
+    datasetFingerprintRef.current = dataset.fingerprint;
+    personnelRowsRef.current = dataset.rows;
+    rosterRowsRef.current = dataset.rosterRows ?? [];
+    rosterLabelsRef.current = dataset.rosterLabels ?? {};
+    rosterColumnsRef.current = dataset.rosterColumns ?? [];
+    setRosterUpdatedAt(dataset.rosterUpdatedAt);
+    setPersonnelEpoch((value) => value + 1);
+    setRosterEpoch((value) => value + 1);
+
+    const staff = peekDataCache<BackendPersonnelOverview>(
+      overviewStaffCacheKey(dataset.fingerprint),
+    );
+    if (!staff?.rows?.length) return;
+
+    serverStaffRowsRef.current = staff.rows.map(withStaffOverviewStatus);
+    personnelOverviewRowsCacheRef.current = {
+      key: `${dataset.fingerprint}:0`,
+      rows: serverStaffRowsRef.current,
     };
-  }, []);
+    setStaffOverviewEpoch((value) => value + 1);
+    setData(staff);
+    setMessage("Кеш огляду · оновлюю з БД…");
+    staffAssetsContextRef.current = {
+      rows: serverStaffRowsRef.current,
+      dataset,
+    };
+  }, [active]);
 
   useEffect(() => {
+    if (!active) {
+      loadSeqRef.current += 1;
+      loadControllerRef.current?.abort();
+      ejoosControllerRef.current?.abort();
+      return;
+    }
+    startLoad();
+    return () => {
+      loadSeqRef.current += 1;
+    };
+  }, [active]);
+
+  useEffect(() => {
+    if (!active || source === "staff" || ejoosLoadedRef.current) return;
+    startEjoosLoad();
+  }, [active, source]);
+
+  useEffect(() => {
+    if (!active || source === "staff") return;
+    ensureOverviewAssets();
+  }, [active, source, ensureOverviewAssets]);
+
+  useEffect(() => {
+    if (!active) return;
     const onSynced = () => {
-      startLoad(true);
+      window.clearTimeout(staffSyncReloadTimerRef.current);
+      staffSyncReloadTimerRef.current = window.setTimeout(() => {
+        startLoad(true);
+      }, 800);
     };
     window.addEventListener(STAFF_SHEET_SYNCED_EVENT, onSynced);
-    return () => window.removeEventListener(STAFF_SHEET_SYNCED_EVENT, onSynced);
-  }, []);
+    return () => {
+      window.removeEventListener(STAFF_SHEET_SYNCED_EVENT, onSynced);
+      window.clearTimeout(staffSyncReloadTimerRef.current);
+    };
+  }, [active]);
 
   const deferredQuery = useDeferredValue(query);
   const nameQueries = useMemo(
@@ -572,14 +876,22 @@ export function OverviewPage() {
   const isNameListSearch = nameQueries.length > 1;
 
   const personnelOverviewRows = useMemo(() => {
+    if (serverStaffRowsRef.current.length) {
+      return serverStaffRowsRef.current;
+    }
     if (!personnelRowsRef.current.length) {
       return [] as BackendPersonnelOverviewRow[];
     }
-    return buildStaffOverviewRowsFromPersonnel(
+    const cacheKey = `${datasetFingerprintRef.current}:${rosterEpoch}`;
+    const cached = personnelOverviewRowsCacheRef.current;
+    if (cached.key === cacheKey) return cached.rows;
+    const rows = buildStaffOverviewRowsFromPersonnel(
       personnelRowsRef.current,
       rosterLabelsRef.current,
     ).map(withStaffOverviewStatus);
-  }, [personnelEpoch, rosterEpoch]);
+    personnelOverviewRowsCacheRef.current = { key: cacheKey, rows };
+    return rows;
+  }, [personnelEpoch, rosterEpoch, staffOverviewEpoch]);
 
   const sourceRows = useMemo(() => {
     if (!data) return [] as BackendPersonnelOverviewRow[];
@@ -607,6 +919,26 @@ export function OverviewPage() {
     );
   }, [data, isNameListSearch, source, sourceRows]);
 
+  const rowSearchTextCacheRef = useRef(new Map<string, string>());
+  const documentsByExternalIdRef = useRef(documentsByExternalId);
+  documentsByExternalIdRef.current = documentsByExternalId;
+
+  useEffect(() => {
+    rowSearchTextCacheRef.current.clear();
+  }, [documentsByExternalId, nameSearchRows]);
+
+  const getRowSearchText = useCallback((row: BackendPersonnelOverviewRow) => {
+    const cached = rowSearchTextCacheRef.current.get(row.id);
+    if (cached !== undefined) return cached;
+    const documentLabels =
+      row.externalId && documentsByExternalIdRef.current[row.externalId]
+        ? documentsByExternalIdRef.current[row.externalId].labels.join(" ")
+        : "";
+    const text = buildOverviewRowSearchText(row, documentLabels);
+    rowSearchTextCacheRef.current.set(row.id, text);
+    return text;
+  }, []);
+
   const filteredRows = useMemo(() => {
     return nameSearchRows.filter((row) => {
       if (!nameQueries.length) return true;
@@ -621,33 +953,13 @@ export function OverviewPage() {
       if (!normalizedQuery) return true;
       if (overviewNameMatchesQuery(row.name, nameQueries[0] ?? "")) return true;
 
-      return [
-        row.name,
-        row.externalId,
-        row.rank,
-        row.positionTitle,
-        row.unit,
-        row.statusLabel,
-        row.fighterDirection,
-        row.fighterExitDate,
-        row.fighterReturnDate,
-        row.fighterTotalDays,
-        row.fighterStatus,
-        row.externalId && documentsByExternalId[row.externalId]
-          ? documentsByExternalId[row.externalId].labels.join(" ")
-          : "",
-      ]
-        .join(" ")
-        .split(" ")
-        .map(normalizeRosterText)
-        .join(" ")
-        .includes(normalizedQuery);
+      return getRowSearchText(row).includes(normalizedQuery);
     });
   }, [
     documentsByExternalId,
+    getRowSearchText,
     isNameListSearch,
     nameQueries,
-    source,
     nameSearchRows,
   ]);
 
@@ -681,10 +993,7 @@ export function OverviewPage() {
   const openQuestionnaire = useCallback(async (target: OverviewQuestionnaireTarget) => {
     if (!target.externalId) return;
     if (!target.hasQuestionnaire) {
-      openPersonnelInNewTab({
-        rowId: target.rowId,
-        externalId: target.externalId,
-      });
+      openPersonnelFromOverview({ externalId: target.externalId });
       setMessage(`Відкрито картку ${target.name} — можна додати анкету.`);
       return;
     }
@@ -762,14 +1071,12 @@ export function OverviewPage() {
     });
   }, []);
 
-  useEffect(() => {
-    prefetchOverviewPhotos(sourceRows.slice(0, 40));
-  }, [prefetchOverviewPhotos, sourceRows, rosterEpoch]);
-
-  useEffect(() => {
-    if (!filteredRows.length || filteredRows.length > 40) return;
-    prefetchOverviewPhotos(filteredRows);
-  }, [filteredRows, prefetchOverviewPhotos, rosterEpoch]);
+  const onVisibleRowsChange = useCallback(
+    (visibleRows: BackendPersonnelOverviewRow[]) => {
+      prefetchOverviewPhotos(visibleRows);
+    },
+    [prefetchOverviewPhotos],
+  );
 
   const exportOverviewTable = async (
     context: SciDataTableExportContext<BackendPersonnelOverviewRow>,
@@ -797,8 +1104,28 @@ export function OverviewPage() {
       return;
     }
 
+    ensureOverviewAssets();
+    let presenceMap = questionnaireByExternalId;
+    const ctx = staffAssetsContextRef.current;
+    if (ctx && questionnairePresenceStatus !== "ready") {
+      const assets = await fetchOverviewPersonnelAssets({
+        overviewRows: ctx.rows,
+        dataset: ctx.dataset,
+      });
+      presenceMap = assets.questionnairePresence;
+      startTransition(() => {
+        setQuestionnaireByExternalId((current) => ({
+          ...current,
+          ...assets.questionnairePresence,
+        }));
+        setQuestionnaireSourceIdByExternalId(assets.questionnaireSourceIds);
+        setDocumentsByExternalId(assets.documents);
+        setQuestionnairePresenceStatus("ready");
+      });
+    }
+
     const questionnaireRows = context.rows.filter(
-      (row) => row.externalId && questionnaireByExternalId[row.externalId],
+      (row) => row.externalId && presenceMap[row.externalId],
     );
     const files: Array<{ name: string; data: Uint8Array }> = [];
 
@@ -838,6 +1165,9 @@ export function OverviewPage() {
     const exportedAt = new Date();
     let exportRows = context.allRows ?? context.rows;
     let exportRosterRows = rosterRowsRef.current;
+    let exportRosterColumns:
+      | Array<{ key: string; letter?: string; originalIndex?: number }>
+      | undefined;
     let archivePeriods: ReturnType<typeof parsePbArchive> = [];
     try {
       setMessage("Оновлюю «Загальний список» і archive 1ПБ для експорту…");
@@ -846,6 +1176,7 @@ export function OverviewPage() {
       });
       const sourceSheet = payload.sheets[0];
       if (sourceSheet) {
+        exportRosterColumns = sourceSheet.columns;
         exportRosterRows = fillDownRosterUnitRows(
           sourceSheet.rows.map((row, index) => ({
             __dbRowId: `google:${row.excelRowNumber || index + 2}`,
@@ -884,6 +1215,7 @@ export function OverviewPage() {
       exportRows,
       exportRosterRows,
       archivePeriods,
+      exportRosterColumns,
     );
 
     await writeXlsxFile(sheets, {
@@ -900,6 +1232,143 @@ export function OverviewPage() {
     );
   };
 
+  const exportRotaGudzReport = async (
+    context: SciDataTableExportContext<BackendPersonnelOverviewRow>,
+  ) => {
+    try {
+      await exportOverviewRotaGudzReport(context);
+      const unit =
+        context.filters?.find((filter) => filter.id === "unit")?.values[0] ??
+        "рота";
+      setMessage(`Експортовано звіт роти (ГУД): ${unit}.`);
+    } catch (error) {
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "Не вдалося експортувати звіт роти (ГУД).",
+      );
+    }
+  };
+
+  const exportPpdLocationReport = async (
+    context: SciDataTableExportContext<BackendPersonnelOverviewRow>,
+  ) => {
+    let exportRows = context.allRows ?? context.rows;
+    let exportRosterRows = rosterRowsRef.current;
+    try {
+      setMessage("Оновлюю «Загальний список» для експорту ППД / Полігон…");
+      const payload = await pullStaffSheetRosterImportPayload({
+        source: "gviz",
+      });
+      const sourceSheet = payload.sheets[0];
+      if (sourceSheet) {
+        exportRosterRows = fillDownRosterUnitRows(
+          sourceSheet.rows.map((row, index) => ({
+            __dbRowId: `google:${row.excelRowNumber || index + 2}`,
+            __rowNumber: row.excelRowNumber,
+            ...row.values,
+          })),
+        );
+        const rosterLabels = Object.fromEntries(
+          sourceSheet.columns.map((column) => [column.key, column.label]),
+        );
+        const freshRows = buildStaffOverviewRowsFromRoster(
+          exportRosterRows,
+          rosterLabels,
+          sourceSheet.columns,
+        ).map(withStaffOverviewStatus);
+        if (freshRows.length) {
+          exportRows = freshRows;
+        }
+      }
+    } catch (error) {
+      console.warn(
+        "[Огляд] Не вдалося оновити Google перед експортом ППД / Полігон",
+        error,
+      );
+    }
+
+    try {
+      const { ppdCount, polygonCount } = await exportOverviewPpdLocationReport(
+        context,
+        exportRows,
+        exportRosterRows,
+      );
+      setMessage(
+        `Експортовано ППД / Полігон: ${ppdCount} на ППД, ${polygonCount} на полігоні.`,
+      );
+    } catch (error) {
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "Не вдалося експортувати ППД / Полігон.",
+      );
+    }
+  };
+
+  const exportRotaBchsMorningReport = async (
+    context: SciDataTableExportContext<BackendPersonnelOverviewRow>,
+  ) => {
+    let exportRows = context.allRows ?? context.rows;
+    let exportRosterRows = rosterRowsRef.current;
+    const selectedUnits = context.filters?.find((filter) => filter.id === "unit")?.values ?? [];
+    let staffCount = summarizeNovaStaffForUnits(
+      rosterRowsRef.current, selectedUnits, rosterColumnsRef.current,
+    ).staff;
+    try {
+      setMessage("Оновлюю «Загальний список» для експорту БЧС…");
+      const payload = await pullStaffSheetRosterImportPayload({
+        source: "gviz",
+      });
+      const sourceSheet = payload.sheets[0];
+      if (sourceSheet) {
+        exportRosterRows = fillDownRosterUnitRows(
+          sourceSheet.rows.map((row, index) => ({
+            __dbRowId: `google:${row.excelRowNumber || index + 2}`,
+            __rowNumber: row.excelRowNumber,
+            ...row.values,
+          })),
+        );
+        const rosterLabels = Object.fromEntries(
+          sourceSheet.columns.map((column) => [column.key, column.label]),
+        );
+        const freshRows = buildStaffOverviewRowsFromRoster(
+          exportRosterRows,
+          rosterLabels,
+          sourceSheet.columns,
+        ).map(withStaffOverviewStatus);
+        if (freshRows.length) {
+          exportRows = freshRows;
+          staffCount = summarizeNovaStaffForUnits(
+            exportRosterRows, selectedUnits, sourceSheet.columns,
+          ).staff;
+        }
+      }
+    } catch (error) {
+      console.warn(
+        "[Огляд] Не вдалося оновити Google перед експортом БЧС",
+        error,
+      );
+    }
+
+    try {
+      await exportOverviewRotaBchsMorningReport({
+        ...context,
+        allRows: exportRows,
+      }, staffCount, exportRosterRows);
+      const unit =
+        context.filters?.find((filter) => filter.id === "unit")?.values[0] ??
+        "рота";
+      setMessage(`Експортовано БЧС (ранковий ПБ): ${unit}.`);
+    } catch (error) {
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "Не вдалося експортувати БЧС (ранковий ПБ).",
+      );
+    }
+  };
+
   return (
     <main className="main-panel overview-page">
       <div className="overview-screen">
@@ -913,13 +1382,13 @@ export function OverviewPage() {
           </Typography>
         </Box>
         <Stack direction="row" spacing={1}>
-          <Button variant="outlined" onClick={() => startLoad(true)}>
+          <Button variant="outlined" onClick={() => startLoad(true, { refreshStaffServer: true })}>
             Оновити
           </Button>
         </Stack>
       </header>
 
-      {isLoading && <LinearProgress color="primary" />}
+      {isLoading && data ? <LinearProgress color="primary" /> : null}
 
       <section className="overview-metrics">
         <article className="overview-metric-card">
@@ -1025,24 +1494,39 @@ export function OverviewPage() {
       ) : null}
 
       <div className="overview-table-panel">
+        {isLoading && !data ? (
+          <div className="overview-table-preloader">
+            <MagneticTapePreloader
+              status="ЗАВАНТАЖЕННЯ ОГЛЯДУ"
+              hint="Читаю Штатку та готую таблицю особового складу."
+            />
+          </div>
+        ) : null}
         <OverviewVirtualTable
           rows={filteredRows}
           photos={photos}
           onNeedPhoto={onNeedPhoto}
+          onVisibleRowsChange={onVisibleRowsChange}
           questionnaireByExternalId={questionnaireByExternalId}
           questionnaireLoading={questionnairePresenceStatus === "loading"}
+          questionnairePresenceStatus={questionnairePresenceStatus}
           documentsByExternalId={documentsByExternalId}
+          onColumnVisibilityChange={handleColumnVisibilityChange}
           onOpenQuestionnaire={openQuestionnaire}
-          emptyMessage={
-            isLoading && !data
-              ? "Завантаження огляду..."
-              : "Немає записів за поточними фільтрами."
-          }
+          emptyMessage="Немає записів за поточними фільтрами."
           onExport={(context) => void exportOverviewTable(context)}
           onImportantExport={(context) =>
             void exportImportantOverviewColumns(context)
           }
+          onRotaGudzExport={(context) => void exportRotaGudzReport(context)}
+          onRotaBchsMorningExport={(context) =>
+            void exportRotaBchsMorningReport(context)
+          }
+          onPpdLocationExport={(context) =>
+            void exportPpdLocationReport(context)
+          }
           copyTextBuilder={buildOverviewWhatsAppCopyText}
+          rotaCopyTextBuilder={buildOverviewRotaCopyText}
         />
         <footer className="overview-table-footer">
           <span>

@@ -58,7 +58,20 @@ describe("timesheet occupied styles", () => {
     const occupied = cellStyleId(sheetXml || "", "G7");
     const history = cellStyleId(sheetXml || "", "G8");
     expect(occupied).toBeTruthy();
-    expect(history).toBe(occupied);
+    expect(history).toBeTruthy();
+    const stylesXml = await zip.file("xl/styles.xml")?.async("string");
+    const cellXfsBody =
+      stylesXml?.match(/<cellXfs\b[^>]*>([\s\S]*?)<\/cellXfs>/i)?.[1] ?? "";
+    const xfList = [...cellXfsBody.matchAll(/<xf\b[^>]*(?:\/>|>[\s\S]*?<\/xf>)/gi)].map(
+      (match) => match[0],
+    );
+    const occupiedXf = xfList[Number(occupied)] ?? "";
+    const historyXf = xfList[Number(history)] ?? "";
+    expect(historyXf.match(/\bfillId="(\d+)"/i)?.[1]).toBe(
+      occupiedXf.match(/\bfillId="(\d+)"/i)?.[1],
+    );
+    expect(historyXf).toMatch(/horizontal="center"/i);
+    expect(stylesXml).toMatch(/Times New Roman/i);
   });
 
   it("shiftSheetRowsDown updates shared formula refs", () => {
@@ -144,6 +157,361 @@ describe("timesheet occupied styles", () => {
     const sheetXml = await zip.file("xl/worksheets/sheet1.xml")?.async("string");
     expect(sheetXml).toBeTruthy();
     expect(sheetXml).not.toMatch(/\bt="shared"/i);
+    await module.default.fromDataAsync(await next.arrayBuffer());
+  });
+
+  it("ignores wrapText and bold on SHPO writes", async () => {
+    const module = await import(
+      "xlsx-populate/browser/xlsx-populate-no-encryption"
+    );
+    const workbook = await module.default.fromBlankAsync();
+    const sheet = workbook.sheet(0);
+    sheet.name("1. ШПО");
+    sheet.cell(7, 6).value("солдат").style({
+      bold: true,
+      wrapText: true,
+      horizontalAlignment: "left",
+    });
+    const blob = (await workbook.outputAsync("blob")) as Blob;
+
+    const next = await applyInlineStringWritesToWorkbook(
+      blob,
+      /шпо|штатно.?посад/i,
+      [
+        {
+          row: 8,
+          column: 6,
+          value: "молодший сержант",
+          styleSourceRow: 7,
+          styleSourceColumn: 6,
+          copyNeighborStyle: true,
+          wrapText: true,
+        },
+      ],
+    );
+    const zip = await JSZip.loadAsync(await next.arrayBuffer());
+    const stylesXml = await zip.file("xl/styles.xml")?.async("string");
+    const sheetXml = await zip.file("xl/worksheets/sheet1.xml")?.async("string");
+    const styleId = cellStyleId(sheetXml || "", "F8");
+    const cellXfsBody =
+      stylesXml?.match(/<cellXfs\b[^>]*>([\s\S]*?)<\/cellXfs>/i)?.[1] ?? "";
+    const xf = [...cellXfsBody.matchAll(/<xf\b[^>]*(?:\/>|>[\s\S]*?<\/xf>)/gi)]
+      .map((match) => match[0])[Number(styleId)] ?? "";
+    expect(xf).toMatch(/horizontal="center"/i);
+    expect(xf).not.toMatch(/wrapText="1"/i);
+    const fontId = xf.match(/\bfontId="(\d+)"/i)?.[1];
+    const fonts = [
+      ...(stylesXml?.match(/<fonts\b[^>]*>([\s\S]*?)<\/fonts>/i)?.[1] ?? "").matchAll(
+        /<font\b[^>]*(?:\/>|>[\s\S]*?<\/font>)/gi,
+      ),
+    ].map((match) => match[0]);
+    expect(fonts[Number(fontId)] ?? "").not.toMatch(/<b\b/i);
+    await module.default.fromDataAsync(await next.arrayBuffer());
+  });
+
+  it("ignores wrapText on timesheet writes", async () => {
+    const module = await import(
+      "xlsx-populate/browser/xlsx-populate-no-encryption"
+    );
+    const workbook = await module.default.fromBlankAsync();
+    const sheet = workbook.sheet(0);
+    sheet.name("6. Табель");
+    sheet.cell(7, 9).value("вибув").style({
+      bold: true,
+      wrapText: true,
+      horizontalAlignment: "left",
+    });
+    const blob = (await workbook.outputAsync("blob")) as Blob;
+
+    const next = await applyInlineStringWritesToWorkbook(blob, /табель/i, [
+      {
+        row: 8,
+        column: 9,
+        value: "вибув на А0409 (скасовано)",
+        styleSourceRow: 7,
+        styleSourceColumn: 9,
+        wrapText: true,
+      },
+    ]);
+    const zip = await JSZip.loadAsync(await next.arrayBuffer());
+    const stylesXml = await zip.file("xl/styles.xml")?.async("string");
+    const sheetXml = await zip.file("xl/worksheets/sheet1.xml")?.async("string");
+    const styleId = cellStyleId(sheetXml || "", "I8");
+    const cellXfsBody =
+      stylesXml?.match(/<cellXfs\b[^>]*>([\s\S]*?)<\/cellXfs>/i)?.[1] ?? "";
+    const xf = [...cellXfsBody.matchAll(/<xf\b[^>]*(?:\/>|>[\s\S]*?<\/xf>)/gi)]
+      .map((match) => match[0])[Number(styleId)] ?? "";
+    expect(xf).not.toMatch(/wrapText="1"/i);
+    const fontId = xf.match(/\bfontId="(\d+)"/i)?.[1];
+    const fonts = [
+      ...(stylesXml?.match(/<fonts\b[^>]*>([\s\S]*?)<\/fonts>/i)?.[1] ?? "").matchAll(
+        /<font\b[^>]*(?:\/>|>[\s\S]*?<\/font>)/gi,
+      ),
+    ].map((match) => match[0]);
+    expect(fonts[Number(fontId)] ?? "").not.toMatch(/<b\b/i);
+    await module.default.fromDataAsync(await next.arrayBuffer());
+  });
+
+  it("applies Times New Roman center on timesheet writes while preserving fill", async () => {
+    const module = await import(
+      "xlsx-populate/browser/xlsx-populate-no-encryption"
+    );
+    const workbook = await module.default.fromBlankAsync();
+    const sheet = workbook.sheet(0);
+    sheet.name("6. Табель");
+    sheet.cell(7, 9).value("вибув на А0409").style({
+      fill: "ffff00",
+      bold: true,
+      horizontalAlignment: "left",
+    });
+    const blob = (await workbook.outputAsync("blob")) as Blob;
+
+    const next = await applyInlineStringWritesToWorkbook(
+      blob,
+      /табель/i,
+      [
+        {
+          row: 8,
+          column: 9,
+          value: "вибув на А0409 (скасовано)",
+          styleSourceRow: 7,
+          styleSourceColumn: 9,
+          copyNeighborStyle: false,
+          keepNeighborStyle: true,
+        },
+      ],
+    );
+    const zip = await JSZip.loadAsync(await next.arrayBuffer());
+    const stylesXml = await zip.file("xl/styles.xml")?.async("string");
+    const sheetXml = await zip.file("xl/worksheets/sheet1.xml")?.async("string");
+    expect(stylesXml).toMatch(/Times New Roman/i);
+    const sourceStyleId = cellStyleId(sheetXml || "", "I7");
+    const writtenStyleId = cellStyleId(sheetXml || "", "I8");
+    expect(sourceStyleId).toBeTruthy();
+    expect(writtenStyleId).toBeTruthy();
+    const cellXfsBody =
+      stylesXml?.match(/<cellXfs\b[^>]*>([\s\S]*?)<\/cellXfs>/i)?.[1] ?? "";
+    const xfList = [...cellXfsBody.matchAll(/<xf\b[^>]*(?:\/>|>[\s\S]*?<\/xf>)/gi)].map(
+      (match) => match[0],
+    );
+    const sourceXf = xfList[Number(sourceStyleId)] ?? "";
+    const writtenXf = xfList[Number(writtenStyleId)] ?? "";
+    expect(writtenXf).toMatch(/horizontal="center"/i);
+    expect(writtenXf).toMatch(/vertical="center"/i);
+    expect(writtenXf).not.toMatch(/wrapText="1"/i);
+    const sourceFillId = sourceXf.match(/\bfillId="(\d+)"/i)?.[1];
+    const writtenFillId = writtenXf.match(/\bfillId="(\d+)"/i)?.[1];
+    expect(writtenFillId).toBe(sourceFillId);
+    const fontId = writtenXf.match(/\bfontId="(\d+)"/i)?.[1];
+    const fonts = [
+      ...(stylesXml?.match(/<fonts\b[^>]*>([\s\S]*?)<\/fonts>/i)?.[1] ?? "").matchAll(
+        /<font\b[^>]*(?:\/>|>[\s\S]*?<\/font>)/gi,
+      ),
+    ].map((match) => match[0]);
+    const font = fonts[Number(fontId)] ?? "";
+    expect(font).toMatch(/Times New Roman/i);
+    expect(font).not.toMatch(/<b\b/i);
+    expect(font).toMatch(/sz val="12"/i);
+    await module.default.fromDataAsync(await next.arrayBuffer());
+  });
+
+  it("uses fixed 12pt instead of header Times New Roman 14", async () => {
+    const module = await import(
+      "xlsx-populate/browser/xlsx-populate-no-encryption"
+    );
+    const workbook = await module.default.fromBlankAsync();
+    const sheet = workbook.sheet(0);
+    sheet.name("6. Табель");
+    sheet.cell(1, 1).value("Заголовок").style({
+      fontFamily: "Times New Roman",
+      fontSize: 14,
+      bold: false,
+      horizontalAlignment: "center",
+      verticalAlignment: "center",
+    });
+    sheet.cell(7, 9).value("+").style({
+      fontFamily: "Times New Roman",
+      fontSize: 11,
+      bold: false,
+      horizontalAlignment: "center",
+      verticalAlignment: "center",
+    });
+    const blob = (await workbook.outputAsync("blob")) as Blob;
+
+    const next = await applyInlineStringWritesToWorkbook(blob, /табель/i, [
+      {
+        row: 8,
+        column: 9,
+        value: "-",
+        styleSourceRow: 7,
+        styleSourceColumn: 9,
+        copyNeighborStyle: false,
+        keepNeighborStyle: true,
+      },
+    ]);
+    const zip = await JSZip.loadAsync(await next.arrayBuffer());
+    const stylesXml = await zip.file("xl/styles.xml")?.async("string");
+    const sheetXml = await zip.file("xl/worksheets/sheet1.xml")?.async("string");
+    const styleId = cellStyleId(sheetXml || "", "I8");
+    const cellXfsBody =
+      stylesXml?.match(/<cellXfs\b[^>]*>([\s\S]*?)<\/cellXfs>/i)?.[1] ?? "";
+    const xfList = [...cellXfsBody.matchAll(/<xf\b[^>]*(?:\/>|>[\s\S]*?<\/xf>)/gi)].map(
+      (match) => match[0],
+    );
+    const xf = xfList[Number(styleId)] ?? "";
+    const fontId = xf.match(/\bfontId="(\d+)"/i)?.[1];
+    const fonts = [
+      ...(stylesXml?.match(/<fonts\b[^>]*>([\s\S]*?)<\/fonts>/i)?.[1] ?? "").matchAll(
+        /<font\b[^>]*(?:\/>|>[\s\S]*?<\/font>)/gi,
+      ),
+    ].map((match) => match[0]);
+    const font = fonts[Number(fontId)] ?? "";
+    expect(font).toMatch(/Times New Roman/i);
+    expect(font).toMatch(/sz val="12"/i);
+    expect(font).not.toMatch(/sz val="14"/i);
+    expect(font).not.toMatch(/<b\b/i);
+    await module.default.fromDataAsync(await next.arrayBuffer());
+  });
+
+  it("uses Times New Roman on absent sheet writes", async () => {
+    const module = await import(
+      "xlsx-populate/browser/xlsx-populate-no-encryption"
+    );
+    const workbook = await module.default.fromBlankAsync();
+    const sheet = workbook.sheet(0);
+    sheet.name("5. Тимчасово відсутні");
+    sheet.cell(7, 2).value("ІВАНОВ").style({
+      fontFamily: "Calibri",
+      horizontalAlignment: "left",
+    });
+    const blob = (await workbook.outputAsync("blob")) as Blob;
+
+    const next = await applyInlineStringWritesToWorkbook(
+      blob,
+      /відсутн/i,
+      [
+        {
+          row: 8,
+          column: 2,
+          value: "ПЕТРЕНКО",
+          styleSourceRow: 7,
+          styleSourceColumn: 2,
+          keepNeighborStyle: true,
+        },
+      ],
+    );
+    const zip = await JSZip.loadAsync(await next.arrayBuffer());
+    const stylesXml = await zip.file("xl/styles.xml")?.async("string");
+    expect(stylesXml).toMatch(/Times New Roman/i);
+    const sheetXml = await zip.file("xl/worksheets/sheet1.xml")?.async("string");
+    const styleId = cellStyleId(sheetXml || "", "B8");
+    const cellXfsBody =
+      stylesXml?.match(/<cellXfs\b[^>]*>([\s\S]*?)<\/cellXfs>/i)?.[1] ?? "";
+    const xf = [...cellXfsBody.matchAll(/<xf\b[^>]*(?:\/>|>[\s\S]*?<\/xf>)/gi)]
+      .map((match) => match[0])[Number(styleId)] ?? "";
+    const fontId = xf.match(/\bfontId="(\d+)"/i)?.[1];
+    const fonts = [
+      ...(stylesXml?.match(/<fonts\b[^>]*>([\s\S]*?)<\/fonts>/i)?.[1] ?? "").matchAll(
+        /<font\b[^>]*(?:\/>|>[\s\S]*?<\/font>)/gi,
+      ),
+    ].map((match) => match[0]);
+    expect(fonts[Number(fontId)] ?? "").toMatch(/Times New Roman/i);
+    expect(fonts[Number(fontId)] ?? "").toMatch(/sz val="12"/i);
+    await module.default.fromDataAsync(await next.arrayBuffer());
+  });
+
+  it("never keeps bold on OOS writes even with copyNeighborStyle", async () => {
+    const module = await import(
+      "xlsx-populate/browser/xlsx-populate-no-encryption"
+    );
+    const workbook = await module.default.fromBlankAsync();
+    const sheet = workbook.sheet(0);
+    sheet.name("2. ООС");
+    sheet.cell(7, 7).value("НОВІКОВ").style({
+      bold: true,
+      wrapText: false,
+      horizontalAlignment: "left",
+    });
+    const blob = (await workbook.outputAsync("blob")) as Blob;
+
+    const next = await applyInlineStringWritesToWorkbook(blob, /оос/i, [
+      {
+        row: 8,
+        column: 7,
+        value: "ЯМКОВИЙ",
+        styleSourceRow: 7,
+        copyNeighborStyle: true,
+      },
+    ]);
+    const zip = await JSZip.loadAsync(await next.arrayBuffer());
+    const stylesXml = await zip.file("xl/styles.xml")?.async("string");
+    const sheetXml = await zip.file("xl/worksheets/sheet1.xml")?.async("string");
+    const styleId = cellStyleId(sheetXml || "", "G8");
+    const cellXfsBody =
+      stylesXml?.match(/<cellXfs\b[^>]*>([\s\S]*?)<\/cellXfs>/i)?.[1] ?? "";
+    const xf = [...cellXfsBody.matchAll(/<xf\b[^>]*(?:\/>|>[\s\S]*?<\/xf>)/gi)]
+      .map((match) => match[0])[Number(styleId)] ?? "";
+    const fontId = xf.match(/\bfontId="(\d+)"/i)?.[1];
+    const fonts = [
+      ...(stylesXml?.match(/<fonts\b[^>]*>([\s\S]*?)<\/fonts>/i)?.[1] ?? "").matchAll(
+        /<font\b[^>]*(?:\/>|>[\s\S]*?<\/font>)/gi,
+      ),
+    ].map((match) => match[0]);
+    expect(fonts[Number(fontId)] ?? "").not.toMatch(/<b\b/i);
+    await module.default.fromDataAsync(await next.arrayBuffer());
+  });
+
+  it("applies Times New Roman center non-bold wrap on OOS writes", async () => {
+    const module = await import(
+      "xlsx-populate/browser/xlsx-populate-no-encryption"
+    );
+    const workbook = await module.default.fromBlankAsync();
+    const sheet = workbook.sheet(0);
+    sheet.name("3. ООС");
+    sheet.cell(7, 4).value("2103378").style({ bold: true, wrapText: false });
+    sheet.cell(7, 7).value("НОВІКОВ").style({
+      bold: true,
+      horizontalAlignment: "left",
+      verticalAlignment: "top",
+    });
+    const blob = (await workbook.outputAsync("blob")) as Blob;
+
+    const next = await applyInlineStringWritesToWorkbook(blob, /оос/i, [
+      {
+        row: 8,
+        column: 7,
+        value: "ЯМКОВИЙ\nРуслан",
+        styleSourceRow: 7,
+        copyNeighborStyle: false,
+        wrapText: true,
+      },
+    ]);
+    const zip = await JSZip.loadAsync(await next.arrayBuffer());
+    const stylesXml = await zip.file("xl/styles.xml")?.async("string");
+    const sheetXml = await zip.file("xl/worksheets/sheet1.xml")?.async("string");
+    expect(sheetXml).toMatch(/r="G8"/);
+    expect(stylesXml).toMatch(/Times New Roman/i);
+    const styleId = cellStyleId(sheetXml || "", "G8");
+    expect(styleId).toBeTruthy();
+    const cellXfsBody =
+      stylesXml?.match(/<cellXfs\b[^>]*>([\s\S]*?)<\/cellXfs>/i)?.[1] ?? "";
+    const xfList = [...cellXfsBody.matchAll(/<xf\b[^>]*(?:\/>|>[\s\S]*?<\/xf>)/gi)].map(
+      (match) => match[0],
+    );
+    expect(Number(styleId)).toBeLessThan(xfList.length);
+    const xf = xfList[Number(styleId)] ?? "";
+    expect(xf).toMatch(/horizontal="center"/i);
+    expect(xf).toMatch(/vertical="center"/i);
+    expect(xf).toMatch(/wrapText="1"/i);
+    const fontId = xf.match(/\bfontId="(\d+)"/i)?.[1];
+    const fonts = [
+      ...(stylesXml?.match(/<fonts\b[^>]*>([\s\S]*?)<\/fonts>/i)?.[1] ?? "").matchAll(
+        /<font\b[^>]*(?:\/>|>[\s\S]*?<\/font>)/gi,
+      ),
+    ].map((match) => match[0]);
+    const font = fonts[Number(fontId)] ?? "";
+    expect(font).toMatch(/Times New Roman/i);
+    expect(font).not.toMatch(/<b\b/i);
     await module.default.fromDataAsync(await next.arrayBuffer());
   });
 

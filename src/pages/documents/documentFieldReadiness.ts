@@ -174,9 +174,9 @@ export const documentRequiredInputKeys = (
 ): readonly string[] => {
   const base = DOCUMENT_REQUIRED_INPUT_KEYS[type] ?? [];
   if (type === "lostMilitaryId") {
-    const kind = String(fields?.circumstanceKind ?? "movement");
-    if (kind === "custom") return [...base, "customCircumstances"];
-    return [...base, "fromLocation", "toLocation"];
+    const kind = String(fields?.circumstanceKind ?? "custom");
+    if (kind === "movement") return [...base, "fromLocation", "toLocation"];
+    return [...base, "lossLocation", "customCircumstances"];
   }
   if (type === "form6Report") {
     const manual =
@@ -207,6 +207,22 @@ export const documentHasEmptyInputs = (
   fields: Record<string, unknown> | null | undefined,
 ) => {
   const resolved = resolveDocumentFieldsForGapCheck(type, fields);
+  if (type === "lostMilitaryId") {
+    const kind = String(resolved.circumstanceKind ?? "custom");
+    const base = DOCUMENT_REQUIRED_INPUT_KEYS.lostMilitaryId ?? [];
+    const baseMissing = base.some((key) =>
+      isRequiredValueBlank(type, key, resolved[key]),
+    );
+    if (baseMissing) return true;
+    if (kind === "movement") {
+      return ["fromLocation", "toLocation"].some((key) =>
+        isRequiredValueBlank(type, key, resolved[key]),
+      );
+    }
+    const hasLocation = !isBlankDocumentInput(resolved.lossLocation);
+    const hasDetails = !isBlankDocumentInput(resolved.customCircumstances);
+    return !(hasLocation || hasDetails);
+  }
   return documentRequiredInputKeys(type, resolved).some((key) =>
     isRequiredValueBlank(type, key, resolved[key]),
   );
@@ -217,9 +233,26 @@ export const documentRequiredFieldIsBlank = (
   key: string,
   fields: Record<string, unknown> | null | undefined,
 ) => {
+  const resolved = resolveDocumentFieldsForGapCheck(type, fields);
+  if (type === "lostMilitaryId") {
+    const kind = String(resolved.circumstanceKind ?? "custom");
+    if (kind === "movement") {
+      if (key !== "fromLocation" && key !== "toLocation") {
+        const base = DOCUMENT_REQUIRED_INPUT_KEYS.lostMilitaryId ?? [];
+        if (!base.includes(key)) return false;
+        return isRequiredValueBlank(type, key, resolved[key]);
+      }
+      return isRequiredValueBlank(type, key, resolved[key]);
+    }
+    if (key === "lossLocation" || key === "customCircumstances") {
+      const hasLocation = !isBlankDocumentInput(resolved.lossLocation);
+      const hasDetails = !isBlankDocumentInput(resolved.customCircumstances);
+      if (hasLocation || hasDetails) return false;
+      return isRequiredValueBlank(type, key, resolved[key]);
+    }
+  }
   const required = documentRequiredInputKeys(type, fields);
   if (!required.includes(key)) return false;
-  const resolved = resolveDocumentFieldsForGapCheck(type, fields);
   return isRequiredValueBlank(type, key, resolved[key]);
 };
 

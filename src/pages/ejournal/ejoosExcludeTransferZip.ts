@@ -20,6 +20,7 @@ import {
 } from "./ejoosSyncPlan";
 import {
   applyInlineStringWritesToWorkbook,
+  restyleWrittenRowsFromZip,
   type ZipCellWrite,
 } from "./ejoosZipCellWrites";
 import { stripTimesheetDivisionLabel } from "./ejoosTimesheetUnitSections";
@@ -209,9 +210,7 @@ const excludedStyledWrite = (
     // нижні рядки часто жовті, і тоді нова підстава фарбується жовтим.
     copyNeighborStyle: false,
     heightSourceRow: styleSourceRow,
-    wrapText:
-      column === 5 ||
-      (typeof next === "string" && next.includes("\n")),
+    wrapText: true,
   };
 };
 
@@ -249,24 +248,16 @@ const timesheetStyledWrite = (
   value: string | number | null,
   sourceRow: number,
   sourceColumn = column,
-): ZipCellWrite => {
-  const wrapText =
-    typeof value === "string" &&
-    (value.includes("\n") || /вибув/iu.test(value));
-  return {
-    row,
-    column,
-    value,
-    styleSourceRow: sourceRow,
-    styleSourceColumn: sourceColumn,
-    // Як у Виключених: не шукати «канонічний» стиль по аркушу.
-    // Порожні рядки Табеля — жовтий шаблон вакансії без синьої ПІБ і товстої сітки.
-    copyNeighborStyle: false,
-    keepNeighborStyle: !wrapText,
-    heightSourceRow: sourceRow,
-    wrapText,
-  };
-};
+): ZipCellWrite => ({
+  row,
+  column,
+  value,
+  styleSourceRow: sourceRow,
+  styleSourceColumn: sourceColumn,
+  copyNeighborStyle: false,
+  keepNeighborStyle: true,
+  heightSourceRow: sourceRow,
+});
 
 const TIMESHEET_STYLE_LAST_COLUMN = 40;
 
@@ -824,5 +815,14 @@ export async function applyExcludeTransfersWithZip(input: {
       arrivalWrites,
     );
   }
+  blob = await restyleWrittenRowsFromZip(blob, [
+    { sheet: excluded.sheetName, writes: excludedWrites },
+    { sheet: oos.sheetName, writes: oosWrites },
+    { sheet: shpo.sheetName, writes: shpoWrites },
+    { sheet: timesheet.sheetName, writes: timesheetWrites },
+    ...(arrivals
+      ? [{ sheet: arrivals.sheetName, writes: arrivalWrites }]
+      : []),
+  ]);
   return blob;
 }

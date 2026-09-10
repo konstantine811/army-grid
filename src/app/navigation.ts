@@ -278,3 +278,17 @@ export const openPersonnelInNewTab = ({
   rowId?: string;
   externalId?: string;
 }) => openPersonnelPerson({ rowId, externalId }, { newTab: true });
+
+/** Open Особовий склад from Огляд — same tab, personnel row id only (not overview `roster:…`). */
+export const openPersonnelFromOverview = (target: {
+  externalId?: string;
+  rowId?: string;
+}) => {
+  const externalId = String(target.externalId ?? "").trim();
+  const rowId = String(target.rowId ?? "").trim();
+  if (!externalId && !rowId) return;
+  openPersonnelPerson({
+    externalId: externalId || undefined,
+    rowId: externalId ? undefined : rowId,
+  });
+};

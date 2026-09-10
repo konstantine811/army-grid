@@ -14,13 +14,22 @@ import {
   type PersonChangeCategory,
   buildSheetImpacts,
   buildTimesheetPreview,
+  isSupersededPriorMonthDispositionOp,
   personHasWorkbookApplyOps,
   personIsInformationalOnly,
+  timesheetPreviewContextForOps,
 } from "./ejoosPersonDiff";
 import { formatTimesheetTransferMark } from "./ejoosExcludedColumns";
-import { positionCloseWritesExcluded } from "./ejoosExcludePolicy";
+import {
+  excludeTransferDestination,
+  positionCloseWritesExcluded,
+} from "./ejoosExcludePolicy";
 import { buildSheetRowPreviews } from "./ejoosSheetRowPreview";
-import { timesheetOpNeedsManualCode } from "./ejoosOpRequirements";
+import {
+  isReviewOnlyMismatchOp,
+  personApplyBlockReason,
+  timesheetOpNeedsManualCode,
+} from "./ejoosOpRequirements";
 import { EJOOS_TIMESHEET_CODES } from "./ejoosRules";
 import { dayFromOrderLabel } from "./ejoosTimesheetText";
 import { formatApiDateTime } from "../../shared/format";
@@ -206,6 +215,7 @@ export const PersonChangeRow = memo(function PersonChangeRow({
 export function PersonChangeCard({
   person,
   timesheetDay,
+  timesheetDayLabel = "",
   mode = "review",
   historyMeta,
   onAccept,
@@ -213,12 +223,14 @@ export function PersonChangeCard({
   onReject,
   onClose,
   onPatchPayload,
+  onRebuildAsOf,
   isLoading,
   canQueue,
   applyBlocked,
 }: {
   person: PersonChange;
   timesheetDay: number;
+  timesheetDayLabel?: string;
   mode?: PersonChangeCardMode;
   historyMeta?: PersonChangeCardHistoryMeta;
   onAccept?: () => void;
@@ -226,20 +238,37 @@ export function PersonChangeCard({
   onReject?: () => void;
   onClose: () => void;
   onPatchPayload?: (opId: string, patch: Record<string, string>) => void;
+  onRebuildAsOf?: (isoDate: string) => void;
   isLoading?: boolean;
   canQueue?: boolean;
   applyBlocked?: boolean;
 }) {
   const isHistory = mode === "history";
-  const timesheetPreview = useMemo(
-    () =>
-      person.timesheetPreview ??
-      buildTimesheetPreview(person.ops, timesheetDay),
-    [person.ops, person.timesheetPreview, timesheetDay],
+  const blockedDisposition = person.ops.find(
+    (op) =>
+      op.kind === "move_to_disposition" &&
+      op.payload.journalMonthBlocked === "1",
   );
+  const blockedDispositionSuperseded = Boolean(
+    blockedDisposition &&
+      isSupersededPriorMonthDispositionOp(blockedDisposition, person.ops),
+  );
+  const timesheetPreview = useMemo(() => {
+    if (person.timesheetPreview) return person.timesheetPreview;
+    const previewContext = timesheetPreviewContextForOps(
+      person.ops,
+      timesheetDay,
+      timesheetDayLabel,
+    );
+    return buildTimesheetPreview(
+      person.ops,
+      previewContext.timesheetDay,
+      previewContext.timesheetDayLabel,
+    );
+  }, [person.ops, person.timesheetPreview, timesheetDay, timesheetDayLabel]);
   const excludeOp = person.ops.find((op) => op.kind === "exclude_transfer");
   const needsDestination = Boolean(
-    excludeOp && !excludeOp.payload.destination?.trim(),
+    excludeOp && !excludeTransferDestination(excludeOp.payload),
   );
   const needsExclusionDetails = Boolean(
     excludeOp &&
@@ -253,6 +282,8 @@ export function PersonChangeCard({
   );
   const needsTimesheetCode = timesheetOps.some(timesheetOpNeedsManualCode);
   const manualTimesheetOps = timesheetOps.filter(timesheetOpNeedsManualCode);
+  const reviewMismatchOps = person.ops.filter(isReviewOnlyMismatchOp);
+  const applyBlockReason = personApplyBlockReason(person.ops);
   const reviewOnly = personIsInformationalOnly(person.ops);
   const hasWorkbookApply = personHasWorkbookApplyOps(person.ops);
   const bySheet = useMemo(() => {
@@ -351,6 +382,41 @@ export function PersonChangeCard({
           <strong>{person.summaryAfter}</strong>
         </div>
       </div>
+
+      {blockedDisposition && !blockedDispositionSuperseded && !isHistory ? (
+        <Box sx={{ mt: 1.5, p: 1.25, border: "1px solid #f5c16c", borderRadius: 1 }}>
+          <Typography variant="body2" color="warning.main">
+            Наказ {blockedDisposition.payload.orderDate || "—"} (
+            {blockedDisposition.payload.targetMonthLabel || "минулий місяць"}).
+            Зараз обрано «станом на» {timesheetDayLabel}. Змініть дату джерела
+            на {blockedDisposition.payload.suggestedAsOfDate || "місяць наказу"},
+            перебудуйте — тоді операцію можна застосувати.
+          </Typography>
+          {onRebuildAsOf && blockedDisposition.payload.suggestedAsOfDate ? (
+            <Button
+              size="small"
+              variant="outlined"
+              sx={{ mt: 1 }}
+              disabled={isLoading}
+              onClick={() => {
+                const label = blockedDisposition.payload.suggestedAsOfDate || "";
+                const match = label.match(
+                  /(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})/,
+                );
+                if (!match) return;
+                const year =
+                  Number(match[3]) < 100
+                    ? 2000 + Number(match[3])
+                    : Number(match[3]);
+                const iso = `${year}-${String(match[2]).padStart(2, "0")}-${String(match[1]).padStart(2, "0")}`;
+                onRebuildAsOf(iso);
+              }}
+            >
+              Перебудувати за {blockedDisposition.payload.suggestedAsOfDate}
+            </Button>
+          ) : null}
+        </Box>
+      ) : null}
 
       {person.sourceInfluences?.length ? (
         <Box sx={{ mt: 1.5 }}>
@@ -525,6 +591,7 @@ export function PersonChangeCard({
                     onChange={(event) =>
                       patch(excludeOp.id, {
                         documentsDest: event.target.value,
+                        destination: event.target.value,
                       })
                     }
                     placeholder="повний текст із «Яка зміна»"
@@ -596,6 +663,23 @@ export function PersonChangeCard({
             </Typography>
           ) : null}
         </Box>
+      ) : null}
+
+      {!isHistory && reviewMismatchOps.length ? (
+        <Typography variant="body2" color="text.secondary" sx={{ mt: 1.5 }}>
+          Примітка archive/sh: {reviewMismatchOps[0]?.why || reviewMismatchOps[0]?.after}.
+          ПЕРЕВ і Табель можна застосувати — цей рядок лише для перевірки джерел.
+        </Typography>
+      ) : null}
+
+      {!isHistory &&
+      applyBlockReason &&
+      !needsDestination &&
+      !needsExclusionDetails &&
+      !needsTimesheetCode ? (
+        <Typography variant="body2" color="warning.main" sx={{ mt: 1 }}>
+          {applyBlockReason}
+        </Typography>
       ) : null}
 
       {!isHistory && manualTimesheetOps.length ? (
@@ -802,7 +886,9 @@ export function PersonChangeCard({
               Boolean(applyBlocked) ||
               person.severity === "conflict" ||
               needsDestination ||
+              needsExclusionDetails ||
               needsTimesheetCode ||
+              Boolean(applyBlockReason) ||
               (!reviewOnly && !hasWorkbookApply)
             }
             onClick={onApplyNow}
@@ -821,7 +907,9 @@ export function PersonChangeCard({
                 (canQueue === false ||
                   person.severity === "conflict" ||
                   needsDestination ||
-                  needsTimesheetCode))
+                  needsExclusionDetails ||
+                  needsTimesheetCode ||
+                  Boolean(applyBlockReason)))
             }
             onClick={onAccept}
           >

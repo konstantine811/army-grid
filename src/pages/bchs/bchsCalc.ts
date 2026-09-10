@@ -673,7 +673,7 @@ export const isBchsVacationStatus = (status: string) =>
 /** Excel AE: «*СЗЧ*» + «*Не в сторою*». */
 export const isBchsAwolStatus = (status: string) => {
   const normalized = normalizeBchsText(status);
-  return normalized.includes("сзч") || normalized.includes("не в сторою");
+  return normalized.includes("сзч") || normalized.includes("не в стр");
 };
 
 export const isBchsMissingStatus = (status: string) =>

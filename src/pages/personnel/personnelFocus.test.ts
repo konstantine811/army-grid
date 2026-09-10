@@ -22,6 +22,15 @@ describe("findPersonnelRowByFocusTarget", () => {
     ).toBe(rows[0]);
   });
 
+  it("ignores overview synthetic row ids and matches by external id", () => {
+    expect(
+      findPersonnelRowByFocusTarget(rows, {
+        rowId: "roster:минайлюк сергій",
+        externalId: "13188",
+      }),
+    ).toBe(rows[0]);
+  });
+
   it("finds by external id when row id mismatches", () => {
     expect(
       findPersonnelRowByFocusTarget(rows, {

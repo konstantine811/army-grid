@@ -62,6 +62,10 @@ describe("classifyOverviewStatusFromRoster", () => {
     expect(classifyOverviewStatusFromRoster("в строю").statusLabel).toBe(
       "в строю",
     );
+    expect(classifyOverviewStatusFromRoster("не в строю").status).toBe("AWOL");
+    expect(classifyOverviewStatusFromRoster("НЕ В СТРОЮ - СЗЧ").status).toBe(
+      "AWOL",
+    );
     expect(
       classifyOverviewStatusFromRoster("Новоприбулий").statusLabel,
     ).toBe("Новоприбулий");

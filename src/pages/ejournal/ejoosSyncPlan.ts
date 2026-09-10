@@ -2075,6 +2075,7 @@ export const buildEjoosSyncPlan = (
     "БЕЗВІСТИ",
   ]);
   const latestOperationalRowByPerson = new Map<string, number>();
+  const latestRozporadjRowByPerson = new Map<string, number>();
   for (const event of activeMovementsAll) {
     if (!operationalTypes.has(event.type)) continue;
     if (cancelledExternalTransferRows.has(event.excelRow)) continue;
@@ -2085,6 +2086,12 @@ export const buildEjoosSyncPlan = (
       key,
       Math.max(latestOperationalRowByPerson.get(key) ?? 0, event.excelRow),
     );
+    if (event.type === "РОЗПОРЯДЖ") {
+      latestRozporadjRowByPerson.set(
+        key,
+        Math.max(latestRozporadjRowByPerson.get(key) ?? 0, event.excelRow),
+      );
+    }
   }
   const effectiveMovements = activeMovementsAll.filter((event) => {
     if (event.type === "СКАСУВАННЯ") return false;
@@ -2096,6 +2103,13 @@ export const buildEjoosSyncPlan = (
     if (chainedPositionRows.has(event.excelRow)) return true;
     if (currentPositionMovementRows.has(event.excelRow)) return true;
     const key = movementPersonKey(event);
+    if (
+      event.type === "РОЗПОРЯДЖ" &&
+      key &&
+      latestRozporadjRowByPerson.get(key) === event.excelRow
+    ) {
+      return true;
+    }
     return Boolean(
       key && latestOperationalRowByPerson.get(key) === event.excelRow,
     );
@@ -2303,6 +2317,15 @@ export const buildEjoosSyncPlan = (
     return false;
   });
   const augustAbsenceSpansFor = (personId: string, fullName: string) => {
+    const person = { personId, fullName };
+    for (const event of activeMovementsAll) {
+      if (!isSamePerson(person, event)) continue;
+      if (event.type !== "РОЗПОРЯДЖ") continue;
+      const orderMs = dateMs(event.orderDate || event.basisDate);
+      if (orderMs && leadWindowStart && orderMs < leadWindowStart) {
+        return [];
+      }
+    }
     const spans = buildTimesheetAbsenceSpans(
       archiveAll
         .filter((period) => isSamePerson({ personId, fullName }, period))
@@ -4109,9 +4132,48 @@ export const buildEjoosSyncPlan = (
     return latest;
   };
 
+  const priorMonthDispositionMonthLabel = (orderDate: string) => {
+    const ms = dateMs(orderDate);
+    if (!ms) return orderDate || "минулого місяця";
+    const monthNames = [
+      "січень",
+      "лютий",
+      "березень",
+      "квітень",
+      "травень",
+      "червень",
+      "липень",
+      "серпень",
+      "вересень",
+      "жовтень",
+      "листопад",
+      "грудень",
+    ];
+    const date = new Date(ms);
+    return `${monthNames[date.getUTCMonth()]} ${date.getUTCFullYear()}`;
+  };
+  const isPriorMonthPendingDisposition = (event: PbMovement) => {
+    if (event.type !== "РОЗПОРЯДЖ" || wasMovementProcessed(event)) {
+      return false;
+    }
+    const movementDate = dateMs(event.orderDate || event.basisDate);
+    if (!leadWindowStart || !movementDate || movementDate >= leadWindowStart) {
+      return false;
+    }
+    return (
+      personStillInSh(event.personId, event.fullName) ||
+      onStaffShpo(event.personId, event.fullName)
+    );
+  };
+
   const considerMovement = (event: PbMovement) => {
     const movementDate = dateMs(event.orderDate || event.basisDate);
-    if (leadWindowStart && movementDate && movementDate < leadWindowStart) {
+    if (
+      leadWindowStart &&
+      movementDate &&
+      movementDate < leadWindowStart &&
+      !isPriorMonthPendingDisposition(event)
+    ) {
       return;
     }
     if (isAmbiguousStaffTransfer(event)) {
@@ -4403,6 +4465,33 @@ export const buildEjoosSyncPlan = (
         staffShpoRow || needsTimesheetClose || timesheetNeedsCreate,
       );
       if (canMoveToDisposition) {
+        const orderMs = dateMs(event.orderDate || event.basisDate);
+        const orderInJournalMonth =
+          !orderMs ||
+          !leadWindowStart ||
+          journalDayFromDateMs(orderMs, leadWindowStart) > 0;
+        const journalMonthBlocked = Boolean(
+          orderMs && leadWindowStart && !orderInJournalMonth,
+        );
+        const laterStaffPlacementInWindow = activeMovementsAll.some(
+          (movement) =>
+            samePerson(movement.personId, movement.fullName) &&
+            movement.type === "ПОСАДА" &&
+            isOwnUnitStaffMove(movement) &&
+            eventInLeadWindow(movement) &&
+            (movementEventTime(movement) > movementEventTime(event) ||
+              (movementEventTime(movement) === movementEventTime(event) &&
+                movement.excelRow > event.excelRow)),
+        );
+        if (
+          journalMonthBlocked &&
+          (dispositionStateReflected || laterStaffPlacementInWindow)
+        ) {
+          return;
+        }
+        const targetMonthLabel = priorMonthDispositionMonthLabel(
+          event.orderDate || event.basisDate || "",
+        );
         const absenceStatus =
           (openAbsentRow?.ground &&
           isDispositionAbsenceStatus(openAbsentRow.ground)
@@ -4438,8 +4527,10 @@ export const buildEjoosSyncPlan = (
           ]),
           kind: "move_to_disposition",
           // Без даних архіву запис відсутності заповнити нічим.
-          class: "ready",
-          sheet: "ШПО → розпорядження / Тимчасово відсутні / Табель",
+          class: journalMonthBlocked ? "needs_input" : "ready",
+          sheet: journalMonthBlocked
+            ? "ШПО → розпорядження / Табель (місяць наказу)"
+            : "ШПО → розпорядження / Тимчасово відсутні / Табель",
           personId: event.personId || staffShpoRow?.personId || "",
           fullName: event.fullName || staffShpoRow?.fullName || "",
           rank: event.rank || staffShpoRow?.rank || "",
@@ -4450,7 +4541,9 @@ export const buildEjoosSyncPlan = (
             absenceStatus,
             keepOpenAbsenceTimesheet
               ? `Табель 01–${String(timesheetDay).padStart(2, "0")} ${absenceCode}; ${event.orderDate || "у дату наказу"} — ${dispositionTimesheetDeparture}; далі «-»`
-              : "",
+              : staffTimesheetRow || timesheetNeedsCreate
+                ? `Табель до ${event.orderDate || "наказу"} «+»; у дату наказу — ${dispositionTimesheetDeparture}; далі до кінця місяця «-»`
+                : "",
             openAbsentRow || szchRemains
               ? `${openAbsenceLabel || "відсутність"} лишається відкритою`
               : hasSzchContext
@@ -4469,12 +4562,18 @@ export const buildEjoosSyncPlan = (
             .filter(Boolean)
             .join(" · "),
           sourceRef: `Рух!R${event.excelRow} №${event.movementNumber}`,
-          why: keepOpenAbsenceTimesheet
+          why: journalMonthBlocked
+            ? `Наказ у ${targetMonthLabel}, а зараз «станом на» ${timesheetDayLabel}. Змініть дату на ${event.orderDate || "місяць наказу"} і перебудуйте — тоді застосуйте розпорядження.`
+            : keepOpenAbsenceTimesheet
             ? openAbsenceLabel === "БЕЗВІСТИ"
               ? "БЕЗВІСТИ → РОЗПОРЯДЖ: звільнити ШПО (фінальний sh wins), ООС і відкритий БЕЗВІСТИ лишити; у Табелі до дати наказу ЗБ, у дату наказу — вибуття в розпорядження, далі «-». Виключені не змінюються."
               : "СЗЧ → РОЗПОРЯДЖ: звільнити ШПО (фінальний sh wins), ООС і відкритий СЗЧ лишити; у Табелі до дати наказу СЗЧ, у дату наказу — вибуття в розпорядження, далі «-». Виключені не змінюються."
             : "РОЗПОРЯДЖ звільняє стару штатну посаду, але залишає особу в ООС. Виключені не змінюються.",
-          confidence: activeArchivePeriod ? "high" : "review",
+          confidence: journalMonthBlocked
+            ? "manual"
+            : activeArchivePeriod
+              ? "high"
+              : "review",
           payload: {
             type: event.type,
             previousIndex: event.previousIndex,
@@ -4518,15 +4617,30 @@ export const buildEjoosSyncPlan = (
             szchReflectedElsewhere: String(szchReflectedElsewhere),
             dispositionInShpo: String(dispositionInShpo),
             dispositionInTimesheet: String(dispositionInTimesheet),
-            timesheetAbsenceSpans: encodeTimesheetAbsenceSpans(
-              augustAbsenceSpansFor(
-                event.personId || staffShpoRow?.personId || "",
-                event.fullName || staffShpoRow?.fullName || "",
-              ),
-            ),
+            timesheetAbsenceSpans: journalMonthBlocked
+              ? ""
+              : encodeTimesheetAbsenceSpans(
+                  (() => {
+                    const spans = augustAbsenceSpansFor(
+                      event.personId || staffShpoRow?.personId || "",
+                      event.fullName || staffShpoRow?.fullName || "",
+                    );
+                    if (!keepOpenAbsenceTimesheet) return spans;
+                    const orderDay =
+                      orderMs && leadWindowStart
+                        ? journalDayFromDateMs(orderMs, leadWindowStart)
+                        : 0;
+                    return orderDay > 1
+                      ? absenceSpansBeforeEpisode(spans, orderDay)
+                      : spans;
+                  })(),
+                ),
+            journalMonthBlocked: journalMonthBlocked ? "1" : "",
+            suggestedAsOfDate: event.orderDate || "",
+            targetMonthLabel,
           },
           movementKey: createMovementKey(event),
-          checkedDefault: true,
+          checkedDefault: !journalMonthBlocked,
         });
         return;
       }
@@ -4809,6 +4923,15 @@ export const buildEjoosSyncPlan = (
       const staleClearNote = staleExcluded.length
         ? ` Попередн${staleExcluded.length === 1 ? "ій рядок" : "і рядки"} Виключені R${staleExcluded.map((row) => row.excelRow).join(", R")} прибираємо — лишаємо чинне ПЕРЕВ.`
         : "";
+      const excludeEpisodePaint =
+        fromIndex && timesheetWrite.sourceExcelRow
+          ? staffEpisodePaintPayload(
+              fromId || event.personId,
+              fromName,
+              fromIndex,
+              timesheetWrite.sourceExcelRow,
+            )
+          : null;
 
       ops.push({
         id: opId([
@@ -4859,9 +4982,17 @@ export const buildEjoosSyncPlan = (
           orderDate: event.orderDate,
           excludeDate,
           timesheetActiveFrom:
-            unrecordedSameMonthTransit || arrival
+            excludeEpisodePaint?.timesheetActiveFrom ||
+            (unrecordedSameMonthTransit || arrival
               ? inboundPlacement?.orderDate || ""
-              : "",
+              : ""),
+          timesheetAbsenceSpans: excludeEpisodePaint?.timesheetAbsenceSpans || "",
+          timesheetPreserveHistory:
+            excludeEpisodePaint?.timesheetPreserveHistory || "",
+          historyTimesheetExcelRow:
+            excludeEpisodePaint?.historyTimesheetExcelRow || "",
+          historyTimesheetAbsenceSpans:
+            excludeEpisodePaint?.historyTimesheetAbsenceSpans || "",
           timesheetCreateHistory: timesheetWrite.createHistory ? "1" : "",
           timesheetReplaceInPlace: timesheetWrite.replaceInPlace ? "1" : "",
           transitSameMonth: unrecordedSameMonthTransit ? "1" : "",
@@ -5199,14 +5330,30 @@ export const buildEjoosSyncPlan = (
         inboundStaffDateFor(personId, fullName) ||
         event.orderDate;
       const monthSpans = augustAbsenceSpansFor(personId, fullName);
-      const carryAbsenceFromMonthStart = monthSpans.some(
-        (span) => span.fromDay === 1,
-      );
-      const timesheetActiveFrom = carryAbsenceFromMonthStart
-        ? journalMonthStartLabel
-        : returningToStaffIndex
-          ? event.orderDate
-          : staffTimesheetFrom;
+      const latestArchiveReturn = returningFromDisposition
+        ? [...archiveAll]
+            .filter((period) => isSamePerson({ personId, fullName }, period))
+            .filter((period) => hasActualReturn(period.returnDate))
+            .sort(
+              (left, right) =>
+                dateMs(right.returnDate) - dateMs(left.returnDate),
+            )[0]
+        : null;
+      const carryAbsenceFromMonthStart =
+        !returningFromDisposition &&
+        monthSpans.some((span) => span.fromDay === 1);
+      const timesheetActiveFrom = returningFromDisposition
+        ? event.orderDate ||
+          latestArchiveReturn?.returnDate ||
+          (openAbsence?.actualReturn &&
+          hasActualReturn(openAbsence.actualReturn)
+            ? openAbsence.actualReturn
+            : "")
+        : carryAbsenceFromMonthStart
+          ? journalMonthStartLabel
+          : returningToStaffIndex
+            ? event.orderDate
+            : staffTimesheetFrom;
       const timesheetPreserveHistory =
         transferCancel ||
         carryAbsenceFromMonthStart ||
@@ -5341,15 +5488,15 @@ export const buildEjoosSyncPlan = (
             : "",
           openAbsenceExcelRow: openAbsence ? String(openAbsence.excelRow) : "",
           timesheetAbsenceSpans: encodeTimesheetAbsenceSpans(
-            carryAbsenceFromMonthStart
-              ? monthSpans
-              : clipAbsenceSpansToActiveEpisode(
-                  monthSpans,
-                  journalDayFromDateMs(
-                    dateMs(timesheetActiveFrom),
-                    leadWindowStart,
-                  ) || 1,
-                ),
+            (() => {
+              const activeDay =
+                journalDayFromDateMs(
+                  dateMs(timesheetActiveFrom),
+                  leadWindowStart,
+                ) || 1;
+              if (carryAbsenceFromMonthStart) return monthSpans;
+              return clipAbsenceSpansToActiveEpisode(monthSpans, activeDay);
+            })(),
           ),
           historyTimesheetExcelRow: (() => {
             if (transferCancel || carryAbsenceFromMonthStart) return "";
@@ -5971,6 +6118,144 @@ export const buildEjoosSyncPlan = (
         rankVariants: displayRanks.join(" | "),
       },
       checkedDefault: false,
+    });
+  }
+
+  // Особа вже на штаті (sh + ШПО), але «Тимчасово прибулі» лишилось відкритим.
+  // Типово: ПРИБУВ з БРЕЗ без окремої ПОСАДИ в РУХ — ПРИБУВ не проходить
+  // considerMovement, бо personStillInEjoos=true.
+  for (const person of shPeople) {
+    const nextIndex = person.positionIndex;
+    if (!nextIndex || !isPositionIndex(nextIndex) || !person.fullName) continue;
+    const personId = person.personId;
+    const fullName = person.fullName;
+    const arrival = arrivalOf(personId, fullName);
+    if (!arrival) continue;
+    if (
+      ops.some(
+        (op) =>
+          op.kind === "position_change" &&
+          isSamePerson({ personId, fullName }, op),
+      )
+    ) {
+      continue;
+    }
+    const targetShpo = shpoByIndex.get(nextIndex) ?? null;
+    if (!targetShpo || !isSamePerson({ personId, fullName }, targetShpo)) {
+      continue;
+    }
+    const placementEvent =
+      [...movementsAll]
+        .filter(
+          (event) =>
+            isSamePerson({ personId, fullName }, event) &&
+            eventInLeadWindow(event) &&
+            (event.type === "ПРИБУВ" || isOwnUnitStaffMove(event)) &&
+            (event.nextIndex === nextIndex ||
+              String(event.changeText || "").includes(nextIndex) ||
+              event.type === "ПРИБУВ"),
+        )
+        .sort(
+          (left, right) =>
+            movementEventTime(right) - movementEventTime(left) ||
+            right.excelRow - left.excelRow,
+        )[0] ?? null;
+    const existingOos =
+      (personId && oosById.get(personId)) ||
+      byPersonName(oosByName, personId, fullName) ||
+      ejoosOos.find((row) => isSamePerson({ personId, fullName }, row)) ||
+      null;
+    const indexTimesheet = dayByIndex.get(nextIndex) ?? null;
+    const personStaffTimesheet = staffIndexTimesheetForPerson(
+      personId,
+      fullName,
+      nextIndex,
+    );
+    const targetTimesheet =
+      personStaffTimesheet ||
+      (indexTimesheet &&
+      isSamePerson({ personId, fullName }, indexTimesheet)
+        ? indexTimesheet
+        : null) ||
+      indexTimesheet;
+    const rank = person.rank || placementEvent?.rank || targetShpo.rank;
+    const orderDate =
+      placementEvent?.orderDate ||
+      placementEvent?.basisDate ||
+      staffAppointmentDateFor(personId, fullName, nextIndex) ||
+      arrival.arriveDate ||
+      "";
+    const orderNumber = placementEvent?.orderNumber || "";
+    const staffTimesheetFrom =
+      timesheetEpisodeStartFor(personId, fullName, nextIndex) ||
+      inboundStaffDateFor(personId, fullName) ||
+      orderDate;
+    const timesheetActiveFrom =
+      staffTimesheetFrom || orderDate || journalMonthStartLabel;
+    const episodePaint = staffEpisodePaintPayload(
+      personId,
+      fullName,
+      nextIndex,
+      targetTimesheet?.excelRow || 0,
+    );
+    const canApply = Boolean(targetShpo && targetTimesheet);
+    ops.push({
+      id: opId([
+        "temp-arrival-close",
+        personId || canonicalName(fullName),
+        nextIndex,
+      ]),
+      kind: "position_change",
+      class: canApply ? "ready" : "needs_input",
+      sheet: "4. Тимч. прибулі → 1. ШПО / 2. ООС / 6. Табель",
+      personId,
+      fullName,
+      positionIndex: nextIndex,
+      rank,
+      before: `тимчасово прибулий${arrival.fromUnit ? ` · ${arrival.fromUnit}` : ""}`,
+      after: `штатна посада ${nextIndex}`,
+      sourceRef: placementEvent
+        ? `Рух!R${placementEvent.excelRow} №${placementEvent.movementNumber}`
+        : `sh!R${person.excelRow} · ${nextIndex}`,
+      why: placementEvent
+        ? `ПРИБУВ/постановка №${orderNumber || "?"} від ${orderDate || "?"}: закрити тимчасове прибуття, зафіксувати в ООС штат ${nextIndex}`
+        : `Особа вже на штаті ${nextIndex} за sh/ШПО — закрити відкритий рядок «Тимчасово прибулі» та оновити ООС`,
+      confidence: canApply ? "high" : "manual",
+      payload: {
+        movementNumber: placementEvent?.movementNumber || "",
+        previousIndex: placementEvent?.previousIndex || arrival.fromUnit || "БРЕЗ",
+        nextIndex,
+        changeText: placementEvent?.changeText || "",
+        orderNumber,
+        orderDate,
+        basisNumber: placementEvent?.basisNumber || "",
+        basisDate: placementEvent?.basisDate || "",
+        nextName: fullName,
+        nextRank: rank,
+        nextPersonId: personId,
+        positionTitle: person.positionTitle || "",
+        statusRaw: person.status || placementEvent?.status || "",
+        isTempArrivalPlacement: "1",
+        arrivalExcelRow: String(arrival.excelRow),
+        arrivalDepartDate: orderDate,
+        arrivalDepartOrderNumber: orderNumber,
+        arrivalDepartOrderDate: orderDate,
+        oosExcelRow: existingOos ? String(existingOos.excelRow) : "",
+        oosHistoryIndexes: nextIndex,
+        oosHistoryDates: orderDate,
+        shpoExcelRow: String(targetShpo.excelRow),
+        timesheetExcelRow: targetTimesheet
+          ? String(targetTimesheet.excelRow)
+          : "",
+        timesheetActiveFrom:
+          episodePaint.timesheetActiveFrom || timesheetActiveFrom,
+        timesheetSkipHistory: "1",
+        timesheetPreserveHistory: episodePaint.timesheetPreserveHistory || "",
+        timesheetBindStaffIndex: nextIndex,
+        reconcileTempArrival: "1",
+        ...episodePaint,
+      },
+      checkedDefault: canApply,
     });
   }
 

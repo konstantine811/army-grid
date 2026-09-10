@@ -173,7 +173,7 @@ describe("applyConfirmedEjoosOps fail-closed", () => {
           }),
         ],
       }),
-    ).rejects.toThrow("не мають усіх даних для безпечного застосування");
+    ).rejects.toThrow(/Табел/i);
   });
 
   it("throws on standalone arrival instead of writing", async () => {
@@ -435,6 +435,123 @@ describe("position_change from СЗЧ does not clone the timesheet row", () => {
     expect(named.map((item) => item.row)).toEqual([9]);
     expect(String(ts?.rawRows[8]?.[8] ?? "").trim()).toBe("-");
     expect(String(ts?.rawRows[8]?.[17] ?? "").trim()).toBe("+");
+  }, 30_000);
+});
+
+describe("return to staff then РОЗПОРЯДЖ (Volkov chain)", () => {
+  it("paints staff row with archive codes, departure on 28, dashes after", async () => {
+    const module = await import(
+      "xlsx-populate/browser/xlsx-populate-no-encryption"
+    );
+    const workbook = await module.default.fromBlankAsync();
+    const shpo = workbook.sheet(0);
+    shpo.name("1. ШПО");
+    workbook.addSheet("2. ООС").cell(1, 1).value("2. ООС");
+    workbook.addSheet("3. Виключені").cell(1, 1).value("3. Виключені");
+    workbook.addSheet("4. Тимчасово прибулі").cell(1, 1).value("4. Тимчасово прибулі");
+    const absents = workbook.addSheet("5. Тимчасово відсутні");
+    absents.cell(1, 1).value("5. Тимчасово відсутні");
+    const timesheet = workbook.addSheet("6. Табель");
+    timesheet.cell(1, 1).value("6. Табель");
+    timesheet.cell(2, 9).value("Серпень 2026 р.");
+
+    shpo.cell(7, 1).value("2103229");
+    shpo.cell(20, 2).value(", який знаходиться у розпорядженні");
+    shpo.cell(20, 7).value("ВОЛКОВ Артем Миколайович");
+    shpo.cell(20, 8).value("11688");
+
+    absents.cell(6, 2).value("ВОЛКОВ Артем Миколайович");
+    absents.cell(6, 3).value("11688");
+    absents.cell(6, 5).value("СЗЧ");
+
+    timesheet.cell(7, 2).value("2103229");
+    timesheet.cell(15, 2).value("ВИБУВ У РОЗПОРЯДЖЕННЯ КОМАНДИРА");
+    timesheet.cell(16, 2).value("РОЗПОРЯДЖЕННЯ");
+
+    const blobIn = (await workbook.outputAsync("blob")) as Blob;
+    const ejoos = await readWorkbookSnapshot(
+      new File([blobIn], "ejoos.xlsx", { type: XLSX_MIME }),
+      EJOOS_SYNC_READ_OPTIONS,
+    );
+
+    const placement = op({
+      id: "pos-volkov",
+      kind: "position_change",
+      personId: "11688",
+      fullName: "ВОЛКОВ Артем Миколайович",
+      positionIndex: "2103229",
+      rank: "солдат",
+      payload: {
+        nextIndex: "2103229",
+        nextName: "ВОЛКОВ Артем Миколайович",
+        nextPersonId: "11688",
+        nextRank: "солдат",
+        orderDate: "10.08.2026",
+        orderNumber: "231",
+        returningFromDisposition: "1",
+        timesheetActiveFrom: "10.08.2026",
+        timesheetAbsenceSpans: "11-19:лік|20-27:СЗЧ",
+        shpoExcelRow: "7",
+        timesheetExcelRow: "7",
+        dispositionShpoExcelRow: "20",
+        openAbsenceExcelRow: "6",
+      },
+    });
+    const disposition = op({
+      id: "disp-volkov",
+      kind: "move_to_disposition",
+      personId: "11688",
+      fullName: "ВОЛКОВ Артем Миколайович",
+      positionIndex: "2103229",
+      rank: "солдат",
+      payload: {
+        previousIndex: "2103229",
+        orderDate: "28.08.2026",
+        orderNumber: "251",
+        destination:
+          ", який знаходиться у розпорядженні командира військової частини А4862",
+        keepOpenSzchTimesheet: "1",
+        absenceCode: "СЗЧ",
+        timesheetFound: "true",
+        shpoExcelRow: "7",
+        timesheetExcelRow: "7",
+        timesheetAbsenceSpans: "11-19:лік|20-27:СЗЧ",
+      },
+    });
+
+    const plan = dummyPlan([placement, disposition]);
+    plan.timesheetDay = 31;
+    plan.timesheetDayLabel = "31.08.2026";
+
+    const { blob } = await applyConfirmedEjoosOps({
+      ejoos,
+      plan,
+      ops: [placement, disposition],
+    });
+    const after = await readWorkbookSnapshot(
+      new File([blob], "ЄЖООС_станом_на_31-08-2026.xlsx", { type: XLSX_MIME }),
+      EJOOS_SYNC_READ_OPTIONS,
+    );
+    const ts = after.sheets.find((sheet) => /табель/i.test(sheet.sheetName));
+    const staffRow = (ts?.rawRows ?? []).find(
+      (row) => String(row[7] ?? "") === "11688",
+    );
+    expect(staffRow).toBeTruthy();
+    const day = (index: number) =>
+      String(staffRow?.[8 + index] ?? "").trim();
+    for (let index = 0; index <= 8; index += 1) {
+      expect(day(index), `day ${index + 1}`).toBe("-");
+    }
+    expect(day(9)).toBe("+");
+    for (let index = 10; index <= 18; index += 1) {
+      expect(day(index), `day ${index + 1}`).toBe("лік");
+    }
+    for (let index = 19; index <= 26; index += 1) {
+      expect(day(index), `day ${index + 1}`).toBe("СЗЧ");
+    }
+    expect(day(27)).toMatch(/вибув у розпоряджен/i);
+    expect(day(28)).toBe("-");
+    expect(day(29)).toBe("-");
   }, 30_000);
 });
 

@@ -2,15 +2,22 @@ import { describe, expect, it } from "vitest";
 import type { EjournalPreviewRow } from "../ejournal/ejournalTypes";
 import {
   actApprovalDateLine,
+  approvalFooterBlock,
+  buildLostMilitaryIdReportText,
+  buildManualSignatoryDateLine,
+  circumstancesText,
   createLostMilitaryIdFields,
   declinedInvestigator,
+  formatReporterTitleLines,
   instrumentalInvestigatorLine,
   investigatorFooterLines,
   investigatorFromPersonnelRow,
   mergeLostMilitaryIdFields,
   militaryUnitLabel,
   normalizeMilitaryUnitPhrase,
+  orderFooterBlock,
   splitLostMilitaryIdSignatory,
+  usesMovementCircumstances,
 } from "./lostMilitaryIdReport";
 import { buildPersonSummary } from "../personnel/personnelUtils";
 
@@ -58,6 +65,28 @@ describe("investigatorFromPersonnelRow", () => {
       investigatorManual: false,
     });
   });
+
+  it("uses Взвод when посада is a number", () => {
+    const row = person("ІВАНОВ Іван", {
+      rank: "лейтенант",
+      position: "29",
+      взвод: "2 піхотний взвод 1 піхотної роти",
+      id: "1",
+    });
+    expect(investigatorFromPersonnelRow(row).investigatorPosition).toMatch(
+      /піхотний взвод/i,
+    );
+  });
+
+  it("does not turn appointment date into dative position with trailing у", () => {
+    const row = person("ІВАНОВ Іван", {
+      rank: "лейтенант",
+      position: "29.03.2026",
+      повна_посада: "29.03.2026",
+      id: "1",
+    });
+    expect(investigatorFromPersonnelRow(row).investigatorPosition).toBe("");
+  });
 });
 
 describe("mergeLostMilitaryIdFields investigator mode", () => {
@@ -79,6 +108,14 @@ describe("mergeLostMilitaryIdFields investigator mode", () => {
     });
     expect(merged.investigatorManual).toBe(false);
     expect(merged.investigatorPersonId).toBe("2103111");
+  });
+
+  it("clears corrupted date saved as investigator position", () => {
+    const defaults = createLostMilitaryIdFields(null, buildPersonSummary(null));
+    const merged = mergeLostMilitaryIdFields(defaults, {
+      investigatorPosition: "29.03.2026у",
+    });
+    expect(merged.investigatorPosition).toBe("");
   });
 
   it("capitalizes investigator position in the form and report text", () => {
@@ -135,11 +172,114 @@ describe("act document blocks", () => {
     expect(parts.fullName).toMatch(/СЕМЕНЮК/i);
   });
 
-  it("formats approval date from order date", () => {
+  it("builds approval footer from document signatory record", () => {
     const fields = mergeLostMilitaryIdFields(
-      createLostMilitaryIdFields(null, buildPersonSummary(null)),
-      { orderDate: "15.11.2025" },
+      createLostMilitaryIdFields(null, buildPersonSummary(null), [
+        {
+          blockType: "APPROVAL",
+          title: "Командир військової частини А4862",
+          rank: "",
+          fullName: "",
+        },
+      ]),
+      { approvalDate: "29.08.2026" },
     );
-    expect(actApprovalDateLine(fields)).toBe("«15»  листопада  2025 року");
+    const footer = approvalFooterBlock(fields);
+    expect(footer.titleLines).toEqual(["Командир військової частини А4862"]);
+    expect(footer.rank).toBe("");
+    expect(footer.name).toBe("");
+    expect(actApprovalDateLine(fields)).toBe(
+      buildManualSignatoryDateLine(new Date()),
+    );
+  });
+
+  it("builds order footer with full commander data, skipping placeholder signatories", () => {
+    const fields = createLostMilitaryIdFields(null, buildPersonSummary(null), [
+      {
+        blockType: "SIGNER",
+        title: "Командир __ взводу __ роти\n__ лейтенант __ (прізвище та ініціали)",
+        rank: "",
+        fullName: "",
+      },
+      {
+        blockType: "APPROVAL",
+        title: "Командир __ взводу __ роти",
+        rank: "",
+        fullName: "",
+      },
+    ]);
+    const footer = orderFooterBlock(fields);
+    expect(footer.titleLines).toEqual([
+      "Тимчасово виконуючий обов’язки",
+      "командира військової частини А4862",
+    ]);
+    expect(footer.rank).toBe("капітан");
+    expect(footer.name).toMatch(/АДАМОВ/i);
+  });
+
+  it("prefers complete approval signatory for order footer", () => {
+    const fields = createLostMilitaryIdFields(null, buildPersonSummary(null), [
+      {
+        blockType: "APPROVAL",
+        title: "Командир 1 піхотного батальйону\nвійськової частини А4862",
+        rank: "старший лейтенант",
+        fullName: "Єгор СИДОРЕНКО",
+      },
+    ]);
+    const footer = orderFooterBlock(fields);
+    expect(footer.rank).toBe("старший лейтенант");
+    expect(footer.name).toMatch(/СИДОРЕНКО/i);
+    expect(footer.titleLines[0]).toMatch(/Командир 1 піхотного батальйону/i);
+  });
+
+  it("uses current month and year with blank day under signatory signature", () => {
+    expect(buildManualSignatoryDateLine(new Date(2026, 8, 8))).toBe(
+      "«  »  вересня  2026 року",
+    );
+  });
+
+  it("strips date lines from multiline reporter title", () => {
+    expect(
+      formatReporterTitleLines(
+        "Командир 1 піхотного батальйону\nвійськової частини А4862\n05.09.2026",
+        "старший лейтенант",
+      ),
+    ).toEqual([
+      "Командир 1 піхотного батальйону",
+      "військової частини А4862",
+    ]);
+  });
+});
+
+describe("lost military id event circumstances", () => {
+  const eventFields = (): ReturnType<typeof createLostMilitaryIdFields> => ({
+    ...createLostMilitaryIdFields(
+      person("ПЕТРЕНКО Іван Іванович", { rank: "солдат" }),
+      buildPersonSummary(
+        person("ПЕТРЕНКО Іван Іванович", { rank: "солдат" }),
+      ),
+    ),
+    lossDate: "12.11.2025",
+    isExactDate: true,
+    circumstanceKind: "custom",
+    lossLocation: "с. Гришене",
+    customCircumstances:
+      "на позицію потрапив каб та FPV дрон і все згоріло",
+    searchConducted: false,
+  });
+
+  it("builds phrase from place and event details", () => {
+    expect(circumstancesText(eventFields())).toBe(
+      "с. Гришене, на позицію потрапив каб та FPV дрон і все згоріло",
+    );
+    expect(usesMovementCircumstances(eventFields())).toBe(false);
+  });
+
+  it("weaves event into report text without movement placeholders", () => {
+    const text = buildLostMilitaryIdReportText(eventFields());
+    expect(text).toContain("12.11.2025");
+    expect(text).toContain("с. Гришене");
+    expect(text).toContain("FPV дрон");
+    expect(text).not.toContain("переміщення з ______");
   });
 });

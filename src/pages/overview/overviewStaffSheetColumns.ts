@@ -9,7 +9,7 @@ import {
   resolveFighterStatusTotalDays,
   type FighterStatusFieldKey,
 } from "../personnel/fighterStatusImport";
-import { MORNING_GENERAL_LIST_COLUMN_LABELS } from "../personnel/personnelUtils";
+import { MORNING_GENERAL_LIST_COLUMN_LABELS } from "../personnel/morningGeneralListColumnLabels";
 
 export type OverviewStaffSheetColumnDef = {
   id: string;
@@ -33,7 +33,7 @@ const OVERVIEW_PRIMARY_FIGHTER_FIELDS = new Set<FighterStatusFieldKey>([
   "fighter_status_total_days",
   "fighter_status_value",
 ]);
-const OVERVIEW_PRIORITY_ROSTER_COLUMNS = [31, 32] as const;
+const OVERVIEW_PRIORITY_ROSTER_COLUMNS = [31, 35, 32] as const;
 
 const duplicateRosterLabels = (() => {
   const counts = new Map<string, number>();
@@ -52,6 +52,7 @@ const duplicateRosterLabels = (() => {
 const rosterColumnHeader = (columnNumber: number) => {
   const label = MORNING_GENERAL_LIST_COLUMN_LABELS[columnNumber]?.trim() ?? "";
   if (!label) return `Колонка ${columnNumber}`;
+  if (columnNumber === 35) return "Місце перебування (уточнення)";
   if (duplicateRosterLabels.has(label)) {
     return `${label} (кол. ${columnNumber})`;
   }
@@ -96,14 +97,26 @@ export const OVERVIEW_STAFF_SHEET_COLUMN_DEFS: OverviewStaffSheetColumnDef[] = [
     })),
 ];
 
+/** Колонки анкет/доків приховані за замовчуванням — assets завантажуються on-demand. */
+export const OVERVIEW_DEFERRED_ASSET_COLUMN_IDS = [
+  "questionnaire",
+  "documents",
+] as const;
+
 /** Усі колонки Штатки приховані за замовчуванням — увімкнути через «Колонки». */
 export const DEFAULT_OVERVIEW_STAFF_COLUMN_VISIBILITY: Record<string, boolean> =
-  Object.fromEntries(
-    OVERVIEW_STAFF_SHEET_COLUMN_DEFS.map((column) => [
-      column.id,
-      column.columnNumber === 31 || column.columnNumber === 32,
-    ]),
-  );
+  {
+    questionnaire: false,
+    documents: false,
+    ...Object.fromEntries(
+      OVERVIEW_STAFF_SHEET_COLUMN_DEFS.map((column) => [
+        column.id,
+        column.columnNumber === 31 ||
+          column.columnNumber === 35 ||
+          column.columnNumber === 32,
+      ]),
+    ),
+  };
 
 const staffSheetColumnsCache = new WeakMap<
   EjournalPreviewRow,

@@ -1,10 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { TextField } from "@/components/sci/SciPrimitives";
-import type { BackendPersonnelRosterLatest } from "../../api";
-import { CacheKeys, readDataCache } from "../../data/idbDataCache";
-import { loadSharedRosterLatest } from "../../data/sharedAppData";
+import { loadPersonnelDataset } from "../../data/personnelDataset";
 import type { EjournalPreviewRow } from "../ejournal/ejournalTypes";
-import { loadPersonnelRowsForOverview } from "../overview/overviewPersonnelAssets";
 import { overviewNameMatchesQuery } from "../overview/overviewNameSearch";
 import {
   buildPersonSummary,
@@ -12,23 +9,9 @@ import {
   getPersonFullPositionTitle,
 } from "../personnel/personnelUtils";
 
-const rosterRowsFromLatest = (latest: BackendPersonnelRosterLatest | null) => {
-  if (!latest?.sheet) return [] as EjournalPreviewRow[];
-  return latest.rows.map((row) => ({
-    __dbRowId: row.id,
-    __rowNumber: row.excelRowNumber,
-    ...(row.values && typeof row.values === "object" && !Array.isArray(row.values)
-      ? row.values
-      : {}),
-  })) as EjournalPreviewRow[];
-};
-
 const loadPickerPeople = async () => {
-  const cached = await readDataCache<BackendPersonnelRosterLatest | null>(
-    CacheKeys.rosterLatest,
-  );
-  const roster = cached ?? (await loadSharedRosterLatest().catch(() => null));
-  return loadPersonnelRowsForOverview(rosterRowsFromLatest(roster));
+  const dataset = await loadPersonnelDataset();
+  return dataset.rows;
 };
 
 export type PersonnelPickerPerson = {

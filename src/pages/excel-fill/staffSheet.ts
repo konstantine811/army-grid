@@ -1,5 +1,5 @@
 import type { EjournalPreviewRow } from "../ejournal/ejournalTypes";
-import { MORNING_GENERAL_LIST_COLUMN_LABELS } from "../personnel/personnelUtils";
+import { MORNING_GENERAL_LIST_COLUMN_LABELS } from "../personnel/morningGeneralListColumnLabels";
 import {
   FIGHTER_STATUS_FIELDS,
   buildFighterStatusAdditions,
@@ -683,13 +683,23 @@ const resolveHeaderRosterColumn = (
   const trimmed = header.trim();
   if (!trimmed) return columnIndex + 1;
 
+  const normalizedHeader = trimmed
+    .toLocaleLowerCase("uk-UA")
+    .replace(/\s+/g, " ");
+  if (
+    normalizedHeader.includes("уточнен") &&
+    normalizedHeader.includes("перебуван")
+  ) {
+    return 35;
+  }
+
   const exactStaff = STAFF_SHEET_HEADERS.findIndex(
     (label) =>
       label.toLocaleLowerCase("uk-UA") === trimmed.toLocaleLowerCase("uk-UA"),
   );
   if (exactStaff >= 0) return STAFF_SHEET_ROSTER_COLUMNS[exactStaff];
 
-  const wanted = trimmed.toLocaleLowerCase("uk-UA").replace(/\s+/g, " ");
+  const wanted = normalizedHeader;
   for (const [columnNumber, label] of Object.entries(
     MORNING_GENERAL_LIST_COLUMN_LABELS,
   )) {
@@ -702,6 +712,7 @@ const resolveHeaderRosterColumn = (
     MORNING_GENERAL_LIST_COLUMN_LABELS,
   )) {
     const known = label.toLocaleLowerCase("uk-UA");
+    if (wanted.includes("уточнен") && Number(columnNumber) === 31) continue;
     if (wanted.startsWith(known) || known.startsWith(wanted)) {
       return Number(columnNumber);
     }

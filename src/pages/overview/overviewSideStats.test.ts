@@ -4,6 +4,8 @@ import {
   buildOverviewCriticalFromRows,
   buildOverviewTodayStats,
   filterOverviewCriticalForRows,
+  overviewRowChangedToday,
+  parseOverviewCalendarDate,
 } from "./overviewSideStats";
 
 const row = (
@@ -94,5 +96,43 @@ describe("overview side stats follow selected rows", () => {
     expect(stats.todayChanges.leave).toBe(1);
     expect(stats.todayChanges.medical).toBe(0);
     expect(stats.todayChanges.total).toBe(1);
+  });
+
+  it("parses Ukrainian dd.MM.yyyy dates from EЖООС rows", () => {
+    const parsed = parseOverviewCalendarDate("08.09.2026, 08:00");
+    expect(parsed?.getFullYear()).toBe(2026);
+    expect(parsed?.getMonth()).toBe(8);
+    expect(parsed?.getDate()).toBe(8);
+  });
+
+  it("counts Штатка fighter status dates as today updates", () => {
+    const now = new Date("2026-09-08T12:00:00");
+    const stats = buildOverviewTodayStats(
+      [
+        row({
+          id: "f1",
+          status: "MEDICAL",
+          statusLabel: "Лікування",
+          updatedAt: "",
+          fighterExitDate: "08.09.2026",
+        }),
+        row({
+          id: "f2",
+          status: "LEAVE",
+          statusLabel: "Відпустка",
+          updatedAt: "",
+          fighterEntryDate: "07.09.2026",
+        }),
+      ],
+      now,
+    );
+
+    expect(overviewRowChangedToday(
+      { ...row(), fighterExitDate: "08.09.2026" },
+      now,
+    )).toBe(true);
+    expect(stats.todayUpdates).toBe(1);
+    expect(stats.todayChanges.medical).toBe(1);
+    expect(stats.todayChanges.leave).toBe(0);
   });
 });

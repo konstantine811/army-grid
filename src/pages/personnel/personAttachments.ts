@@ -4,7 +4,15 @@ import type {
   BackendPersonQuestionnaireMeta,
 } from "../../api";
 import { api } from "../../api";
-import { loadSharedDocumentsAll } from "../../data/sharedAppData";
+import {
+  CacheKeys,
+  deleteDataCache,
+  fetchWithCache,
+  jsonChanged,
+  peekDataCache,
+  readDataCache,
+} from "../../data/idbDataCache";
+import { loadSharedQuestionnairesMeta } from "../../data/personnelBootstrap";
 import { sanitizeFileName } from "../../shared/browserExport";
 import type { EjournalPreviewRow } from "../ejournal/ejournalTypes";
 import { readRosterColumnValue } from "../excel-fill/rosterSourceSnapshot";
@@ -58,9 +66,26 @@ const pushLegacyAttachmentLookupIds = (
   }
 };
 
-const hasQuestionnaireRecord = (
-  questionnaire: BackendPersonQuestionnaire | null | undefined,
-) => Boolean(questionnaire?.personExternalId || questionnaire?.id);
+const questionnaireMetaToStub = (
+  meta: BackendPersonQuestionnaireMeta,
+): BackendPersonQuestionnaire => ({
+  id: meta.personExternalId,
+  personExternalId: meta.personExternalId,
+  fileName: meta.fileName ?? null,
+  mimeType: "application/pdf",
+  fileData: "",
+  createdAt: "",
+  updatedAt: "",
+});
+
+/** Full questionnaire payload including base64 PDF — use only when file bytes are required. */
+export const loadPersonQuestionnaireFull = async (
+  personExternalId: string,
+) => {
+  const id = personExternalId.trim();
+  if (!id) return null;
+  return api.getPersonQuestionnaire(id).catch(() => null);
+};
 
 const FILE_NAME_NOISE = new Set([
   "pdf",
@@ -132,18 +157,12 @@ export const rowHasListedQuestionnaire = (
   return false;
 };
 
-let questionnaireIndexCache:
-  | { at: number; items: Awaited<ReturnType<typeof api.listPersonQuestionnaires>> }
-  | null = null;
-
 const loadQuestionnaireIndex = async () => {
-  const now = Date.now();
-  if (questionnaireIndexCache && now - questionnaireIndexCache.at < 30_000) {
-    return questionnaireIndexCache.items;
-  }
-  const items = await api.listPersonQuestionnaires().catch(() => []);
-  questionnaireIndexCache = { at: now, items };
-  return items;
+  const cached = peekDataCache<BackendPersonQuestionnaireMeta[]>(
+    CacheKeys.questionnairesMeta,
+  );
+  if (cached?.length) return cached;
+  return loadSharedQuestionnairesMeta().catch(() => []);
 };
 
 const resolveQuestionnaireViaIndex = async (
@@ -157,13 +176,10 @@ const resolveQuestionnaireViaIndex = async (
   for (const meta of items) {
     const id = meta.personExternalId?.trim();
     if (!id || !lookupSet.has(id)) continue;
-    const questionnaire = await api.getPersonQuestionnaire(id).catch(() => null);
-    if (hasQuestionnaireRecord(questionnaire)) {
-      return {
-        questionnaire,
-        resolvedExternalId: questionnaire!.personExternalId?.trim() || id,
-      };
-    }
+    return {
+      questionnaire: questionnaireMetaToStub(meta),
+      resolvedExternalId: id,
+    };
   }
 
   if (!allowFileNameFallback) return null;
@@ -180,13 +196,10 @@ const resolveQuestionnaireViaIndex = async (
         });
   if (uniqueFileHit?.personExternalId?.trim()) {
     const id = uniqueFileHit.personExternalId.trim();
-    const questionnaire = await api.getPersonQuestionnaire(id).catch(() => null);
-    if (hasQuestionnaireRecord(questionnaire)) {
-      return {
-        questionnaire,
-        resolvedExternalId: questionnaire!.personExternalId?.trim() || id,
-      };
-    }
+    return {
+      questionnaire: questionnaireMetaToStub(uniqueFileHit),
+      resolvedExternalId: id,
+    };
   }
 
   return null;
@@ -330,46 +343,96 @@ let availablePhotoIdsCache:
   | null = null;
 let availablePhotoIdsPromise: Promise<Set<string>> | null = null;
 
+const photoIdsFromList = (
+  items: Array<{
+    personExternalId?: string;
+    hasFile?: boolean;
+    hasThumbnail?: boolean;
+    photoData?: string;
+  }>,
+) =>
+  new Set(
+    items
+      .filter(
+        (item) =>
+          item.personExternalId &&
+          (item.hasFile || item.hasThumbnail || Boolean(item.photoData)),
+      )
+      .map((item) => item.personExternalId!.trim())
+      .filter(Boolean),
+  );
+
+const rememberPhotoIds = (ids: Set<string>) => {
+  availablePhotoIdsCache = { at: Date.now(), ids };
+  return ids;
+};
+
 export const clearAvailablePersonPhotoIdsCache = () => {
   availablePhotoIdsCache = null;
   availablePhotoIdsPromise = null;
+  void deleteDataCache(CacheKeys.personnelPhotoIndex);
 };
 
-export const loadAvailablePersonPhotoIds = async () => {
+export const loadAvailablePersonPhotoIds = async (options?: {
+  force?: boolean;
+}) => {
   const now = Date.now();
-  if (availablePhotoIdsCache && now - availablePhotoIdsCache.at < 30_000) {
+  if (
+    !options?.force &&
+    availablePhotoIdsCache &&
+    now - availablePhotoIdsCache.at < 30_000
+  ) {
     return availablePhotoIdsCache.ids;
   }
-  availablePhotoIdsPromise ??= api
-    .listPersonPhotos()
-    .then(
-      (items) =>
-        new Set(
-          items
-            .filter(
-              (item) =>
-                item.personExternalId &&
-                (item.hasFile ||
-                  item.hasThumbnail ||
-                  Boolean(item.photoData)),
-            )
-            .map((item) => item.personExternalId.trim())
-            .filter(Boolean),
-        ),
-    )
-    .catch(() => new Set<string>())
-    .then((ids) => {
-      availablePhotoIdsCache = { at: Date.now(), ids };
-      return ids;
-    })
+
+  if (!availablePhotoIdsCache && !options?.force) {
+    const persisted = await readDataCache<string[]>(
+      CacheKeys.personnelPhotoIndex,
+    );
+    if (persisted?.length) {
+      rememberPhotoIds(new Set(persisted));
+    }
+  }
+
+  availablePhotoIdsPromise ??= fetchWithCache<string[]>({
+    key: CacheKeys.personnelPhotoIndex,
+    force: options?.force,
+    fetcher: async () => {
+      const items = await api.listPersonPhotos();
+      return [...photoIdsFromList(items)];
+    },
+    isChanged: jsonChanged,
+  })
+    .then((ids) => rememberPhotoIds(new Set(ids)))
+    .catch(() => availablePhotoIdsCache?.ids ?? new Set<string>())
     .finally(() => {
       availablePhotoIdsPromise = null;
     });
+
   return availablePhotoIdsPromise;
 };
 
 export const peekAvailablePersonPhotoIds = () =>
   availablePhotoIdsCache?.ids ?? null;
+
+/** Map list externalIds → thumbnail URLs when the photo index is already known. */
+export const collectPersonnelListPhotoUpdates = (
+  externalIds: string[],
+  rowByExternalId: ReadonlyMap<string, EjournalPreviewRow>,
+  availableIds: Set<string> | null | undefined,
+  requestedIds: ReadonlySet<string>,
+) => {
+  const updates: Record<string, string> = {};
+  for (const externalId of new Set(externalIds)) {
+    if (!externalId || requestedIds.has(externalId)) continue;
+    const row = rowByExternalId.get(externalId);
+    if (!row) continue;
+    const photoUrl = personPhotoThumbnailUrlForRow(row, undefined, availableIds);
+    if (!photoUrl) continue;
+    updates[externalId] = photoUrl;
+  }
+  return updates;
+};
 
 /** DB / filesystem key under which the photo is stored (may differ from roster externalId). */
 export const resolvePersonPhotoStorageIdForRow = (
@@ -385,14 +448,47 @@ export const resolvePersonPhotoStorageIdForRow = (
   return "";
 };
 
+/** Prefer the indexed / fingerprint key so saves survive reload and list lookup. */
+export const resolvePersonPhotoStorageIdForSave = (
+  row: EjournalPreviewRow | null,
+  fallbackExternalId = "",
+) => {
+  const fromIndex = resolvePersonPhotoStorageIdForRow(row);
+  if (fromIndex) return fromIndex;
+
+  const fingerprint = buildPersonIdentityFingerprint(
+    getPersonDisplayName(row),
+    resolvePersonBirthDate(row),
+    resolvePersonCallSign(row),
+  );
+  if (fingerprint) return fingerprint;
+
+  const fallback = fallbackExternalId.trim() || resolvePersonIdentityKey(row);
+  return fallback;
+};
+
+export const pruneStalePersonPhotos = async (
+  row: EjournalPreviewRow | null,
+  keepId: string,
+) => {
+  if (!row || !keepId) return;
+  const staleIds = collectPersonAttachmentLookupIds(row).filter(
+    (id) => id && id !== keepId,
+  );
+  await Promise.all(
+    staleIds.map((id) => api.deletePersonPhoto(id).catch(() => undefined)),
+  );
+};
+
 export const personPhotoThumbnailUrlForRow = (
   row: EjournalPreviewRow | null,
   hints?: PersonAttachmentLookupHints,
   availableIds?: Set<string> | null,
+  cacheBust?: number | string,
 ) => {
   const storageId = resolvePersonPhotoStorageIdForRow(row, hints, availableIds);
   return storageId
-    ? api.personPhotoFileUrl(storageId, { thumbnail: true })
+    ? api.personPhotoFileUrl(storageId, { thumbnail: true, cacheBust })
     : "";
 };
 
@@ -400,9 +496,12 @@ export const personPhotoFullUrlForRow = (
   row: EjournalPreviewRow | null,
   hints?: PersonAttachmentLookupHints,
   availableIds?: Set<string> | null,
+  cacheBust?: number | string,
 ) => {
   const storageId = resolvePersonPhotoStorageIdForRow(row, hints, availableIds);
-  return storageId ? api.personPhotoFileUrl(storageId) : "";
+  return storageId
+    ? api.personPhotoFileUrl(storageId, { cacheBust })
+    : "";
 };
 
 /** Lightweight list/card preview: request the 96×128 thumbnail directly. */
@@ -431,6 +530,15 @@ export type LoadPersonQuestionnaireOptions = {
   nameIsAmbiguous?: boolean;
 };
 
+const readWarmDocumentsCatalog = async (): Promise<BackendPersonDocument[]> => {
+  const memory = peekDataCache<BackendPersonDocument[]>(CacheKeys.documentsAll);
+  if (Array.isArray(memory) && memory.length) return memory;
+  const persisted = await readDataCache<BackendPersonDocument[]>(
+    CacheKeys.documentsAll,
+  );
+  return Array.isArray(persisted) ? persisted : [];
+};
+
 export const loadPersonDocumentsForRow = async (
   row: EjournalPreviewRow | null,
   hints?: PersonAttachmentLookupHints,
@@ -446,12 +554,10 @@ export const loadPersonDocumentsForRow = async (
   ]
     .map(normalizeAttachmentNameKey)
     .filter(Boolean);
-  const [direct, all] = await Promise.all([
-    fallback
-      ? api.listPersonDocuments(fallback).catch(() => [])
-      : Promise.resolve([] as BackendPersonDocument[]),
-    loadSharedDocumentsAll().catch(() => [] as BackendPersonDocument[]),
-  ]);
+  const direct = fallback
+    ? await api.listPersonDocuments(fallback).catch(() => [])
+    : ([] as BackendPersonDocument[]);
+  const all = await readWarmDocumentsCatalog();
   const related = all.filter((document) => {
     if (lookupSet.has(document.personExternalId)) return true;
     if (options?.nameIsAmbiguous) return false;
@@ -491,26 +597,25 @@ export const loadPersonQuestionnaireForRow = async (
   ].filter(Boolean);
   const allowFileNameFallback = !options?.nameIsAmbiguous;
 
-  if (fallback) {
-    try {
-      const questionnaire = await api.getPersonQuestionnaire(fallback);
-      if (hasQuestionnaireRecord(questionnaire)) {
-        return {
-          questionnaire,
-          resolvedExternalId: questionnaire!.personExternalId?.trim() || fallback,
-        };
-      }
-    } catch {
-      /* fall through to the questionnaire index */
-    }
-  }
-
   const indexed = await resolveQuestionnaireViaIndex(
     lookupIds,
     expectedNames,
     allowFileNameFallback,
   );
   if (indexed) return indexed;
+
+  if (fallback) {
+    const items = await loadQuestionnaireIndex();
+    const meta = items.find(
+      (item) => item.personExternalId?.trim() === fallback,
+    );
+    if (meta) {
+      return {
+        questionnaire: questionnaireMetaToStub(meta),
+        resolvedExternalId: fallback,
+      };
+    }
+  }
 
   return { questionnaire: null, resolvedExternalId: fallback };
 };

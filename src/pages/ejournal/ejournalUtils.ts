@@ -6,7 +6,7 @@ import {
 } from "../../excelRoundTrip";
 import { normalizeDatasetKey } from "../../shared/format";
 import type { EjournalColumn, EjournalPreviewRow } from "./ejournalTypes";
-import { resolveMorningGeneralListColumnLabel } from "../personnel/personnelUtils";
+import { resolveMorningGeneralListColumnLabel } from "../personnel/morningGeneralListColumnLabels";
 
 export const buildImportColumns = (
   sheet: ExcelWorkbookSnapshot | ExcelWorkbookSnapshot["sheets"][number],

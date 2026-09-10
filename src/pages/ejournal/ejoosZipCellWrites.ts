@@ -1,4 +1,5 @@
 import JSZip from "jszip";
+import { EJOOS_WRITE_STYLE } from "./ejoosStyleConfig";
 import {
   expandSharedFormulas,
   repairBrokenCellOpenTags,
@@ -27,8 +28,7 @@ export type ZipCellWrite = {
    */
   copyNeighborStyle?: boolean;
   /**
-   * Use the neighbor cell `s=` as-is (same font, align, borders).
-   * Do not invent a new wrap/center xf — that is what made anketa fills bold.
+   * Копіювати fill/border із style-source, але застосувати TNR + center (без wrap).
    */
   keepNeighborStyle?: boolean;
   /** Absolute cellXfs index, if already resolved. */
@@ -877,12 +877,6 @@ const sortSheetDataRows = (sheetXml: string) => {
 const xfAppliesAlignment = (xfXml: string) =>
   /applyAlignment="(?:1|true)"/i.test(xfXml);
 
-const isCenteredWrapXf = (xfXml: string) =>
-  xfAppliesAlignment(xfXml) &&
-  /wrapText="(?:1|true)"/i.test(xfXml) &&
-  /vertical="center"/i.test(xfXml) &&
-  /horizontal="center"/i.test(xfXml);
-
 const fontsFromStyles = (stylesXml: string) => {
   const body = stylesXml.match(/<fonts\b[^>]*>([\s\S]*?)<\/fonts>/i)?.[1] ?? "";
   return [...body.matchAll(/<font\b[^>]*(?:\/>|>[\s\S]*?<\/font>)/gi)].map(
@@ -895,172 +889,403 @@ const fontIdIsBold = (stylesXml: string, fontId: string) => {
   return Boolean(font && /<b\b/i.test(font));
 };
 
+const TIMES_NEW_ROMAN = EJOOS_WRITE_STYLE.fontName;
+
+/** Розмір шрифту для всіх записів у ЄЖООС (див. ejoosStyleConfig.ts). */
+export const EJOOS_DATA_FONT_SIZE = EJOOS_WRITE_STYLE.fontSize;
+
 const regularFontId = (stylesXml: string) => {
   const fonts = fontsFromStyles(stylesXml);
   const index = fonts.findIndex((font) => !/<b\b/i.test(font));
   return index >= 0 ? String(index) : "0";
 };
 
-const xfFontId = (xfXml: string) => xfXml.match(/\bfontId="(\d+)"/i)?.[1] ?? "0";
+const fontHasTimesNewRoman = (fontXml: string) =>
+  new RegExp(`<name\\b[^>]*\\bval="${TIMES_NEW_ROMAN}"`, "i").test(fontXml);
 
-const withRegularFont = (xfXml: string, stylesXml: string) => {
-  const fontId = xfFontId(xfXml);
-  if (!fontIdIsBold(stylesXml, fontId)) return xfXml;
-  const nextFont = regularFontId(stylesXml);
-  let xf = xfXml.replace(/\bfontId="[^"]*"/i, `fontId="${nextFont}"`);
-  if (/applyFont=/i.test(xf)) {
-    xf = xf.replace(/applyFont="[^"]*"/i, `applyFont="1"`);
-  } else {
-    xf = xf.replace(/<xf\b/, `<xf applyFont="1"`);
-  }
-  return xf;
+const fontSizeFromFontXml = (fontXml: string | undefined) => {
+  const sz = fontXml?.match(/\bsz val="(\d+)"/i)?.[1];
+  const size = Number(sz);
+  return Number.isFinite(size) && size > 0 ? size : EJOOS_DATA_FONT_SIZE;
 };
 
-const withCenterAlignment = (xfXml: string) => {
-  let xf = xfXml;
-  if (/applyAlignment=/i.test(xf)) {
-    xf = xf.replace(/applyAlignment="[^"]*"/i, `applyAlignment="1"`);
-  } else {
-    xf = xf.replace(/<xf\b/, `<xf applyAlignment="1"`);
-  }
-  if (/<alignment\b/i.test(xf)) {
-    return xf.replace(
-      /<alignment\b([^>]*)(?:\/>|><\/alignment>|>)/i,
-      (_all, attrs: string) => {
-        const cleaned = String(attrs)
-          .replace(/\s+vertical="[^"]*"/gi, "")
-          .replace(/\s+horizontal="[^"]*"/gi, "")
-          .replace(/\/\s*$/, "")
-          .trimEnd();
-        return `<alignment${cleaned} vertical="center" horizontal="center"/>`;
-      },
-    );
-  }
-  const alignment = `<alignment vertical="center" horizontal="center"/>`;
-  if (/\/\s*>\s*$/.test(xf.trim())) {
-    return xf.replace(/\/\s*>\s*$/, `>${alignment}</xf>`);
-  }
-  return xf.replace(/<xf\b([^>]*)>/, `<xf$1>${alignment}`);
-};
+const fontSizeFromStyles = (stylesXml: string, fontId: string) =>
+  fontSizeFromFontXml(fontsFromStyles(stylesXml)[Number(fontId)]);
 
-const ensurePlainCenteredStyle = (
+/** Звичайний Times New Roman фіксованого розміру для записів даних. */
+const ensureTimesNewRomanRegularFont = (
   stylesXml: string,
-  sourceStyleId: string | undefined,
+  size = EJOOS_DATA_FONT_SIZE,
 ) => {
-  const block = stylesXml.match(/<cellXfs\b([^>]*)>([\s\S]*?)<\/cellXfs>/i);
-  if (!block) return { xml: stylesXml, styleId: sourceStyleId };
-  const xfs = [
-    ...block[2].matchAll(/<xf\b[^>]*(?:\/>|>[\s\S]*?<\/xf>)/gi),
-  ].map((match) => match[0]);
-  const sourceIndex = Number(sourceStyleId);
-  const sourceXf =
-    Number.isInteger(sourceIndex) && sourceIndex >= 0 && sourceIndex < xfs.length
-      ? xfs[sourceIndex]
-      : undefined;
-  const fallbackFont = regularFontId(stylesXml);
-  const next = withRegularFont(
-    withCenterAlignment(
-      sourceXf ||
-        `<xf numFmtId="0" fontId="${fallbackFont}" fillId="0" borderId="0" xfId="0" applyFont="1" applyAlignment="1"/>`,
-    ),
-    stylesXml,
+  const fonts = fontsFromStyles(stylesXml);
+  const index = fonts.findIndex(
+    (font) =>
+      fontHasTimesNewRoman(font) &&
+      !/<b\b/i.test(font) &&
+      fontSizeFromFontXml(font) === size,
   );
-  if (sourceXf && next === sourceXf) {
-    return { xml: stylesXml, styleId: String(sourceIndex) };
+  if (index >= 0) return { xml: stylesXml, fontId: String(index) };
+  const newFont = `<font><sz val="${size}"/><name val="${TIMES_NEW_ROMAN}"/><family val="1"/><charset val="204"/></font>`;
+  const block = stylesXml.match(/<fonts\b([^>]*)>([\s\S]*?)<\/fonts>/i);
+  if (!block) {
+    return { xml: stylesXml, fontId: regularFontId(stylesXml) };
   }
-  const existing = xfs.findIndex((xf) => xf === next);
-  if (existing >= 0) return { xml: stylesXml, styleId: String(existing) };
+  const count = fonts.length + 1;
+  const openTag = block[0].slice(0, block[0].indexOf(">") + 1);
+  const nextOpen = /\bcount="/i.test(openTag)
+    ? openTag.replace(/\bcount="[^"]*"/i, `count="${count}"`)
+    : openTag.replace(/>$/, ` count="${count}">`);
   const xml = stylesXml.replace(
-    /<cellXfs\b[^>]*>[\s\S]*?<\/cellXfs>/i,
-    `<cellXfs count="${xfs.length + 1}">${block[2]}${next}</cellXfs>`,
+    block[0],
+    `${nextOpen}${block[2]}${newFont}</fonts>`,
   );
-  return { xml, styleId: String(xfs.length) };
+  return { xml, fontId: String(fonts.length) };
 };
+
+const fontIdIsTimesNewRomanRegular = (stylesXml: string, fontId: string) => {
+  const font = fontsFromStyles(stylesXml)[Number(fontId)];
+  return Boolean(font && fontHasTimesNewRoman(font) && !/<b\b/i.test(font));
+};
+
+const xfFontId = (xfXml: string) => xfXml.match(/\bfontId="(\d+)"/i)?.[1] ?? "0";
 
 const xfAttr = (xfXml: string | undefined, name: string, fallback: string) =>
   xfXml?.match(new RegExp(`\\b${name}="(\\d+)"`, "i"))?.[1] ?? fallback;
-
-/** Новий xf: wrap + центр + звичайний шрифт. Не патчимо старий XML — Excel ігнорує alignment без applyAlignment="1". */
-const buildWrapCenterRegularXf = (
-  sourceXf: string | undefined,
-  stylesXml: string,
-) => {
-  const numFmtId = xfAttr(sourceXf, "numFmtId", "0");
-  const fillId = xfAttr(sourceXf, "fillId", "0");
-  const borderId = xfAttr(sourceXf, "borderId", "0");
-  const xfId = xfAttr(sourceXf, "xfId", "0");
-  const fontId = regularFontId(stylesXml);
-  const applyNumberFormat =
-    numFmtId !== "0" || /applyNumberFormat="(?:1|true)"/i.test(sourceXf || "")
-      ? ` applyNumberFormat="1"`
-      : "";
-  const applyFill = /applyFill="(?:1|true)"/i.test(sourceXf || "")
-    ? ` applyFill="1"`
-    : "";
-  const applyBorder =
-    borderId !== "0" || /applyBorder="(?:1|true)"/i.test(sourceXf || "")
-      ? ` applyBorder="1"`
-      : "";
-  return `<xf numFmtId="${numFmtId}" fontId="${fontId}" fillId="${fillId}" borderId="${borderId}" xfId="${xfId}" applyFont="1"${applyNumberFormat}${applyFill}${applyBorder} applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>`;
-};
 
 const cellXfsBlock = (stylesXml: string) =>
   stylesXml.match(
     /<(?:[\w]+:)?cellXfs\b([^>]*)>([\s\S]*?)<\/(?:[\w]+:)?cellXfs>/i,
   );
 
-const countXfChildren = (body: string) =>
-  (body.match(/<(?:[\w]+:)?xf\b/gi) ?? []).length;
+/** Новий xf: центр + Times New Roman (не bold), з/без wrap. Зберігаємо fill/border джерела. */
+const buildCenterRegularXf = (
+  sourceXf: string | undefined,
+  fontId: string,
+  wrapText: boolean,
+) => {
+  const numFmtId = xfAttr(sourceXf, "numFmtId", "0");
+  const fillId = xfAttr(sourceXf, "fillId", "0");
+  const borderId = xfAttr(sourceXf, "borderId", "0");
+  const xfId = xfAttr(sourceXf, "xfId", "0");
+  const applyNumberFormat =
+    numFmtId !== "0" || /applyNumberFormat="(?:1|true)"/i.test(sourceXf || "")
+      ? ` applyNumberFormat="1"`
+      : "";
+  const applyFill =
+    fillId !== "0" || /applyFill="(?:1|true)"/i.test(sourceXf || "")
+      ? ` applyFill="1"`
+      : "";
+  const applyBorder =
+    borderId !== "0" || /applyBorder="(?:1|true)"/i.test(sourceXf || "")
+      ? ` applyBorder="1"`
+      : "";
+  const wrapAttr = wrapText ? ` wrapText="1"` : "";
+  return `<xf numFmtId="${numFmtId}" fontId="${fontId}" fillId="${fillId}" borderId="${borderId}" xfId="${xfId}" applyFont="1"${applyNumberFormat}${applyFill}${applyBorder} applyAlignment="1"><alignment horizontal="center" vertical="center"${wrapAttr}/></xf>`;
+};
 
-/** Копія стилю клітинки + wrap + центр. Не чіпаємо styles.xml, якщо розбір xf ненадійний. */
-const ensureWrapOnStyle = (
+const styleMatchesCenterRegular = (
+  stylesXml: string,
+  styleId: string,
+  wrapText: boolean,
+  fontSize = EJOOS_DATA_FONT_SIZE,
+) => {
+  const xf = xfXmlForStyle(stylesXml, styleId);
+  if (!xf || !xfAppliesAlignment(xf)) return false;
+  if (!/applyFont="(?:1|true)"/i.test(xf)) return false;
+  if (!fontIdIsTimesNewRomanRegular(stylesXml, xfFontId(xf))) return false;
+  if (fontSizeFromStyles(stylesXml, xfFontId(xf)) !== fontSize) return false;
+  if (!/vertical="center"/i.test(xf) || !/horizontal="center"/i.test(xf)) {
+    return false;
+  }
+  const hasWrap = /wrapText="(?:1|true)"/i.test(xf);
+  return wrapText ? hasWrap : !hasWrap;
+};
+
+/**
+ * Єдиний шлях стилізації записів у ЄЖООС.
+ * Усюди Times New Roman, center, не bold. Wrap — лише ООС / Виключені.
+ */
+const ensureCenterRegularStyle = (
   stylesXml: string,
   sourceStyleId: string | undefined,
+  wrapText: boolean,
 ) => {
   const block = cellXfsBlock(stylesXml);
-  if (!block) {
-    return { xml: stylesXml, styleId: sourceStyleId };
-  }
-  const xfs = [
-    ...block[2].matchAll(
-      /<(?:[\w]+:)?xf\b[^>]*(?:\/>|>[\s\S]*?<\/(?:[\w]+:)?xf>)/gi,
-    ),
-  ].map((match) => match[0]);
-  if (!xfs.length || xfs.length !== countXfChildren(block[2])) {
-    return { xml: stylesXml, styleId: sourceStyleId };
-  }
+  const xfs = block
+    ? [
+        ...block[2].matchAll(
+          /<(?:[\w]+:)?xf\b[^>]*(?:\/>|>[\s\S]*?<\/(?:[\w]+:)?xf>)/gi,
+        ),
+      ].map((match) => match[0])
+    : [];
   const sourceIndex = Number(sourceStyleId);
   const sourceXf =
     Number.isInteger(sourceIndex) && sourceIndex >= 0 && sourceIndex < xfs.length
       ? xfs[sourceIndex]
       : undefined;
+  const targetFontSize = EJOOS_DATA_FONT_SIZE;
+  const fontEnsured = ensureTimesNewRomanRegularFont(stylesXml, targetFontSize);
+  let xml = fontEnsured.xml;
   if (
-    sourceXf &&
-    isCenteredWrapXf(sourceXf) &&
-    !fontIdIsBold(stylesXml, xfFontId(sourceXf))
+    sourceStyleId &&
+    styleMatchesCenterRegular(xml, sourceStyleId, wrapText, targetFontSize)
   ) {
-    return { xml: stylesXml, styleId: String(sourceIndex) };
+    return { xml, styleId: sourceStyleId };
   }
-  const wrapped = buildWrapCenterRegularXf(sourceXf, stylesXml);
-  const existing = xfs.findIndex((xf) => xf === wrapped);
-  if (existing >= 0) return { xml: stylesXml, styleId: String(existing) };
+  if (!block) return { xml, styleId: sourceStyleId };
+  if (!xfs.length) {
+    return { xml, styleId: sourceStyleId };
+  }
+  const built = buildCenterRegularXf(sourceXf, fontEnsured.fontId, wrapText);
+  const existing = xfs.findIndex((xf) => xf === built);
+  if (existing >= 0) return { xml, styleId: String(existing) };
   const open = block[0].slice(0, block[0].indexOf(">") + 1);
   const close = block[0].match(/<\/(?:[\w]+:)?cellXfs>/i)?.[0];
-  if (!close) return { xml: stylesXml, styleId: sourceStyleId };
+  if (!close) return { xml, styleId: sourceStyleId };
   const nextOpen = /\bcount="/i.test(open)
     ? open.replace(/\bcount="[^"]*"/i, `count="${xfs.length + 1}"`)
     : open.replace(/>$/, ` count="${xfs.length + 1}">`);
-  const xml = stylesXml.replace(
+  const nextXml = xml.replace(
     block[0],
-    `${nextOpen}${block[2]}${wrapped}${close}`,
+    `${nextOpen}${block[2]}${built}${close}`,
   );
-  return { xml, styleId: String(xfs.length) };
+  if (nextXml === xml) return { xml, styleId: sourceStyleId };
+  return { xml: nextXml, styleId: String(xfs.length) };
 };
+
+const ensurePlainCenteredStyle = (
+  stylesXml: string,
+  sourceStyleId: string | undefined,
+) => ensureCenterRegularStyle(stylesXml, sourceStyleId, false);
 
 const yieldToUi = () =>
   new Promise<void>((resolve) => {
     window.setTimeout(resolve, 0);
   });
+
+const PLAIN_DATA_SHEET_RES = [/табель/i, /шпо|штатно.?посад/i] as const;
+
+const plainDataSheetPattern = (sheetNameOrRe: string | RegExp) => {
+  if (typeof sheetNameOrRe === "string") {
+    return PLAIN_DATA_SHEET_RES.find((re) => re.test(sheetNameOrRe));
+  }
+  const source = sheetNameOrRe.source.toLowerCase();
+  if (/табель/.test(source)) return PLAIN_DATA_SHEET_RES[0];
+  if (/шпо|штатно/.test(source)) return PLAIN_DATA_SHEET_RES[1];
+  return undefined;
+};
+
+/** ШПО / Табель: TNR, center, не bold, без wrap на записах. */
+export const isPlainDataSheetTarget = (sheetNameOrRe: string | RegExp) =>
+  Boolean(plainDataSheetPattern(sheetNameOrRe));
+
+export const isTimesheetSheetTarget = (sheetNameOrRe: string | RegExp) => {
+  if (typeof sheetNameOrRe === "string") return /табель/i.test(sheetNameOrRe);
+  const source = sheetNameOrRe.source.toLowerCase();
+  return /табель/.test(source);
+};
+
+const buildNewRowXml = (
+  row: number,
+  rowWrites: ZipCellWrite[],
+  withSharedString: (write: ZipCellWrite) => ZipCellWrite,
+  styleIdFor: (write: ZipCellWrite) => string | undefined,
+) => {
+  const valueWrites = rowWrites.filter((write) => !write.styleOnly);
+  const styleOnlyWrites = rowWrites.filter((write) => write.styleOnly);
+  const cellsByColumn = new Map<number, string>();
+  for (const write of valueWrites) {
+    const next = withSharedString(write);
+    cellsByColumn.set(
+      next.column,
+      buildCellXml(
+        `${columnNumberToLetter(next.column)}${next.row}`,
+        styleIdFor(next),
+        next.value,
+        next.sharedStringIndex,
+      ),
+    );
+  }
+  for (const write of styleOnlyWrites) {
+    if (cellsByColumn.has(write.column)) continue;
+    cellsByColumn.set(
+      write.column,
+      buildCellXml(
+        `${columnNumberToLetter(write.column)}${write.row}`,
+        styleIdFor(write),
+        null,
+      ),
+    );
+  }
+  const cells = [...cellsByColumn.entries()]
+    .sort(([left], [right]) => left - right)
+    .map(([, cellXml]) => cellXml);
+  return `<row r="${row}">${cells.join("")}</row>`;
+};
+
+const WRAP_DATA_SHEET_RES = [/оос/i, /виключен/i] as const;
+
+const wrapDataSheetPattern = (sheetNameOrRe: string | RegExp) => {
+  if (typeof sheetNameOrRe === "string") {
+    return WRAP_DATA_SHEET_RES.find((re) => re.test(sheetNameOrRe));
+  }
+  const source = sheetNameOrRe.source.toLowerCase();
+  if (/оос/.test(source)) return WRAP_DATA_SHEET_RES[0];
+  if (/виключен/.test(source)) return WRAP_DATA_SHEET_RES[1];
+  return undefined;
+};
+
+/** ООС / Виключені: wrap дозволено, bold — ні. */
+export const isWrapDataSheetTarget = (sheetNameOrRe: string | RegExp) =>
+  Boolean(wrapDataSheetPattern(sheetNameOrRe));
+
+/** Політика стилів записів у ЄЖООС: усюди TNR + center + не bold. */
+export const ejoosSheetWriteStylePolicy = (
+  sheetNameOrRe: string | RegExp,
+): { wrapText: boolean; lastColumn: number; minRow: number } => {
+  const label =
+    typeof sheetNameOrRe === "string" ? sheetNameOrRe : sheetNameOrRe.source;
+  const lower = label.toLowerCase();
+  if (/табель/.test(lower)) {
+    return { wrapText: false, lastColumn: 40, minRow: 7 };
+  }
+  if (/шпо|штатно/.test(lower)) {
+    return { wrapText: false, lastColumn: 32, minRow: 7 };
+  }
+  if (/оос/.test(lower)) {
+    return { wrapText: true, lastColumn: 40, minRow: 7 };
+  }
+  if (/виключен/.test(lower)) {
+    return { wrapText: true, lastColumn: 32, minRow: 7 };
+  }
+  if (/відсутн/.test(lower)) {
+    return { wrapText: false, lastColumn: 18, minRow: 6 };
+  }
+  if (/прибул/.test(lower)) {
+    return { wrapText: false, lastColumn: 20, minRow: 6 };
+  }
+  return { wrapText: false, lastColumn: 40, minRow: 7 };
+};
+
+/** Після xlsx-populate або для страховки: TNR, center, не bold. */
+export async function restyleSheetDataRows(
+  file: Blob,
+  sheetNameOrRe: string | RegExp,
+  rows: Iterable<number>,
+  options?: { lastColumn?: number; wrapText?: boolean; minRow?: number },
+): Promise<Blob> {
+  const policy = ejoosSheetWriteStylePolicy(sheetNameOrRe);
+  const minRow = options?.minRow ?? policy.minRow;
+  const unique = [...new Set([...rows].filter((row) => row >= minRow))];
+  if (!unique.length) return file;
+  const lastColumn = options?.lastColumn ?? policy.lastColumn;
+  const wrapText = options?.wrapText ?? policy.wrapText;
+  const writes: ZipCellWrite[] = [];
+  for (const row of unique) {
+    for (let column = 1; column <= lastColumn; column += 1) {
+      writes.push({
+        row,
+        column,
+        value: null,
+        styleOnly: true,
+        styleSourceRow: row,
+        styleSourceColumn: column,
+        keepNeighborStyle: true,
+        copyNeighborStyle: false,
+        wrapText,
+      });
+    }
+  }
+  return applyInlineStringWritesToWorkbook(file, sheetNameOrRe, writes);
+}
+
+export async function restylePlainDataSheetRows(
+  file: Blob,
+  sheetNameOrRe: string | RegExp,
+  rows: Iterable<number>,
+  lastColumn = 40,
+): Promise<Blob> {
+  if (!plainDataSheetPattern(sheetNameOrRe)) return file;
+  return restyleSheetDataRows(file, sheetNameOrRe, rows, {
+    lastColumn,
+    wrapText: false,
+  });
+}
+
+export async function restyleTimesheetDataRows(
+  file: Blob,
+  rows: Iterable<number>,
+): Promise<Blob> {
+  return restyleSheetDataRows(file, /табель/i, rows, {
+    lastColumn: 40,
+    wrapText: false,
+  });
+}
+
+export async function restyleShpoDataRows(
+  file: Blob,
+  rows: Iterable<number>,
+): Promise<Blob> {
+  return restyleSheetDataRows(file, /шпо|штатно.?посад/i, rows, {
+    lastColumn: 32,
+    wrapText: false,
+  });
+}
+
+export async function restyleOosDataRows(
+  file: Blob,
+  rows: Iterable<number>,
+): Promise<Blob> {
+  return restyleSheetDataRows(file, /оос/i, rows, {
+    lastColumn: 40,
+    wrapText: true,
+  });
+}
+
+export async function restyleExcludedDataRows(
+  file: Blob,
+  rows: Iterable<number>,
+): Promise<Blob> {
+  return restyleSheetDataRows(file, /виключен/i, rows, {
+    lastColumn: 32,
+    wrapText: true,
+  });
+}
+
+export async function restyleAbsentDataRows(
+  file: Blob,
+  rows: Iterable<number>,
+): Promise<Blob> {
+  return restyleSheetDataRows(file, /відсутн/i, rows);
+}
+
+export async function restyleArrivalDataRows(
+  file: Blob,
+  rows: Iterable<number>,
+): Promise<Blob> {
+  return restyleSheetDataRows(file, /прибул/i, rows);
+}
+
+/** Унікальні рядки з масиву ZIP-записів (для restyle після apply). */
+export const rowsFromZipWrites = (
+  writes: Iterable<ZipCellWrite>,
+  minRow = 6,
+): number[] => [
+  ...new Set([...writes].map((write) => write.row).filter((row) => row >= minRow)),
+];
+
+export async function restyleWrittenRowsFromZip(
+  file: Blob,
+  targets: Array<{ sheet: string | RegExp; writes: ZipCellWrite[] }>,
+): Promise<Blob> {
+  let blob = file;
+  for (const { sheet, writes } of targets) {
+    const rows = rowsFromZipWrites(writes);
+    if (!rows.length) continue;
+    blob = await restyleSheetDataRows(blob, sheet, rows);
+  }
+  return blob;
+}
 
 /**
  * Точковий запис текстових клітинок у аркуш .xlsx без xlsx-populate.
@@ -1127,13 +1352,24 @@ export async function applyInlineStringWritesToWorkbook(
     throw new Error(`Не вдалося прочитати аркуш ${sheetPath}.`);
   }
   let sheetXml = loadedSheetXml;
+  const isPlainDataSheet = isPlainDataSheetTarget(sheetNameOrRe);
 
   const skipStyleRows = new Set(writes.map((write) => write.row));
-  const needsNeighborStyle = writes.some((write) => write.copyNeighborStyle);
+  const needsNeighborStyle =
+    !isPlainDataSheet && writes.some((write) => write.copyNeighborStyle);
   const xmlTemplateRow = needsNeighborStyle
     ? findWrapTemplateRow(sheetXml, sstXml, "D", skipStyleRows, stylesXml)
     : 0;
   const resolvedWrites = writes.map((write) => {
+    if (isPlainDataSheet && write.copyNeighborStyle) {
+      return {
+        ...write,
+        copyNeighborStyle: false,
+        keepNeighborStyle: true,
+        styleSourceRow: write.styleSourceRow || write.row,
+        styleSourceColumn: write.styleSourceColumn || write.column,
+      };
+    }
     if (!write.copyNeighborStyle) return write;
     const fallback =
       write.styleSourceRow && write.styleSourceRow >= 7
@@ -1161,10 +1397,11 @@ export async function applyInlineStringWritesToWorkbook(
     split ? [...split.indexByRow.keys()] : [],
   );
   const styleIdBySource = new Map<string, string | undefined>();
-  const wrapStyleBySource = new Map<string, string | undefined>();
+  const centerStyleBySource = new Map<string, string | undefined>();
   const needsSstParse = writes.some((write) => write.styleOnly);
   const sstStrings = needsSstParse ? parseSharedStringList(sstXml) : [];
   const writeNeedsWrap = (write: ZipCellWrite, rowXml?: string) => {
+    if (isPlainDataSheet) return false;
     if (write.wrapText) return true;
     if (String(write.value ?? "").includes("\n")) return true;
     if (!write.styleOnly) return false;
@@ -1229,18 +1466,18 @@ export async function applyInlineStringWritesToWorkbook(
     return styleId;
   };
   const styleIdFor = (write: ZipCellWrite, rowXml?: string) => {
-    const sourceId = sourceStyleIdFor(write, rowXml);
-    // Новий xf у styles.xml ламає Excel (зняття Font/Format/Style з усієї книги).
-    if (write.keepNeighborStyle) return sourceId;
-    const needsWrap = writeNeedsWrap(write, rowXml) || Boolean(write.wrapText);
-    if (!needsWrap || !stylesXml) return sourceId;
-    const cacheKey = sourceId ?? "_none";
-    if (wrapStyleBySource.has(cacheKey)) {
-      return wrapStyleBySource.get(cacheKey);
+    const sourceId = write.styleId ?? sourceStyleIdFor(write, rowXml);
+    const needsWrap = isPlainDataSheet
+      ? false
+      : write.wrapText ?? isWrapDataSheetTarget(sheetNameOrRe);
+    if (!stylesXml) return sourceId;
+    const cacheKey = `${sourceId ?? "_none"}:${needsWrap ? "w" : "n"}`;
+    if (centerStyleBySource.has(cacheKey)) {
+      return centerStyleBySource.get(cacheKey);
     }
-    const ensured = ensureWrapOnStyle(stylesXml, sourceId);
+    const ensured = ensureCenterRegularStyle(stylesXml, sourceId, needsWrap);
     stylesXml = ensured.xml;
-    wrapStyleBySource.set(cacheKey, ensured.styleId);
+    centerStyleBySource.set(cacheKey, ensured.styleId);
     return ensured.styleId;
   };
 
@@ -1260,20 +1497,11 @@ export async function applyInlineStringWritesToWorkbook(
       );
       const partIndex = split.indexByRow.get(row);
       if (partIndex == null) {
-        const cells = rowWrites
-          .filter((write) => !write.styleOnly)
-          .map((write) => {
-            const next = withSharedString(write);
-            return buildCellXml(
-              `${columnNumberToLetter(next.column)}${next.row}`,
-              styleIdFor(next),
-              next.value,
-              next.sharedStringIndex,
-            );
-          });
         newRows.push({
           row,
-          xml: `<row r="${row}">${cells.join("")}</row>`,
+          xml: buildNewRowXml(row, rowWrites, withSharedString, (write) =>
+            styleIdFor(write),
+          ),
         });
         continue;
       }
@@ -1337,20 +1565,11 @@ export async function applyInlineStringWritesToWorkbook(
         (a, b) => a.column - b.column,
       );
       if (!existingRowNums.has(row)) {
-        const cells = rowWrites
-          .filter((write) => !write.styleOnly)
-          .map((write) => {
-            const next = withSharedString(write);
-            return buildCellXml(
-              `${columnNumberToLetter(next.column)}${next.row}`,
-              styleIdFor(next),
-              next.value,
-              next.sharedStringIndex,
-            );
-          });
         newRows.push({
           row,
-          xml: `<row r="${row}">${cells.join("")}</row>`,
+          xml: buildNewRowXml(row, rowWrites, withSharedString, (write) =>
+            styleIdFor(write),
+          ),
         });
         continue;
       }

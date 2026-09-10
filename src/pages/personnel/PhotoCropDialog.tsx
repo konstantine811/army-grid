@@ -13,7 +13,6 @@ import {
   DialogContent,
   DialogTitle,
   LinearProgress,
-  Stack,
   Typography,
 } from "@/components/sci/SciPrimitives";
 import { CloudUploadOutlinedIcon } from "@/components/sci/icons";
@@ -167,13 +166,14 @@ export const PhotoCropStage = forwardRef<
   const previewRef = useRef<HTMLDivElement | null>(null);
   const imageRefs = useRef<Array<HTMLImageElement | null>>([]);
   const [previewPages, setPreviewPages] = useState<PreviewPage[]>([]);
-  const [activePdfPage, setActivePdfPage] = useState(1);
-  const [pdfPageCount, setPdfPageCount] = useState(1);
+  const [pdfPageCount, setPdfPageCount] = useState(0);
   const [isPreparingPreview, setIsPreparingPreview] = useState(false);
   const [cropRect, setCropRect] = useState<CropRect>(defaultCropRect);
   const [isDrawing, setIsDrawing] = useState(false);
   const [drawStart, setDrawStart] = useState({ x: 0, y: 0 });
-  const isPdf = file?.type === "application/pdf";
+  const isPdf =
+    file?.type === "application/pdf" ||
+    file?.name.toLowerCase().endsWith(".pdf");
   const ready = Boolean(previewPages.length) && !isPreparingPreview;
 
   useEffect(() => {
@@ -181,13 +181,9 @@ export const PhotoCropStage = forwardRef<
   }, [onReadyChange, ready]);
 
   useEffect(() => {
-    setActivePdfPage(1);
-    setPdfPageCount(1);
-  }, [file]);
-
-  useEffect(() => {
     if (!file || !active) {
       setPreviewPages([]);
+      setPdfPageCount(0);
       setIsPreparingPreview(false);
       return;
     }
@@ -195,6 +191,7 @@ export const PhotoCropStage = forwardRef<
     let cancelled = false;
     setIsPreparingPreview(true);
     setPreviewPages([]);
+    setPdfPageCount(0);
     setCropRect(defaultCropRect);
     imageRefs.current = [];
 
@@ -211,15 +208,17 @@ export const PhotoCropStage = forwardRef<
           return;
         }
 
-        if (file.type === "application/pdf") {
-          const rendered = await renderPdfPageToImageDataUrl(
-            file,
-            activePdfPage,
-          );
-          if (!cancelled) {
-            setPdfPageCount(rendered.pageCount);
-            setPreviewPages([rendered.page]);
-          }
+        if (
+          file.type === "application/pdf" ||
+          file.name.toLowerCase().endsWith(".pdf")
+        ) {
+          const pages: PreviewPage[] = [];
+          await visitPdfPagesAsImageDataUrls(file, (page, pageCount) => {
+            if (cancelled) return;
+            pages.push(page);
+            setPdfPageCount(pageCount);
+            setPreviewPages([...pages]);
+          });
           return;
         }
 
@@ -227,6 +226,7 @@ export const PhotoCropStage = forwardRef<
       } catch (error) {
         if (!cancelled) {
           setPreviewPages([]);
+          setPdfPageCount(0);
           onMessage(
             error instanceof Error
               ? error.message
@@ -243,7 +243,7 @@ export const PhotoCropStage = forwardRef<
     return () => {
       cancelled = true;
     };
-  }, [file, onMessage, active, activePdfPage]);
+  }, [file, onMessage, active]);
 
   const getPointerPosition = (event: PointerEvent<HTMLDivElement>) => {
     const innerRect = event.currentTarget.getBoundingClientRect();
@@ -380,35 +380,12 @@ export const PhotoCropStage = forwardRef<
     <div className={`photo-crop-embed${compact ? " is-compact" : ""}`}>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
         {isPdf
-          ? "Протягніть прямокутник навколо фото на сторінці, потім «Зберегти фото»."
+          ? pdfPageCount > 1
+            ? `Прокрутіть PDF (${pdfPageCount} стор.), виділіть фото прямокутником і натисніть «Зберегти фото».`
+            : "Протягніть прямокутник навколо фото на сторінці, потім «Зберегти фото»."
           : "Можна одразу натиснути «Зберегти фото» або протягнути прямокутник для обрізки."}
       </Typography>
       {isPreparingPreview && <LinearProgress color="primary" sx={{ mb: 1 }} />}
-      {isPdf && pdfPageCount > 1 && (
-        <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }}>
-          <Button
-            disabled={activePdfPage <= 1 || isPreparingPreview}
-            onClick={() => setActivePdfPage((page) => Math.max(1, page - 1))}
-            size="small"
-            variant="outlined"
-          >
-            ←
-          </Button>
-          <Typography variant="caption" color="text.secondary">
-            Сторінка {activePdfPage} з {pdfPageCount}
-          </Typography>
-          <Button
-            disabled={activePdfPage >= pdfPageCount || isPreparingPreview}
-            onClick={() =>
-              setActivePdfPage((page) => Math.min(pdfPageCount, page + 1))
-            }
-            size="small"
-            variant="outlined"
-          >
-            →
-          </Button>
-        </Stack>
-      )}
       <div className="photo-crop-stage" ref={previewRef}>
         <div
           className="photo-crop-stage-inner"
@@ -423,7 +400,7 @@ export const PhotoCropStage = forwardRef<
                 <img
                   alt={
                     isPdf
-                      ? `Сторінка PDF ${page.pageNumber ?? activePdfPage} для кадрування`
+                      ? `Сторінка PDF ${page.pageNumber ?? index + 1} для кадрування`
                       : "Фото для кадрування"
                   }
                   key={page.id}

@@ -9,7 +9,7 @@ import {
   useMaterialReactTable,
 } from "@/components/sci/SciDataTable";
 import type { BackendPersonnelOverviewRow } from "../../api";
-import { openPersonnelInNewTab } from "../../app/navigation";
+import { openPersonnelFromOverview } from "../../app/navigation";
 import { OVERVIEW_STAFF_COLUMN_HEADERS } from "./overviewStaffColumns";
 import {
   buildOverviewStaffSheetColumnDefs,
@@ -153,13 +153,20 @@ export function OverviewVirtualTable({
   photos,
   questionnaireByExternalId,
   questionnaireLoading = false,
+  questionnairePresenceStatus = "ready",
   documentsByExternalId,
   onOpenQuestionnaire,
   onNeedPhoto,
+  onVisibleRowsChange,
   onExport,
   onImportantExport,
+  onRotaGudzExport,
+  onRotaBchsMorningExport,
+  onPpdLocationExport,
   copyTextBuilder,
+  rotaCopyTextBuilder,
   emptyMessage = "Немає записів за поточними фільтрами.",
+  onColumnVisibilityChange,
 }: {
   rows: BackendPersonnelOverviewRow[];
   photos: Record<string, string>;
@@ -168,33 +175,69 @@ export function OverviewVirtualTable({
   documentsByExternalId?: Record<string, OverviewPersonDocumentSummary>;
   onOpenQuestionnaire?: (target: OverviewQuestionnaireTarget) => void;
   onNeedPhoto?: (row: BackendPersonnelOverviewRow) => void;
+  onVisibleRowsChange?: (rows: BackendPersonnelOverviewRow[]) => void;
   onExport?: (
     context: SciDataTableExportContext<BackendPersonnelOverviewRow>,
   ) => void | Promise<void>;
   onImportantExport?: (
     context: SciDataTableExportContext<BackendPersonnelOverviewRow>,
   ) => void | Promise<void>;
+  onRotaGudzExport?: (
+    context: SciDataTableExportContext<BackendPersonnelOverviewRow>,
+  ) => void | Promise<void>;
+  onRotaBchsMorningExport?: (
+    context: SciDataTableExportContext<BackendPersonnelOverviewRow>,
+  ) => void | Promise<void>;
+  onPpdLocationExport?: (
+    context: SciDataTableExportContext<BackendPersonnelOverviewRow>,
+  ) => void | Promise<void>;
   copyTextBuilder?: (
     context: SciDataTableExportContext<BackendPersonnelOverviewRow>,
   ) => string | Promise<string>;
+  rotaCopyTextBuilder?: (
+    context: SciDataTableExportContext<BackendPersonnelOverviewRow>,
+  ) => string | Promise<string>;
   emptyMessage?: string;
+  questionnairePresenceStatus?: "idle" | "loading" | "ready";
+  onColumnVisibilityChange?: (visibility: Record<string, boolean>) => void;
 }) {
   const photosRef = useRef(photos);
   photosRef.current = photos;
 
+  const questionnaireByExternalIdRef = useRef(questionnaireByExternalId);
+  questionnaireByExternalIdRef.current = questionnaireByExternalId;
+  const documentsByExternalIdRef = useRef(documentsByExternalId);
+  documentsByExternalIdRef.current = documentsByExternalId;
+  const questionnaireLoadingRef = useRef(questionnaireLoading);
+  questionnaireLoadingRef.current = questionnaireLoading;
+  const questionnairePresenceStatusRef = useRef(questionnairePresenceStatus);
+  questionnairePresenceStatusRef.current = questionnairePresenceStatus;
+
+  const rowHasQuestionnaire = (row: BackendPersonnelOverviewRow) => {
+    const map = questionnaireByExternalIdRef.current;
+    return Boolean(
+      map?.[row.externalId] ||
+        map?.[overviewPersonMatchKey(row.name)],
+    );
+  };
+
+  const questionnaireCellLabel = (row: BackendPersonnelOverviewRow) =>
+    rowHasQuestionnaire(row)
+      ? "Є"
+      : questionnaireLoadingRef.current &&
+          questionnairePresenceStatusRef.current !== "idle"
+        ? "Завантаження…"
+        : questionnairePresenceStatusRef.current === "idle"
+          ? "—"
+          : "Немає";
+
   const openPerson = (row: BackendPersonnelOverviewRow) => {
-    openPersonnelInNewTab({
-      rowId: row.id,
-      externalId: row.externalId,
-    });
+    openPersonnelFromOverview({ externalId: row.externalId });
   };
 
   const openQuestionnaire = (row: BackendPersonnelOverviewRow) => {
     if (!row.externalId) return;
-    const hasQuestionnaire = Boolean(
-      questionnaireByExternalId?.[row.externalId] ||
-        questionnaireByExternalId?.[overviewPersonMatchKey(row.name)],
-    );
+    const hasQuestionnaire = rowHasQuestionnaire(row);
     if (onOpenQuestionnaire) {
       onOpenQuestionnaire({
         externalId: row.externalId,
@@ -205,7 +248,7 @@ export function OverviewVirtualTable({
       return;
     }
     if (hasQuestionnaire) return;
-    openPersonnelInNewTab({ rowId: row.id, externalId: row.externalId });
+    openPersonnelFromOverview({ externalId: row.externalId });
   };
 
   const rowNumberById = useMemo(
@@ -282,23 +325,11 @@ export function OverviewVirtualTable({
         id: "questionnaire",
         header: OVERVIEW_STAFF_COLUMN_HEADERS.questionnaire,
         size: 130,
-        accessorFn: (row) =>
-          questionnaireByExternalId?.[row.externalId] ||
-          questionnaireByExternalId?.[overviewPersonMatchKey(row.name)]
-            ? "Є"
-            : questionnaireLoading
-              ? "Завантаження…"
-              : "Немає",
+        accessorFn: (row) => questionnaireCellLabel(row),
         Cell: ({ row }) => {
-          const hasQuestionnaire = Boolean(
-            questionnaireByExternalId?.[row.original.externalId] ||
-              questionnaireByExternalId?.[overviewPersonMatchKey(row.original.name)],
-          );
-          const label = hasQuestionnaire
-            ? "Є"
-            : questionnaireLoading
-              ? "Завантаження…"
-              : "Немає";
+          const hasQuestionnaire = rowHasQuestionnaire(row.original);
+          const label = questionnaireCellLabel(row.original);
+          const loading = questionnaireLoadingRef.current;
           return (
             <button
               type="button"
@@ -306,13 +337,15 @@ export function OverviewVirtualTable({
               aria-label={
                 hasQuestionnaire
                   ? `Відкрити анкету: ${row.original.name}`
-                  : questionnaireLoading
+                  : loading
                     ? `Перевіряю анкету: ${row.original.name}`
                     : `Анкети немає — перейти до картки: ${row.original.name}`
               }
               disabled={
                 !row.original.externalId ||
-                (!hasQuestionnaire && questionnaireLoading)
+                (!hasQuestionnaire &&
+                  questionnaireLoadingRef.current &&
+                  questionnairePresenceStatusRef.current !== "idle")
               }
               onClick={() => openQuestionnaire(row.original)}
             >
@@ -334,13 +367,15 @@ export function OverviewVirtualTable({
         header: "Документи",
         size: 150,
         accessorFn: (row) =>
-          overviewDocumentPresence(row, documentsByExternalId),
+          overviewDocumentPresence(row, documentsByExternalIdRef.current),
         exportValue: (row) =>
-          overviewDocumentChipLabel(row, documentsByExternalId),
+          overviewDocumentChipLabel(row, documentsByExternalIdRef.current),
         Cell: ({ row }) => {
+          const documents = documentsByExternalIdRef.current;
           const summary =
             (row.original.externalId &&
-              documentsByExternalId?.[row.original.externalId]) ||
+              documents?.[row.original.externalId]) ||
+            documents?.[overviewPersonMatchKey(row.original.name)] ||
             null;
           const hasDocuments = Boolean(summary?.count);
           return (
@@ -349,10 +384,7 @@ export function OverviewVirtualTable({
                 className={`overview-status-chip ${
                   hasDocuments ? "tone-ok" : "tone-other"
                 }`}
-                label={overviewDocumentChipLabel(
-                  row.original,
-                  documentsByExternalId,
-                )}
+                label={overviewDocumentChipLabel(row.original, documents)}
                 size="small"
                 variant="outlined"
               />
@@ -407,8 +439,7 @@ export function OverviewVirtualTable({
               size="small"
               aria-label="Деталі"
               onClick={() =>
-                openPersonnelInNewTab({
-                  rowId: row.original.id,
+                openPersonnelFromOverview({
                   externalId: row.original.externalId,
                 })
               }
@@ -422,14 +453,7 @@ export function OverviewVirtualTable({
         ),
       },
     ],
-    [
-      documentsByExternalId,
-      onNeedPhoto,
-      onOpenQuestionnaire,
-      questionnaireByExternalId,
-      questionnaireLoading,
-      rowNumberById,
-    ],
+    [onNeedPhoto, onOpenQuestionnaire, rowNumberById],
   );
 
   const table = useMaterialReactTable({
@@ -440,7 +464,11 @@ export function OverviewVirtualTable({
     copyLabel: "Копіювати",
     enableCopyText: true,
     copyTextBuilder,
+    secondaryCopyLabel: "Копіювати Роту",
+    secondaryCopyTextBuilder: rotaCopyTextBuilder,
     enableGlobalFilter: false,
+    enableRowVirtualization: true,
+    estimatedRowHeight: 44,
     getRowId: (row) => row.id,
     getTdProps: ({ columnId }) =>
       columnId === "questionnaire"
@@ -449,6 +477,14 @@ export function OverviewVirtualTable({
     onExport,
     onSecondaryExport: onImportantExport,
     secondaryExportLabel: "Експорт важливих колонок",
+    onTertiaryExport: onRotaGudzExport,
+    tertiaryExportLabel: "Звіт роти (ГУД)",
+    onQuaternaryExport: onRotaBchsMorningExport,
+    quaternaryExportLabel: "БЧС (ранковий ПБ)",
+    onQuinaryExport: onPpdLocationExport,
+    quinaryExportLabel: "ППД / Полігон",
+    onColumnVisibilityChange,
+    onVisibleRowsChange,
     initialState: {
       pagination: {
         pageSize: 1000,

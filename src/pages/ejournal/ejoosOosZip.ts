@@ -475,7 +475,10 @@ export async function applyRankLabelsWithZip(input: {
         row: shpoRow,
         column: 6,
         value: rank,
-        copyNeighborStyle: true,
+        styleSourceRow: shpoRow,
+        styleSourceColumn: 6,
+        copyNeighborStyle: false,
+        keepNeighborStyle: true,
       });
     }
     if (timesheetRow > 0) {
@@ -483,7 +486,10 @@ export async function applyRankLabelsWithZip(input: {
         row: timesheetRow,
         column: 6,
         value: rank,
-        copyNeighborStyle: true,
+        styleSourceRow: timesheetRow,
+        styleSourceColumn: 6,
+        copyNeighborStyle: false,
+        keepNeighborStyle: true,
       });
     }
   }

@@ -9768,7 +9768,11 @@ var require_lib3 = __commonJS({
 // src/personnel-merge/server-entry.ts
 var server_entry_exports = {};
 __export(server_entry_exports, {
+  applyPersonnelIdentityAssetsToOverview: () => applyPersonnelIdentityAssetsToOverview,
+  buildOverviewPersonnelIdentities: () => buildOverviewPersonnelIdentities,
   buildPersonnelDatasetSync: () => buildPersonnelDatasetSync,
+  buildPersonnelStaffOverview: () => buildPersonnelStaffOverview,
+  buildStaffOverviewRowsFromPersonnel: () => buildStaffOverviewRowsFromPersonnel,
   findEjournalPersonnelSheet: () => findEjournalPersonnelSheet,
   mergeRosterRowsIntoOverview: () => mergeRosterRowsIntoOverview,
   overviewMergeFingerprint: () => overviewMergeFingerprint
@@ -9918,9 +9922,10 @@ var CacheKeys = {
   questionnairesMeta: "personnel:questionnaires:meta",
   questionnairePresencePrefix: "personnel:questionnaire-presence:v1:",
   overviewAssetsPrefix: "personnel:overview-assets:v1:",
-  overviewMergePrefix: "personnel:overview-merge:v1:"
+  overviewMergePrefix: "personnel:overview-merge:v1:",
+  personnelPhotoIndex: "personnel:photo-index:v1"
 };
-var isKnownCacheKey = (key) => key === CacheKeys.ejournalImports || key.startsWith("ejournal:sheet-rows:") || key === CacheKeys.rosterLatest || key === CacheKeys.anketaCreatedPersonnel || key === CacheKeys.staffSheetImport || key === CacheKeys.staffSheetVkIndex || key === CacheKeys.personnelDataset || key === CacheKeys.overview || key === CacheKeys.documentsAll || key === CacheKeys.questionnairesMeta || key.startsWith(CacheKeys.questionnairePresencePrefix) || key.startsWith(CacheKeys.overviewAssetsPrefix) || key.startsWith(CacheKeys.overviewMergePrefix);
+var isKnownCacheKey = (key) => key === CacheKeys.ejournalImports || key.startsWith("ejournal:sheet-rows:") || key === CacheKeys.rosterLatest || key === CacheKeys.anketaCreatedPersonnel || key === CacheKeys.staffSheetImport || key === CacheKeys.staffSheetVkIndex || key === CacheKeys.personnelDataset || key === CacheKeys.overview || key === CacheKeys.documentsAll || key === CacheKeys.questionnairesMeta || key.startsWith(CacheKeys.questionnairePresencePrefix) || key.startsWith(CacheKeys.overviewAssetsPrefix) || key.startsWith(CacheKeys.overviewMergePrefix) || key === CacheKeys.personnelPhotoIndex;
 var planDataCacheCleanup = (entries, now = Date.now()) => {
   const toDelete = /* @__PURE__ */ new Set();
   const sheetSnapshots = [];
@@ -10084,6 +10089,187 @@ var readRosterColumnValue = (row, columnNumber) => {
     }
   }
   return "";
+};
+
+// src/pages/personnel/personAttachments.ts
+var normalizeAttachmentNameKey = (value) => String(value ?? "").replace(/[ʼ’']/g, "").replace(/\([^)]*\)/g, " ").replace(/[.,;:№#"/\\|()[\]{}]+/g, " ").replace(/\s+/g, " ").trim().toLocaleLowerCase("uk-UA");
+var pushLegacyAttachmentLookupIds = (ids, name, birthDate = "", callSign = "", includeLooseKeys = false) => {
+  const nameKey = normalizeAttachmentNameKey(name);
+  if (!nameKey || nameKey === "\u043E\u0441\u043E\u0431\u0430 \u043D\u0435 \u0432\u0438\u0431\u0440\u0430\u043D\u0430") return;
+  const birthKey = normalizePersonBirthKey(birthDate);
+  if (birthKey) ids.add(`name-birth:${nameKey}:${birthKey}`);
+  if (!birthKey || includeLooseKeys) {
+    ids.add(`name:${nameKey}`);
+    const callSignKey = normalizeAttachmentNameKey(callSign);
+    if (callSignKey) {
+      ids.add(`name-call:${nameKey}:${callSignKey}`);
+    }
+  }
+};
+var FILE_NAME_NOISE = /* @__PURE__ */ new Set([
+  "pdf",
+  "\u0430\u043D\u043A\u0435\u0442\u0430",
+  "\u0430\u043D\u043A\u0435\u0442\u0438",
+  "questionnaire",
+  "\u043E\u043F\u0438\u0442\u0443\u0432\u0430\u043B\u044C\u043D\u0438\u043A",
+  "\u0441\u043A\u0430\u043D",
+  "scan"
+]);
+var nameTokensOf = (value) => normalizeAttachmentNameKey(String(value ?? "").replace(/\.pdf$/i, "")).split(" ").filter((token) => token.length > 1 && !FILE_NAME_NOISE.has(token));
+var nameTokensMatchFileName = (fullName, fileName) => {
+  const personTokens = nameTokensOf(fullName);
+  const fileTokens = nameTokensOf(fileName);
+  if (personTokens.length < 2 || fileTokens.length < 2) return false;
+  const shared = Math.min(personTokens.length, fileTokens.length);
+  for (let index = 0; index < shared; index += 1) {
+    if (personTokens[index] !== fileTokens[index]) return false;
+  }
+  return true;
+};
+var questionnaireFileMatchesPerson = (fileName, names) => {
+  const normalizedNames = names.map((name) => String(name ?? "").trim()).filter(Boolean);
+  if (!normalizedNames.length) return true;
+  const text = String(fileName ?? "").trim();
+  if (!text || /^questionnaire\.pdf$/i.test(text)) return true;
+  return normalizedNames.some((name) => nameTokensMatchFileName(name, text));
+};
+var collectNameLookupVariants = (name) => {
+  const trimmed = String(name ?? "").trim();
+  const tokens = normalizeAttachmentNameKey(trimmed).split(" ").filter(Boolean);
+  const variants = [];
+  const push = (value) => {
+    const text = value.trim();
+    if (!text || variants.includes(text)) return;
+    variants.push(text);
+  };
+  if (trimmed) push(trimmed);
+  if (tokens.length >= 2) push(tokens.slice(0, 2).join(" "));
+  return variants;
+};
+var pushNameAttachmentLookupIds = (ids, name, birthDate = "", callSign = "", includeLooseKeys = false) => {
+  for (const variant of collectNameLookupVariants(name)) {
+    pushLegacyAttachmentLookupIds(
+      ids,
+      variant,
+      birthDate,
+      callSign,
+      includeLooseKeys
+    );
+    const withBirth = buildPersonIdentityFingerprint(variant, birthDate);
+    if (withBirth) ids.add(withBirth);
+    if (!birthDate || includeLooseKeys) {
+      const withoutBirth = buildPersonIdentityFingerprint(variant);
+      if (withoutBirth) ids.add(withoutBirth);
+      const withCallSign = buildPersonIdentityFingerprint(variant, "", callSign);
+      if (withCallSign) ids.add(withCallSign);
+    }
+  }
+};
+var lookupIdsByRow = /* @__PURE__ */ new WeakMap();
+var hasAttachmentLookupHints = (hints) => Boolean(
+  hints?.anketaExternalId?.trim() || hints?.anketaFullName?.trim() || hints?.anketaBirthDate?.trim()
+);
+var collectPersonAttachmentLookupIds = (row, hints, options) => {
+  const includeLooseKeys = Boolean(options?.includeLooseKeys);
+  if (row && !hasAttachmentLookupHints(hints) && !includeLooseKeys) {
+    const cached = lookupIdsByRow.get(row);
+    if (cached) return cached;
+  }
+  const ids = /* @__PURE__ */ new Set();
+  for (const candidate of collectPersonExternalIdCandidates(row)) {
+    ids.add(candidate);
+  }
+  const push = (value) => {
+    const text = String(value ?? "").trim();
+    if (text && text !== "0") ids.add(text);
+  };
+  push(hints?.anketaExternalId);
+  const personnelName2 = getPersonDisplayName(row);
+  const anketaName = String(hints?.anketaFullName ?? "").trim();
+  const personnelBirth2 = resolvePersonBirthDate(row);
+  const anketaBirth = String(hints?.anketaBirthDate ?? "").trim();
+  const callSign = resolvePersonCallSign(row);
+  for (const name of [personnelName2, anketaName]) {
+    if (!name) continue;
+    const birth = name === personnelName2 ? personnelBirth2 : anketaBirth;
+    const variantCallSign = name === personnelName2 ? callSign : "";
+    pushNameAttachmentLookupIds(
+      ids,
+      name,
+      birth,
+      variantCallSign,
+      includeLooseKeys
+    );
+    if (includeLooseKeys) {
+      const nameKey = normalizeAttachmentNameKey(name);
+      if (nameKey) {
+        ids.add(`roster:${nameKey}`);
+        ids.add(`roster:${name.trim()}`);
+      }
+    }
+  }
+  const primary = resolvePersonIdentityKey(row);
+  if (primary) ids.add(primary);
+  const collected = [...ids];
+  if (row && !hasAttachmentLookupHints(hints) && !includeLooseKeys) {
+    lookupIdsByRow.set(row, collected);
+  }
+  return collected;
+};
+var parseOrphanAttachmentIdentityId = (id) => {
+  const raw = String(id ?? "").trim();
+  if (!raw) return null;
+  const takeNameBirth = (body) => {
+    const birthMatch = body.match(/:(\d{4}-\d{2}-\d{2})$/);
+    if (birthMatch) {
+      const nameKey2 = body.slice(0, -birthMatch[0].length).trim();
+      return nameKey2 ? { nameKey: nameKey2, birthKey: birthMatch[1] } : null;
+    }
+    const callIdx = body.lastIndexOf(":c:");
+    if (callIdx > 0) {
+      const nameKey2 = body.slice(0, callIdx).trim();
+      const callKey = body.slice(callIdx + 3).trim();
+      return nameKey2 ? { nameKey: nameKey2, callKey } : null;
+    }
+    const nameKey = body.trim();
+    return nameKey ? { nameKey } : null;
+  };
+  if (raw.startsWith("p:")) return takeNameBirth(raw.slice(2));
+  if (raw.startsWith("name-birth:")) return takeNameBirth(raw.slice("name-birth:".length));
+  if (raw.startsWith("name-call:")) {
+    const body = raw.slice("name-call:".length);
+    const sep = body.lastIndexOf(":");
+    if (sep <= 0) return null;
+    const nameKey = body.slice(0, sep).trim();
+    const callKey = body.slice(sep + 1).trim();
+    return nameKey ? { nameKey, callKey } : null;
+  }
+  if (raw.startsWith("name:")) {
+    const nameKey = raw.slice(5).trim();
+    return nameKey ? { nameKey } : null;
+  }
+  if (raw.startsWith("roster:")) {
+    const rest = raw.slice("roster:".length).trim();
+    if (!rest) return null;
+    if (/^[a-z0-9_-]+$/i.test(rest) && !/[а-яіїєґ]/i.test(rest)) return null;
+    const nameKey = normalizeAttachmentNameKey(rest);
+    return nameKey ? { nameKey } : null;
+  }
+  return null;
+};
+var personNameMatchesOrphanNameKey = (personName, orphanNameKey) => {
+  const personKey = normalizeAttachmentNameKey(personName);
+  const orphanKey = normalizeAttachmentNameKey(orphanNameKey);
+  if (!personKey || !orphanKey) return false;
+  if (personKey === orphanKey) return true;
+  const personTokens = personKey.split(" ").filter(Boolean);
+  const orphanTokens = orphanKey.split(" ").filter(Boolean);
+  if (personTokens.length < 2 || orphanTokens.length < 2) return false;
+  const shared = Math.min(personTokens.length, orphanTokens.length);
+  for (let index = 0; index < shared; index += 1) {
+    if (personTokens[index] !== orphanTokens[index]) return false;
+  }
+  return true;
 };
 
 // src/pages/personnel/personnelUtils.ts
@@ -10632,6 +10818,40 @@ var resolvePersonIdentityKey = (row) => {
     return "";
   }
 };
+var collectPersonExternalIdCandidates = (row) => {
+  if (!row) return [];
+  const values = /* @__PURE__ */ new Set();
+  const push = (value) => {
+    const text = String(value ?? "").trim();
+    if (text && text !== "0") values.add(text);
+  };
+  for (const key of Object.keys(row)) {
+    if (key === "__dbRowId" || isPersonSpreadsheetIdFieldKey(key)) {
+      push(readPersonIdFieldValue(row[key]));
+    }
+  }
+  push(row.__dbRowId);
+  const name = getPersonFieldValue(row, ["\u043F\u0440\u0456\u0437\u0432\u0438\u0449\u0435"]) || getPersonFieldValue(row, ["\u043F\u0456\u0431"]);
+  const nameKey = normalizePersonIdentityText(name);
+  const spreadsheetId = getPersonExternalId(row);
+  const birthKey = normalizePersonBirthKey(resolvePersonBirthDate(row));
+  const callSignKey = normalizePersonIdentityText(resolvePersonCallSign(row));
+  if (nameKey) {
+    if (birthKey) {
+      push(`name-birth:${nameKey}:${birthKey}`);
+    } else {
+      push(`roster:${nameKey}`);
+      push(`roster:${String(name).trim()}`);
+      push(`name:${nameKey}`);
+      if (callSignKey) push(`name-call:${nameKey}:${callSignKey}`);
+    }
+  }
+  if (callSignKey && !birthKey) push(`call:${callSignKey}`);
+  if (spreadsheetId) push(`roster:${spreadsheetId}`);
+  const identityKey = resolvePersonIdentityKey(row);
+  if (identityKey) push(identityKey);
+  return [...values];
+};
 var PERSONNEL_STATUS_AS_NAME_RE = /(?:^|\s)(?:вибув|відсутн|виключ|перевед|знят|загиб|зникл|тимчасово|розпоряджен|командир(?:а)?\s+в(?:ійськової)?\s*ч(?:астини)?|в\s+розпоряджен)(?:\s|$)/i;
 var cleanPersonDisplayName = (value) => String(value ?? "").replace(/\([^)]*(?:р\.?\s*н\.?|народ)[^)]*\)/gi, " ").replace(/\([^)]*\d{1,2}[.\/-]\d{1,2}[.\/-]\d{2,4}[^)]*\)/g, " ").replace(/\s+/g, " ").trim();
 var looksLikePersonnelName = (value) => {
@@ -10647,6 +10867,14 @@ var looksLikePersonnelName = (value) => {
   const parts = text.split(/\s+/).filter(Boolean);
   if (parts.length < 2 || parts.length > 8) return false;
   return parts.every((part) => /^[\p{L}][\p{L}'ʼ’\-]*$/u.test(part));
+};
+var isLikelyPersonnelRow = (row) => {
+  if (!row.__dbRowId) return false;
+  const fromOos = cleanPersonDisplayName(
+    getPersonFieldValue(row, ["\u043F\u0440\u0456\u0437\u0432\u0438\u0449\u0435"]) || getPersonFieldValue(row, ["\u043F\u0456\u0431"])
+  );
+  const fromRoster = resolvePersonDisplayNameFromRoster(row);
+  return looksLikePersonnelName(fromOos) || looksLikePersonnelName(fromRoster);
 };
 var findEjournalPersonnelSheet = (imports) => {
   for (const item of imports) {
@@ -10803,6 +11031,12 @@ var withArchiveMarker = (target, rosterRow) => {
     [ROSTER_ARCHIVE_SOURCE_KEY]: ROSTER_ARCHIVE_SOURCE_VALUE,
     [`${ROSTER_FIELD_PREFIX2}${ROSTER_ARCHIVE_SOURCE_KEY}`]: ROSTER_ARCHIVE_SOURCE_VALUE
   };
+};
+var isPersonnelInStaffRoster = (row) => {
+  if (!row) return false;
+  if (isPersonnelFromArchive(row)) return false;
+  if (/^roster:/i.test(String(row.__dbRowId ?? ""))) return true;
+  return Object.keys(row).some((key) => key.startsWith(ROSTER_FIELD_PREFIX2));
 };
 var getRosterValue = (row, keyParts) => {
   const key = Object.keys(row).find(
@@ -11069,13 +11303,14 @@ var buildPersonnelDatasetVersion = (sheet, roster) => ({
   rosterSheetUpdatedAt: roster?.sheet?.updatedAt ?? "",
   rosterRowCount: roster?.sheet?.rowCount ?? roster?.rows?.length ?? 0
 });
+var DATASET_FINGERPRINT_SEP = "";
 var personnelDatasetFingerprint = (version) => [
   version.oosSheetId,
   version.oosStamp,
   version.rosterImportId,
   version.rosterSheetUpdatedAt,
   version.rosterRowCount
-].join("\0");
+].join(DATASET_FINGERPRINT_SEP);
 var rosterRowsFromPersonnelLatest = (latest) => {
   if (!latest?.sheet || !Array.isArray(latest.rows)) {
     return [];
@@ -11622,8 +11857,9 @@ var rosterRowToOverviewRow = (rosterRow, rosterLabels = {}, options = {}) => {
   const rowKey = identityKey || (name ? normalizeRosterText2(name) : "") || fallbackKey;
   if (!rowKey) return null;
   const staffStatus = applyStaffRosterStatus(rosterRow, rosterLabels);
+  const stableRowId = fallbackKey ? `roster:row:${fallbackKey}` : options.rowIndex != null ? `roster:${rowKey}:i${options.rowIndex}` : `roster:${rowKey}`;
   return {
-    id: `roster:${rowKey}`,
+    id: stableRowId,
     externalId: identityKey || fallbackKey,
     name: displayName,
     rank: resolvePersonRankTitle(rosterRow) || getRosterValue(rosterRow, ["\u0437\u0432\u0430\u043D\u043D\u044F"]),
@@ -11645,6 +11881,27 @@ var rosterRowToOverviewRow = (rosterRow, rosterLabels = {}, options = {}) => {
     staffSheetColumns: buildStaffSheetColumnsRecord(rosterRow)
   };
 };
+var buildStaffOverviewRowsFromPersonnel = (personnelRows, rosterLabels = {}, battalion = "ALL") => {
+  const result = [];
+  for (let index = 0; index < personnelRows.length; index++) {
+    const row = personnelRows[index];
+    if (!isLikelyPersonnelRow(row)) continue;
+    const inStaff = isPersonnelInStaffRoster(row);
+    if (!inStaff) continue;
+    const battalionLabel = rosterBattalionLabel(void 0, row);
+    if (battalion !== "ALL" && battalionLabel !== battalion) continue;
+    const overviewRow = rosterRowToOverviewRow(row, rosterLabels, {
+      requireName: true,
+      inStaff,
+      inNovaStaff: battalionLabel === "\u043D\u043E\u0432\u0430",
+      name: getPersonDisplayName(row),
+      battalion: battalionLabel,
+      rowIndex: index
+    });
+    if (overviewRow) result.push(overviewRow);
+  }
+  return result;
+};
 var buildOverviewMetrics = (rows) => ({
   total: rows.length,
   onDuty: rows.filter((row) => row.status === "ON_DUTY").length,
@@ -11658,6 +11915,35 @@ var buildOverviewMetrics = (rows) => ({
     )
   ).length
 });
+var buildPersonnelStaffOverview = (personnelRows, rosterLabels = {}, meta = {}) => {
+  const rows = buildStaffOverviewRowsFromPersonnel(
+    personnelRows,
+    rosterLabels
+  );
+  return {
+    importId: meta.importId || "personnel-zustand-preview",
+    importName: meta.importName || "\u041E\u0441\u043E\u0431\u043E\u0432\u0438\u0439 \u0441\u043A\u043B\u0430\u0434 \xB7 \u0441\u043F\u0456\u043B\u044C\u043D\u0438\u0439 \u043A\u0435\u0448",
+    rows,
+    metrics: buildOverviewMetrics(rows),
+    units: [...new Set(rows.map((row) => row.unit).filter(Boolean))].sort(
+      (left, right) => left.localeCompare(right, "uk", {
+        numeric: true,
+        sensitivity: "base"
+      })
+    ),
+    critical: [],
+    todayChanges: {
+      total: 0,
+      onDuty: 0,
+      businessTrip: 0,
+      leave: 0,
+      medical: 0,
+      awol: 0,
+      other: 0
+    },
+    todayUpdates: 0
+  };
+};
 var mergeRosterRowsIntoOverview = (overview, rosterRows, rosterLabels = {}, columns) => {
   if (!rosterRows.length) {
     return {
@@ -11778,9 +12064,221 @@ var overviewMergeFingerprint = (overview, rosterFingerprint, rosterRows = []) =>
   const rosterStamp = rosterFingerprint.trim() || `${rosterRows.length}:${String(rosterRows[0]?.__dbRowId ?? "").trim()}`;
   return `overview-merge:v1:${overviewStamp(overview)}:${rosterStamp}`;
 };
+
+// src/pages/personnel/personPhonesStore.ts
+var PERSON_PHONES_DOCUMENT_TYPE = "personPhones";
+
+// src/pages/overview/overviewNameSearch.ts
+var normalizeOverviewName = (value) => normalizeRosterMatchText(value).replace(/[ьъ]/g, "").replace(/ё/g, "\u0435").replace(/[`´]/g, "").replace(/-/g, " ").replace(/\s+/g, " ").trim();
+
+// src/pages/overview/overviewPersonnelAssets.ts
+var stripNameNoise = (value) => String(value ?? "").replace(/\d{1,2}[.\/-]\d{1,2}[.\/-]\d{2,4}\s*(?:р\.?\s*н\.?)?/gi, " ").replace(/\([^)]*\)/g, " ");
+var nameKeyOf = (value) => normalizeOverviewName(stripNameNoise(value));
+var birthFromText = (value) => {
+  const match = String(value ?? "").match(/(\d{1,2}[.\/-]\d{1,2}[.\/-]\d{2,4})/);
+  return match ? normalizePersonBirthKey(match[1]) : "";
+};
+var overviewPersonMatchKey = (name, birth = "") => {
+  const nameKey = nameKeyOf(name);
+  if (!nameKey) return "";
+  const birthKey = normalizePersonBirthKey(String(birth ?? "")) || birthFromText(name);
+  return birthKey ? `${nameKey}|${birthKey}` : nameKey;
+};
+var overviewDocumentTypeLabel = (type) => type === "ubdReport" ? "\u0420\u0430\u043F\u043E\u0440\u0442 \u043D\u0430 \u0423\u0411\u0414" : type === "form6Report" ? "\u0424\u043E\u0440\u043C\u0430 6" : type === "form12Report" ? "\u0424\u043E\u0440\u043C\u0430 12" : type === "serviceCharacteristic" ? "\u0421\u043B\u0443\u0436\u0431\u043E\u0432\u0430 \u0445\u0430\u0440\u0430\u043A\u0442\u0435\u0440\u0438\u0441\u0442\u0438\u043A\u0430" : type === "zhbdCertificate" ? "\u0414\u043E\u0432\u0456\u0434\u043A\u0430 \u0416\u0411\u0414" : type === "ubdRestoreReport" ? "\u0420\u0430\u043F\u043E\u0440\u0442 \u043D\u0430 \u0432\u0456\u0434\u043D\u043E\u0432\u043B\u0435\u043D\u043D\u044F \u0423\u0411\u0414" : type === "salaryPowerAttorney" ? "\u0414\u043E\u0432\u0456\u0440\u0435\u043D\u0456\u0441\u0442\u044C \u043D\u0430 \u0437\u0430\u0440\u043F\u043B\u0430\u0442\u0443" : type === "temporaryMilitaryId" ? "\u0422\u0438\u043C\u0447\u0430\u0441\u043E\u0432\u0438\u0439 \u0432\u0456\u0439\u0441\u044C\u043A\u043E\u0432\u0438\u0439 \u043A\u0432\u0438\u0442\u043E\u043A" : type === "lostMilitaryId" ? "\u0412\u0442\u0440\u0430\u0442\u0430 \u0432\u0456\u0439\u0441\u044C\u043A\u043E\u0432\u043E\u0433\u043E \u043A\u0432\u0438\u0442\u043A\u0430" : type;
+var personnelName = (row) => getPersonDisplayName(row) || getRosterPersonName(row);
+var personnelBirth = (row) => normalizePersonBirthKey(resolvePersonBirthDate(row)) || birthFromText(personnelName(row));
+var takeLookup = (row) => {
+  try {
+    return [
+      resolvePersonIdentityKey(row),
+      ...collectPersonAttachmentLookupIds(row)
+    ].filter(Boolean);
+  } catch {
+    return [];
+  }
+};
+var buildOverviewPersonnelIdentities = (rows) => rows.flatMap((row) => {
+  const name = personnelName(row);
+  if (!name) return [];
+  return [{
+    name,
+    birthKey: personnelBirth(row),
+    lookupIds: takeLookup(row)
+  }];
+});
+var asList = (value) => Array.isArray(value) ? value : [];
+var remember = (byFull, byName, nameAmbiguous, nameKey, birthKey, value) => {
+  if (!nameKey || !value) return;
+  if (birthKey) byFull[`${nameKey}|${birthKey}`] = value;
+  if (nameAmbiguous.has(nameKey)) return;
+  if (byName[nameKey] && byName[nameKey] !== value) {
+    delete byName[nameKey];
+    nameAmbiguous.add(nameKey);
+    return;
+  }
+  byName[nameKey] = value;
+};
+var pickByPerson = (byFull, byName, nameKey, birthKey) => birthKey && byFull[`${nameKey}|${birthKey}`] || byName[nameKey] || "";
+var applyPersonnelIdentityAssetsToOverview = (overviewRows, personnelIdentities, questionnaires = [], photoList = [], documents = []) => {
+  const people = asList(personnelIdentities).filter(Boolean);
+  const qList = asList(questionnaires);
+  const photosIn = asList(
+    photoList
+  );
+  const docsIn = asList(documents);
+  const photoById = {};
+  for (const item of photosIn) {
+    const id = String(item.personExternalId ?? "").trim();
+    const data = String(item.photoData ?? "").trim();
+    if (id && data) photoById[id] = data;
+  }
+  const docsById = {};
+  for (const document2 of docsIn) {
+    if (document2.type === PERSON_PHONES_DOCUMENT_TYPE) continue;
+    const id = String(document2.personExternalId ?? "").trim();
+    if (!id) continue;
+    const current = docsById[id] ?? { count: 0, labels: [] };
+    current.count += 1;
+    const label = document2.title?.trim() || overviewDocumentTypeLabel(document2.type);
+    if (label && !current.labels.includes(label)) current.labels.push(label);
+    docsById[id] = current;
+  }
+  const qByFull = {};
+  const qByName = {};
+  const qNameAmbiguous = /* @__PURE__ */ new Set();
+  const photoByFull = {};
+  const photoByName = {};
+  const photoNameAmbiguous = /* @__PURE__ */ new Set();
+  const docIdByFull = {};
+  const docIdByName = {};
+  const docNameAmbiguous = /* @__PURE__ */ new Set();
+  const peopleByName = /* @__PURE__ */ new Map();
+  const addPersonName = (nameKey, birthKey, ids) => {
+    if (!nameKey) return;
+    const list = peopleByName.get(nameKey) ?? [];
+    list.push({ birthKey, ids });
+    peopleByName.set(nameKey, list);
+  };
+  const rememberAll = (nameKey, birthKey, qSource, photo, docId) => {
+    remember(qByFull, qByName, qNameAmbiguous, nameKey, birthKey, qSource);
+    remember(photoByFull, photoByName, photoNameAmbiguous, nameKey, birthKey, photo);
+    remember(docIdByFull, docIdByName, docNameAmbiguous, nameKey, birthKey, docId);
+  };
+  const rememberParsedId = (id, extraName = "", extraBirth = "") => {
+    const parsed = parseOrphanAttachmentIdentityId(id);
+    const nameKey = nameKeyOf(extraName || parsed?.nameKey || "");
+    const birthKey = extraBirth || parsed?.birthKey || birthFromText(extraName || parsed?.nameKey || "");
+    if (!nameKey) return { nameKey: "", birthKey: "" };
+    return { nameKey, birthKey };
+  };
+  for (const item of qList) {
+    const source = String(item.personExternalId ?? "").trim();
+    if (!source) continue;
+    const { nameKey, birthKey } = rememberParsedId(source);
+    if (nameKey) remember(qByFull, qByName, qNameAmbiguous, nameKey, birthKey, source);
+  }
+  for (const [id, photo] of Object.entries(photoById)) {
+    const { nameKey, birthKey } = rememberParsedId(id);
+    if (nameKey) remember(photoByFull, photoByName, photoNameAmbiguous, nameKey, birthKey, photo);
+  }
+  for (const id of Object.keys(docsById)) {
+    const { nameKey, birthKey } = rememberParsedId(id);
+    if (nameKey) remember(docIdByFull, docIdByName, docNameAmbiguous, nameKey, birthKey, id);
+  }
+  const storedQIds = new Set(
+    qList.map((item) => String(item.personExternalId ?? "").trim()).filter(Boolean)
+  );
+  for (const person of people) {
+    const name = person.name;
+    const nameKey = nameKeyOf(name);
+    const birthKey = person.birthKey;
+    if (!nameKey) continue;
+    const lookup = person.lookupIds;
+    addPersonName(nameKey, birthKey, lookup);
+    const qSource = lookup.find((id) => storedQIds.has(id)) || "";
+    const photo = lookup.map((id) => photoById[id]).find(Boolean) || "";
+    const docId = lookup.find((id) => docsById[id]) || "";
+    rememberAll(nameKey, birthKey, qSource, photo, docId);
+  }
+  for (const item of qList) {
+    const fileName = String(item.fileName ?? "").trim();
+    const source = String(item.personExternalId ?? "").trim();
+    if (!fileName || !source || /^questionnaire\.pdf$/i.test(fileName)) continue;
+    const hits = overviewRows.filter(
+      (row) => questionnaireFileMatchesPerson(fileName, [row.name])
+    );
+    if (hits.length !== 1) continue;
+    const nameKey = nameKeyOf(hits[0].name);
+    const birthKey = birthFromText(hits[0].name);
+    remember(qByFull, qByName, qNameAmbiguous, nameKey, birthKey, source);
+  }
+  const resolveOverviewIdentity = (row) => {
+    const nameKey = nameKeyOf(row.name);
+    const birthFromName = birthFromText(row.name);
+    const candidates = peopleByName.get(nameKey) ?? [];
+    const byBirth = birthFromName ? candidates.find((item) => item.birthKey === birthFromName) : void 0;
+    const unique = candidates.length === 1 ? candidates[0] : void 0;
+    const birthKey = birthFromName || byBirth?.birthKey || unique?.birthKey || "";
+    return { nameKey, birthKey };
+  };
+  const photos = { ...photoById };
+  const questionnairePresence = {};
+  const questionnaireSourceIds = {};
+  const documentsOut = {
+    ...docsById
+  };
+  const assignKeys = (keys, write) => {
+    for (const key of keys) {
+      if (key) write(key);
+    }
+  };
+  for (const row of overviewRows) {
+    const rowId = String(row.externalId ?? "").trim();
+    const { nameKey, birthKey } = resolveOverviewIdentity(row);
+    if (!nameKey) continue;
+    const matchKey = overviewPersonMatchKey(row.name, birthKey);
+    const keys = [rowId, row.id, matchKey].filter(Boolean);
+    let qSource = pickByPerson(qByFull, qByName, nameKey, birthKey);
+    if (!qSource && rowId) {
+      const parsed = parseOrphanAttachmentIdentityId(rowId);
+      if (parsed?.nameKey && personNameMatchesOrphanNameKey(row.name, parsed.nameKey)) {
+        qSource = qList.find((item) => item.personExternalId === rowId) ? rowId : "";
+      }
+      if (!qSource && qList.some((item) => item.personExternalId === rowId)) {
+        qSource = rowId;
+      }
+    }
+    if (qSource) {
+      assignKeys(keys, (key) => {
+        questionnairePresence[key] = true;
+        questionnaireSourceIds[key] = qSource;
+      });
+    }
+    const photo = pickByPerson(photoByFull, photoByName, nameKey, birthKey);
+    if (photo) assignKeys(keys, (key) => {
+      photos[key] = photo;
+    });
+    const docId = pickByPerson(docIdByFull, docIdByName, nameKey, birthKey);
+    if (docId && docsById[docId]) {
+      assignKeys(keys, (key) => {
+        documentsOut[key] = docsById[docId];
+      });
+    }
+  }
+  return {
+    photos,
+    questionnairePresence,
+    questionnaireSourceIds,
+    documents: documentsOut
+  };
+};
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
+  applyPersonnelIdentityAssetsToOverview,
+  buildOverviewPersonnelIdentities,
   buildPersonnelDatasetSync,
+  buildPersonnelStaffOverview,
+  buildStaffOverviewRowsFromPersonnel,
   findEjournalPersonnelSheet,
   mergeRosterRowsIntoOverview,
   overviewMergeFingerprint

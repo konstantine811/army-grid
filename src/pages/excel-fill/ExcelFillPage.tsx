@@ -6,7 +6,7 @@ import {
   FileUploadOutlinedIcon,
   SyncAltOutlinedIcon,
 } from "@/components/sci/icons";
-import { api } from "../../api";
+import { type BackendPersonnelRosterLatest } from "../../api";
 import { useAuth } from "../../auth/AuthProvider";
 import { CacheKeys, readDataCache } from "../../data/idbDataCache";
 import {
@@ -28,7 +28,7 @@ import {
   analyzePositionsVozFill,
   DEFAULT_POSITIONS_VOZ_RULES,
   loadPositionsVozRules,
-  parseRosterLatestToPeople,
+  rosterRowsToPositionsPeople,
   savePositionsVozRules,
   type PositionsVozFillRule,
   type PositionsVozPerson,
@@ -1183,22 +1183,26 @@ export function ExcelFillPage() {
 
   const applyPersonnelDataset = (
     dataset: PersonnelDataset,
-    latest: NonNullable<Awaited<ReturnType<typeof api.getLatestPersonnelRoster>>>,
+    latest: BackendPersonnelRosterLatest | null | undefined,
   ) => {
     const rows = dataset.rows
       .filter(isLikelyPersonnelRow)
       .filter(isPersonnelInStaffRoster);
     const label =
-      latest.sourceFileName || latest.importName || "Загальний список";
+      latest?.sourceFileName ||
+      latest?.importName ||
+      "Загальний список";
     const snapshot = rosterRowsToSourceSnapshot(rows, label);
-    const staffSnapshot = rosterLatestToStaffSheetImportSnapshot(latest);
+    const staffSnapshot = latest
+      ? rosterLatestToStaffSheetImportSnapshot(latest)
+      : null;
     setRosterSource(snapshot);
     setSourceUpload(null);
     setSourceUploadLoadedAt(null);
     setRosterPreviewRows(rows);
     setRosterRowCount(rows.length);
     setRosterLabel(label);
-    setRosterImportedAt(latest.createdAt || null);
+    setRosterImportedAt(latest?.createdAt || null);
     setRosterLoadedAt(new Date().toISOString());
     if (staffSnapshot) {
       setStaffSheetImport(staffSnapshot);
@@ -1214,11 +1218,27 @@ export function ExcelFillPage() {
   const loadSourceFromPersonnel = async (forceRefresh = false) => {
     setIsBusy(true);
     try {
-      const [dataset, latest] = await Promise.all([
-        loadPersonnelDataset({ force: forceRefresh }),
-        loadSharedRosterLatest({ force: forceRefresh }),
-      ]);
-      if (!latest?.sheet || !dataset.rows.length) {
+      const dataset = await loadPersonnelDataset({ force: forceRefresh });
+      if (!dataset.rows.length) {
+        setRosterSource(null);
+        setRosterPreviewRows([]);
+        setRosterRowCount(0);
+        setRosterLabel("");
+        setRosterImportedAt(null);
+        setRosterLoadedAt(null);
+        setMessage(
+          "У БД немає «Загального списку». Імпортуйте файл «Штатка» (.xlsx).",
+        );
+        return;
+      }
+      const latest =
+        (await readDataCache<BackendPersonnelRosterLatest>(
+          CacheKeys.rosterLatest,
+        )) ??
+        (await loadSharedRosterLatest({ force: forceRefresh }).catch(
+          () => null,
+        ));
+      if (!latest?.sheet && !dataset.rosterRows.length) {
         setRosterSource(null);
         setRosterPreviewRows([]);
         setRosterRowCount(0);
@@ -1274,11 +1294,12 @@ export function ExcelFillPage() {
   const loadPositionsFromDb = async () => {
     setIsBusy(true);
     try {
-      const applyLatest = (
-        latest: NonNullable<Awaited<ReturnType<typeof api.getLatestPersonnelRoster>>>,
+      const applyDataset = (
+        dataset: PersonnelDataset,
+        latest: BackendPersonnelRosterLatest | null | undefined,
         fromCache = false,
       ) => {
-        if (!latest?.sheet) {
+        if (!dataset.rosterRows.length) {
           setPositionsPeople([]);
           setPositionsRosterLabel("");
           setMessage(
@@ -1286,28 +1307,39 @@ export function ExcelFillPage() {
           );
           return;
         }
-        const people = parseRosterLatestToPeople(latest);
+        const people = rosterRowsToPositionsPeople(dataset.rosterRows);
+        const label =
+          latest?.sourceFileName ||
+          latest?.importName ||
+          "Загальний список";
         setPositionsPeople(people);
-        setPositionsRosterLabel(
-          latest.sourceFileName || latest.importName || "Загальний список",
-        );
+        setPositionsRosterLabel(label);
         setMessage(
           fromCache
             ? `Кеш: ${people.length} осіб · оновлюю з БД…`
-            : `З БД завантажено ${people.length} осіб · ${latest.sourceFileName || latest.importName}.`,
+            : `З БД завантажено ${people.length} осіб · ${label}.`,
         );
       };
 
-      const cached = await readDataCache<
-        Awaited<ReturnType<typeof api.getLatestPersonnelRoster>>
-      >(CacheKeys.rosterLatest);
-      if (cached?.sheet) {
-        applyLatest(cached, true);
+      const cachedDataset = await readDataCache<PersonnelDataset>(
+        CacheKeys.personnelDataset,
+      );
+      const cachedRoster = await readDataCache<BackendPersonnelRosterLatest>(
+        CacheKeys.rosterLatest,
+      );
+      if (cachedDataset?.rosterRows.length) {
+        applyDataset(cachedDataset, cachedRoster, true);
         setIsBusy(false);
       }
 
-      const latest = await loadSharedRosterLatest();
-      if (!latest?.sheet) {
+      const dataset = await loadPersonnelDataset();
+      const latest =
+        cachedRoster ??
+        (await readDataCache<BackendPersonnelRosterLatest>(
+          CacheKeys.rosterLatest,
+        )) ??
+        (await loadSharedRosterLatest().catch(() => null));
+      if (!dataset.rosterRows.length) {
         setPositionsPeople([]);
         setPositionsRosterLabel("");
         setMessage(
@@ -1315,7 +1347,7 @@ export function ExcelFillPage() {
         );
         return;
       }
-      applyLatest(latest);
+      applyDataset(dataset, latest);
     } catch (error) {
       setMessage(
         error instanceof Error

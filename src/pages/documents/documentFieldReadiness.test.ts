@@ -135,6 +135,22 @@ describe("documentFieldReadiness", () => {
     ).toBe(true);
   });
 
+  it("accepts lost-ID event with date, place and circumstances only", () => {
+    expect(
+      documentHasEmptyInputs("lostMilitaryId", {
+        fullName: "Іваненко Іван",
+        rank: "солдат",
+        staffPosition: "стрілець",
+        addressee: "командиру",
+        lossDate: "12.11.2025",
+        circumstanceKind: "custom",
+        lossLocation: "с. Гришене",
+        customCircumstances:
+          "на позицію потрапив каб та FPV дрон і все згоріло",
+      }),
+    ).toBe(false);
+  });
+
   it("marks Form 6 id document incomplete without a passport number", () => {
     const filled = {
       fullName: "Іваненко Іван",

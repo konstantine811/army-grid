@@ -25,6 +25,7 @@ import {
   planBlocksWorkbookApply,
   SOURCE_DATE_UNKNOWN_MESSAGE,
 } from "./ejoosSyncPlan";
+import { EjoosAsOfDateControl } from "./EjoosAsOfDateControl";
 import { logTimesheetDebugDump, isTimesheetVerboseDebugEnabled } from "./ejoosTimesheetDebugDump";
 import {
   collectManualEjoosPeople,
@@ -556,29 +557,25 @@ export function EjoosChangesPanel() {
             {session.counters.autoReady} авто · {session.counters.needsReview}{" "}
             перевірити · у черзі {queuedPeople.length}
           </Typography>
+          <Stack
+            direction="row"
+            spacing={1}
+            sx={{ mt: 1 }}
+            style={{ flexWrap: "wrap", alignItems: "center" }}
+          >
+            <Typography variant="body2" component="span">
+              Станом на
+            </Typography>
+            <EjoosAsOfDateControl
+              appliedLabel={session.plan.timesheetDayLabel}
+              busy={isLoading}
+              onApply={(isoDate) => rebuildOperations(isoDate)}
+            />
+          </Stack>
           {session.plan.sourceDateUnknown ? (
             <Typography variant="body2" sx={{ mt: 0.5, color: "#f5c16c" }}>
               {SOURCE_DATE_UNKNOWN_MESSAGE}
             </Typography>
-          ) : null}
-          {session.plan.sourceDateUnknown ? (
-            <Stack
-              direction="row"
-              spacing={1}
-              sx={{ mt: 1 }}
-              style={{ flexWrap: "wrap", alignItems: "center" }}
-            >
-              <Typography variant="body2">Станом на</Typography>
-              <input
-                type="date"
-                className="ejoos-search"
-                onChange={(event) => {
-                  const value = event.target.value;
-                  if (!value) return;
-                  void rebuildOperations(value);
-                }}
-              />
-            </Stack>
           ) : null}
         </Box>
         <Stack direction="row" spacing={1} style={{ flexWrap: "wrap" }}>
@@ -796,6 +793,7 @@ export function EjoosChangesPanel() {
             <PersonChangeCard
               person={selectedPerson}
               timesheetDay={session?.plan.timesheetDay ?? 31}
+              timesheetDayLabel={session?.plan.timesheetDayLabel || ""}
               canQueue={
                 personCanEnterApplyQueue(selectedPerson) &&
                 !planBlocksWorkbookApply(session.plan)
@@ -827,6 +825,7 @@ export function EjoosChangesPanel() {
               onPatchPayload={(opId, patch) =>
                 patchOpPayload(selectedPerson.id, opId, patch)
               }
+              onRebuildAsOf={(isoDate) => void rebuildOperations(isoDate)}
               isLoading={isLoading}
             />
             </>

@@ -28,7 +28,6 @@ import {
   type BackendPersonQuestionnaireMeta,
   type BackendPersonnelOverview,
   type BackendPersonnelOverviewRow,
-  type BackendPersonnelRosterLatest,
 } from "../../api";
 import {
   CacheKeys,
@@ -36,6 +35,11 @@ import {
   jsonChanged,
   readDataCache,
 } from "../../data/idbDataCache";
+import {
+  loadPersonnelDataset,
+  rosterRowsFromDataset,
+} from "../../data/personnelDataset";
+import { readWorkbookSnapshot } from "../../excelRoundTrip";
 import { buildDocumentRoute } from "../../app/navigation";
 import type { EjournalPreviewRow } from "../ejournal/ejournalTypes";
 import {
@@ -76,7 +80,7 @@ import {
   type PersonSignatureRecord,
 } from "../personnel/personSignatureStore";
 import { exportDocumentsJournalExcel } from "./documentsJournalExcel";
-import { personNameFromSyntheticDocumentId } from "./documentPersonIdentity";
+import { getDocumentPersonName } from "./documentPersonName";
 import {
   buildUbdNotSubmittedRowFromDocument,
   buildUbdRosterCallSignIndex,
@@ -117,7 +121,6 @@ import {
   normalizeRosterMatchText,
   parseUbdTaskPeriodStartDate,
 } from "../personnel/fighterStatusImport";
-import { mapRosterLatestToPreviewRows } from "../excel-fill/rosterSourceSnapshot";
 import { Spinner } from "@/components/ui/spinner/spinner";
 import {
   copyPngDataUrlToClipboard,
@@ -204,10 +207,20 @@ import {
   investigatorFromPersonnelRow,
   reportSignerOf,
   reporterFooterBlock,
+  approvalFooterBlock,
+  actApprovalDateLine,
+  buildManualSignatoryDateLine,
   type LostMilitaryIdFields,
   type LostMilitaryIdSignatory,
 } from "./lostMilitaryIdReport";
 import { PersonnelNamePicker } from "./PersonnelNamePicker";
+import {
+  formatUbdOnHandMatchSummary,
+  formatUbdOnHandSheetBreakdown,
+  matchUbdOnHandAgainstDocuments,
+  parseUbdOnHandWorkbook,
+  type UbdOnHandMatchReport,
+} from "./ubdOnHandImport";
 import {
   createLostMilitaryIdReportWordBlob,
   createLostMilitaryIdOrderWordBlob,
@@ -655,9 +668,21 @@ const prepareUbdRestoreExportFields = async (
 };
 
 const loadLostMilitaryIdSignatoryRecords = async () => {
-  const own = await api.listDocumentSignatories("lostMilitaryId");
-  if (own.length) return own;
-  return api.listDocumentSignatories("ubdReport");
+  return loadSignatoryRecordsWithUbdFallback("lostMilitaryId");
+};
+
+const prepareLostMilitaryIdExportFields = async (
+  fields: LostMilitaryIdFields,
+): Promise<LostMilitaryIdFields> => {
+  const signatories = toLostMilitaryIdSignatories(
+    snapshotSignatories(await loadLostMilitaryIdSignatoryRecords()),
+  );
+  const defaults = createLostMilitaryIdFields(
+    null,
+    buildPersonSummary(null),
+    signatories,
+  );
+  return mergeLostMilitaryIdFields(defaults, fields);
 };
 
 const toLostMilitaryIdSignatories = (
@@ -1677,38 +1702,6 @@ const readDocumentFieldText = (
   return typeof value === "string" ? value.trim() : "";
 };
 
-const getDocumentPersonName = (document: BackendPersonDocument) => {
-  const metadataName = String(document.personName ?? "").trim();
-  if (metadataName) return metadataName;
-
-  const fields = (document.fields || {}) as Record<string, unknown>;
-  const fullName =
-    readDocumentFieldText(fields, "fullName") ||
-    readDocumentFieldText(fields, "pib") ||
-    readDocumentFieldText(fields, "name") ||
-    readDocumentFieldText(fields, "ПІБ") ||
-    readDocumentFieldText(fields, "ФИО");
-  if (fullName) return fullName;
-
-  const assembled = [
-    readDocumentFieldText(fields, "lastName"),
-    readDocumentFieldText(fields, "firstName"),
-    readDocumentFieldText(fields, "patronymic"),
-  ]
-    .filter(Boolean)
-    .join(" ");
-  if (assembled) return assembled;
-
-  const syntheticName = personNameFromSyntheticDocumentId(
-    document.personExternalId,
-  );
-  if (syntheticName) return syntheticName;
-
-  return document.personExternalId
-    ? `ID ${document.personExternalId}`
-    : "Без ПІБ";
-};
-
 const readDocumentUbdTaskPeriod = (document: BackendPersonDocument) => {
   if (document.type !== "ubdReport") return "";
   const value = document.fields?.taskPeriod;
@@ -2133,6 +2126,13 @@ export function DocumentsPage(_props: {
   const journalStatusMenuRef = useRef<HTMLDivElement | null>(null);
   const [journalMonthFilter, setJournalMonthFilter] = useState("ALL");
   const [journalNameQuery, setJournalNameQuery] = useState("");
+  const [ubdOnHandImported, setUbdOnHandImported] = useState<
+    UbdOnHandMatchReport["imported"] | null
+  >(null);
+  const [ubdOnHandFileName, setUbdOnHandFileName] = useState("");
+  const [ubdOnHandFilterActive, setUbdOnHandFilterActive] = useState(false);
+  const [isImportingUbdOnHand, setIsImportingUbdOnHand] = useState(false);
+  const ubdOnHandImportInputRef = useRef<HTMLInputElement | null>(null);
   /** IDs зняті з експорту; усі інші з відфільтрованого списку експортуються. */
   const [journalExportDeselectedIds, setJournalExportDeselectedIds] = useState<
     Record<string, true>
@@ -2194,7 +2194,7 @@ export function DocumentsPage(_props: {
     mode === "lostMilitaryId";
   const [lostMilitaryIdPreviewDoc, setLostMilitaryIdPreviewDoc] = useState<
     "report" | "order" | "act"
-  >("report");
+  >("act");
   useEffect(() => {
     if (mode !== "lostMilitaryId") return;
     const step = resolveDocumentWorkflowStatus(
@@ -2230,13 +2230,17 @@ export function DocumentsPage(_props: {
       );
     }
     if (mode === "lostMilitaryId") {
+      const prepare =
+        lostMilitaryIdPreviewDoc === "act"
+          ? prepareLostMilitaryIdExportFields
+          : async (fields: LostMilitaryIdFields) => fields;
       if (lostMilitaryIdPreviewDoc === "order") {
-        return createLostMilitaryIdOrderWordBlob(lostMilitaryIdFields);
+        return prepare(lostMilitaryIdFields).then(createLostMilitaryIdOrderWordBlob);
       }
       if (lostMilitaryIdPreviewDoc === "act") {
-        return createLostMilitaryIdActWordBlob(lostMilitaryIdFields);
+        return prepare(lostMilitaryIdFields).then(createLostMilitaryIdActWordBlob);
       }
-      return createLostMilitaryIdReportWordBlob(lostMilitaryIdFields);
+      return prepare(lostMilitaryIdFields).then(createLostMilitaryIdReportWordBlob);
     }
     return Promise.reject(new Error("Немає Word-шаблону для цього документа."));
   }, [
@@ -2281,6 +2285,13 @@ export function DocumentsPage(_props: {
       ),
     [allPersonDocuments],
   );
+
+  const ubdOnHandReport = useMemo(() => {
+    if (!ubdOnHandImported?.length) return null;
+    return matchUbdOnHandAgainstDocuments(ubdOnHandImported, journalDocuments, {
+      documentTypes: ["ubdReport"],
+    });
+  }, [journalDocuments, ubdOnHandImported]);
 
   const journalMonthOptions = useMemo(() => {
     const months = new Set<string>();
@@ -2350,6 +2361,13 @@ export function DocumentsPage(_props: {
   const filteredJournalDocuments = useMemo(() => {
     const filtered = journalDocuments.filter((document) => {
       if (!documentMatchesJournalNameQuery(document, journalNameQuery)) {
+        return false;
+      }
+      if (
+        ubdOnHandFilterActive &&
+        ubdOnHandReport?.matchedDocumentIds.size &&
+        !ubdOnHandReport.matchedDocumentIds.has(document.id)
+      ) {
         return false;
       }
       if (
@@ -2457,6 +2475,8 @@ export function DocumentsPage(_props: {
     journalSortField,
     journalStatusFilters,
     journalTypeFilter,
+    ubdOnHandFilterActive,
+    ubdOnHandReport,
     lostMilitaryIdFields,
     mode,
     selectedDocumentId,
@@ -2617,6 +2637,71 @@ export function DocumentsPage(_props: {
     );
   };
 
+  const clearUbdOnHandImport = () => {
+    setUbdOnHandImported(null);
+    setUbdOnHandFileName("");
+    setUbdOnHandFilterActive(false);
+    setDocumentMessage("Фільтр за списком УБД в наявності знято.");
+  };
+
+  const importUbdOnHandFromFile = async (file: File) => {
+    setIsImportingUbdOnHand(true);
+    try {
+      const snapshot = await readWorkbookSnapshot(file);
+      const imported = parseUbdOnHandWorkbook(snapshot);
+      if (!imported.length) {
+        setUbdOnHandImported(null);
+        setUbdOnHandFileName("");
+        setUbdOnHandFilterActive(false);
+        setDocumentMessage(
+          `У файлі «${file.name}» не знайдено жодного ПІБ для імпорту.`,
+        );
+        return;
+      }
+      setUbdOnHandImported(imported);
+      setUbdOnHandFileName(file.name);
+      setUbdOnHandFilterActive(true);
+      setJournalTypeFilter("ubdReport");
+      setJournalStatusFilters([]);
+      setJournalNameQuery("");
+      setJournalExportDeselectedIds({});
+      const report = matchUbdOnHandAgainstDocuments(
+        imported,
+        journalDocuments,
+        { documentTypes: ["ubdReport"] },
+      );
+      setDocumentMessage(
+        `Імпорт «${file.name}»: ${formatUbdOnHandMatchSummary(report)} · ${formatUbdOnHandSheetBreakdown(imported)}`,
+      );
+    } catch (error) {
+      setDocumentMessage(
+        error instanceof Error
+          ? `Помилка імпорту УБД: ${error.message}`
+          : "Помилка імпорту УБД.",
+      );
+    } finally {
+      setIsImportingUbdOnHand(false);
+    }
+  };
+
+  const copyUbdOnHandUnmatchedNames = async () => {
+    if (!ubdOnHandReport?.unmatched.length) {
+      setDocumentMessage("Усі імпортовані ПІБ мають документи в журналі.");
+      return;
+    }
+    const text = ubdOnHandReport.unmatched
+      .map((row) => row.fullName)
+      .join("\n");
+    try {
+      await navigator.clipboard.writeText(text);
+      setDocumentMessage(
+        `Скопійовано ${ubdOnHandReport.unmatched.length} ПІБ без документів.`,
+      );
+    } catch {
+      setDocumentMessage("Не вдалося скопіювати список ПІБ.");
+    }
+  };
+
   const exportDocumentJournal = async () => {
     if (!filteredJournalDocuments.length) {
       setDocumentMessage("Немає рядків для експорту за поточними фільтрами.");
@@ -2636,16 +2721,13 @@ export function DocumentsPage(_props: {
 
       if (journalTypeFilter === "ubdReport") {
         setDocumentMessage("Готую таблицю УБД «Не подавалися»…");
-        const [staffImport, cachedRoster] = await Promise.all([
+        const [staffImport, dataset] = await Promise.all([
           readDataCache<StaffSheetImportSnapshot>(CacheKeys.staffSheetImport),
-          readDataCache<BackendPersonnelRosterLatest>(CacheKeys.rosterLatest),
+          loadPersonnelDataset(),
         ]);
-        const rosterLatest =
-          cachedRoster ??
-          (await api.getLatestPersonnelRoster().catch(() => null));
         const rosterCallSignIndex = buildUbdRosterCallSignIndex([
           ...(staffImport?.rows ?? []),
-          ...mapRosterLatestToPreviewRows(rosterLatest),
+          ...rosterRowsFromDataset(dataset),
         ]);
 
         const uniqueIds = [
@@ -3293,13 +3375,9 @@ export function DocumentsPage(_props: {
     void (async () => {
       try {
         // 1) Той самий ранковий «Загальний список», що на картці особи
-        const latest = await fetchWithCache({
-          key: CacheKeys.rosterLatest,
-          fetcher: () => api.getLatestPersonnelRoster(),
-          isChanged: jsonChanged,
-        });
+        const dataset = await loadPersonnelDataset();
         if (cancelled) return;
-        const rows = mapRosterLatestToPreviewRows(latest);
+        const rows = rosterRowsFromDataset(dataset);
         const wanted = normalize(lookupName);
         const wantedSurname = wanted.split(" ")[0] || "";
         const match =
@@ -3375,13 +3453,9 @@ export function DocumentsPage(_props: {
     let cancelled = false;
     void (async () => {
       try {
-        const latest = await fetchWithCache({
-          key: CacheKeys.rosterLatest,
-          fetcher: () => api.getLatestPersonnelRoster(),
-          isChanged: jsonChanged,
-        });
+        const dataset = await loadPersonnelDataset();
         if (cancelled) return;
-        const rows = mapRosterLatestToPreviewRows(latest);
+        const rows = rosterRowsFromDataset(dataset);
         const match = findRosterRowByPersonName(rows, lookupName);
         if (!match) return;
 
@@ -4371,8 +4445,8 @@ export function DocumentsPage(_props: {
     try {
       let personForFields = selectedPerson;
       try {
-        const latest = await api.getLatestPersonnelRoster();
-        const rows = mapRosterLatestToPreviewRows(latest);
+        const dataset = await loadPersonnelDataset();
+        const rows = rosterRowsFromDataset(dataset);
         const match = findRosterRowByPersonName(rows, summary.name);
         if (match) {
           personForFields = applyRosterFieldsToPerson(
@@ -6575,25 +6649,17 @@ export function DocumentsPage(_props: {
   };
 
   const saveLostMilitaryIdAsWord = async () => {
-    setDocumentMessage("Формую рапорт про втрату військового квитка...");
-    const blob = await createLostMilitaryIdReportWordBlob(lostMilitaryIdFields);
-    const fileName = `${safeFilePart(lostMilitaryIdFields.folderName)} · Рапорт.docx`;
-    downloadBlob(fileName, blob);
-    setDocumentMessage(`Word-файл «${fileName}» збережено.`);
-    setWorkflowStep("document", "on");
-    void saveLostMilitaryIdDocument(lostMilitaryIdFields);
-  };
-
-  const saveLostMilitaryIdKit = async () => {
-    setDocumentMessage("Формую комплект: рапорт, наказ, акт...");
-    const blob = await createLostMilitaryIdKitZip(lostMilitaryIdFields);
-    const fileName = `${safeFilePart(lostMilitaryIdFields.folderName)}.zip`;
+    setDocumentMessage("Формую ZIP-архів: рапорт, наказ та акт...");
+    const exportFields = await prepareLostMilitaryIdExportFields(lostMilitaryIdFields);
+    const blob = await createLostMilitaryIdKitZip(exportFields);
+    const fileName = `${safeFilePart(exportFields.folderName)}.zip`;
     downloadBlob(fileName, blob);
     setDocumentMessage(
-      `Комплект «${fileName}» збережено (рапорт, наказ, акт — 3 файли в архіві).`,
+      `ZIP-архів «${fileName}» збережено (рапорт, наказ, акт розслідування).`,
     );
     setWorkflowStep("document", "on");
-    void saveLostMilitaryIdDocument(lostMilitaryIdFields);
+    setLostMilitaryIdFields(exportFields);
+    void saveLostMilitaryIdDocument(exportFields);
   };
 
   const printUbdDocument = () => {
@@ -7053,8 +7119,7 @@ export function DocumentsPage(_props: {
             ))}
           </Stack>
           <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1 }}>
-            «Сформувати комплект» завантажує три окремі .docx у ZIP. Новий формат акту — з
-            «ЗАТВЕРДЖУЮ» зверху; відкрийте файл «… · Акт.docx».
+            Експорт Word — ZIP-архів із трьома файлами: рапорт, наказ та акт розслідування.
           </Typography>
         </>
       ) : null}
@@ -8443,9 +8508,15 @@ export function DocumentsPage(_props: {
                 ["militaryUnit", "В/ч"],
                 ["addressee", "Кому"],
                 ["lossDate", "Дата втрати"],
-                ["fromLocation", "Звідки"],
-                ["toLocation", "Куди"],
-                ["customCircumstances", "Інші обставини"],
+                ...(lostMilitaryIdFields.circumstanceKind === "movement"
+                  ? ([
+                      ["fromLocation", "Звідки"],
+                      ["toLocation", "Куди"],
+                    ] as Array<[keyof LostMilitaryIdFields, string]>)
+                  : ([
+                      ["lossLocation", "Місце втрати"],
+                      ["customCircumstances", "Обставини"],
+                    ] as Array<[keyof LostMilitaryIdFields, string]>)),
                 ["searchResult", "Результат пошуку"],
                 ...(lostMilitaryIdFields.signatories.length
                   ? []
@@ -8463,6 +8534,7 @@ export function DocumentsPage(_props: {
                     key === "addressee" ||
                     key === "reporterTitle" ||
                     key === "investigatorPosition" ||
+                    key === "lossLocation" ||
                     key === "customCircumstances") &&
                     "wide",
                   documentRequiredFieldIsBlank(
@@ -8481,14 +8553,23 @@ export function DocumentsPage(_props: {
                     key === "addressee" ||
                     key === "reporterTitle" ||
                     key === "investigatorPosition" ||
-                    key === "customCircumstances"
+                    key === "lossLocation" ||
+                    key === "customCircumstances" ||
+                    key === "address" ||
+                    key === "enlistedOrder" ||
+                    key === "personnelChiefName"
                   }
                   rows={
                     key === "staffPosition" ||
                     key === "reporterTitle" ||
-                    key === "investigatorPosition"
-                      ? 2
-                      : undefined
+                    key === "investigatorPosition" ||
+                    key === "customCircumstances"
+                      ? key === "customCircumstances"
+                        ? 3
+                        : 2
+                      : key === "address" || key === "enlistedOrder"
+                        ? 2
+                        : undefined
                   }
                   value={String(lostMilitaryIdFields[key] ?? "")}
                   onChange={(event) =>
@@ -8568,8 +8649,16 @@ export function DocumentsPage(_props: {
             {(
               [
                 ["reportDate", "Дата рапорту"],
+                ["reportNumber", "Номер рапорту"],
                 ["orderNumber", "Номер наказу"],
                 ["orderDate", "Дата наказу"],
+                ["birthDate", "Дата народження"],
+                ["enlistedDate", "Дата зарахування"],
+                ["enlistedOrder", "Наказ про зарахування"],
+                ["education", "Освіта"],
+                ["maritalStatus", "Сімейний стан"],
+                ["address", "Адреса реєстрації"],
+                ["personnelChiefName", "Начальник персоналу (п.3)"],
                 ["folderName", "Папка"],
               ] as Array<[keyof LostMilitaryIdFields, string]>
             ).map(([key, label]) => (
@@ -8590,28 +8679,47 @@ export function DocumentsPage(_props: {
             ))}
             {lostMilitaryIdFields.signatories.length ? (
               <div className="wide document-default-signatories">
-                <code>Підпис рапорту (з шаблону)</code>
-                {lostMilitaryIdFields.signatories
-                  .filter((signatory) => signatory.blockType === "SIGNER")
-                  .map((signatory, index) => {
-                    const footer = reporterFooterBlock(lostMilitaryIdFields);
-                    const signer = reportSignerOf(lostMilitaryIdFields);
+                <code>Дефолтні записи (редагуються у «Записи для документів»)</code>
+                {lostMilitaryIdFields.signatories.map((signatory, index) => {
+                  if (signatory.blockType === "APPROVAL") {
+                    const footer = approvalFooterBlock(lostMilitaryIdFields);
                     return (
-                      <article
-                        key={`${signatory.fullName}-${index}`}
-                      >
-                        <strong>
-                          {signer?.fullName || signatory.fullName}
-                        </strong>
-                        {footer.titleLines.map((line) => (
-                          <span key={line}>{line}</span>
-                        ))}
-                        <small>
-                          {footer.rank} · {footer.name}
-                        </small>
+                      <article key={`approval-${index}`}>
+                        <strong>ЗАТВЕРДЖУЮ</strong>
+                        <div className="document-signatory-right">
+                          {footer.titleLines.map((line) => (
+                            <span key={line}>{line}</span>
+                          ))}
+                          <span>
+                            {footer.rank || "________________"}
+                            {" \t "}
+                            {footer.name || "________________"}
+                          </span>
+                        </div>
+                        <small>{actApprovalDateLine(lostMilitaryIdFields)}</small>
                       </article>
                     );
-                  })}
+                  }
+                  const footer = reporterFooterBlock(lostMilitaryIdFields);
+                  const signer = reportSignerOf(lostMilitaryIdFields);
+                  return (
+                    <article key={`signer-${index}`}>
+                      <strong>{signer?.fullName || signatory.fullName}</strong>
+                      <div className="document-signatory-two-col">
+                        <div>
+                          {footer.titleLines.map((line) => (
+                            <span key={line}>{line}</span>
+                          ))}
+                        </div>
+                        <div>
+                          <span>{footer.rank || "________________"}</span>
+                          <span>{footer.name || "________________"}</span>
+                        </div>
+                      </div>
+                      <small>{buildManualSignatoryDateLine()}</small>
+                    </article>
+                  );
+                })}
               </div>
             ) : null}
           </div>
@@ -8635,7 +8743,7 @@ export function DocumentsPage(_props: {
                   )
                 }
               />
-              <span>Під час переміщення</span>
+              <span>Під час переміщення (звідки → куди)</span>
             </label>
             <label>
               <Checkbox
@@ -8965,7 +9073,7 @@ export function DocumentsPage(_props: {
             : "main-panel documents-journal-page"
         }
       >
-        <header className="topbar analytics-topbar salary-document-topbar">
+        <header className="topbar analytics-topbar salary-document-topbar documents-journal-topbar">
           <Box className="salary-document-title">
             <Typography component="h1" variant="h4">
               Документи
@@ -8974,7 +9082,12 @@ export function DocumentsPage(_props: {
               Загальний журнал рапортів · прогрес по всіх службовцях
             </Typography>
           </Box>
-          <Stack direction="row" spacing={1}>
+          <Stack
+            direction="row"
+            spacing={1}
+            useFlexGap
+            sx={{ flexWrap: "wrap", justifyContent: "flex-end" }}
+          >
             <Button
               variant="outlined"
               startIcon={<ArticleOutlinedIcon />}
@@ -9044,14 +9157,40 @@ export function DocumentsPage(_props: {
         </Alert>
 
         <section className="analytics-panel documents-journal-panel">
-          <div className="panel-heading">
-            Усі документи · {filteredJournalDocuments.length}
-            {filteredJournalDocuments.length !== journalDocuments.length
-              ? ` / ${journalDocuments.length}`
-              : ""}
-            {filteredJournalDocuments.length
-              ? ` · експорт ${journalExportSelectedCount}`
-              : ""}
+          <div className="panel-heading documents-journal-panel-heading">
+            <span>
+              Усі документи · {filteredJournalDocuments.length}
+              {filteredJournalDocuments.length !== journalDocuments.length
+                ? ` / ${journalDocuments.length}`
+                : ""}
+              {filteredJournalDocuments.length
+                ? ` · експорт ${journalExportSelectedCount}`
+                : ""}
+            </span>
+            <Button
+              component="label"
+              variant="contained"
+              size="small"
+              startIcon={<FileUploadOutlinedIcon />}
+              disabled={isLoadingDocumentJournal || isImportingUbdOnHand}
+              title="Імпорт Excel «посвідчення УБД в наявності»"
+              sx={{ color: "#1a1a14", flex: "0 0 auto" }}
+            >
+              {isImportingUbdOnHand
+                ? "Імпорт..."
+                : "Імпорт УБД в наявності"}
+              <input
+                ref={ubdOnHandImportInputRef}
+                hidden
+                type="file"
+                accept=".xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  event.target.value = "";
+                  if (file) void importUbdOnHandFromFile(file);
+                }}
+              />
+            </Button>
           </div>
           <div className="documents-journal-toolbar">
             <TextField
@@ -9179,6 +9318,60 @@ export function DocumentsPage(_props: {
               <MenuItem value="SKIPPED_STATUS200">Не потрібні: 200</MenuItem>
             </TextField>
           </div>
+          {ubdOnHandReport ? (
+            <div className="documents-journal-bulk-progress documents-journal-ubd-on-hand">
+              <div className="documents-journal-bulk-progress-heading">
+                <code>
+                  УБД в наявності
+                  {ubdOnHandFileName ? ` · ${ubdOnHandFileName}` : ""} ·{" "}
+                  {formatUbdOnHandMatchSummary(ubdOnHandReport)}
+                </code>
+                <Stack direction="row" spacing={1}>
+                  <Button
+                    variant={ubdOnHandFilterActive ? "contained" : "outlined"}
+                    size="small"
+                    onClick={() => setUbdOnHandFilterActive((current) => !current)}
+                  >
+                    {ubdOnHandFilterActive
+                      ? "Лише зі списку"
+                      : "Показати всі"}
+                  </Button>
+                  {ubdOnHandReport.unmatched.length ? (
+                    <Button
+                      variant="outlined"
+                      size="small"
+                      startIcon={<ContentCopyOutlinedIcon />}
+                      onClick={() => void copyUbdOnHandUnmatchedNames()}
+                    >
+                      Без документів · {ubdOnHandReport.unmatched.length}
+                    </Button>
+                  ) : null}
+                  <Button
+                    variant="outlined"
+                    size="small"
+                    color="warning"
+                    onClick={clearUbdOnHandImport}
+                  >
+                    Зняти імпорт
+                  </Button>
+                </Stack>
+              </div>
+              <code className="documents-journal-bulk-progress-empty">
+                Аркуші:{" "}
+                {formatUbdOnHandSheetBreakdown(ubdOnHandReport.imported)}
+                {ubdOnHandReport.unmatched.length
+                  ? ` · без документів: ${ubdOnHandReport.unmatched
+                      .slice(0, 8)
+                      .map((row) => row.fullName)
+                      .join(" · ")}${
+                      ubdOnHandReport.unmatched.length > 8
+                        ? ` · … ще ${ubdOnHandReport.unmatched.length - 8}`
+                        : ""
+                    }`
+                  : " · усі імпортовані ПІБ мають рапорт УБД у журналі"}
+              </code>
+            </div>
+          ) : null}
           {journalTypeFilter === "ubdReport" ? (
             <div className="documents-journal-bulk-progress documents-journal-bulk-progress-recovery">
               <div className="documents-journal-bulk-progress-heading">
@@ -9945,19 +10138,12 @@ export function DocumentsPage(_props: {
                 <Stack direction="row" spacing={1}>
                   {questionnaireHeaderButton}
                   <Button
-                    variant="outlined"
+                    variant="contained"
                     startIcon={<ArticleOutlinedIcon />}
                     onClick={() => void saveLostMilitaryIdAsWord()}
-                  >
-                    Рапорт у Word
-                  </Button>
-                  <Button
-                    variant="contained"
-                    startIcon={<FileDownloadOutlinedIcon />}
-                    onClick={() => void saveLostMilitaryIdKit()}
                     sx={{ color: "#1a1a14" }}
                   >
-                    Сформувати комплект
+                    Word · ZIP (рапорт, наказ, акт)
                   </Button>
                 </Stack>
               </div>
@@ -10127,19 +10313,12 @@ export function DocumentsPage(_props: {
               <Stack direction="row" spacing={1}>
                 {questionnaireHeaderButton}
                 <Button
-                  variant="outlined"
+                  variant="contained"
                   startIcon={<ArticleOutlinedIcon />}
                   onClick={() => void saveLostMilitaryIdAsWord()}
-                >
-                  Рапорт у Word
-                </Button>
-                <Button
-                  variant="contained"
-                  startIcon={<FileDownloadOutlinedIcon />}
-                  onClick={() => void saveLostMilitaryIdKit()}
                   sx={{ color: "#1a1a14" }}
                 >
-                  Сформувати комплект
+                  Word · ZIP (рапорт, наказ, акт)
                 </Button>
               </Stack>
             ) : (

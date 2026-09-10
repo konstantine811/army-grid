@@ -108,7 +108,11 @@ export const measuredFetch = async (
     responseBytes =
       Number.isFinite(contentLength) && contentLength >= 0 ? contentLength : null;
     return response;
+  } catch (error) {
+    if (init?.signal?.aborted) throw error;
+    throw error;
   } finally {
+    if (init?.signal?.aborted) return;
     const durationMs = performance.now() - startedAt;
     const event: AppPerformanceEvent = {
       type: "api",
@@ -125,7 +129,11 @@ export const measuredFetch = async (
       durationMs >= SLOW_API_MS ||
       (responseBytes ?? 0) >= LARGE_RESPONSE_BYTES
     ) {
-      console.warn("[Performance] Heavy API request", event);
+      console.warn(
+        `[Performance] Heavy API request ${event.method} ${event.path} · ${event.durationMs}ms` +
+          (responseBytes != null ? ` · ${Math.round(responseBytes / 1024)}KB` : ""),
+        event,
+      );
     }
   }
 };

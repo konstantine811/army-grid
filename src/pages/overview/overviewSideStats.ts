@@ -4,17 +4,56 @@ import type {
 } from "../../api";
 import { normalizeRosterMatchText } from "../personnel/fighterStatusImport";
 
-const isSameCalendarDay = (value: string | null | undefined, now = new Date()) => {
+/** Parses ISO and Ukrainian dd.MM.yyyy[, HH:mm] used in Overview rows. */
+export const parseOverviewCalendarDate = (
+  value: string | null | undefined,
+): Date | null => {
   const text = String(value ?? "").trim();
-  if (!text) return false;
+  if (!text) return null;
+
+  const ukMatch = text.match(
+    /^(\d{1,2})\.(\d{1,2})\.(\d{4})(?:[,\s]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/,
+  );
+  if (ukMatch) {
+    const [, day, month, year, hour = "0", minute = "0", second = "0"] = ukMatch;
+    const parsed = new Date(
+      Number(year),
+      Number(month) - 1,
+      Number(day),
+      Number(hour),
+      Number(minute),
+      Number(second),
+    );
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  }
+
   const parsed = new Date(text);
-  if (Number.isNaN(parsed.getTime())) return false;
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+};
+
+const isSameCalendarDay = (value: string | null | undefined, now = new Date()) => {
+  const parsed = parseOverviewCalendarDate(value);
+  if (!parsed) return false;
   return (
     parsed.getFullYear() === now.getFullYear() &&
     parsed.getMonth() === now.getMonth() &&
     parsed.getDate() === now.getDate()
   );
 };
+
+const overviewRowTouchDates = (row: BackendPersonnelOverviewRow) =>
+  [
+    row.updatedAt,
+    row.validFrom,
+    row.fighterEntryDate,
+    row.fighterExitDate,
+    row.fighterReturnDate,
+  ].filter(Boolean);
+
+export const overviewRowChangedToday = (
+  row: BackendPersonnelOverviewRow,
+  now = new Date(),
+) => overviewRowTouchDates(row).some((value) => isSameCalendarDay(value, now));
 
 const isReturnOverdue = (plannedReturn: string | null | undefined, now = new Date()) => {
   const text = String(plannedReturn ?? "").trim();
@@ -101,9 +140,7 @@ export const buildOverviewTodayStats = (
   rows: BackendPersonnelOverviewRow[],
   now = new Date(),
 ) => {
-  const todayRows = rows.filter(
-    (row) => isSameCalendarDay(row.updatedAt, now) || isSameCalendarDay(row.validFrom, now),
-  );
+  const todayRows = rows.filter((row) => overviewRowChangedToday(row, now));
   const count = (status: string) =>
     todayRows.filter((row) => row.status === status).length;
 

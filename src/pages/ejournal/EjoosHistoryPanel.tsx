@@ -241,6 +241,7 @@ export function EjoosHistoryPanel() {
               <PersonChangeCard
                 person={selected.person}
                 timesheetDay={selected.timesheetDay}
+                timesheetDayLabel={selected.timesheetDayLabel || ""}
                 mode="history"
                 historyMeta={{
                   version: selected.version,

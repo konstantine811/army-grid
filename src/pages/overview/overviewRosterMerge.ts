@@ -5,9 +5,12 @@ import type {
 import type { EjournalPreviewRow } from "../ejournal/ejournalTypes";
 import {
   extractBchsAwayPeopleFromDbRows,
+  filterBchsNovaPeople,
   hasBchsFullName,
+  matchesBchsRosterUnit,
   normalizeBchsText,
 } from "../bchs/bchsCalc";
+import type { BchsPersonnelAwayPerson } from "../bchs/bchsTypes";
 import {
   buildPersonIdentityFingerprint,
   classifyOverviewStatusFromRoster,
@@ -26,6 +29,7 @@ import {
   getRosterValue,
   isPersonnelInStaffRoster,
 } from "../personnel/personnelRosterMerge";
+import { isRosterStaffLineRow } from "../personnel/rosterRowFill";
 import { readRosterColumnValue } from "../excel-fill/rosterSourceSnapshot";
 import {
   getRosterFighterStatusOverviewFields,
@@ -88,7 +92,97 @@ const sortBattalionLabels = (labels: string[]) =>
 /** Google Sheets може зберігати роту об'єднаною коміркою — заповнюємо її для рядків посад нижче. */
 
 /** @deprecated import from rosterRowFill */
-export { fillDownRosterUnitRows } from "../personnel/rosterRowFill";
+export { fillDownRosterUnitRows, isRosterStaffLineRow } from "../personnel/rosterRowFill";
+
+export const rosterRowMatchesOverviewUnit = (
+  unit: string,
+  selectedUnits: string[],
+) => {
+  if (!selectedUnits.length) return true;
+  const normalizedUnit = normalizeRosterMatchText(unit);
+  return selectedUnits.some(
+    (selected) =>
+      normalizeRosterMatchText(selected) === normalizedUnit ||
+      matchesBchsRosterUnit(selected, unit),
+  );
+};
+
+type NovaStaffBlockRow = {
+  row: EjournalPreviewRow;
+  person: BchsPersonnelAwayPerson | undefined;
+  index: number;
+};
+
+/**
+ * Перший штатний блок роти в «Загальному списку» (до наступного підрозділу).
+ * Повторний заголовок «2 піхотна рота» нижче (архів/стара) не рахується — як фільтр Excel по merge.
+ */
+export const forEachNovaStaffBlockRow = (
+  rosterRows: EjournalPreviewRow[],
+  selectedUnits: string[],
+  columns: Array<{ key: string; letter?: string; originalIndex?: number }> | undefined,
+  visit: (entry: NovaStaffBlockRow) => void,
+) => {
+  const extracted = extractBchsAwayPeopleFromDbRows(rosterRows, columns);
+  const unitFilterActive = selectedUnits.length > 0;
+  let inFirstTargetBlock = !unitFilterActive;
+  let blockClosed = false;
+  let activeSectionUnit = "";
+
+  rosterRows.forEach((row, index) => {
+    const person = extracted[index];
+    const battalion = rosterBattalionLabel(person, row);
+    const explicitUnit = readRosterColumnValue(row, 2).trim();
+
+    if (unitFilterActive && explicitUnit) {
+      const isTarget = rosterRowMatchesOverviewUnit(explicitUnit, selectedUnits);
+      if (blockClosed) {
+        inFirstTargetBlock = false;
+        activeSectionUnit = "";
+      } else if (isTarget) {
+        inFirstTargetBlock = true;
+        activeSectionUnit = explicitUnit;
+      } else if (inFirstTargetBlock) {
+        blockClosed = true;
+        inFirstTargetBlock = false;
+        activeSectionUnit = "";
+      }
+    }
+
+    if (battalion !== "нова") return;
+    if (unitFilterActive && !inFirstTargetBlock) return;
+
+    const unit =
+      explicitUnit ||
+      activeSectionUnit ||
+      getRosterUnit(row) ||
+      String(person?.rosterUnit ?? "").trim();
+    if (unitFilterActive && !rosterRowMatchesOverviewUnit(unit, selectedUnits)) return;
+
+    visit({ row, person, index });
+  });
+};
+
+/** «За штатом» + список для Підрахунку: «нова», перший блок роти, лише рядки посад. */
+export const summarizeNovaStaffForUnits = (
+  rosterRows: EjournalPreviewRow[],
+  selectedUnits: string[],
+  columns?: Array<{ key: string; letter?: string; originalIndex?: number }>,
+): { staff: number; listedPeople: BchsPersonnelAwayPerson[] } => {
+  let staff = 0;
+  const blockPeople: BchsPersonnelAwayPerson[] = [];
+
+  forEachNovaStaffBlockRow(rosterRows, selectedUnits, columns, ({ row, person }) => {
+    if (!person) return;
+    blockPeople.push(person);
+    if (isRosterStaffLineRow(row)) staff += 1;
+  });
+
+  return {
+    staff,
+    listedPeople: filterBchsNovaPeople(blockPeople),
+  };
+};
 
 /** Посади / люди зі Штатки. `battalion = ALL` — усі пункти, не лише «нова». */
 export const summarizeStaffFromRoster = (
@@ -143,6 +237,8 @@ export const rosterRowToOverviewRow = (
     inStaff?: boolean;
     name?: string;
     battalion?: string;
+    /** Індекс у масиві джерела — резерв для унікального React key */
+    rowIndex?: number;
   } = {},
 ): BackendPersonnelOverviewRow | null => {
   const name = options.name?.trim() || getRosterPersonName(rosterRow);
@@ -166,8 +262,19 @@ export const rosterRowToOverviewRow = (
   if (!rowKey) return null;
 
   const staffStatus = applyStaffRosterStatus(rosterRow, rosterLabels);
+  const fighterFields = getRosterFighterStatusOverviewFields(rosterRow);
+  const touchDate =
+    fighterFields.fighterExitDate ||
+    fighterFields.fighterReturnDate ||
+    fighterFields.fighterEntryDate ||
+    "";
+  const stableRowId = fallbackKey
+    ? `roster:row:${fallbackKey}`
+    : options.rowIndex != null
+      ? `roster:${rowKey}:i${options.rowIndex}`
+      : `roster:${rowKey}`;
   return {
-    id: `roster:${rowKey}`,
+    id: stableRowId,
     externalId: identityKey || fallbackKey,
     name: displayName,
     rank: resolvePersonRankTitle(rosterRow) || getRosterValue(rosterRow, ["звання"]),
@@ -175,17 +282,17 @@ export const rosterRowToOverviewRow = (
     status: staffStatus.staffStatus,
     statusLabel: staffStatus.staffStatusLabel,
     positionTitle: getPersonFullPositionTitle(rosterRow),
-    validFrom: null,
+    validFrom: fighterFields.fighterExitDate || fighterFields.fighterEntryDate || null,
     days: null,
-    plannedReturn: null,
+    plannedReturn: fighterFields.fighterReturnDate || null,
     place: "",
-    updatedAt: "",
+    updatedAt: touchDate,
     inStaff: options.inStaff !== false,
     inNovaStaff: options.inNovaStaff === true,
     battalion: options.battalion,
     fromEjoos: false,
     ...staffStatus,
-    ...getRosterFighterStatusOverviewFields(rosterRow),
+    ...fighterFields,
     staffSheetColumns: buildStaffSheetColumnsRecord(rosterRow),
   };
 };
@@ -218,6 +325,7 @@ export const buildStaffOverviewRowsFromRoster = (
       inNovaStaff: namedNovaRows.has(row),
       name,
       battalion: battalionLabel,
+      rowIndex: index,
     });
     if (overviewRow) result.push(overviewRow);
   });
@@ -233,7 +341,8 @@ export const buildStaffOverviewRowsFromPersonnel = (
 ): BackendPersonnelOverviewRow[] => {
   const result: BackendPersonnelOverviewRow[] = [];
 
-  for (const row of personnelRows) {
+  for (let index = 0; index < personnelRows.length; index++) {
+    const row = personnelRows[index];
     if (!isLikelyPersonnelRow(row)) continue;
     const inStaff = isPersonnelInStaffRoster(row);
     if (!inStaff) continue;
@@ -246,6 +355,7 @@ export const buildStaffOverviewRowsFromPersonnel = (
       inNovaStaff: battalionLabel === "нова",
       name: getPersonDisplayName(row),
       battalion: battalionLabel,
+      rowIndex: index,
     });
     if (overviewRow) result.push(overviewRow);
   }

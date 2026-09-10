@@ -12,6 +12,8 @@
     "lint": "oxlint",
     "test": "vitest run",
     "test:watch": "vitest",
+    "ejoos:style-probe": "jiti scripts/ejoosStyleProbe.ts",
+    "ejoos:debug-person": "jiti scripts/debugEjoosApplyPerson.ts",
     "preview": "vite preview",
     "preview:lan": "vite preview --host",
     "serve:lan": "npm run build && vite preview --host"

@@ -82,9 +82,16 @@ type SciTableOptions<TData> = {
   globalFilterPlaceholder?: string;
   exportLabel?: string;
   secondaryExportLabel?: string;
+  tertiaryExportLabel?: string;
+  quaternaryExportLabel?: string;
+  quinaryExportLabel?: string;
   copyLabel?: string;
   enableCopyText?: boolean;
   copyTextBuilder?: (
+    context: SciDataTableExportContext<TData>,
+  ) => string | Promise<string>;
+  secondaryCopyLabel?: string;
+  secondaryCopyTextBuilder?: (
     context: SciDataTableExportContext<TData>,
   ) => string | Promise<string>;
   onExport?: (
@@ -93,8 +100,20 @@ type SciTableOptions<TData> = {
   onSecondaryExport?: (
     context: SciDataTableExportContext<TData>,
   ) => void | Promise<void>;
+  onTertiaryExport?: (
+    context: SciDataTableExportContext<TData>,
+  ) => void | Promise<void>;
+  onQuaternaryExport?: (
+    context: SciDataTableExportContext<TData>,
+  ) => void | Promise<void>;
+  onQuinaryExport?: (
+    context: SciDataTableExportContext<TData>,
+  ) => void | Promise<void>;
   emptyMessage?: string;
   getRowId?: (row: TData, index: number) => string;
+  onColumnVisibilityChange?: (visibility: Record<string, boolean>) => void;
+  /** Called when virtualized visible rows change (scroll / data / filters). */
+  onVisibleRowsChange?: (rows: TData[]) => void;
   /** Extra props/class for body cells (editing highlight, data attrs). */
   getTdProps?: (args: {
     row: TData;
@@ -165,6 +184,9 @@ export function MaterialReactTable<TData>({
   const [columnVisibility, setColumnVisibility] = useState<
     Record<string, boolean>
   >(() => table.initialState?.columnVisibility ?? {});
+  useEffect(() => {
+    table.onColumnVisibilityChange?.(columnVisibility);
+  }, [columnVisibility, table.onColumnVisibilityChange]);
   const [pinOverrides, setPinOverrides] = useState<
     Record<string, SciDataTablePin | "off">
   >({});
@@ -174,11 +196,18 @@ export function MaterialReactTable<TData>({
   const [copyState, setCopyState] = useState<"idle" | "copied" | "error">(
     "idle",
   );
+  const [secondaryCopyState, setSecondaryCopyState] = useState<
+    "idle" | "copied" | "error"
+  >("idle");
   const copyResetRef = useRef<number | null>(null);
+  const secondaryCopyResetRef = useRef<number | null>(null);
   useEffect(
     () => () => {
       if (copyResetRef.current != null) {
         window.clearTimeout(copyResetRef.current);
+      }
+      if (secondaryCopyResetRef.current != null) {
+        window.clearTimeout(secondaryCopyResetRef.current);
       }
     },
     [],
@@ -279,6 +308,32 @@ export function MaterialReactTable<TData>({
   });
   const rowVirtualizerRef = useRef(rowVirtualizer);
   rowVirtualizerRef.current = rowVirtualizer;
+
+  useEffect(() => {
+    if (!table.onVisibleRowsChange) return;
+    const notifyVisibleRows = () => {
+      if (!enableVirtualization) {
+        table.onVisibleRowsChange?.(rows);
+        return;
+      }
+      const items = rowVirtualizerRef.current.getVirtualItems();
+      table.onVisibleRowsChange?.(
+        items
+          .map((item) => rows[item.index])
+          .filter((row): row is TData => Boolean(row)),
+      );
+    };
+    notifyVisibleRows();
+    const scrollEl = scrollParentRef.current;
+    scrollEl?.addEventListener("scroll", notifyVisibleRows, { passive: true });
+    return () => scrollEl?.removeEventListener("scroll", notifyVisibleRows);
+  }, [
+    enableVirtualization,
+    rows,
+    rowVirtualizer.range?.startIndex,
+    rowVirtualizer.range?.endIndex,
+    table.onVisibleRowsChange,
+  ]);
 
   const focusedRowId = table.focusedCell?.rowId ?? "";
   const focusedColumnId = table.focusedCell?.columnId ?? "";
@@ -440,7 +495,11 @@ export function MaterialReactTable<TData>({
     table.enableColumnVisibility !== false ||
     Boolean(table.onExport) ||
     Boolean(table.onSecondaryExport) ||
-    table.enableCopyText === true;
+    Boolean(table.onTertiaryExport) ||
+    Boolean(table.onQuaternaryExport) ||
+    Boolean(table.onQuinaryExport) ||
+    table.enableCopyText === true ||
+    Boolean(table.secondaryCopyTextBuilder);
   const hasColumnFilters =
     table.enableColumnFilters !== false &&
     visibleColumns.some((column) => column.enableColumnFilter !== false);
@@ -535,6 +594,47 @@ export function MaterialReactTable<TData>({
                   : (table.copyLabel ?? "Копіювати")}
             </button>
           ) : null}
+          {table.secondaryCopyTextBuilder ? (
+            <button
+              type="button"
+              className={
+                secondaryCopyState === "copied"
+                  ? "sci-data-table-export is-copied"
+                  : secondaryCopyState === "error"
+                    ? "sci-data-table-export is-error"
+                    : "sci-data-table-export"
+              }
+              onClick={() => {
+                const builder = table.secondaryCopyTextBuilder;
+                if (!builder) return;
+                const context = {
+                  rows: sortedRows,
+                  allRows: table.data,
+                  columns: visibleExportColumns,
+                  filters: activeExportFilters,
+                };
+                void Promise.resolve(builder(context))
+                  .then((text) => copyTextToClipboard(text ?? ""))
+                  .catch(() => false)
+                  .then((ok) => {
+                    if (secondaryCopyResetRef.current != null) {
+                      window.clearTimeout(secondaryCopyResetRef.current);
+                    }
+                    setSecondaryCopyState(ok ? "copied" : "error");
+                    secondaryCopyResetRef.current = window.setTimeout(() => {
+                      setSecondaryCopyState("idle");
+                      secondaryCopyResetRef.current = null;
+                    }, 1800);
+                  });
+              }}
+            >
+              {secondaryCopyState === "copied"
+                ? "Скопійовано"
+                : secondaryCopyState === "error"
+                  ? "Не вдалося"
+                  : (table.secondaryCopyLabel ?? "Копіювати")}
+            </button>
+          ) : null}
           {table.onExport ? (
             <button
               type="button"
@@ -565,6 +665,54 @@ export function MaterialReactTable<TData>({
               }
             >
               {table.secondaryExportLabel ?? "Експорт важливих колонок"}
+            </button>
+          ) : null}
+          {table.onTertiaryExport ? (
+            <button
+              type="button"
+              className="sci-data-table-export"
+              onClick={() =>
+                void table.onTertiaryExport?.({
+                  rows: filteredRows,
+                  allRows: table.data,
+                  columns: visibleExportColumns,
+                  filters: activeExportFilters,
+                })
+              }
+            >
+              {table.tertiaryExportLabel ?? "Експорт звіту роти"}
+            </button>
+          ) : null}
+          {table.onQuaternaryExport ? (
+            <button
+              type="button"
+              className="sci-data-table-export"
+              onClick={() =>
+                void table.onQuaternaryExport?.({
+                  rows: filteredRows,
+                  allRows: table.data,
+                  columns: visibleExportColumns,
+                  filters: activeExportFilters,
+                })
+              }
+            >
+              {table.quaternaryExportLabel ?? "Експорт БЧС (ранковий)"}
+            </button>
+          ) : null}
+          {table.onQuinaryExport ? (
+            <button
+              type="button"
+              className="sci-data-table-export"
+              onClick={() =>
+                void table.onQuinaryExport?.({
+                  rows: filteredRows,
+                  allRows: table.data,
+                  columns: visibleExportColumns,
+                  filters: activeExportFilters,
+                })
+              }
+            >
+              {table.quinaryExportLabel ?? "Експорт ППД"}
             </button>
           ) : null}
           {table.enableColumnVisibility !== false ? (

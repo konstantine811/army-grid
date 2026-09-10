@@ -1,5 +1,5 @@
 import { FIGHTER_STATUS_FALLBACK_HEADERS } from "../excel-fill/staffSheet";
-import { MORNING_GENERAL_LIST_COLUMN_LABELS } from "../personnel/personnelUtils";
+import { MORNING_GENERAL_LIST_COLUMN_LABELS } from "../personnel/morningGeneralListColumnLabels";
 
 const rosterCol = (columnNumber: number) =>
   MORNING_GENERAL_LIST_COLUMN_LABELS[columnNumber] ?? "";

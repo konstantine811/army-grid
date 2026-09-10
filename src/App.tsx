@@ -1,5 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { Button, Typography } from "@/components/sci/SciPrimitives";
+import { MagneticTapePreloader } from "@/components/sci/MagneticTapePreloader";
 import { MenuOutlinedIcon } from "@/components/sci/icons";
 import "./App.css";
 import {
@@ -17,22 +18,25 @@ import {
 } from "./app/navigation";
 import type { PersonnelFocusTarget } from "./pages/personnel/personnelFocus";
 import { Sidebar, APP_PAGE_LABELS } from "./app/layout/Sidebar";
-import { AnalyticsPage } from "./pages/analytics/AnalyticsPage";
-import { PersonnelPage } from "./pages/personnel/PersonnelPage";
-import { DocumentsPage } from "./pages/documents/DocumentsPage";
+import {
+  LazyAnalyticsPage,
+  LazyAnketaDataPage,
+  LazyBchsPage,
+  LazyDocumentsPage,
+  LazyEjournalPage,
+  LazyExcelFillPage,
+  LazyOverviewPage,
+  LazyPageBoundary,
+  LazyPersonnelPage,
+  LazySocPassportPage,
+} from "./app/lazyPages";
 import { storeSelectedPersonFullPosition } from "./pages/documents/zhbdCertificateReport";
 import {
   getPersonFullPositionTitle,
   pickFullPositionFromPersonRow,
 } from "./pages/personnel/personnelUtils";
-import { EjournalPage } from "./pages/ejournal/EjournalPage";
 import type { EjournalPreviewRow } from "./pages/ejournal/ejournalTypes";
 import { buildPersonSummary } from "./pages/personnel/personnelUtils";
-import { BchsPage } from "./pages/bchs/BchsPage";
-import { OverviewPage } from "./pages/overview/OverviewPage";
-import { ExcelFillPage } from "./pages/excel-fill/ExcelFillPage";
-import { AnketaDataPage } from "./pages/anketa-data/AnketaDataPage";
-import { SocPassportPage } from "./pages/soc-passport/SocPassportPage";
 import { DocumentSignatoriesSettingsPage } from "./pages/document-settings/DocumentSignatoriesSettingsPage";
 import { SciScrollbars } from "./components/sci/SciScrollbars";
 import { SciLiveFeedback } from "./components/sci/SciLiveFeedback";
@@ -219,9 +223,10 @@ function App() {
   if (loading) {
     return (
       <div className="auth-shell auth-shell--loading">
-        <Typography variant="body2" color="text.secondary">
-          Завантаження…
-        </Typography>
+        <MagneticTapePreloader
+          status="ПЕРЕВІРКА СЕСІЇ"
+          hint="Підключаюся до сервера та перевіряю доступ."
+        />
       </div>
     );
   }
@@ -287,68 +292,92 @@ function App() {
           activePage={activePage}
           mountedPages={mountedPages}
         >
-          <OverviewPage />
+          <LazyPageBoundary
+            status="ЗАВАНТАЖЕННЯ ОГЛЯДУ"
+            hint="Читаю Штатку та готую таблицю особового складу."
+          >
+            <LazyOverviewPage active={activePage === "overview"} />
+          </LazyPageBoundary>
         </AppPageSlot>
         <AppPageSlot
           page="analytics"
           activePage={activePage}
           mountedPages={mountedPages}
         >
-          <AnalyticsPage />
+          <LazyPageBoundary>
+            <LazyAnalyticsPage />
+          </LazyPageBoundary>
         </AppPageSlot>
         <AppPageSlot
           page="bchs"
           activePage={activePage}
           mountedPages={mountedPages}
         >
-          <BchsPage active={activePage === "bchs"} />
+          <LazyPageBoundary>
+            <LazyBchsPage active={activePage === "bchs"} />
+          </LazyPageBoundary>
         </AppPageSlot>
         <AppPageSlot
           page="excelFill"
           activePage={activePage}
           mountedPages={mountedPages}
         >
-          <ExcelFillPage />
+          <LazyPageBoundary>
+            <LazyExcelFillPage />
+          </LazyPageBoundary>
         </AppPageSlot>
         <AppPageSlot
           page="anketaData"
           activePage={activePage}
           mountedPages={mountedPages}
         >
-          <AnketaDataPage />
+          <LazyPageBoundary>
+            <LazyAnketaDataPage />
+          </LazyPageBoundary>
         </AppPageSlot>
         <AppPageSlot
           page="socPassport"
           activePage={activePage}
           mountedPages={mountedPages}
         >
-          <SocPassportPage />
+          <LazyPageBoundary>
+            <LazySocPassportPage />
+          </LazyPageBoundary>
         </AppPageSlot>
         <AppPageSlot
           page="ejournal"
           activePage={activePage}
           mountedPages={mountedPages}
         >
-          <EjournalPage />
+          <LazyPageBoundary>
+            <LazyEjournalPage />
+          </LazyPageBoundary>
         </AppPageSlot>
         <AppPageSlot
           page="personnel"
           activePage={activePage}
           mountedPages={mountedPages}
         >
-          <PersonnelPage onOpenDocuments={openDocumentsForPerson} />
+          <LazyPageBoundary
+            status="ГОТУЮ СПИСОК У ШТАТІ"
+            hint="Спочатку завантажую Штатку, тому проміжний список ООС не показується."
+          >
+            <LazyPersonnelPage onOpenDocuments={openDocumentsForPerson} />
+          </LazyPageBoundary>
         </AppPageSlot>
         <AppPageSlot
           page="documents"
           activePage={activePage}
           mountedPages={mountedPages}
         >
-          <DocumentsPage
-            key={routeKey}
-            onNavigate={(path) => {
-              applyRoute(pushAppRoute(path, getPageFromPath(path)));
-            }}
-          />
+          <LazyPageBoundary>
+            <LazyDocumentsPage
+              key={routeKey}
+              onNavigate={(path) => {
+                applyRoute(pushAppRoute(path, getPageFromPath(path)));
+              }}
+            />
+          </LazyPageBoundary>
         </AppPageSlot>
         <AppPageSlot
           page="documentSettings"

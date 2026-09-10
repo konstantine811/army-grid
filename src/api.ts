@@ -13,7 +13,10 @@ import {
 } from './auth/authTypes'
 import { showAppToast, showBackendBlockedToast } from './shared/appToast'
 import { dataUrlToUint8Array } from './shared/browserExport'
-import type { PersonnelDataset } from './data/personnelDatasetCore'
+import type {
+  PersonnelDataset,
+  PersonnelDatasetVersion,
+} from './data/personnelDatasetCore'
 import { createPhotoThumbnailDataUrl } from './pages/personnel/photoCompression'
 import { apiRequestPool, photoRequestPool, type ApiRequestPriority } from './apiRequestPool'
 import { measuredFetch } from './performance/performanceMonitor'
@@ -42,10 +45,13 @@ export const apiBaseUrl = () => resolveApiBaseUrl()
 
 export const personPhotoFileUrl = (
   personExternalId: string,
-  options?: { thumbnail?: boolean },
+  options?: { thumbnail?: boolean; cacheBust?: number | string },
 ) => {
   const params = new URLSearchParams()
   if (options?.thumbnail) params.set('thumbnail', '1')
+  if (options?.cacheBust != null && String(options.cacheBust).trim()) {
+    params.set('v', String(options.cacheBust).trim())
+  }
   const token = getAuthToken()
   if (token) params.set('access_token', token)
   const query = params.toString()
@@ -176,6 +182,45 @@ export type BackendPersonnelRosterVersion = {
   createdAt: string
   sheetUpdatedAt: string | null
   rowCount: number
+}
+
+export type BackendPersonnelSnapshotMeta = {
+  available: boolean
+  rowCount: number
+  updatedAt: string | null
+}
+
+export type BackendPersonnelVersionProbe = {
+  fingerprint: string
+  version: PersonnelDatasetVersion
+  rosterVersion: BackendPersonnelRosterVersion | null
+  snapshot: {
+    fingerprint: string
+    rowCount: number
+    updatedAt: string
+    matchesLive: boolean
+  } | null
+}
+
+export type PersonnelBootstrapInclude =
+  | 'dataset'
+  | 'staff'
+  | 'assets'
+  | 'merge'
+
+export type BackendPersonnelBootstrap = {
+  fingerprint: string
+  version: PersonnelDatasetVersion
+  rosterVersion: BackendPersonnelRosterVersion | null
+  dataset: BackendPersonnelSnapshotMeta
+  staff: BackendPersonnelSnapshotMeta
+  assets: BackendPersonnelSnapshotMeta
+  merge: BackendPersonnelSnapshotMeta & { fingerprint: string | null }
+  /** Present when requested via `?include=dataset,staff`. */
+  payloads?: {
+    dataset?: PersonnelDataset | null
+    staff?: BackendPersonnelOverview | null
+  }
 }
 
 export type EjournalRowActionType =
@@ -488,6 +533,32 @@ export type BackendPersonnelOverview = {
   }
 }
 
+export type OverviewPersonnelAssetsSnapshot = {
+  fingerprint: string
+  questionnairePresence: Record<string, true>
+  questionnaireSourceIds: Record<string, string>
+  documents: Record<
+    string,
+    {
+      count: number
+      labels: string[]
+    }
+  >
+  generatedAt?: number
+}
+
+export type ApiHttpError = Error & { status: number }
+
+export const isApiHttpError = (error: unknown): error is ApiHttpError =>
+  error instanceof Error &&
+  typeof (error as ApiHttpError).status === 'number'
+
+const attachHttpStatus = (error: Error, status: number): ApiHttpError => {
+  const enriched = error as ApiHttpError
+  enriched.status = status
+  return enriched
+}
+
 const authHeaders = (): HeadersInit => {
   const token = getAuthToken()
   return token ? { Authorization: `Bearer ${token}` } : {}
@@ -553,7 +624,7 @@ async function request<T>(path: string, options: ApiRequestInit = {}): Promise<T
             variant: response.status >= 500 ? 'CRITICAL' : 'WARNING',
           })
         }
-        throw new Error(message)
+        throw attachHttpStatus(new Error(message), response.status)
       }
 
       if (response.status === 204) return undefined as T
@@ -579,7 +650,7 @@ async function requestGetOptional<T>(path: string): Promise<T | null> {
     if (response.status === 404) return null
     if (!response.ok) {
       const message = await parseApiError(response)
-      throw new Error(message)
+      throw attachHttpStatus(new Error(message), response.status)
     }
     if (response.status === 204) return null
     return response.json() as Promise<T>
@@ -660,8 +731,13 @@ export const api = {
     })
   },
 
-  getAuthMe() {
-    return request<AuthUser>('/auth/me')
+  getAuthMe(options: { omitPhoto?: boolean; signal?: AbortSignal } = {}) {
+    const params = new URLSearchParams()
+    if (options.omitPhoto) params.set('omitPhoto', '1')
+    const query = params.toString()
+    return request<AuthUser>(`/auth/me${query ? `?${query}` : ''}`, {
+      signal: options.signal,
+    })
   },
 
   updateOwnProfile(payload: {
@@ -677,8 +753,14 @@ export const api = {
     })
   },
 
-  refreshAuth() {
-    return request<AuthSession>('/auth/refresh', { method: 'POST' })
+  refreshAuth(options: { omitPhoto?: boolean; signal?: AbortSignal } = {}) {
+    const params = new URLSearchParams()
+    if (options.omitPhoto) params.set('omitPhoto', '1')
+    const query = params.toString()
+    return request<AuthSession>(`/auth/refresh${query ? `?${query}` : ''}`, {
+      method: 'POST',
+      signal: options.signal,
+    })
   },
 
   listAuthUsers() {
@@ -1259,6 +1341,30 @@ export const api = {
     )
   },
 
+  getPersonnelVersion(options: { signal?: AbortSignal } = {}) {
+    return request<BackendPersonnelVersionProbe>(
+      '/ejournals/personnel/version',
+      { signal: options.signal },
+    ).catch(() => null)
+  },
+
+  getPersonnelBootstrap(
+    options: {
+      signal?: AbortSignal
+      include?: PersonnelBootstrapInclude[]
+    } = {},
+  ) {
+    const params = new URLSearchParams()
+    if (options.include?.length) {
+      params.set('include', options.include.join(','))
+    }
+    const query = params.toString()
+    return request<BackendPersonnelBootstrap>(
+      `/ejournals/personnel/bootstrap${query ? `?${query}` : ''}`,
+      { signal: options.signal },
+    ).catch(() => null)
+  },
+
   getPersonnelDataset(
     options: { fingerprint?: string; signal?: AbortSignal } = {},
   ) {
@@ -1294,10 +1400,53 @@ export const api = {
     )
   },
 
-  rebuildPersonnelDataset() {
+  rebuildPersonnelDataset(options: { signal?: AbortSignal } = {}) {
     return request<PersonnelDataset>('/ejournals/personnel/dataset/rebuild', {
       method: 'POST',
+      signal: options.signal,
     })
+  },
+
+  getOverviewStaff(
+    options: { fingerprint?: string; signal?: AbortSignal } = {},
+  ) {
+    const params = new URLSearchParams()
+    if (options.fingerprint?.trim()) {
+      params.set('fingerprint', options.fingerprint.trim())
+    }
+    const query = params.toString()
+    return request<BackendPersonnelOverview | null>(
+      `/ejournals/personnel/overview/staff${query ? `?${query}` : ''}`,
+      { signal: options.signal },
+    ).catch(() => null)
+  },
+
+  rebuildOverviewStaff(options: { signal?: AbortSignal } = {}) {
+    return request<BackendPersonnelOverview>(
+      '/ejournals/personnel/overview/staff/rebuild',
+      { method: 'POST', signal: options.signal },
+    )
+  },
+
+  getOverviewAssets(
+    options: { fingerprint?: string; signal?: AbortSignal } = {},
+  ) {
+    const params = new URLSearchParams()
+    if (options.fingerprint?.trim()) {
+      params.set('fingerprint', options.fingerprint.trim())
+    }
+    const query = params.toString()
+    return request<OverviewPersonnelAssetsSnapshot | null>(
+      `/ejournals/personnel/overview/assets${query ? `?${query}` : ''}`,
+      { signal: options.signal },
+    ).catch(() => null)
+  },
+
+  rebuildOverviewAssets(options: { signal?: AbortSignal } = {}) {
+    return request<OverviewPersonnelAssetsSnapshot>(
+      '/ejournals/personnel/overview/assets/rebuild',
+      { method: 'POST', signal: options.signal },
+    )
   },
 
   getEjournalLive(unitLabel = '1ПБ') {

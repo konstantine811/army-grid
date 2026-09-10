@@ -241,3 +241,13 @@ export const excludedTimesheetWrite = (
   }
   return { createHistory: true, replaceInPlace: false, sourceExcelRow: 0 };
 };
+
+/** Куди вибув: UI часто пише в documentsDest, apply читає documentsDest/changeText. */
+export const excludeTransferDestination = (
+  payload: Record<string, string | undefined>,
+) =>
+  payload.destination?.trim() ||
+  payload.documentsDest?.trim() ||
+  payload.timesheetDestination?.trim() ||
+  payload.changeText?.trim() ||
+  "";

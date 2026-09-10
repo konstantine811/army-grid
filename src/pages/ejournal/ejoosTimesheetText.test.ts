@@ -12,6 +12,10 @@ import {
   extractTimesheetDestinationFromPosition,
   formatDispositionTimesheetDeparture,
   formatTimesheetDeparture,
+  journalMonthStartMsFromLabel,
+  parseDateLabelMs,
+  parseTimesheetAbsenceSpans,
+  staffTimesheetMarkReturnThenDisposition,
   timesheetMarkForOpenDispositionDay,
   archiveReturnContradictsCurrentSh,
   findTimesheetMonthHeaderCell,
@@ -582,15 +586,44 @@ describe("timesheet departure phrase strips position and picks до/у", () => {
     );
   });
 
+  it("staff row after return to post: archive codes then disposition departure", () => {
+    const departure = formatDispositionTimesheetDeparture(
+      ", який знаходиться у розпорядженні командира військової частини А4862",
+      "251",
+      "28.08.2026",
+    );
+    const spans = parseTimesheetAbsenceSpans("11-19:лік|20-27:СЗЧ");
+    const mark = (day: number) =>
+      staffTimesheetMarkReturnThenDisposition(day, {
+        activeFromDay: 10,
+        lastDay: 31,
+        spans,
+        dispositionOrderDay: 28,
+        dispositionDeparture: departure,
+      });
+    expect(mark(9)).toBe("-");
+    expect(mark(10)).toBe("+");
+    expect(mark(11)).toBe("лік");
+    expect(mark(19)).toBe("лік");
+    expect(mark(20)).toBe("СЗЧ");
+    expect(mark(27)).toBe("СЗЧ");
+    expect(mark(28)).toBe(departure);
+    expect(mark(29)).toBe("-");
+    expect(mark(31)).toBe("-");
+  });
+
   it("open disposition: absence code before order day, phrase on order day, dashes after", () => {
     const departure = formatDispositionTimesheetDeparture(
       ", який знаходиться у розпорядженні командира військової частини А4862",
       "706-РС",
       "12.08.2026",
     );
+    const monthStart = journalMonthStartMsFromLabel("25.08.2026");
     const mark = (day: number) =>
       timesheetMarkForOpenDispositionDay(day, {
         dispositionOrderDay: 12,
+        dispositionOrderDateMs: parseDateLabelMs("12.08.2026"),
+        timesheetMonthStartMs: monthStart,
         dispositionDeparture: departure,
         absenceCode: "СЗЧ",
         lastDay: 25,
@@ -599,6 +632,21 @@ describe("timesheet departure phrase strips position and picks до/у", () => {
     expect(mark(12)).toBe(departure);
     expect(mark(13)).toBe("-");
     expect(mark(25)).toBe("-");
+  });
+
+  it("prior-month disposition paints the whole September slice as inactive", () => {
+    const mark = (day: number) =>
+      timesheetMarkForOpenDispositionDay(day, {
+        dispositionOrderDay: 25,
+        dispositionOrderDateMs: parseDateLabelMs("25.08.2026"),
+        timesheetMonthStartMs: journalMonthStartMsFromLabel("08.09.2026"),
+        dispositionDeparture: "вибув у розпорядження",
+        absenceCode: "+",
+        beforeOrderMark: "+",
+        lastDay: 8,
+      });
+    expect(mark(1)).toBe("-");
+    expect(mark(8)).toBe("-");
   });
 
   it("does not treat a bare job title as a destination", () => {

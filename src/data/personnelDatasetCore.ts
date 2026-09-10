@@ -74,6 +74,8 @@ export const buildPersonnelDatasetVersionFromRosterVersion = (
   rosterRowCount: rosterVersion?.rowCount ?? 0,
 });
 
+const DATASET_FINGERPRINT_SEP = "\u001f";
+
 export const personnelDatasetFingerprint = (
   version: PersonnelDatasetVersion,
 ) =>
@@ -83,7 +85,7 @@ export const personnelDatasetFingerprint = (
     version.rosterImportId,
     version.rosterSheetUpdatedAt,
     version.rosterRowCount,
-  ].join("\u0000");
+  ].join(DATASET_FINGERPRINT_SEP);
 
 export const rosterRowsFromPersonnelLatest = (
   latest: BackendPersonnelRosterLatest | null | undefined,

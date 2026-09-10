@@ -87,8 +87,11 @@ export const timesheetMarkForOpenDispositionDay = (
   day: number,
   options: {
     dispositionOrderDay: number;
+    dispositionOrderDateMs?: number;
+    timesheetMonthStartMs?: number;
     dispositionDeparture: string;
     absenceCode: string;
+    beforeOrderMark?: string;
     lastDay: number;
     absenceSpans?: TimesheetAbsenceSpan[];
     fillBeforeActive?: boolean;
@@ -96,15 +99,50 @@ export const timesheetMarkForOpenDispositionDay = (
 ): string => {
   const {
     dispositionOrderDay,
+    dispositionOrderDateMs = 0,
+    timesheetMonthStartMs = 0,
     dispositionDeparture,
     absenceCode,
     lastDay,
     absenceSpans,
   } = options;
-  if (dispositionOrderDay > 0 && day === dispositionOrderDay) {
+  const beforeOrderMark = options.beforeOrderMark ?? absenceCode;
+  if (
+    dispositionOrderDateMs &&
+    timesheetMonthStartMs &&
+    dispositionOrderDateMs < timesheetMonthStartMs
+  ) {
+    return "-";
+  }
+  if (dispositionOrderDateMs && timesheetMonthStartMs) {
+    const orderDate = new Date(dispositionOrderDateMs);
+    const sheetMonth = new Date(timesheetMonthStartMs);
+    if (
+      orderDate.getUTCFullYear() > sheetMonth.getUTCFullYear() ||
+      (orderDate.getUTCFullYear() === sheetMonth.getUTCFullYear() &&
+        orderDate.getUTCMonth() > sheetMonth.getUTCMonth())
+    ) {
+      if (absenceSpans?.length) {
+        const fromSpan = timesheetMarkFromArchive(day, {
+          activeFromDay: 1,
+          lastDay,
+          spans: absenceSpans,
+          fillBeforeActive: options.fillBeforeActive ?? true,
+        });
+        if (fromSpan) return fromSpan;
+      }
+      return beforeOrderMark;
+    }
+  }
+  const orderDayInSheet =
+    (dispositionOrderDateMs &&
+      timesheetMonthStartMs &&
+      journalDayFromDateMs(dispositionOrderDateMs, timesheetMonthStartMs)) ||
+    dispositionOrderDay;
+  if (orderDayInSheet > 0 && day === orderDayInSheet) {
     return dispositionDeparture;
   }
-  if (dispositionOrderDay > 0 && day > dispositionOrderDay) {
+  if (orderDayInSheet > 0 && day > orderDayInSheet) {
     return "-";
   }
   if (absenceSpans?.length) {
@@ -116,7 +154,41 @@ export const timesheetMarkForOpenDispositionDay = (
     });
     if (fromSpan) return fromSpan;
   }
-  return absenceCode;
+  return beforeOrderMark;
+};
+
+/** Штатний рядок після ПОСАДА з розпорядження: archive-коди, потім вибуття в розпорядження. */
+export const staffTimesheetMarkReturnThenDisposition = (
+  day: number,
+  options: {
+    activeFromDay: number;
+    lastDay: number;
+    spans: TimesheetAbsenceSpan[];
+    dispositionOrderDay: number;
+    dispositionDeparture: string;
+  },
+): string => {
+  const {
+    activeFromDay,
+    lastDay,
+    spans,
+    dispositionOrderDay,
+    dispositionDeparture,
+  } = options;
+  if (dispositionOrderDay > 0 && day === dispositionOrderDay) {
+    return dispositionDeparture;
+  }
+  if (dispositionOrderDay > 0 && day > dispositionOrderDay) {
+    return "-";
+  }
+  return (
+    timesheetMarkFromArchive(day, {
+      activeFromDay,
+      lastDay,
+      spans,
+      fillBeforeActive: activeFromDay > 1,
+    }) ?? "-"
+  );
 };
 
 /**
@@ -224,6 +296,54 @@ export const isInternalStaffTimesheetDeparture = (value: unknown) => {
 export const dayFromOrderLabel = (value: string) => {
   const day = Number(String(value || "").match(/(\d{1,2})[./-]/)?.[1] ?? 0);
   return day >= 1 && day <= 31 ? day : 0;
+};
+
+export const parseDateLabelMs = (value: string): number => {
+  const match = String(value ?? "").match(
+    /(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})/,
+  );
+  if (!match) return 0;
+  const year =
+    Number(match[3]) < 100 ? 2000 + Number(match[3]) : Number(match[3]);
+  const result = Date.UTC(year, Number(match[2]) - 1, Number(match[1]));
+  return Number.isFinite(result) ? result : 0;
+};
+
+export const journalMonthStartMsFromLabel = (label: string): number => {
+  const match = String(label || "").match(
+    /(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})/,
+  );
+  if (!match) return 0;
+  const year =
+    Number(match[3]) < 100 ? 2000 + Number(match[3]) : Number(match[3]);
+  return Date.UTC(year, Number(match[2]) - 1, 1);
+};
+
+export const journalMonthLastDayFromStartMs = (monthStartMs: number): number => {
+  if (!monthStartMs) return 31;
+  const date = new Date(monthStartMs);
+  date.setUTCMonth(date.getUTCMonth() + 1);
+  date.setUTCDate(0);
+  return date.getUTCDate();
+};
+
+/** Після РОЗПОРЯДЖ у тому ж місяці «-» ставимо до кінця календарного місяця. */
+export const dispositionTimesheetPaintLastDay = (
+  planTimesheetDay: number,
+  orderDateLabel: string,
+  timesheetMonthStartMs: number,
+): number => {
+  const capped = Math.min(31, Math.max(1, planTimesheetDay));
+  const orderMs = parseDateLabelMs(orderDateLabel);
+  if (!orderMs || !timesheetMonthStartMs) return capped;
+  const orderDay = journalDayFromDateMs(orderMs, timesheetMonthStartMs);
+  if (orderDay > 0) {
+    return Math.max(
+      capped,
+      journalMonthLastDayFromStartMs(timesheetMonthStartMs),
+    );
+  }
+  return capped;
 };
 
 /** День місяця журналу (1–31) або 0, якщо дата в іншому місяці/році. */

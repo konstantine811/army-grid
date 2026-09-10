@@ -36,6 +36,7 @@ import {
 import { positionCloseWritesExcluded } from "./ejoosExcludePolicy";
 import {
   applyInlineStringWritesToWorkbook,
+  restyleWrittenRowsFromZip,
   type ZipCellWrite,
 } from "./ejoosZipCellWrites";
 import { findTimesheetAppendRowForUnit } from "./ejoosTimesheetUnitSections";
@@ -64,6 +65,50 @@ const textAt = (sheet: ExcelSheetSnapshot, row: number, column: number) =>
 
 const nameKey = (value: string) =>
   value.toLocaleLowerCase("uk-UA").replace(/\s+/g, " ").trim();
+
+const timesheetStyledWrite = (
+  row: number,
+  column: number,
+  value: string | number | null,
+  sourceRow: number,
+  sourceColumn = column,
+): ZipCellWrite => ({
+  row,
+  column,
+  value,
+  styleSourceRow: sourceRow,
+  styleSourceColumn: sourceColumn,
+  copyNeighborStyle: false,
+  keepNeighborStyle: true,
+  heightSourceRow: sourceRow,
+});
+
+const findNearbyTimesheetStyleRow = (
+  sheet: ExcelSheetSnapshot,
+  nearRow: number,
+) => {
+  for (let row = nearRow - 1; row >= 7; row -= 1) {
+    if (textAt(sheet, row, 7) || textAt(sheet, row, 9)) return row;
+  }
+  for (let row = nearRow + 1; row <= sheet.rawRows.length; row += 1) {
+    if (textAt(sheet, row, 7) || textAt(sheet, row, 9)) return row;
+  }
+  return Math.max(7, nearRow);
+};
+
+const findTimesheetDayStyleColumn = (
+  sheet: ExcelSheetSnapshot,
+  styleRow: number,
+) => {
+  for (let day = 1; day <= 31; day += 1) {
+    const mark = textAt(sheet, styleRow, 8 + day);
+    if (mark === "+") return 8 + day;
+  }
+  for (let day = 1; day <= 31; day += 1) {
+    if (textAt(sheet, styleRow, 8 + day)) return 8 + day;
+  }
+  return 9;
+};
 
 const nextExcludedRow = (sheet: ExcelSheetSnapshot) => {
   let last = 5;
@@ -211,6 +256,9 @@ const collectWrites = (op: EjoosSyncOp, ctx: PositionChangeContext) => {
           column,
           value: valueOf(timesheet.rawRows[oldTimesheetRow - 1]?.[column - 1]),
           styleSourceRow: oldTimesheetRow,
+          styleSourceColumn: column,
+          keepNeighborStyle: true,
+          copyNeighborStyle: false,
         });
       }
       let presentDays = 0;
@@ -231,7 +279,7 @@ const collectWrites = (op: EjoosSyncOp, ctx: PositionChangeContext) => {
           column: 8 + day,
           value,
           styleSourceRow: oldTimesheetRow,
-          wrapText: typeof value === "string" && /вибув/iu.test(value),
+          copyNeighborStyle: false,
         });
         ctx.timesheetWrites.push({
           row: oldTimesheetRow,
@@ -302,6 +350,9 @@ const collectWrites = (op: EjoosSyncOp, ctx: PositionChangeContext) => {
       parseTimesheetAbsenceSpans(op.payload.timesheetAbsenceSpans || ""),
       presenceFrom > 1 ? presenceFrom : 1,
     );
+    const styleRow = findNearbyTimesheetStyleRow(timesheet, newTimesheetRow);
+    const styleDayColumn = findTimesheetDayStyleColumn(timesheet, styleRow);
+    let presentDays = 0;
 
     const isTransferCancel = Boolean(op.payload.transferCancelOrder);
     if (
@@ -370,7 +421,7 @@ const collectWrites = (op: EjoosSyncOp, ctx: PositionChangeContext) => {
                 column: 8 + day,
                 value,
                 styleSourceRow: newTimesheetRow,
-                wrapText: typeof value === "string" && /вибув/iu.test(value),
+                copyNeighborStyle: false,
               });
             }
             ctx.timesheetWrites.push({
@@ -388,26 +439,38 @@ const collectWrites = (op: EjoosSyncOp, ctx: PositionChangeContext) => {
       [7, fullName],
       [8, personId],
     ] as Array<[number, string]>) {
-      ctx.timesheetWrites.push({
-        row: newTimesheetRow,
-        column,
-        value: value || null,
-      });
+      ctx.timesheetWrites.push(
+        timesheetStyledWrite(
+          newTimesheetRow,
+          column,
+          value || null,
+          styleRow,
+          column,
+        ),
+      );
     }
     for (let day = 1; day <= 31; day += 1) {
-        const value = timesheetMarkFromArchive(day, {
-          activeFromDay: presenceFrom,
-          lastDay,
-          spans: absenceSpans,
-          fillBeforeActive: presenceFrom > 1,
-        });
-      if (value == null) continue;
-      ctx.timesheetWrites.push({
-        row: newTimesheetRow,
-        column: 8 + day,
-        value,
+      const value = timesheetMarkFromArchive(day, {
+        activeFromDay: presenceFrom,
+        lastDay,
+        spans: absenceSpans,
+        fillBeforeActive: presenceFrom > 1,
       });
+      if (value == null) continue;
+      if (value === "+") presentDays += 1;
+      ctx.timesheetWrites.push(
+        timesheetStyledWrite(
+          newTimesheetRow,
+          8 + day,
+          value,
+          styleRow,
+          styleDayColumn,
+        ),
+      );
     }
+    ctx.timesheetWrites.push(
+      timesheetStyledWrite(newTimesheetRow, 40, presentDays, styleRow, 40),
+    );
   }
 
   const historyAbsenceRow = Number(
@@ -510,7 +573,15 @@ const collectWrites = (op: EjoosSyncOp, ctx: PositionChangeContext) => {
       [8, personId],
       [18, orderText],
     ] as Array<[number, string]>) {
-      ctx.shpoWrites.push({ row: newShpoRow, column, value: value || null });
+      ctx.shpoWrites.push({
+        row: newShpoRow,
+        column,
+        value: value || null,
+        styleSourceRow: newShpoRow,
+        styleSourceColumn: column,
+        keepNeighborStyle: true,
+        copyNeighborStyle: false,
+      });
     }
   }
 
@@ -653,5 +724,11 @@ export async function applyPositionChangeWithZip(input: {
     oos.sheetName,
     ctx.oosWrites,
   );
+  blob = await restyleWrittenRowsFromZip(blob, [
+    { sheet: excluded.sheetName, writes: ctx.excludedWrites },
+    { sheet: timesheet.sheetName, writes: ctx.timesheetWrites },
+    { sheet: shpo.sheetName, writes: ctx.shpoWrites },
+    { sheet: oos.sheetName, writes: ctx.oosWrites },
+  ]);
   return blob;
 }

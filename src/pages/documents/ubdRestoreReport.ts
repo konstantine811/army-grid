@@ -83,6 +83,12 @@ const formatRestoreDate = (value: Date) => {
   return `${pad(value.getDate())}.${pad(value.getMonth() + 1)}.${value.getFullYear()}`;
 };
 
+/** Дата рапорта: з поля або сьогодні (ДД.ММ.РРРР, не «для проставлення»). */
+export const resolveUbdRestoreReportDate = (
+  fields: Pick<UbdRestoreReportFields, "date">,
+  at: Date = new Date(),
+) => fields.date.trim() || formatRestoreDate(at);
+
 export const formatGivenSurname = (fullName: string) => {
   const parts = fullName
     .trim()
@@ -292,7 +298,7 @@ export const resolveUbdRestoreSignatoryParts = (
   if (signatory?.signatureData?.trim()) {
     parts.signatureData = signatory.signatureData.trim();
   }
-  parts.date = parts.date || reportDate.trim();
+  parts.date = reportDate.trim();
   return parts;
 };
 

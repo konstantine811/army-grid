@@ -19,6 +19,7 @@ import {
   type BackendEjournalLiveVersion,
 } from "../../api";
 import { formatApiDateTime } from "../../shared/format";
+import { EjoosAsOfDateControl } from "./EjoosAsOfDateControl";
 import {
   type ExcelWorkbookSnapshot,
   EJOOS_SYNC_READ_OPTIONS,
@@ -788,33 +789,32 @@ export function EjoosLiveSyncPanel() {
               <Alert severity="warning" variant="outlined">
                 {SOURCE_DATE_UNKNOWN_MESSAGE}
                 <Stack direction="row" spacing={1} sx={{ mt: 1 }} alignItems="center">
-                  <input
-                    type="date"
-                    value={sourceAsOf}
-                    onChange={(event) => {
-                      const value = event.target.value;
-                      setSourceAsOf(value);
-                      if (!value || !ejoosSnapshot || !pbSnapshot) return;
-                      const gen = (planGenRef.current += 1);
-                      setIsLoading(true);
-                      void buildPlanOffThread(ejoosSnapshot, pbSnapshot, value)
-                        .then((nextPlan) => {
-                          if (gen !== planGenRef.current) return;
-                          setPlan(nextPlan);
-                        })
-                        .catch((err) => {
-                          if (gen !== planGenRef.current) return;
-                          setError(
-                            err instanceof Error
-                              ? err.message
-                              : "Не вдалося перерахувати план",
-                          );
-                        })
-                        .finally(() => {
-                          if (gen === planGenRef.current) setIsLoading(false);
-                        });
-                    }}
-                  />
+                <EjoosAsOfDateControl
+                  appliedLabel={plan.timesheetDayLabel}
+                  busy={isLoading || !ejoosSnapshot || !pbSnapshot}
+                  onApply={(isoDate) => {
+                    setSourceAsOf(isoDate);
+                    if (!ejoosSnapshot || !pbSnapshot) return;
+                    const gen = (planGenRef.current += 1);
+                    setIsLoading(true);
+                    void buildPlanOffThread(ejoosSnapshot, pbSnapshot, isoDate)
+                      .then((nextPlan) => {
+                        if (gen !== planGenRef.current) return;
+                        setPlan(nextPlan);
+                      })
+                      .catch((err) => {
+                        if (gen !== planGenRef.current) return;
+                        setError(
+                          err instanceof Error
+                            ? err.message
+                            : "Не вдалося перерахувати план",
+                        );
+                      })
+                      .finally(() => {
+                        if (gen === planGenRef.current) setIsLoading(false);
+                      });
+                  }}
+                />
                 </Stack>
               </Alert>
             ) : null}

@@ -3,14 +3,60 @@ import { parsePbShPeople } from "./ejoosSyncPlan";
 import { mapPbStatusToEjoosWithRules, readOperatorSettings } from "./ejoosStatusMap";
 import { formatTimesheetTransferMark } from "./ejoosExcludedColumns";
 import {
+  absenceSpansBeforeEpisode,
   dayFromOrderLabel,
+  dispositionTimesheetPaintLastDay,
   formatDispositionTimesheetDeparture,
+  journalDayFromDateMs,
+  journalMonthStartMsFromLabel,
+  parseDateLabelMs,
   parseTimesheetAbsenceSpans,
   timesheetMarkFromArchive,
   timesheetTransferMarkForDay,
 } from "./ejoosTimesheetText";
+
+export const timesheetPreviewContextForOps = (
+  ops: EjoosSyncOp[],
+  timesheetDay: number,
+  timesheetDayLabel: string,
+) => {
+  const hasCurrentMonthTimesheetPlacement = ops.some(
+    (op) =>
+      op.kind === "position_change" &&
+      op.class === "ready" &&
+      (op.payload.returningFromDisposition === "1" ||
+        Boolean(op.payload.timesheetActiveFrom?.trim()) ||
+        Boolean(op.payload.orderDate?.trim())),
+  );
+  if (hasCurrentMonthTimesheetPlacement) {
+    return { timesheetDay, timesheetDayLabel };
+  }
+  const disposition = ops.find(
+    (op) =>
+      op.kind === "move_to_disposition" &&
+      op.payload.journalMonthBlocked === "1" &&
+      op.payload.orderDate,
+  );
+  if (!disposition?.payload.orderDate) {
+    return { timesheetDay, timesheetDayLabel };
+  }
+  const orderDate = disposition.payload.orderDate;
+  const monthStart = journalMonthStartMsFromLabel(orderDate);
+  return {
+    timesheetDay: dispositionTimesheetPaintLastDay(
+      dayFromOrderLabel(orderDate),
+      orderDate,
+      monthStart,
+    ),
+    timesheetDayLabel: orderDate,
+  };
+};
 import { excludeWritePlan, positionCloseWritesExcluded } from "./ejoosExcludePolicy";
-import { personOpsBlockApply } from "./ejoosOpRequirements";
+import {
+  isReviewOnlyMismatchOp,
+  personOpsBlockApply,
+} from "./ejoosOpRequirements";
+import { excludeTransferDestination } from "./ejoosExcludePolicy";
 import type { ExcelWorkbookSnapshot } from "../../excelRoundTrip";
 
 const formatArchiveSpanSummary = (raw: string) =>
@@ -141,6 +187,23 @@ const normKey = (value: string) =>
     .replace(/\s+/g, " ")
     .trim();
 
+export const isSupersededPriorMonthDispositionOp = (
+  op: EjoosSyncOp,
+  ops: EjoosSyncOp[],
+) =>
+  op.kind === "move_to_disposition" &&
+  op.payload.journalMonthBlocked === "1" &&
+  ops.some(
+    (candidate) =>
+      candidate.kind === "position_change" &&
+      candidate.class === "ready" &&
+      candidate.payload.returningFromDisposition === "1" &&
+      (candidate.personId === op.personId ||
+        (candidate.fullName &&
+          op.fullName &&
+          normKey(candidate.fullName) === normKey(op.fullName))),
+  );
+
 const personKey = (op: EjoosSyncOp) => {
   // Дубль Табеля групуємо за ПІБ: у хвості аркуша кілька осіб можуть мати
   // один битий Excel-ID, і тоді всі ops зліпаються в одну картку.
@@ -203,7 +266,9 @@ const categoryForOps = (allOps: EjoosSyncOp[]): PersonChangeCategory => {
 };
 
 const severityForOps = (allOps: EjoosSyncOp[]): EjoosOpClass => {
-  const ops = actionableOps(allOps);
+  const ops = actionableOps(allOps).filter(
+    (op) => !isSupersededPriorMonthDispositionOp(op, allOps),
+  );
   if (ops.some((op) => op.class === "conflict")) return "conflict";
   if (ops.some((op) => op.class === "needs_input")) return "needs_input";
   return "ready";
@@ -614,11 +679,7 @@ export const buildSheetImpacts = (ops: EjoosSyncOp[]): SheetImpactItem[] => {
           "timesheet",
           writesExcluded ? "history" : "edit",
           op.payload.returningFromDisposition === "1"
-            ? `Штатний рядок ${op.payload.nextIndex || op.positionIndex}: на початку місяця коди відсутності (СЗЧ), з фактичного повернення «+»${
-                op.payload.timesheetAbsenceSpans
-                  ? ` (${formatArchiveSpanSummary(op.payload.timesheetAbsenceSpans)})`
-                  : ""
-              }`
+            ? `Штатний рядок ${op.payload.nextIndex || op.positionIndex}: до ${op.payload.timesheetActiveFrom || op.payload.orderDate || "повернення"} «-», з фактичного повернення «+»`
             : writesExcluded
             ? `Закрити рядок ${op.payload.previousIndex} з датою вибуття та поставити на ${op.payload.nextIndex || op.positionIndex} з ${op.payload.orderDate || "дати наказу"}`
             : closesOldPosition
@@ -716,13 +777,19 @@ export const buildSheetImpacts = (ops: EjoosSyncOp[]): SheetImpactItem[] => {
       setImpact(map, "oos", "append", `Прибуття: ${op.after || "—"}`);
       setImpact(map, "shpo", "edit", "Зайняти посаду після підтвердження");
     } else if (op.kind === "move_to_disposition") {
+      const blocked = op.payload.journalMonthBlocked === "1";
+      const asOfHint = blocked
+        ? `Після «станом на» ${op.payload.suggestedAsOfDate || op.payload.orderDate || "?"}: `
+        : "";
       setImpact(
         map,
         "shpo",
         "edit",
-        op.payload.skipShpoDisposition === "1"
-          ? `Звільнити позицію ${op.payload.previousIndex || op.positionIndex}; у блоці розпорядження запис уже є`
-          : `Звільнити позицію ${op.payload.previousIndex || op.positionIndex} і додати у блок розпорядження`,
+        blocked
+          ? `${asOfHint}звільнити позицію ${op.payload.previousIndex || op.positionIndex} і додати у блок розпорядження`
+          : op.payload.skipShpoDisposition === "1"
+            ? `Звільнити позицію ${op.payload.previousIndex || op.positionIndex}; у блоці розпорядження запис уже є`
+            : `Звільнити позицію ${op.payload.previousIndex || op.positionIndex} і додати у блок розпорядження`,
       );
       setImpact(
         map,
@@ -755,7 +822,9 @@ export const buildSheetImpacts = (ops: EjoosSyncOp[]): SheetImpactItem[] => {
           op.payload.keepOpenSzchTimesheet === "1"
           ? "edit"
           : "skip",
-        op.payload.timesheetCreateRow === "1"
+        blocked
+          ? `${asOfHint}${op.payload.orderDate || "У дату наказу"} — «вибув у розпорядження…»; далі до кінця місяця «-»`
+          : op.payload.timesheetCreateRow === "1"
           ? `Додати рядок у блок «ВИБУВ У РОЗПОРЯДЖЕННЯ…» · 01–зріз ${op.payload.absenceCode || "СЗЧ"}; у дату наказу записати вибуття в розпорядження`
           : op.payload.keepOpenSzchTimesheet === "1"
           ? `Блок «ВИБУВ У РОЗПОРЯДЖЕННЯ…» · 01–зріз ${op.payload.absenceCode || "СЗЧ"}; ${op.payload.orderDate || "у дату розпорядження"} записати «${formatDispositionTimesheetDeparture(
@@ -764,7 +833,7 @@ export const buildSheetImpacts = (ops: EjoosSyncOp[]): SheetImpactItem[] => {
               op.payload.orderDate || "",
             )}», далі «-»`
           : op.payload.timesheetFound === "true"
-            ? "Закрити штатний рядок і зберегти історію розпорядження"
+            ? `${op.payload.orderDate || "У дату наказу"} — «вибув у розпорядження…»; далі до кінця місяця «-»`
             : "Штатного рядка немає — Табель не змінюємо",
       );
     } else if (op.kind === "data_mismatch" || op.payload.mismatchKind === "ARCHIVE_RETURN_SH_STILL_ABSENT") {
@@ -1001,9 +1070,18 @@ const describeWillDo = (ops: EjoosSyncOp[]): string[] => {
   const disposition = ops.find(
     (op) => op.kind === "move_to_disposition",
   );
-  if (disposition) {
+  const dispositionSupersededByReturn =
+    disposition &&
+    isSupersededPriorMonthDispositionOp(disposition, ops);
+  if (disposition && !dispositionSupersededByReturn) {
     const payload = disposition.payload;
+    const blocked = payload.journalMonthBlocked === "1";
     return [
+      ...(blocked
+        ? [
+            `Спочатку змініть «станом на» на ${payload.suggestedAsOfDate || payload.orderDate || "місяць наказу"} і перебудуйте операції`,
+          ]
+        : []),
       `1. ШПО: звільнити посаду ${payload.previousIndex || disposition.positionIndex}`,
       payload.skipShpoDisposition === "1"
         ? "1. ШПО: у блоці розпорядження запис уже є"
@@ -1216,26 +1294,29 @@ const collapseTimesheetRuns = (
 export const buildTimesheetPreview = (
   ops: EjoosSyncOp[],
   timesheetDay: number,
+  timesheetDayLabel = "",
 ): PersonTimesheetPreview | null => {
   const excludeOp = [...ops]
     .reverse()
     .find((op) => op.kind === "exclude_transfer");
-  const spanOp = [...ops]
-    .reverse()
-    .find((op) => op.payload.timesheetAbsenceSpans?.trim());
+  const timesheetMonthStartMs = journalMonthStartMsFromLabel(timesheetDayLabel);
+  const spanOp = [...ops].reverse().find((op) => {
+    if (!op.payload.timesheetAbsenceSpans?.trim()) return false;
+    if (op.kind !== "move_to_disposition") return true;
+    if (op.payload.journalMonthBlocked === "1") return false;
+    if (isSupersededPriorMonthDispositionOp(op, ops)) return false;
+    const orderMs = parseDateLabelMs(op.payload.orderDate || "");
+    return !(
+      timesheetMonthStartMs &&
+      orderMs &&
+      orderMs < timesheetMonthStartMs
+    );
+  });
   const spans = parseTimesheetAbsenceSpans(
     spanOp?.payload.timesheetAbsenceSpans ||
       excludeOp?.payload.timesheetAbsenceSpans ||
       "",
   );
-  const activeFrom =
-    dayFromOrderLabel(
-      excludeOp?.payload.timesheetActiveFrom ||
-        spanOp?.payload.timesheetActiveFrom ||
-        ops.find((op) => op.payload.timesheetActiveFrom)?.payload
-          .timesheetActiveFrom ||
-        "",
-    ) || 1;
   const departDay = dayFromOrderLabel(
     excludeOp?.payload.excludeDate || excludeOp?.payload.orderDate || "",
   );
@@ -1248,31 +1329,120 @@ export const buildTimesheetPreview = (
       op.payload.timesheetCode?.trim() &&
       Number(op.payload.day || 0) > 0,
   );
-  const openDispositionOp = [...ops]
+  const blockedPriorMonthDisposition = [...ops]
     .reverse()
     .find(
       (op) =>
         op.kind === "move_to_disposition" &&
-        op.payload.keepOpenSzchTimesheet === "1" &&
-        op.payload.absenceCode?.trim(),
+        op.payload.journalMonthBlocked === "1" &&
+        !isSupersededPriorMonthDispositionOp(op, ops),
     );
-  const openDispositionMark = openDispositionOp?.payload.absenceCode?.trim() || "";
-  const dispositionOrderDay = dayFromOrderLabel(
-    openDispositionOp?.payload.orderDate || "",
+  const returnFromDisposition = [...ops]
+    .reverse()
+    .find(
+      (op) =>
+        op.kind === "position_change" &&
+        op.payload.returningFromDisposition === "1",
+    );
+  const returnActiveFromDay = (() => {
+    if (!returnFromDisposition) return 0;
+    const orderDay =
+      journalDayFromDateMs(
+        parseDateLabelMs(returnFromDisposition.payload.orderDate || ""),
+        timesheetMonthStartMs,
+      ) || dayFromOrderLabel(returnFromDisposition.payload.orderDate || "");
+    const activeLabel = returnFromDisposition.payload.timesheetActiveFrom || "";
+    const activeDay =
+      journalDayFromDateMs(parseDateLabelMs(activeLabel), timesheetMonthStartMs) ||
+      dayFromOrderLabel(activeLabel);
+    if (!orderDay && !activeDay) return 0;
+    if (!activeDay) return orderDay;
+    if (!orderDay) return activeDay;
+    if (activeDay < orderDay && orderDay - activeDay >= 7) return orderDay;
+    if (activeDay < orderDay) return activeDay;
+    return Math.max(activeDay, orderDay);
+  })();
+  const placementActiveFromDay = (() => {
+    if (returnActiveFromDay) return 0;
+    const placement = [...ops]
+      .reverse()
+      .find(
+        (op) =>
+          op.kind === "position_change" &&
+          op.payload.timesheetActiveFrom?.trim(),
+      );
+    if (!placement) return 0;
+    return (
+      journalDayFromDateMs(
+        parseDateLabelMs(placement.payload.timesheetActiveFrom || ""),
+        timesheetMonthStartMs,
+      ) || dayFromOrderLabel(placement.payload.timesheetActiveFrom || "")
+    );
+  })();
+  const activeFrom =
+    returnActiveFromDay ||
+    placementActiveFromDay ||
+    dayFromOrderLabel(
+      excludeOp?.payload.timesheetActiveFrom ||
+        spanOp?.payload.timesheetActiveFrom ||
+        "",
+    ) ||
+    1;
+  const dispositionOp = [...ops]
+    .reverse()
+    .find(
+      (op) =>
+        op.kind === "move_to_disposition" &&
+        (op.payload.journalMonthBlocked !== "1" ||
+          journalDayFromDateMs(
+            parseDateLabelMs(op.payload.orderDate || ""),
+            timesheetMonthStartMs,
+          ) > 0) &&
+        (op.payload.keepOpenSzchTimesheet === "1" ||
+          op.payload.timesheetFound === "true" ||
+          op.payload.timesheetCreateRow === "1"),
+    );
+  const openDispositionMark =
+    dispositionOp?.payload.keepOpenSzchTimesheet === "1"
+      ? dispositionOp.payload.absenceCode?.trim() || ""
+      : "";
+  const dispositionOrderMs = parseDateLabelMs(
+    dispositionOp?.payload.orderDate || "",
   );
-  const dispositionDeparture = openDispositionOp
+  let dispositionOrderDay = journalDayFromDateMs(
+    dispositionOrderMs,
+    timesheetMonthStartMs,
+  );
+  if (
+    !dispositionOrderDay &&
+    dispositionOp &&
+    (!timesheetMonthStartMs ||
+      !dispositionOrderMs ||
+      dispositionOrderMs >= timesheetMonthStartMs)
+  ) {
+    dispositionOrderDay = dayFromOrderLabel(dispositionOp.payload.orderDate || "");
+  }
+  const dispositionDeparture = dispositionOp
     ? formatDispositionTimesheetDeparture(
-        openDispositionOp.payload.destination ||
-          openDispositionOp.payload.changeText ||
+        dispositionOp.payload.destination ||
+          dispositionOp.payload.changeText ||
           "",
-        openDispositionOp.payload.orderNumber || "",
-        openDispositionOp.payload.orderDate || "",
+        dispositionOp.payload.orderNumber || "",
+        dispositionOp.payload.orderDate || "",
       )
     : "";
+  const previewSpans =
+    dispositionOp &&
+    dispositionOrderDay > 1 &&
+    dispositionOp.payload.keepOpenSzchTimesheet === "1" &&
+    spans.length
+      ? absenceSpansBeforeEpisode(spans, dispositionOrderDay)
+      : spans;
   const rankOnly =
     !spans.length &&
     !dayOps.length &&
     !openDispositionMark &&
+    !dispositionOp &&
     activeFrom <= 1 &&
     !departDay &&
     ops.some((op) => op.kind === "rank_change");
@@ -1280,6 +1450,8 @@ export const buildTimesheetPreview = (
     !spans.length &&
     !dayOps.length &&
     !openDispositionMark &&
+    !dispositionOp &&
+    !blockedPriorMonthDisposition &&
     activeFrom <= 1 &&
     !departDay &&
     !rankOnly
@@ -1287,10 +1459,48 @@ export const buildTimesheetPreview = (
     return null;
   }
 
+  if (blockedPriorMonthDisposition && !returnFromDisposition) {
+    const blockedOrderMs = parseDateLabelMs(
+      blockedPriorMonthDisposition.payload.orderDate || "",
+    );
+    const orderBeforePreviewMonth = Boolean(
+      timesheetMonthStartMs &&
+        blockedOrderMs &&
+        blockedOrderMs < timesheetMonthStartMs,
+    );
+    if (orderBeforePreviewMonth) {
+      const lastDay = Math.min(31, timesheetDay);
+      const days: PersonTimesheetPreview["days"] = [];
+      for (let day = 1; day <= lastDay; day += 1) {
+        days.push({ day, mark: "-" });
+      }
+      return {
+        lastDay,
+        days,
+        runs: collapseTimesheetRuns(days),
+        note: "У розпорядженні з попереднього місяця — у Табелі «-».",
+      };
+    }
+  }
+
   const spanEnd = spans.reduce((max, span) => Math.max(max, span.toDay), 0);
+  const dispositionPaintLastDay = dispositionOp
+    ? dispositionTimesheetPaintLastDay(
+        timesheetDay,
+        dispositionOp.payload.orderDate || "",
+        timesheetMonthStartMs,
+      )
+    : timesheetDay;
   const lastDay = Math.min(
     31,
-    Math.max(timesheetDay, spanEnd, departDay, dispositionOrderDay, 1),
+    Math.max(
+      dispositionPaintLastDay,
+      timesheetDay,
+      spanEnd,
+      departDay,
+      dispositionOrderDay,
+      1,
+    ),
   );
   const days: PersonTimesheetPreview["days"] = [];
   for (let day = 1; day <= lastDay; day += 1) {
@@ -1312,7 +1522,7 @@ export const buildTimesheetPreview = (
       }
       continue;
     }
-    if (dispositionOrderDay > 0 && day === dispositionOrderDay) {
+    if (dispositionOp && dispositionOrderDay > 0 && day === dispositionOrderDay) {
       days.push({
         day,
         mark: "ПЕРЕВ",
@@ -1320,19 +1530,54 @@ export const buildTimesheetPreview = (
       });
       continue;
     }
-    if (openDispositionOp && dispositionOrderDay > 0 && day > dispositionOrderDay) {
+    if (
+      dispositionOp &&
+      dispositionOrderDay > 0 &&
+      day > dispositionOrderDay &&
+      (returnActiveFromDay <= dispositionOrderDay ||
+        day < returnActiveFromDay)
+    ) {
       days.push({ day, mark: "-" });
       continue;
     }
 
-    const fromArchive = spans.length || activeFrom > 1
-      ? timesheetMarkFromArchive(day, {
-          activeFromDay: activeFrom,
+    const beforeOpenDisposition =
+      dispositionOp &&
+      dispositionOrderDay > 0 &&
+      day < dispositionOrderDay &&
+      dispositionOp.payload.keepOpenSzchTimesheet === "1";
+    const afterDispositionReturn =
+      returnActiveFromDay > dispositionOrderDay && day >= returnActiveFromDay;
+    const fromArchive = (() => {
+      if (beforeOpenDisposition) {
+        const openAbsenceActiveFrom =
+          returnActiveFromDay > dispositionOrderDay ? 1 : activeFrom;
+        if (previewSpans.length || openAbsenceActiveFrom > 1) {
+          return timesheetMarkFromArchive(day, {
+            activeFromDay: openAbsenceActiveFrom,
+            lastDay,
+            spans: previewSpans,
+            fillBeforeActive: openAbsenceActiveFrom > 1,
+          });
+        }
+        return null;
+      }
+      if (afterDispositionReturn) {
+        return timesheetMarkFromArchive(day, {
+          activeFromDay: returnActiveFromDay,
           lastDay,
-          spans,
-          fillBeforeActive: activeFrom > 1,
-        })
-      : null;
+          spans: [],
+          fillBeforeActive: false,
+        });
+      }
+      if (!previewSpans.length && activeFrom <= 1) return null;
+      return timesheetMarkFromArchive(day, {
+        activeFromDay: activeFrom,
+        lastDay,
+        spans: previewSpans,
+        fillBeforeActive: activeFrom > 1,
+      });
+    })();
     const fromDayOp = dayOps.find((op) => Number(op.payload.day) === day);
     const mark =
       fromArchive ||
@@ -1551,7 +1796,7 @@ export const patchPersonOpPayload = (
       if (op.kind !== "exclude_transfer") {
         return { ...op, payload };
       }
-      const destination = payload.destination || "";
+      const destination = excludeTransferDestination(payload);
       const excludeDate = payload.excludeDate || "";
       const ready =
         Boolean(destination) &&
@@ -1575,7 +1820,18 @@ export const patchPersonOpPayload = (
       sheetImpacts: buildSheetImpacts(ops),
       ejoosWillDo: describeWillDo(ops),
       sourceInfluences: buildSourceInfluences(ops),
-      timesheetPreview: buildTimesheetPreview(ops, session.plan.timesheetDay),
+      timesheetPreview: (() => {
+        const previewContext = timesheetPreviewContextForOps(
+          ops,
+          session.plan.timesheetDay,
+          session.plan.timesheetDayLabel,
+        );
+        return buildTimesheetPreview(
+          ops,
+          previewContext.timesheetDay,
+          previewContext.timesheetDayLabel,
+        );
+      })(),
       severity: severityForOps(ops),
       summaryAfter:
         ops.find((item) => item.kind === "exclude_transfer")?.after ||
@@ -1602,7 +1858,7 @@ export const patchPersonOpPayload = (
 export const personChangesFromOps = (
   ops: EjoosSyncOp[],
   timesheetDay: number,
-  options?: { decision?: PersonChangeDecision },
+  options?: { decision?: PersonChangeDecision; timesheetDayLabel?: string },
 ): PersonChange[] => {
   const groups = new Map<string, EjoosSyncOp[]>();
   ops.forEach((op) => {
@@ -1675,7 +1931,18 @@ export const personChangesFromOps = (
       sheetActions: toSheetActions(ordered),
       sheetImpacts: buildSheetImpacts(ordered),
       sourceInfluences: buildSourceInfluences(ordered),
-      timesheetPreview: buildTimesheetPreview(ordered, timesheetDay),
+      timesheetPreview: (() => {
+        const previewContext = timesheetPreviewContextForOps(
+          ordered,
+          timesheetDay,
+          options?.timesheetDayLabel || "",
+        );
+        return buildTimesheetPreview(
+          ordered,
+          previewContext.timesheetDay,
+          previewContext.timesheetDayLabel,
+        );
+      })(),
       ops: ordered,
       decision: options?.decision ?? "pending",
     };
@@ -1695,7 +1962,9 @@ export const groupOpsIntoPersonChanges = (
   pb?: ExcelWorkbookSnapshot | null,
   statusRules = readOperatorSettings().statusRules,
 ): EjoosDiffSession => {
-  const people = personChangesFromOps(plan.ops, plan.timesheetDay);
+  const people = personChangesFromOps(plan.ops, plan.timesheetDay, {
+    timesheetDayLabel: plan.timesheetDayLabel,
+  });
 
   const shPeople = pb ? parsePbShPeople(pb) : [];
   let onDuty = 0;
@@ -1791,6 +2060,7 @@ export const transferCancelledHasWorkbookWrites = (op: EjoosSyncOp) => {
 /** ПІБ / ID / звання, ПРИБУВ, «зачекати крок» або перегляд без запису в книгу. */
 export const isInformationalOp = (op: EjoosSyncOp) => {
   if (op.kind === "data_mismatch" || op.kind === "arrival") return true;
+  if (isReviewOnlyMismatchOp(op)) return true;
   if (op.kind !== "other_manual") return false;
   if (
     op.payload.type === "TRANSFER_SCOPE_UNCLEAR" ||
@@ -1816,6 +2086,12 @@ const WORKBOOK_APPLY_KINDS = new Set<EjoosOpKind>([
 /** Є реальний handler у apply; arrival / generic other_manual — ні. */
 export const isWorkbookApplyOp = (op: EjoosSyncOp) => {
   if (op.class === "conflict") return false;
+  if (
+    op.kind === "move_to_disposition" &&
+    op.payload.journalMonthBlocked === "1"
+  ) {
+    return false;
+  }
   if (isInformationalOp(op)) return false;
   if (WORKBOOK_APPLY_KINDS.has(op.kind)) return true;
   return (

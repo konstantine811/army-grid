@@ -59,7 +59,11 @@ import {
   manualInputFromBackend,
   type ManualEjoosOperationInput,
 } from "./ejoosManualOperation";
-import { personOpsBlockApply } from "./ejoosOpRequirements";
+import {
+  personApplyBlockReason,
+  personOpsBlockApply,
+} from "./ejoosOpRequirements";
+import { excludeTransferDestination } from "./ejoosExcludePolicy";
 import {
   buildProtocolText,
   collectProcessedMovementKeys,
@@ -1168,7 +1172,8 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
         person.decision === "accepted" &&
         person.ops.some(
           (op) =>
-            op.kind === "exclude_transfer" && !op.payload.destination?.trim(),
+            op.kind === "exclude_transfer" &&
+            !excludeTransferDestination(op.payload),
         ),
     );
     if (missingDest.length) {
@@ -1180,9 +1185,12 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
       );
       return;
     }
-    if (personOpsBlockApply(ops)) {
+    const queueBlockReason = personApplyBlockReason(ops);
+    if (queueBlockReason) {
       setError(
-        "У черзі є неповне переведення, немає наказу/«куди вибув», або відкритий СЗЧ суперечить новій постановці.",
+        ops.length > 1
+          ? `У черзі: ${queueBlockReason}`
+          : queueBlockReason,
       );
       return;
     }
@@ -1275,7 +1283,7 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
       return;
     }
     const excludeOp = person.ops.find((op) => op.kind === "exclude_transfer");
-    if (excludeOp && !excludeOp.payload.destination?.trim()) {
+    if (excludeOp && !excludeTransferDestination(excludeOp.payload)) {
       setError("Вкажіть «куди вибув» перед застосуванням переведення");
       return;
     }
@@ -1311,10 +1319,9 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
       return;
     }
 
-    if (personOpsBlockApply(ops)) {
-      setError(
-        "У цій картці є неповне переведення або суперечливий статус. Спочатку уточніть дані.",
-      );
+    const applyBlockReason = personApplyBlockReason(ops);
+    if (applyBlockReason) {
+      setError(applyBlockReason);
       return;
     }
     const applyOps = ops.filter(isWorkbookApplyOp);

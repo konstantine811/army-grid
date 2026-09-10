@@ -5,13 +5,14 @@ import {
   VisibilityOutlinedIcon,
 } from "@/components/sci/icons";
 import { useAuth } from "./AuthProvider";
+import { getLastAuthEmail } from "./authTypes";
 
 type Mode = "login" | "register";
 
 export function AuthPage() {
   const { login, register } = useAuth();
   const [mode, setMode] = useState<Mode>("login");
-  const [email, setEmail] = useState("");
+  const [email, setEmail] = useState(() => getLastAuthEmail());
   const [password, setPassword] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [showPassword, setShowPassword] = useState(false);
@@ -37,7 +38,11 @@ export function AuthPage() {
 
   return (
     <div className="auth-shell">
-      <form className="auth-card" onSubmit={(event) => void onSubmit(event)}>
+      <form
+        className="auth-card"
+        autoComplete="on"
+        onSubmit={(event) => void onSubmit(event)}
+      >
         <Typography variant="overline" color="text.secondary">
           Army Grid
         </Typography>
@@ -62,14 +67,18 @@ export function AuthPage() {
           ) : null}
           <TextField
             label="Пошта"
+            name="email"
+            id="auth-email"
             type="email"
             value={email}
             onChange={(event) => setEmail(event.target.value)}
             required
-            autoComplete="email"
+            autoComplete="username email"
           />
           <TextField
             label="Пароль"
+            name="password"
+            id="auth-password"
             type={showPassword ? "text" : "password"}
             value={password}
             onChange={(event) => setPassword(event.target.value)}

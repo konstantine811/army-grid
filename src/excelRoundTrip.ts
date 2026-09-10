@@ -1006,6 +1006,9 @@ export async function exportTemplateWorkbookWithMutations(
   templateUrl: string,
   mutateWorkbook: (workbook: any) => void | Promise<void>,
   fileName: string,
+  postProcessBuffer?: (
+    buffer: ArrayBuffer,
+  ) => ArrayBuffer | Promise<ArrayBuffer>,
 ) {
   const XlsxPopulate = await loadXlsxPopulate();
   const response = await fetch(templateUrl);
@@ -1018,7 +1021,13 @@ export async function exportTemplateWorkbookWithMutations(
 
   await mutateWorkbook(workbook);
 
-  const blob = await workbook.outputAsync("blob");
+  let outputBuffer = await workbook.outputAsync();
+  if (postProcessBuffer) {
+    outputBuffer = await postProcessBuffer(outputBuffer);
+  }
+  const blob = new Blob([outputBuffer], {
+    type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
 

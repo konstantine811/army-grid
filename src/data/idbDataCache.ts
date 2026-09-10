@@ -122,7 +122,20 @@ export const CacheKeys = {
   questionnairePresencePrefix: "personnel:questionnaire-presence:v1:",
   overviewAssetsPrefix: "personnel:overview-assets:v1:",
   overviewMergePrefix: "personnel:overview-merge:v1:",
+  overviewStaffPrefix: "personnel:overview-staff:v1:",
+  personnelPhotoIndex: "personnel:photo-index:v1",
 } as const;
+
+export const overviewStaffCacheKey = (datasetFingerprint: string) =>
+  `${CacheKeys.overviewStaffPrefix}${datasetFingerprint}`;
+
+export type OverviewStaffCacheMeta = {
+  serverUpdatedAt: string | null;
+  rowCount: number;
+};
+
+export const overviewStaffMetaCacheKey = (datasetFingerprint: string) =>
+  `${CacheKeys.overviewStaffPrefix}meta:${datasetFingerprint}`;
 
 const listMetaStamp = (
   items: Array<{ personExternalId?: string | null; id?: string | null }>,
@@ -181,7 +194,9 @@ const isKnownCacheKey = (key: string) =>
   key === CacheKeys.questionnairesMeta ||
   key.startsWith(CacheKeys.questionnairePresencePrefix) ||
   key.startsWith(CacheKeys.overviewAssetsPrefix) ||
-  key.startsWith(CacheKeys.overviewMergePrefix);
+  key.startsWith(CacheKeys.overviewMergePrefix) ||
+  key.startsWith(CacheKeys.overviewStaffPrefix) ||
+  key === CacheKeys.personnelPhotoIndex;
 
 export const planDataCacheCleanup = (
   entries: Array<Pick<CacheEntry, "key" | "savedAt" | "formatVersion">>,
@@ -419,6 +434,8 @@ export const invalidatePersonnelCaches = () =>
     CacheKeys.questionnairePresencePrefix,
     CacheKeys.overviewAssetsPrefix,
     CacheKeys.overviewMergePrefix,
+    CacheKeys.overviewStaffPrefix,
+    CacheKeys.personnelPhotoIndex,
   );
 
 /**

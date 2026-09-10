@@ -12,8 +12,10 @@ import {
   ROSTER_FIELD_PREFIX,
 } from "./personnelRosterMerge";
 import {
+  formatPersonBirthDateDisplay,
   getPersonDisplayName,
   isLikelyPersonnelRow,
+  resolvePersonBirthDate,
 } from "./personnelUtils";
 
 const oosRow = (
@@ -48,6 +50,40 @@ describe("extractBirthDateFromPersonName", () => {
         "ШЕВЧЕНКО Олександр Володимирович (11.05.1981)",
       ),
     ).toBe("1981-05-11");
+  });
+
+  it("reads a date with р.н. suffix from штатка ПІБ", () => {
+    expect(
+      extractBirthDateFromPersonName(
+        "САВЧЕНКО Максим Олександрович (25.01.1997 р.н.)",
+      ),
+    ).toBe("1997-01-25");
+  });
+});
+
+describe("formatPersonBirthDateDisplay", () => {
+  it("extracts DD.MM.YYYY from birth date column noise", () => {
+    expect(formatPersonBirthDateDisplay("25.01.1997 р.н.")).toBe(
+      "25.01.1997",
+    );
+    expect(
+      formatPersonBirthDateDisplay(
+        "САВЧЕНКО Максим Олександрович (25.01.1997 р.н.)",
+      ),
+    ).toBe("25.01.1997");
+  });
+});
+
+describe("resolvePersonBirthDate", () => {
+  it("normalizes штатка birth date with р.н.", () => {
+    const row = rosterRow("САВЧЕНКО Максим Олександрович", {
+      column_16: "25.01.1997 р.н.",
+    });
+    expect(resolvePersonBirthDate(row)).toBe("25.01.1997");
+  });
+
+  it("returns empty string when row is null", () => {
+    expect(resolvePersonBirthDate(null)).toBe("");
   });
 });
 

@@ -1,3 +1,4 @@
+import JSZip from "jszip";
 import {
   AlignmentType,
   Document,
@@ -9,7 +10,6 @@ import {
   TabStopType,
   TextRun,
 } from "docx";
-import JSZip from "jszip";
 import {
   buildLostMilitaryIdReportText,
   buildLostMilitaryIdOrderText,
@@ -17,14 +17,18 @@ import {
   buildLostMilitaryIdActCircumstances,
   buildLostMilitaryIdActConclusions,
   buildLostMilitaryIdActProposals,
+  buildLostMilitaryIdActAttachments,
+  buildLostMilitaryIdActDutySection,
+  buildLostMilitaryIdPersonExplanation,
   actApprovalDateLine,
-  approvalSignatoryOf,
+  approvalFooterBlock,
+  buildManualSignatoryDateLine,
   declinedPerson,
   investigatorFooterBlock,
   instrumentalInvestigatorLine,
   normalizeMilitaryUnitPhrase,
+  orderFooterBlock,
   reporterFooterBlock,
-  splitLostMilitaryIdSignatory,
   type LostMilitaryIdFields,
 } from "./lostMilitaryIdReport";
 import { formatNominativeGivenSurname } from "./lostMilitaryIdCases";
@@ -56,6 +60,93 @@ const para = (
   });
 
 const empty = () => new Paragraph({ children: [] });
+
+const RIGHT_TAB = { type: TabStopType.RIGHT, position: 9000 };
+
+type SignatoryFooterParts = {
+  titleLines: string[];
+  rank: string;
+  name: string;
+  signatureData?: string;
+};
+
+/** ЗАТВЕРДЖУЮ: посада, звання і ПІБ — одна колонка справа. */
+const buildSignatoryRightBlock = (footer: SignatoryFooterParts): Paragraph[] => {
+  const paragraphs: Paragraph[] = [];
+  for (const line of footer.titleLines) {
+    if (line.trim()) {
+      paragraphs.push(
+        para(line, { align: AlignmentType.RIGHT, spacingAfter: 40 }),
+      );
+    }
+  }
+  const signatureRun = footer.signatureData
+    ? dataUrlToImageRun(footer.signatureData)
+    : null;
+  if (signatureRun) {
+    paragraphs.push(
+      new Paragraph({
+        alignment: AlignmentType.RIGHT,
+        spacing: { after: 40, line: 276 },
+        children: [signatureRun],
+      }),
+    );
+  }
+  paragraphs.push(
+    new Paragraph({
+      alignment: AlignmentType.RIGHT,
+      spacing: { after: 40, line: 276 },
+      tabStops: [RIGHT_TAB],
+      children: [
+        run(footer.rank.trim() || "________________"),
+        new TextRun({ text: "\t", font: FONT, size: 28 }),
+        run(footer.name.trim() || "________________"),
+      ],
+    }),
+  );
+  return paragraphs;
+};
+
+/** Два рядки без таблиці: посада зліва, звання і ПІБ справа (таб-стоп). */
+const buildSignatoryPositionNameParagraphs = (
+  footer: SignatoryFooterParts,
+): Paragraph[] => {
+  const titles = footer.titleLines.map((line) => line.trim()).filter(Boolean);
+  const line1 = titles[0] ?? "";
+  const line2 = titles[1] ?? "";
+  const rank = footer.rank.trim() || "________________";
+  const name = footer.name.trim() || "________________";
+  const signatureRun = footer.signatureData
+    ? dataUrlToImageRun(footer.signatureData)
+    : null;
+
+  const row2Children: (TextRun | ImageRun)[] = [
+    run(line2 || " "),
+    new TextRun({ text: "\t", font: FONT, size: 28 }),
+  ];
+  if (signatureRun) {
+    row2Children.push(signatureRun);
+    row2Children.push(new TextRun({ text: " ", font: FONT, size: 28 }));
+  }
+  row2Children.push(run(name));
+
+  return [
+    new Paragraph({
+      spacing: { after: 40, line: 276 },
+      tabStops: [RIGHT_TAB],
+      children: [
+        run(line1 || " "),
+        new TextRun({ text: "\t", font: FONT, size: 28 }),
+        run(rank),
+      ],
+    }),
+    new Paragraph({
+      spacing: { after: 80, line: 276 },
+      tabStops: [RIGHT_TAB],
+      children: row2Children,
+    }),
+  ];
+};
 
 const dataUrlToImageRun = (dataUrl: string) => {
   const match = dataUrl.trim().match(/^data:([^;]+);base64,(.+)$/);
@@ -97,7 +188,6 @@ const pageFooter = () =>
 const buildReportDocument = (fields: LostMilitaryIdFields) => {
   const footer = reporterFooterBlock(fields);
   const body = splitBlocks(buildLostMilitaryIdReportText(fields));
-  const reportDate = fields.reportDate.trim() || "____.____.______";
   return new Document({
     sections: [
       {
@@ -119,26 +209,13 @@ const buildReportDocument = (fields: LostMilitaryIdFields) => {
           }),
           ...body.map((block) => para(block, { indent: true })),
           empty(),
-          ...footer.titleLines.map((line) =>
-            para(line, { spacingAfter: 40 }),
-          ),
-          new Paragraph({
-            spacing: { after: 80 },
-            tabStops: [
-              { type: TabStopType.CENTER, position: 4680 },
-              { type: TabStopType.RIGHT, position: 9000 },
-            ],
-            children: [
-              run(footer.rank || "________________"),
-              new TextRun({ text: "\t", font: FONT, size: 28 }),
-              ...(footer.signatureData
-                ? [dataUrlToImageRun(footer.signatureData) ?? run("________________")]
-                : [run("________________")]),
-              new TextRun({ text: "\t", font: FONT, size: 28 }),
-              run(footer.name || "________________"),
-            ],
+          ...buildSignatoryPositionNameParagraphs({
+            titleLines: footer.titleLines,
+            rank: footer.rank,
+            name: footer.name,
+            signatureData: footer.signatureData,
           }),
-          para(reportDate, {
+          para(buildManualSignatoryDateLine(), {
             align: AlignmentType.RIGHT,
             spacingAfter: 0,
           }),
@@ -150,6 +227,7 @@ const buildReportDocument = (fields: LostMilitaryIdFields) => {
 
 const buildOrderDocument = (fields: LostMilitaryIdFields) => {
   const unit = normalizeMilitaryUnitPhrase(fields.militaryUnit);
+  const commander = orderFooterBlock(fields);
   const number = fields.orderNumber.trim() || "______";
   const date = fields.orderDate.trim() || fields.reportDate.trim() || "____.____.______";
   const body = splitBlocks(buildLostMilitaryIdOrderText(fields));
@@ -181,9 +259,12 @@ const buildOrderDocument = (fields: LostMilitaryIdFields) => {
           }),
           ...body.map((block) => para(block, { indent: true })),
           empty(),
-          para("Командир", { spacingAfter: 40 }),
-          para(unit, { spacingAfter: 200 }),
-          para("________________", { spacingAfter: 0 }),
+          ...buildSignatoryPositionNameParagraphs({
+            titleLines: commander.titleLines,
+            rank: commander.rank,
+            name: commander.name,
+            signatureData: commander.signatureData,
+          }),
         ],
       },
     ],
@@ -194,21 +275,19 @@ const buildActDocument = (fields: LostMilitaryIdFields) => {
   const person = declinedPerson(fields);
   const unit = normalizeMilitaryUnitPhrase(fields.militaryUnit);
   const investigatorLine = instrumentalInvestigatorLine(fields);
-  const approval = splitLostMilitaryIdSignatory(approvalSignatoryOf(fields));
+  const approval = approvalFooterBlock(fields);
   const investigatorFooter = investigatorFooterBlock(fields);
   const orderLabel =
     fields.orderNumber.trim() && fields.orderDate.trim()
-      ? `наказу командира ${unit} від ${fields.orderDate} №${fields.orderNumber}`
+      ? `наказу командира ${unit} від ${fields.orderDate} №${fields.orderNumber} «Про призначення службового розслідування»`
       : `наказу командира ${unit} «Про призначення службового розслідування»`;
   const legal = splitBlocks(buildLostMilitaryIdActCircumstances(fields));
   const conclusions = buildLostMilitaryIdActConclusions(fields);
   const proposals = buildLostMilitaryIdActProposals(fields);
+  const attachments = buildLostMilitaryIdActAttachments(fields);
+  const dutySection = buildLostMilitaryIdActDutySection(fields);
+  const personExplanation = buildLostMilitaryIdPersonExplanation(fields);
   const actTitleTail = `службового розслідування за фактом втрати військового квитка військовослужбовцем ${unit} ${person.rankInstrumental} ${person.instrumental}`;
-
-  const approvalTitleLines =
-    approval.titleLines.length > 0
-      ? approval.titleLines
-      : [`Командир ${unit}`];
 
   return new Document({
     sections: [
@@ -225,18 +304,11 @@ const buildActDocument = (fields: LostMilitaryIdFields) => {
             align: AlignmentType.RIGHT,
             spacingAfter: 40,
           }),
-          ...approvalTitleLines.map((line) =>
-            para(line, { align: AlignmentType.RIGHT, spacingAfter: 40 }),
-          ),
-          new Paragraph({
-            alignment: AlignmentType.RIGHT,
-            spacing: { after: 40 },
-            tabStops: [{ type: TabStopType.RIGHT, position: 9000 }],
-            children: [
-              run(approval.rank || "________________"),
-              new TextRun({ text: "\t", font: FONT, size: 28 }),
-              run(approval.fullName || "________________"),
-            ],
+          ...buildSignatoryRightBlock({
+            titleLines: approval.titleLines,
+            rank: approval.rank,
+            name: approval.name,
+            signatureData: approval.signatureData,
           }),
           para(actApprovalDateLine(fields), {
             align: AlignmentType.RIGHT,
@@ -269,7 +341,7 @@ const buildActDocument = (fields: LostMilitaryIdFields) => {
             spacingAfter: 80,
           }),
           para(
-            "1.4. «Порядок проведення службового розслідування у Збройних Сил України», затверджений наказом Міністерства оборони України від 21.11.2017 № 608 (зі змінами).",
+            "1.4. «Порядок проведення службового розслідування у Збройних Силах України», затверджений наказом Міністерства оборони України від 21.11.2017 № 608 (зі змінами), зареєстрований в Міністерстві юстиції України від 13.12.2017 № 1503/31371.",
             { indent: true, spacingAfter: 80 },
           ),
           para(
@@ -294,15 +366,14 @@ const buildActDocument = (fields: LostMilitaryIdFields) => {
             { indent: true },
           ),
           para(
-            "3.3. Відповідно до вимог статті 4 Дисциплінарного статуту Збройних Сил України військовослужбовець зобов’язаний додержуватися Конституції та законів України, Військової присяги, неухильно виконувати вимоги статутів, накази командирів.",
+            "3.3. Відповідно до вимог статті 128 Статуту внутрішньої служби ЗС України військовослужбовець зобов’язаний сумлінно вивчати військову справу, зразково виконувати свої службові обов’язки.",
             { indent: true },
           ),
           para(
-            `3.4. ${person.rankInstrumental} ${person.nominative} пояснив, що втрата військового квитка сталася ${
-              fields.lossDate.trim() || "______"
-            } ${circumstancesTextSafe(fields)}. Пошуки квитка результату не дали.`,
+            "3.4. Відповідно до вимог статті 4 Дисциплінарного статуту Збройних Сил України на військовослужбовця покладено обов’язок додержуватися Конституції та законів України, Військової присяги, неухильно виконувати вимоги статутів, накази командирів.",
             { indent: true },
           ),
+          para(`3.5. ${personExplanation}`, { indent: true }),
           para("4. Відомості про осіб, стосовно яких призначено службове розслідування.", {
             bold: true,
           }),
@@ -313,54 +384,24 @@ const buildActDocument = (fields: LostMilitaryIdFields) => {
           para("5. Неправомірні дії військовослужбовця та причинний зв’язок:", {
             bold: true,
           }),
-          para(
-            `Втрата військового квитка відбулася ${circumstancesTextSafe(fields)}. Ознак умисних дій не встановлено.`,
-            { indent: true },
-          ),
-          para("Заперечення, заяви та клопотання: не надходило.", {
-            indent: true,
-          }),
+          ...dutySection.map((line) => para(line, { indent: true })),
           para("6. Висновки службового розслідування", { bold: true }),
           para(conclusions, { indent: true }),
           para("Пропозиції:", { bold: true }),
           ...proposals.split("\n").map((line) => para(line, { indent: true })),
           para("7. До акту службового розслідування додаю:", { bold: true }),
-          para(
-            `1. Витяг з ${orderLabel} про призначення службового розслідування.`,
-            { indent: true, spacingAfter: 80 },
-          ),
-          para(
-            `2. Копію рапорту про втрату військового квитка ${person.rankInstrumental} ${person.instrumental}${
-              fields.reportDate.trim() ? ` від ${fields.reportDate}` : ""
-            }.`,
-            { indent: true, spacingAfter: 80 },
-          ),
-          para(
-            `3. Пояснення військовослужбовця ${person.rankGenitive} ${person.genitive}.`,
-            { indent: true },
+          ...attachments.map((line) =>
+            para(line, { indent: true, spacingAfter: 80 }),
           ),
           empty(),
-          ...(investigatorFooter.titleLines.length
-            ? investigatorFooter.titleLines.map((line) =>
-                para(line, { spacingAfter: 40 }),
-              )
-            : [
-                para("Особа, яка проводила службове розслідування", {
-                  spacingAfter: 40,
-                }),
-              ]),
-          new Paragraph({
-            spacing: { after: 0 },
-            tabStops: [{ type: TabStopType.RIGHT, position: 9000 }],
-            children: [
-              run(investigatorFooter.rank || "________________"),
-              new TextRun({ text: "\t", font: FONT, size: 28 }),
-              run(
-                investigatorFooter.name ||
-                  formatNominativeGivenSurname(fields.investigatorFullName) ||
-                  "________________",
-              ),
-            ],
+          ...buildSignatoryPositionNameParagraphs({
+            titleLines: investigatorFooter.titleLines.length
+              ? investigatorFooter.titleLines
+              : ["Особа, яка проводила службове розслідування"],
+            rank: investigatorFooter.rank,
+            name:
+              investigatorFooter.name ||
+              formatNominativeGivenSurname(fields.investigatorFullName),
           }),
         ],
       },
@@ -368,18 +409,8 @@ const buildActDocument = (fields: LostMilitaryIdFields) => {
   });
 };
 
-const circumstancesTextSafe = (fields: LostMilitaryIdFields) => {
-  if (fields.circumstanceKind === "custom") {
-    return fields.customCircumstances.trim() || "за встановлених обставин";
-  }
-  const from = fields.fromLocation.trim();
-  const to = fields.toLocation.trim();
-  if (from && to) return `під час переміщення з ${from} до ${to}`;
-  return "під час переміщення";
-};
-
-const safePart = (value: string) =>
-  value.replace(/[\\/:*?"<>|]+/g, " ").replace(/\s+/g, " ").trim() || "документ";
+export const createLostMilitaryIdWordBlob = (fields: LostMilitaryIdFields) =>
+  Packer.toBlob(buildActDocument(fields));
 
 export const createLostMilitaryIdReportWordBlob = (fields: LostMilitaryIdFields) =>
   Packer.toBlob(buildReportDocument(fields));
@@ -388,21 +419,33 @@ export const createLostMilitaryIdOrderWordBlob = (fields: LostMilitaryIdFields) 
   Packer.toBlob(buildOrderDocument(fields));
 
 export const createLostMilitaryIdActWordBlob = (fields: LostMilitaryIdFields) =>
-  Packer.toBlob(buildActDocument(fields));
+  createLostMilitaryIdWordBlob(fields);
+
+const safeZipEntryName = (value: string) =>
+  String(value || "document")
+    .replace(/[\\/:*?"<>|]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 
 export const createLostMilitaryIdKitZip = async (fields: LostMilitaryIdFields) => {
-  const folder = safePart(fields.folderName);
-  const [report, order, act] = await Promise.all([
+  const [reportBlob, orderBlob, actBlob] = await Promise.all([
     createLostMilitaryIdReportWordBlob(fields),
     createLostMilitaryIdOrderWordBlob(fields),
     createLostMilitaryIdActWordBlob(fields),
   ]);
+
+  const base = safeZipEntryName(
+    fields.folderName || fields.fullName || "Втрата військового квитка",
+  );
   const zip = new JSZip();
-  zip.file(`${folder} · Рапорт.docx`, report);
-  zip.file(`${folder} · Наказ.docx`, order);
-  zip.file(`${folder} · Акт.docx`, act);
+  zip.file(`${base} · Рапорт.docx`, reportBlob);
+  zip.file(`${base} · Наказ.docx`, orderBlob);
+  zip.file(`${base} · Акт розслідування.docx`, actBlob);
+
   return zip.generateAsync({
     type: "blob",
     mimeType: "application/zip",
+    compression: "DEFLATE",
+    compressionOptions: { level: 6 },
   });
 };

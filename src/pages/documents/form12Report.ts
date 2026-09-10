@@ -245,10 +245,25 @@ export const splitForm12Signatory = (
   };
 };
 
+export const looksLikeUaDateToken = (value: string) =>
+  /^\d{1,2}[./-]\d{1,2}[./-]\d{2,4}(?:\s*р(?:ок(?:у)?)?\.?)?$/iu.test(
+    String(value ?? "").trim(),
+  );
+
+const looksLikeNumericToken = (value: string) =>
+  /^\d+(?:[.,]\d+)?$/.test(String(value ?? "").trim());
+
 export const toUkrainianDativePosition = (position: string) => {
   const text = position.trim();
-  if (!text) return "";
+  if (!text || looksLikeUaDateToken(text)) return "";
   const [first, ...rest] = text.split(/\s+/);
+  if (looksLikeUaDateToken(first)) {
+    const tail = rest.join(" ").trim();
+    return tail ? capitalizeReportPosition(tail) : "";
+  }
+  if (looksLikeNumericToken(first)) {
+    return capitalizeReportPosition(text);
+  }
   const key = first.toLocaleLowerCase("uk-UA");
   let dativeFirst = key;
   if (key.endsWith("ець")) dativeFirst = `${key.slice(0, -3)}цю`;

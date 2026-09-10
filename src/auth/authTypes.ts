@@ -1,4 +1,6 @@
 const TOKEN_KEY = "army-grid.auth-token";
+const USER_KEY = "army-grid.auth-user";
+const LAST_EMAIL_KEY = "army-grid.auth-last-email";
 
 export type AppUserRole = "ADMIN" | "USER";
 
@@ -59,6 +61,58 @@ export const setAuthToken = (token: string | null) => {
 };
 
 export const clearAuthToken = () => setAuthToken(null);
+
+export const getCachedAuthUser = (): AuthUser | null => {
+  try {
+    const raw = window.localStorage.getItem(USER_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw) as AuthUser;
+  } catch {
+    return null;
+  }
+};
+
+/** Keep sidebar avatar when session refresh omits photoData. */
+export const mergeAuthUserWithCachedPhoto = (user: AuthUser): AuthUser => {
+  if (user.photoData) return user;
+  const cached = getCachedAuthUser();
+  if (cached?.id === user.id && cached.photoData) {
+    return { ...user, photoData: cached.photoData };
+  }
+  return user;
+};
+
+export const setCachedAuthUser = (user: AuthUser | null) => {
+  try {
+    if (!user) window.localStorage.removeItem(USER_KEY);
+    else {
+      window.localStorage.setItem(
+        USER_KEY,
+        JSON.stringify(mergeAuthUserWithCachedPhoto(user)),
+      );
+    }
+  } catch {
+    // Ignore storage errors.
+  }
+};
+
+export const getLastAuthEmail = () => {
+  try {
+    return window.localStorage.getItem(LAST_EMAIL_KEY) ?? "";
+  } catch {
+    return "";
+  }
+};
+
+export const setLastAuthEmail = (email: string) => {
+  try {
+    const trimmed = email.trim();
+    if (!trimmed) window.localStorage.removeItem(LAST_EMAIL_KEY);
+    else window.localStorage.setItem(LAST_EMAIL_KEY, trimmed);
+  } catch {
+    // Ignore storage errors.
+  }
+};
 
 export const AUTH_LOGOUT_EVENT = "army-grid:auth-logout";
 

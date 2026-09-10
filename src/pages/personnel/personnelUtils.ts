@@ -16,7 +16,10 @@ import {
   downloadBlob,
   sanitizeFileName,
 } from "../../shared/browserExport";
-import type { DbPreviewState, EjournalPreviewRow } from "../ejournal/ejournalTypes";
+import type {
+  DbPreviewState,
+  EjournalPreviewRow,
+} from "../ejournal/ejournalTypes";
 import { readRosterColumnValue } from "../excel-fill/rosterSourceSnapshot";
 import {
   parseDbColumns,
@@ -112,7 +115,12 @@ export const isUnstablePersonExternalId = (value: string) => {
 /** ID рядка staging-імпорту ЕЖООС у БД (CUID/UUID), не fingerprint чи roster-ключ. */
 export const isPersistedEjournalRowId = (value: string) => {
   const raw = String(value ?? "").trim();
-  if (!raw || /^roster:/i.test(raw) || /^p:/i.test(raw) || /^name:/i.test(raw)) {
+  if (
+    !raw ||
+    /^roster:/i.test(raw) ||
+    /^p:/i.test(raw) ||
+    /^name:/i.test(raw)
+  ) {
     return false;
   }
   return CUID_VALUE_RE.test(raw) || UUID_VALUE_RE.test(raw);
@@ -188,7 +196,10 @@ export const getPersonExternalId = (row: EjournalPreviewRow | null) => {
 
   const keys = Object.keys(row)
     .filter(isPersonSpreadsheetIdFieldKey)
-    .sort((left, right) => personSpreadsheetIdKeyRank(left) - personSpreadsheetIdKeyRank(right));
+    .sort(
+      (left, right) =>
+        personSpreadsheetIdKeyRank(left) - personSpreadsheetIdKeyRank(right),
+    );
 
   let resolved = "";
   for (const key of keys) {
@@ -227,7 +238,10 @@ export const isPositionIndexField = (parts: string[]) =>
   parts.includes("індекс") && parts.includes("посади");
 
 export const formatMultilineText = (value: unknown) =>
-  previewValueToDisplay(value).replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
+  previewValueToDisplay(value)
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .trim();
 
 /** Excel serial dates (e.g. 33448) → uk-UA display; leave normal text dates as-is. */
 export const formatExcelDateDisplay = (value: unknown) => {
@@ -320,7 +334,10 @@ export const extractPhones = (value: unknown): string[] => {
   return phones;
 };
 
-const personFieldKeyCache = new WeakMap<EjournalPreviewRow, Map<string, string>>();
+const personFieldKeyCache = new WeakMap<
+  EjournalPreviewRow,
+  Map<string, string>
+>();
 
 /** Prefer exact / shortest key match so "звання" does not hit order columns. */
 export const resolvePersonFieldKey = (
@@ -370,7 +387,9 @@ export const resolvePersonFieldKey = (
       // then the shortest remaining match.
       resolved =
         matches.sort((left, right) => {
-          const leftStarts = left.toLowerCase().startsWith(parts[0] ?? "") ? 0 : 1;
+          const leftStarts = left.toLowerCase().startsWith(parts[0] ?? "")
+            ? 0
+            : 1;
           const rightStarts = right.toLowerCase().startsWith(parts[0] ?? "")
             ? 0
             : 1;
@@ -418,8 +437,7 @@ export const resolvePersonDisplayNameFromRoster = (
 
 export const getPersonDisplayName = (row: EjournalPreviewRow | null) => {
   const fromOos = cleanPersonDisplayName(
-    getPersonFieldValue(row, ["прізвище"]) ||
-      getPersonFieldValue(row, ["піб"]),
+    getPersonFieldValue(row, ["прізвище"]) || getPersonFieldValue(row, ["піб"]),
   );
   const fromRoster = resolvePersonDisplayNameFromRoster(row);
   if (
@@ -455,11 +473,19 @@ export const PERSON_CARD_FIELDS: PersonFieldDef[] = [
     section: "identity",
     kind: "date",
   },
-  { label: "Місце народження", parts: ["місце_народження"], section: "identity" },
+  {
+    label: "Місце народження",
+    parts: ["місце_народження"],
+    section: "identity",
+  },
   { label: "Стать", parts: ["стать"], section: "identity" },
   // Prefer рнокпп_за_наявності — bare ["рнокпп"] wrongly hits shorter відмова_від_рнокпп.
   { label: "РНОКПП", parts: ["рнокпп_за_наявності"], section: "identity" },
-  { label: "Відмова від РНОКПП", parts: ["відмова", "рнокпп"], section: "identity" },
+  {
+    label: "Відмова від РНОКПП",
+    parts: ["відмова", "рнокпп"],
+    section: "identity",
+  },
   {
     label: "Документ, що посвідчує особу",
     parts: ["назва", "документа", "посвідчує"],
@@ -477,7 +503,11 @@ export const PERSON_CARD_FIELDS: PersonFieldDef[] = [
   },
 
   { label: "Вид служби", parts: ["вид_служби"], section: "service" },
-  { label: "Місце перебування", parts: ["місце_перебування"], section: "service" },
+  {
+    label: "Місце перебування",
+    parts: ["місце_перебування"],
+    section: "service",
+  },
   { label: "Звідки прибув", parts: ["звідки", "прибув"], section: "service" },
   {
     label: "Дата укладання контракту",
@@ -688,17 +718,62 @@ export const resolveMorningGeneralListColumnLabel = (
 };
 
 /** Повна посада з ранкового (`повна_посада` / `roster__повна_посада`) або коротка посада. */
+const looksLikePositionDateValue = (value: string) =>
+  /^\d{1,2}[./-]\d{1,2}[./-]\d{2,4}(?:\s*р(?:ок(?:у)?)?\.?)?$/iu.test(
+    value.trim(),
+  );
+
+const looksLikeNumericPositionValue = (value: string) => {
+  const text = value.trim();
+  if (!text || looksLikePositionDateValue(text)) return false;
+  return /^\d+(?:[.,]\d+)?$/.test(text);
+};
+
+const isUnusablePositionTitle = (value: string) => {
+  const text = value.trim();
+  return (
+    !text ||
+    looksLikePositionDateValue(text) ||
+    looksLikeNumericPositionValue(text)
+  );
+};
+
+const readPersonPlatoonValue = (row: EjournalPreviewRow) => {
+  const candidates = [
+    getPersonFieldValue(row, ["взвод"]).trim(),
+    readRosterColumnValue(row, 3).trim(),
+  ];
+  for (const text of candidates) {
+    if (text && !isUnusablePositionTitle(text)) return text;
+  }
+  return "";
+};
+
+const resolvePositionTitleCandidate = (
+  row: EjournalPreviewRow,
+  text: string,
+) => {
+  const trimmed = text.trim();
+  if (!trimmed) return "";
+  if (isUnusablePositionTitle(trimmed)) {
+    return readPersonPlatoonValue(row);
+  }
+  return trimmed;
+};
+
 export const getPersonFullPositionTitle = (row: EjournalPreviewRow | null) => {
   if (!row) return "";
 
   const read = (value: unknown) => previewValueToDisplay(value).trim();
 
   // Явно передано з картки особи при відкритті довідки.
-  const explicit = read(row.__zhbdFullPosition);
+  const explicit = resolvePositionTitleCandidate(row, read(row.__zhbdFullPosition));
   if (explicit) return explicit;
 
   const keyNorm = (key: string) =>
-    rosterSourceKey(key).toLocaleLowerCase("uk-UA").replace(/[\s-]+/g, "_");
+    rosterSourceKey(key)
+      .toLocaleLowerCase("uk-UA")
+      .replace(/[\s-]+/g, "_");
 
   let shortFallback = "";
 
@@ -713,7 +788,9 @@ export const getPersonFullPositionTitle = (row: EjournalPreviewRow | null) => {
       norm.endsWith("_повна_посада") ||
       (norm.includes("повна") && norm.includes("посада"))
     ) {
-      return text;
+      const resolved = resolvePositionTitleCandidate(row, text);
+      if (resolved) return resolved;
+      continue;
     }
 
     if (
@@ -726,15 +803,36 @@ export const getPersonFullPositionTitle = (row: EjournalPreviewRow | null) => {
       !norm.includes("прийняття") &&
       !norm.includes("наказу")
     ) {
-      shortFallback = text;
+      const resolved = resolvePositionTitleCandidate(row, text);
+      if (resolved) shortFallback = resolved;
     }
   }
 
-  return shortFallback || getPersonFieldValue(row, ["чим", "займається"]).trim();
+  const tail =
+    shortFallback ||
+    resolvePositionTitleCandidate(
+      row,
+      getPersonFieldValue(row, ["чим", "займається"]).trim(),
+    );
+  return tail || readPersonPlatoonValue(row);
+};
+
+export const isRosterNoteFieldLabel = (label: string) => {
+  const norm = label
+    .trim()
+    .toLocaleLowerCase("uk-UA")
+    .replace(/_/g, " ");
+  return (
+    norm === "примітки" ||
+    norm === "примітка 3" ||
+    (norm.startsWith("примітка") && !norm.includes("до періоду"))
+  );
 };
 
 /** Значення «Повна посада» з рядка картки (як у блоці Загальний список). */
-export const pickFullPositionFromPersonRow = (row: EjournalPreviewRow | null) => {
+export const pickFullPositionFromPersonRow = (
+  row: EjournalPreviewRow | null,
+) => {
   if (!row) return "";
   const read = (value: unknown) => previewValueToDisplay(value).trim();
   for (const [key, raw] of Object.entries(row)) {
@@ -748,7 +846,9 @@ export const pickFullPositionFromPersonRow = (row: EjournalPreviewRow | null) =>
       norm === "повна_посада" ||
       (norm.includes("повна") && norm.includes("посада"))
     ) {
-      return text;
+      const resolved = resolvePositionTitleCandidate(row, text);
+      if (resolved) return resolved;
+      continue;
     }
   }
   return getPersonFullPositionTitle(row);
@@ -757,7 +857,7 @@ export const pickFullPositionFromPersonRow = (row: EjournalPreviewRow | null) =>
 /** Excel I: оф. / серж. / солд. — категорія складу, не військове звання. */
 const RANK_CATEGORY_VALUE_RE = /^(оф|сер[жh]|солд)\.?$/i;
 const RANK_TITLE_VALUE_RE =
-  /(рекрут|солдат|матрос|сержант|старшина|прапорщик|лейтенант|капітан|майор|підполковник|полковник|генерал)/i;
+  /(рекрут|рядов|солдат|матрос|сержант|старшина|прапорщик|лейтенант|капітан|майор|підполковник|полковник|генерал)/i;
 const GENERIC_ENLISTED_RANK_RE = /^(солдат|матрос|рекрут)$/i;
 
 export const isPersonnelRankCategoryValue = (value: string) =>
@@ -765,7 +865,7 @@ export const isPersonnelRankCategoryValue = (value: string) =>
     value.trim().toLocaleLowerCase("uk-UA").replace(/\s+/g, ""),
   );
 
-const looksLikePersonnelRankTitle = (value: string) => {
+export const looksLikePersonnelRankTitle = (value: string) => {
   const text = value.trim();
   if (!text || isPersonnelRankCategoryValue(text)) return false;
   return RANK_TITLE_VALUE_RE.test(text.toLocaleLowerCase("uk-UA"));
@@ -784,9 +884,7 @@ const shouldSkipRankSourceKey = (sourceKey: string) => {
 const isPreferredRankSourceKey = (sourceKey: string) => {
   const lower = sourceKey.toLocaleLowerCase("uk-UA");
   return (
-    lower.includes("звання") ||
-    /^column_13(_|$)/.test(lower) ||
-    lower === "m"
+    lower.includes("звання") || /^column_13(_|$)/.test(lower) || lower === "m"
   );
 };
 
@@ -857,7 +955,9 @@ export const resolvePersonRankTitle = (row: EjournalPreviewRow | null) => {
   return "";
 };
 
-export const pickPreferredPersonRank = (...values: Array<string | undefined>) => {
+export const pickPreferredPersonRank = (
+  ...values: Array<string | undefined>
+) => {
   let best = "";
   let bestScore = Number.NEGATIVE_INFINITY;
 
@@ -934,17 +1034,27 @@ const collectRosterFieldEntries = (row: EjournalPreviewRow | null) => {
     .filter((entry) => entry.value);
 };
 
+const pickResolvedPersonBirthDate = (raw: unknown) => {
+  const text = formatExcelDateDisplay(raw).trim();
+  if (!text || !looksLikePersonBirthDate(text)) return "";
+  return formatPersonBirthDateDisplay(text);
+};
+
 export const resolvePersonBirthDate = (row: EjournalPreviewRow | null) => {
-  const fromOos = formatExcelDateDisplay(
+  if (!row) return "";
+  const fromOos = pickResolvedPersonBirthDate(
     getPersonFieldValue(row, ["дата_народження"]),
-  ).trim();
-  if (fromOos && looksLikePersonBirthDate(fromOos)) return fromOos;
+  );
+  if (fromOos) return fromOos;
 
   // Інколи дата народження помилково лежить у полі «ID».
-  const fromId = formatExcelDateDisplay(
-    getPersonFieldValue(row, ["id"]),
-  ).trim();
-  if (fromId && looksLikePersonBirthDate(fromId)) return fromId;
+  const fromId = pickResolvedPersonBirthDate(getPersonFieldValue(row, ["id"]));
+  if (fromId) return fromId;
+
+  const fromRosterColumn = pickResolvedPersonBirthDate(
+    readRosterColumnValue(row, 16),
+  );
+  if (fromRosterColumn) return fromRosterColumn;
 
   const rosterEntries = collectRosterFieldEntries(row);
 
@@ -971,19 +1081,32 @@ export const resolvePersonBirthDate = (row: EjournalPreviewRow | null) => {
   // 1) Дата народження зі Штатки
   for (const entry of rosterEntries) {
     if (!isBirthDateKey(entry.sourceKey)) continue;
-    if (looksLikePersonBirthDate(entry.value)) return entry.value;
+    const picked = pickResolvedPersonBirthDate(entry.value);
+    if (picked) return picked;
   }
 
   // 2) Якщо в «Рік» помилково лежить повна дата — підставляємо в дату народження
   for (const entry of rosterEntries) {
     if (!isYearKey(entry.sourceKey)) continue;
-    if (looksLikePersonBirthDate(entry.value)) return entry.value;
+    const picked = pickResolvedPersonBirthDate(entry.value);
+    if (picked) return picked;
   }
 
   // 3) Інші generic-колонки зі Штатки з валідною датою
   for (const entry of rosterEntries) {
     if (!isGenericRosterColumnKey(entry.sourceKey)) continue;
-    if (looksLikePersonBirthDate(entry.value)) return entry.value;
+    const picked = pickResolvedPersonBirthDate(entry.value);
+    if (picked) return picked;
+  }
+
+  // 4) Дата в дужках у ПІБ («… (25.01.1997 р.н.)»)
+  for (const source of [
+    readRosterColumnValue(row, 14),
+    getPersonFieldValue(row, ["прізвище"]),
+    getPersonFieldValue(row, ["піб"]),
+  ]) {
+    const picked = pickResolvedPersonBirthDate(source);
+    if (picked) return picked;
   }
 
   return "";
@@ -995,7 +1118,9 @@ export const resolvePersonPositionTitle = (row: EjournalPreviewRow | null) => {
 
   const read = (value: unknown) => previewValueToDisplay(value).trim();
   const keyNorm = (key: string) =>
-    rosterSourceKey(key).toLocaleLowerCase("uk-UA").replace(/[\s-]+/g, "_");
+    rosterSourceKey(key)
+      .toLocaleLowerCase("uk-UA")
+      .replace(/[\s-]+/g, "_");
 
   let short = "";
   let full = "";
@@ -1010,7 +1135,8 @@ export const resolvePersonPositionTitle = (row: EjournalPreviewRow | null) => {
         norm.endsWith("_повна_посада") ||
         (norm.includes("повна") && norm.includes("посада")))
     ) {
-      full = text;
+      const resolved = resolvePositionTitleCandidate(row, text);
+      if (resolved) full = resolved;
       continue;
     }
     if (
@@ -1023,14 +1149,19 @@ export const resolvePersonPositionTitle = (row: EjournalPreviewRow | null) => {
       !norm.includes("прийняття") &&
       !norm.includes("наказу")
     ) {
-      short = text;
+      const resolved = resolvePositionTitleCandidate(row, text);
+      if (resolved) short = resolved;
     }
   }
 
   return (
     short ||
     full ||
-    getPersonFieldValue(row, ["чим", "займається"]).trim() ||
+    resolvePositionTitleCandidate(
+      row,
+      getPersonFieldValue(row, ["чим", "займається"]).trim(),
+    ) ||
+    readPersonPlatoonValue(row) ||
     getPersonFullPositionTitle(row)
   );
 };
@@ -1063,7 +1194,7 @@ export const resolvePersonStayPlace = (row: EjournalPreviewRow | null) => {
 
 /** Текст для віджета: `06.03.1975 · 51 р.` */
 export const formatPersonBirthDateWithAge = (birthDate: string) => {
-  const date = String(birthDate ?? "").trim();
+  const date = formatPersonBirthDateDisplay(String(birthDate ?? "").trim());
   if (!date) return "";
   const years = computeFullYearsFromBirthDate(date);
   if (years == null) return date;
@@ -1117,7 +1248,8 @@ export const resolvePersonRosterStatus = (
 
   for (const columnNumber of [21, 37] as const) {
     const displayed = previewValueToDisplay(
-      row[`column_${columnNumber}`] ?? row[`${ROSTER_FIELD_PREFIX}column_${columnNumber}`],
+      row[`column_${columnNumber}`] ??
+        row[`${ROSTER_FIELD_PREFIX}column_${columnNumber}`],
     ).trim();
     if (displayed) return displayed;
   }
@@ -1130,9 +1262,7 @@ export const classifyOverviewStatusFromRoster = (status: string) => {
   const displayed = String(status ?? "")
     .replace(/\s+/g, " ")
     .trim();
-  const normalized = displayed
-    .replace(/[ʼ’']/g, "")
-    .toLocaleLowerCase("uk-UA");
+  const normalized = displayed.replace(/[ʼ’']/g, "").toLocaleLowerCase("uk-UA");
   if (normalized.includes("відряд")) {
     return { status: "BUSINESS_TRIP", statusLabel: displayed || "Відрядження" };
   }
@@ -1142,7 +1272,7 @@ export const classifyOverviewStatusFromRoster = (status: string) => {
   if (normalized.includes("ліку") || normalized.includes("шпит")) {
     return { status: "MEDICAL", statusLabel: displayed || "Лікування" };
   }
-  if (normalized.includes("сзч")) {
+  if (normalized.includes("сзч") || normalized.includes("не в стр")) {
     return { status: "AWOL", statusLabel: displayed || "СЗЧ" };
   }
   if (normalized.includes("безв") || normalized.includes("зник")) {
@@ -1237,7 +1367,9 @@ export const isLikelyCallSignToken = (value: string) => {
   return /[a-zа-яіїєґ]/i.test(text);
 };
 
-export const extractPersonCallSign = (...sources: Array<string | undefined>) => {
+export const extractPersonCallSign = (
+  ...sources: Array<string | undefined>
+) => {
   for (const source of sources) {
     const text = String(source ?? "").trim();
     if (!text) continue;
@@ -1347,6 +1479,14 @@ export const normalizePersonBirthKey = (value: string) => {
   return "";
 };
 
+/** DD.MM.YYYY для відображення; витягує дату з «25.01.1997 р.н.» та подібних записів. */
+export const formatPersonBirthDateDisplay = (value: string) => {
+  const key = normalizePersonBirthKey(value);
+  if (!key) return formatExcelDateDisplay(value).trim();
+  const [year, month, day] = key.split("-");
+  return `${day}.${month}.${year}`;
+};
+
 export const buildPersonIdentityFingerprint = (
   name: string,
   birthDate = "",
@@ -1409,8 +1549,7 @@ export const collectPersonExternalIdCandidates = (
   push(row.__dbRowId);
 
   const name =
-    getPersonFieldValue(row, ["прізвище"]) ||
-    getPersonFieldValue(row, ["піб"]);
+    getPersonFieldValue(row, ["прізвище"]) || getPersonFieldValue(row, ["піб"]);
   const nameKey = normalizePersonIdentityText(name);
   const spreadsheetId = getPersonExternalId(row);
   const birthKey = normalizePersonBirthKey(resolvePersonBirthDate(row));
@@ -1450,7 +1589,9 @@ export const formatPersonSignatureName = (
   fullName: string,
   callSign?: string | null,
 ) => {
-  const trimmed = String(fullName ?? "").normalize("NFC").trim();
+  const trimmed = String(fullName ?? "")
+    .normalize("NFC")
+    .trim();
   if (!trimmed) return "";
 
   const withoutCallSignParen = trimmed.replace(/\s*\([^)]+\)\s*$/, "").trim();
@@ -1462,16 +1603,15 @@ export const formatPersonSignatureName = (
     ...parts.slice(1).map(capitalizePersonNamePart),
   ].join(" ");
 
-  const signRaw = String(
-    callSign ?? extractPersonCallSign(trimmed) ?? "",
-  )
+  const signRaw = String(callSign ?? extractPersonCallSign(trimmed) ?? "")
     .normalize("NFC")
     .trim();
-  const sign = /^(?:0|[-—]|немає|відсутн(?:ій|я)|б\/п|#n\/a|\[object object\])$/iu.test(
-    signRaw,
-  )
-    ? ""
-    : signRaw;
+  const sign =
+    /^(?:0|[-—]|немає|відсутн(?:ій|я)|б\/п|#n\/a|\[object object\])$/iu.test(
+      signRaw,
+    )
+      ? ""
+      : signRaw;
   return sign ? `${formatted} (${sign})` : formatted;
 };
 
@@ -1567,7 +1707,9 @@ export const looksLikePersonnelName = (value: string) => {
   if (text === "Особа не вибрана" || text === "-") return false;
   if (/^\d+([.,]\d+)?$/.test(text)) return false;
   if (/^(прізвище|піб|особа|№)\b/i.test(text)) return false;
-  if (/^(управління|рота|взвод|батальйон|група|відділення|штаб)\b/i.test(text)) {
+  if (
+    /^(управління|рота|взвод|батальйон|група|відділення|штаб)\b/i.test(text)
+  ) {
     return false;
   }
   if (PERSONNEL_STATUS_AS_NAME_RE.test(text)) return false;
@@ -1581,16 +1723,15 @@ export const looksLikePersonnelName = (value: string) => {
 export const isLikelyPersonnelRow = (row: EjournalPreviewRow) => {
   if (!row.__dbRowId) return false;
   const fromOos = cleanPersonDisplayName(
-    getPersonFieldValue(row, ["прізвище"]) ||
-      getPersonFieldValue(row, ["піб"]),
+    getPersonFieldValue(row, ["прізвище"]) || getPersonFieldValue(row, ["піб"]),
   );
   const fromRoster = resolvePersonDisplayNameFromRoster(row);
-  return (
-    looksLikePersonnelName(fromOos) || looksLikePersonnelName(fromRoster)
-  );
+  return looksLikePersonnelName(fromOos) || looksLikePersonnelName(fromRoster);
 };
 
-export const findEjournalPersonnelSheet = (imports: BackendEjournalImport[]) => {
+export const findEjournalPersonnelSheet = (
+  imports: BackendEjournalImport[],
+) => {
   for (const item of imports) {
     const oosSheet =
       item.sheets.find((sheet) => /2\.\s*оос/i.test(sheet.name)) ??

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildOverviewRowSearchText,
   overviewNameMatchesQuery,
   parseOverviewNameQueries,
 } from "./overviewNameSearch";
@@ -44,5 +45,22 @@ describe("overviewNameMatchesQuery", () => {
         "ВЕРЕНКО Ром Григорович",
       ),
     ).toBe(true);
+  });
+});
+
+describe("buildOverviewRowSearchText", () => {
+  it("normalizes searchable fields once", () => {
+    const text = buildOverviewRowSearchText(
+      {
+        name: "ПОЛЬОВИЙ Олексій",
+        rank: "солдат",
+        unit: "1 рота",
+        statusLabel: "В строю",
+      },
+      "Форма 6",
+    );
+    expect(text).toContain("польовий");
+    expect(text).toContain("форма");
+    expect(text).toContain("6");
   });
 });

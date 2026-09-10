@@ -50,6 +50,139 @@ describe("buildTimesheetPreview", () => {
     ]);
   });
 
+  it("shows return from disposition as dashes then plus, not July ПЕРЕВ on day 8", () => {
+    const preview = buildTimesheetPreview(
+      [
+        op({
+          kind: "move_to_disposition",
+          class: "needs_input",
+          payload: {
+            orderDate: "08.07.2026",
+            orderNumber: "198",
+            journalMonthBlocked: "1",
+            keepOpenSzchTimesheet: "1",
+            absenceCode: "СЗЧ",
+            timesheetFound: "true",
+            timesheetAbsenceSpans: "1-19:СЗЧ",
+          },
+        }),
+        op({
+          kind: "position_change",
+          class: "ready",
+          payload: {
+            orderDate: "21.08.2026",
+            timesheetActiveFrom: "20.08.2026",
+            returningFromDisposition: "1",
+            nextIndex: "2103179",
+          },
+        }),
+      ],
+      31,
+      "31.08.2026",
+    );
+
+    expect(preview?.runs).toEqual([
+      { from: 1, to: 19, mark: "-" },
+      { from: 20, to: 31, mark: "+" },
+    ]);
+    expect(preview?.departDay).toBeUndefined();
+  });
+
+  it("prefers ПОСАДА order date over stale archive return for active-from day", () => {
+    const preview = buildTimesheetPreview(
+      [
+        op({
+          kind: "move_to_disposition",
+          class: "needs_input",
+          payload: {
+            orderDate: "08.07.2026",
+            journalMonthBlocked: "1",
+            keepOpenSzchTimesheet: "1",
+            absenceCode: "СЗЧ",
+          },
+        }),
+        op({
+          kind: "position_change",
+          class: "ready",
+          payload: {
+            orderDate: "26.08.2026",
+            timesheetActiveFrom: "02.08.2026",
+            returningFromDisposition: "1",
+            nextIndex: "2103179",
+          },
+        }),
+      ],
+      31,
+      "31.08.2026",
+    );
+
+    expect(preview?.runs).toEqual([
+      { from: 1, to: 25, mark: "-" },
+      { from: 26, to: 31, mark: "+" },
+    ]);
+  });
+
+  it("shows all dashes when still in prior-month disposition without return", () => {
+    const preview = buildTimesheetPreview(
+      [
+        op({
+          kind: "move_to_disposition",
+          class: "needs_input",
+          payload: {
+            orderDate: "08.07.2026",
+            journalMonthBlocked: "1",
+            keepOpenSzchTimesheet: "1",
+            absenceCode: "СЗЧ",
+            timesheetAbsenceSpans: "1-31:СЗЧ",
+          },
+        }),
+      ],
+      19,
+      "19.08.2026",
+    );
+
+    expect(preview?.runs).toEqual([{ from: 1, to: 19, mark: "-" }]);
+  });
+
+  it("shows ВП carry, August disposition, then return to staff as plus", () => {
+    const preview = buildTimesheetPreview(
+      [
+        op({
+          kind: "move_to_disposition",
+          class: "ready",
+          payload: {
+            orderDate: "14.08.2026",
+            orderNumber: "241",
+            keepOpenSzchTimesheet: "1",
+            absenceCode: "ВП",
+            absenceType: "відпустка для лікування після поранення",
+            timesheetFound: "true",
+            timesheetAbsenceSpans: "1-13:ВП",
+          },
+        }),
+        op({
+          kind: "position_change",
+          class: "ready",
+          payload: {
+            orderDate: "26.08.2026",
+            timesheetActiveFrom: "26.08.2026",
+            returningFromDisposition: "1",
+            nextIndex: "2103179",
+          },
+        }),
+      ],
+      31,
+      "31.08.2026",
+    );
+
+    expect(preview?.runs).toEqual([
+      { from: 1, to: 13, mark: "ВП" },
+      { from: 14, to: 14, mark: "ПЕРЕВ" },
+      { from: 15, to: 25, mark: "-" },
+      { from: 26, to: 31, mark: "+" },
+    ]);
+  });
+
   it("shows ШЕВЧУК as inactive on day 1, present from day 2, and ЗБ from day 8", () => {
     const preview = buildTimesheetPreview(
       [
@@ -152,6 +285,47 @@ describe("isWorkbookApplyOp", () => {
     expect(writableOps([note, place]).map((item) => item.kind)).toEqual([
       "position_change",
     ]);
+  });
+
+  it("does not ask to rebuild as-of when August return supersedes July disposition", () => {
+    const people = personChangesFromOps(
+      [
+        op({
+          kind: "move_to_disposition",
+          class: "needs_input",
+          payload: {
+            orderDate: "08.07.2026",
+            journalMonthBlocked: "1",
+            suggestedAsOfDate: "08.07.2026",
+            targetMonthLabel: "липень 2026",
+          },
+        }),
+        op({
+          kind: "absent_close",
+          class: "ready",
+          payload: {
+            returnDate: "20.08.2026",
+          },
+        }),
+        op({
+          kind: "position_change",
+          class: "ready",
+          payload: {
+            orderDate: "21.08.2026",
+            timesheetActiveFrom: "20.08.2026",
+            returningFromDisposition: "1",
+            nextIndex: "2103179",
+          },
+        }),
+      ],
+      31,
+      { timesheetDayLabel: "31.08.2026" },
+    );
+    expect(people[0]?.severity).toBe("ready");
+    expect(people[0]?.ejoosWillDo.join("\n")).not.toMatch(
+      /Спочатку змініть «станом на»/i,
+    );
+    expect(people[0]?.ejoosWillDo.join("\n")).toMatch(/2103179/);
   });
 
   it("does not treat unclear transfer as an informational skip", () => {

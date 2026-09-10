@@ -34,9 +34,15 @@ describe("overviewStaffSheetColumns", () => {
       OVERVIEW_STAFF_SHEET_COLUMN_DEFS.slice(0, 2).map(
         (column) => column.header,
       ),
-    ).toEqual(["Місце перебування (кол. 31)", "Примітки"]);
+    ).toEqual([
+      "Місце перебування (кол. 31)",
+      "Місце перебування (уточнення)",
+    ]);
     expect(DEFAULT_OVERVIEW_STAFF_COLUMN_VISIBILITY.staff_31).toBe(true);
+    expect(DEFAULT_OVERVIEW_STAFF_COLUMN_VISIBILITY.staff_35).toBe(true);
     expect(DEFAULT_OVERVIEW_STAFF_COLUMN_VISIBILITY.staff_32).toBe(true);
+    expect(DEFAULT_OVERVIEW_STAFF_COLUMN_VISIBILITY.questionnaire).toBe(false);
+    expect(DEFAULT_OVERVIEW_STAFF_COLUMN_VISIBILITY.documents).toBe(false);
   });
 
   it("builds staff column values from roster row", () => {

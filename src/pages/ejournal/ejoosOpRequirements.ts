@@ -1,7 +1,52 @@
-import { excludedRowsToClear } from "./ejoosExcludePolicy";
+import {
+  excludeTransferDestination,
+  excludedRowsToClear,
+} from "./ejoosExcludePolicy";
 import type { EjoosSyncOp } from "./ejoosSyncPlan";
 
 const PLACEHOLDER_TIMESHEET_CODE = "(оберіть код)";
+
+/** Лише перегляд: не пишемо в книгу і не блокуємо ПЕРЕВ / ПОСАДА. */
+export const isReviewOnlyMismatchOp = (op: EjoosSyncOp) =>
+  op.payload.mismatchKind === "ARCHIVE_RETURN_SH_STILL_ABSENT" ||
+  op.payload.mismatchKind === "ARCHIVE_REFERENCE_MISSING";
+
+const applyCandidateOps = (ops: EjoosSyncOp[]) =>
+  ops.filter(
+    (op) =>
+      op.class !== "conflict" &&
+      !isReviewOnlyMismatchOp(op) &&
+      op.kind !== "data_mismatch",
+  );
+
+const personKey = (op: EjoosSyncOp) =>
+  String(op.personId || op.fullName || "")
+    .trim()
+    .toLocaleLowerCase("uk-UA");
+
+/** ПОСАДА з розпорядження + РОЗПОРЯДЖ у тій же картці (СЗЧ лишається відкритим). */
+export const isReturnThenDispositionPlacement = (
+  op: EjoosSyncOp,
+  ops: EjoosSyncOp[],
+) => {
+  if (
+    op.kind !== "position_change" ||
+    op.payload.returningFromDisposition !== "1"
+  ) {
+    return false;
+  }
+  const key = personKey(op);
+  return (
+    Boolean(key) &&
+    ops.some(
+      (other) =>
+        other.kind === "move_to_disposition" && personKey(other) === key,
+    )
+  );
+};
+
+export const hasReturnThenDispositionChain = (ops: EjoosSyncOp[]) =>
+  ops.some((op) => isReturnThenDispositionPlacement(op, ops));
 
 export function timesheetOpUsesDerivedPayload(op: EjoosSyncOp) {
   if (op.kind !== "timesheet_day") return false;
@@ -40,7 +85,7 @@ export function timesheetOpBlocksApply(op: EjoosSyncOp) {
 export function excludeTransferOpBlocksApply(op: EjoosSyncOp) {
   if (op.kind !== "exclude_transfer") return false;
   return !(
-    op.payload.destination?.trim() &&
+    excludeTransferDestination(op.payload) &&
     op.payload.excludeDate?.trim() &&
     op.payload.orderNumber?.trim() &&
     op.payload.orderDate?.trim()
@@ -61,6 +106,13 @@ export function contradictoryStatusOpsBlockApply(ops: EjoosSyncOp[]) {
       op.kind === "position_change" && Boolean(op.payload.openAbsenceExcelRow),
   );
   if (!placement) return false;
+  // Повернення з СЗЧ/розпорядження: відсутність може лишатися відкритою.
+  if (placement.payload.returningFromDisposition === "1") {
+    return false;
+  }
+  if (isReturnThenDispositionPlacement(placement, ops)) {
+    return false;
+  }
   return !ops.some(
     (op) =>
       (op.kind === "absent_close" &&
@@ -71,18 +123,30 @@ export function contradictoryStatusOpsBlockApply(ops: EjoosSyncOp[]) {
   );
 }
 
-export function personOpsBlockApply(ops: EjoosSyncOp[]) {
-  if (ops.some((op) => op.class === "conflict")) return true;
-  if (ops.some(excludeTransferOpBlocksApply)) return true;
-  if (ops.some(ambiguousTransferOpBlocksApply)) return true;
-  if (ops.some(timesheetOpBlocksApply)) return true;
-  if (contradictoryStatusOpsBlockApply(ops)) return true;
-  if (
-    ops.some(
-      (op) => op.payload.mismatchKind === "ARCHIVE_RETURN_SH_STILL_ABSENT",
-    )
-  ) {
-    return true;
+export function personApplyBlockReason(ops: EjoosSyncOp[]): string | null {
+  if (ops.some((op) => op.class === "conflict")) {
+    return "Конфлікт — спочатку розберіть вручну.";
   }
-  return false;
+  const candidates = applyCandidateOps(ops);
+  if (candidates.some(excludeTransferOpBlocksApply)) {
+    const blocked = candidates.find(excludeTransferOpBlocksApply);
+    if (!excludeTransferDestination(blocked?.payload ?? {})) {
+      return "Заповніть «куди вибув» перед застосуванням переведення.";
+    }
+    return "Вкажіть дату виключення, номер і дату стройового наказу.";
+  }
+  if (candidates.some(ambiguousTransferOpBlocksApply)) {
+    return "Не визначено, внутрішнє чи зовнішнє переведення — уточніть «куди вибув».";
+  }
+  if (candidates.some(timesheetOpBlocksApply)) {
+    return "Оберіть код для Табеля або вкажіть рядок.";
+  }
+  if (contradictoryStatusOpsBlockApply(candidates)) {
+    return "Спочатку закрийте відкритий СЗЧ / тимчасову відсутність, потім ставте на штат.";
+  }
+  return null;
+}
+
+export function personOpsBlockApply(ops: EjoosSyncOp[]) {
+  return personApplyBlockReason(ops) != null;
 }

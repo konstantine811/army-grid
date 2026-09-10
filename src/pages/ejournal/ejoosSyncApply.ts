@@ -28,6 +28,12 @@ import {
 } from "./ejoosOosZip";
 import {
   applyInlineStringWritesToWorkbook,
+  restyleAbsentDataRows,
+  restyleArrivalDataRows,
+  restyleExcludedDataRows,
+  restyleOosDataRows,
+  restyleShpoDataRows,
+  restyleTimesheetDataRows,
   type ZipCellWrite,
 } from "./ejoosZipCellWrites";
 import {
@@ -38,6 +44,7 @@ import {
   clipAbsenceSpansToActiveEpisode,
   dayFromOrderLabel,
   findTimesheetMonthHeaderCell,
+  parseDateLabelMs,
   formatTimesheetMonthHeader,
   historyAbsenceSpansForClosedEpisode,
   isTimesheetAbsenceCode,
@@ -59,7 +66,9 @@ import { findTimesheetPersonRowsInGrid } from "./ejoosTimesheetPersonRows";
 import { personChangesFromOps, isWorkbookApplyOp } from "./ejoosPersonDiff";
 import {
   excludeTransferOpBlocksApply,
-  personOpsBlockApply,
+  hasReturnThenDispositionChain,
+  isReturnThenDispositionPlacement,
+  personApplyBlockReason,
 } from "./ejoosOpRequirements";
 import {
   serializeAppliedPerson,
@@ -139,6 +148,12 @@ const rereadWorkbookAfterBatch = async (
  * потім виключення, потім прості постановки. Інакше новий occupant
  * запишеться на індекс, а РОЗПОРЯДЖ потім зробить clear().
  */
+const movementOrderMs = (op: EjoosSyncOp) =>
+  parseDateLabelMs(op.payload.orderDate || op.payload.excludeDate || "") || 0;
+
+const sortOpsByMovementDate = (batch: EjoosSyncOp[]) =>
+  [...batch].sort((left, right) => movementOrderMs(left) - movementOrderMs(right));
+
 const partitionSafeApplyBatches = (ops: EjoosSyncOp[]): EjoosSyncOp[][] => {
   const excludePeople = new Set(
     ops
@@ -152,11 +167,28 @@ const partitionSafeApplyBatches = (ops: EjoosSyncOp[]): EjoosSyncOp[][] => {
       .map(personKeyOf)
       .filter(Boolean),
   );
+  const returnDispositionPeople = new Set(
+    ops
+      .filter((op) => isReturnThenDispositionPlacement(op, ops))
+      .map(personKeyOf)
+      .filter(Boolean),
+  );
   const simple: EjoosSyncOp[] = [];
   const excludes: EjoosSyncOp[] = [];
   const dispositions: EjoosSyncOp[] = [];
+  const returnDisposition: EjoosSyncOp[] = [];
   for (const op of ops) {
     const key = personKeyOf(op);
+    if (key && returnDispositionPeople.has(key)) {
+      if (
+        op.kind === "position_change" ||
+        op.kind === "move_to_disposition" ||
+        op.kind === "rank_change"
+      ) {
+        returnDisposition.push(op);
+      }
+      continue;
+    }
     if (key && excludePeople.has(key)) {
       if (op.kind === "exclude_transfer" || op.kind === "rank_change") {
         excludes.push(op);
@@ -176,8 +208,45 @@ const partitionSafeApplyBatches = (ops: EjoosSyncOp[]): EjoosSyncOp[][] => {
     }
     simple.push(op);
   }
-  return [dispositions, excludes, simple].filter((batch) => batch.length > 0);
+  return [
+    returnDisposition.length ? sortOpsByMovementDate(returnDisposition) : [],
+    dispositions,
+    excludes,
+    simple,
+  ].filter((batch) => batch.length > 0);
 };
+
+async function finalizeAppliedBatchBlob(input: {
+  ejoos: ExcelWorkbookSnapshot;
+  plan: EjoosSyncPlan;
+  ops: EjoosSyncOp[];
+  rawBlob: Blob;
+  directXml: boolean;
+}): Promise<{ blob: Blob; directXml: boolean }> {
+  const { ejoos, plan, ops: appliedOps, rawBlob, directXml } = input;
+  const blob = await applyTimesheetMonthHeader({
+    file: await applyExcludedClearsWithZip({
+      file: await applyRankLabelsWithZip({
+        file: await applyExcludedPositionDatesPresentation({
+          file: await applyOosHistoryPresentation({
+            file: rawBlob,
+            ejoos,
+            ops: appliedOps,
+            plan,
+          }),
+          ejoos,
+        }),
+        ops: appliedOps,
+      }),
+      ejoos,
+      ops: appliedOps,
+    }),
+    ejoos,
+    plan,
+  });
+  const normalized = await restyleAllEjoosWrittenRows(blob, appliedOps);
+  return { blob: normalized, directXml };
+}
 
 async function applyUniformBatchToBlob(input: {
   ejoos: ExcelWorkbookSnapshot;
@@ -185,6 +254,32 @@ async function applyUniformBatchToBlob(input: {
   ops: EjoosSyncOp[];
 }): Promise<{ blob: Blob; directXml: boolean }> {
   const { ejoos, plan, ops: appliedOps } = input;
+  if (hasReturnThenDispositionChain(appliedOps)) {
+    const positionOps = appliedOps.filter((op) => op.kind === "position_change");
+    const dispositionOps = appliedOps.filter(
+      (op) => op.kind === "move_to_disposition",
+    );
+    const rankOps = appliedOps.filter((op) => op.kind === "rank_change");
+    let working = ejoos;
+    let rawBlob: Blob = ejoos.file;
+    if (rankOps.length || positionOps.length) {
+      rawBlob = await mutateToBlob(working, [...rankOps, ...positionOps], plan);
+      working = await rereadWorkbookAfterBatch(rawBlob, ejoos.fileName);
+    }
+    rawBlob = await applyDispositionWithZip({
+      ejoos: working,
+      plan,
+      ops: dispositionOps,
+      allOps: appliedOps,
+    });
+    return finalizeAppliedBatchBlob({
+      ejoos,
+      plan,
+      ops: appliedOps,
+      rawBlob,
+      directXml: true,
+    });
+  }
   const personKey = personKeyOf;
   const integratedPersons = new Set(
     appliedOps.filter(isSinglePersonMovement).map(personKey).filter(Boolean),
@@ -239,27 +334,13 @@ async function applyUniformBatchToBlob(input: {
       : usePositionZip
         ? await applyPositionChangeWithZip({ ejoos, plan, ops: positionOps })
         : await mutateToBlob(ejoos, appliedOps, plan);
-  const blob = await applyTimesheetMonthHeader({
-    file: await applyExcludedClearsWithZip({
-      file: await applyRankLabelsWithZip({
-        file: await applyExcludedPositionDatesPresentation({
-          file: await applyOosHistoryPresentation({
-            file: rawBlob,
-            ejoos,
-            ops: appliedOps,
-            plan,
-          }),
-          ejoos,
-        }),
-        ops: appliedOps,
-      }),
-      ejoos,
-      ops: appliedOps,
-    }),
+  return finalizeAppliedBatchBlob({
     ejoos,
     plan,
+    ops: appliedOps,
+    rawBlob,
+    directXml,
   });
-  return { blob, directXml };
 }
 
 /**
@@ -305,6 +386,7 @@ export async function applyConfirmedEjoosOps(input: {
       (op) =>
         isSinglePersonMovement(op) ||
         isRankBeforeExclude(op) ||
+        isReturnThenDispositionPlacement(op, ops) ||
         !integratedPersons.has(personKeyOf(op)),
     )
     .sort((left, right) => applyKindOrder(left) - applyKindOrder(right));
@@ -332,26 +414,9 @@ export async function applyConfirmedEjoosOps(input: {
       `Для ${unclearTransfer.fullName || unclearTransfer.personId} не визначено, внутрішнє чи зовнішнє переведення. Уточніть «куди вибув» або в/ч.`,
     );
   }
-  if (personOpsBlockApply(consideredOps)) {
-    const contradiction = appliedOps.find(
-      (op) =>
-        op.kind === "position_change" && op.payload.openAbsenceExcelRow,
-    );
-    if (
-      contradiction &&
-      !appliedOps.some(
-        (op) =>
-          op.kind === "absent_close" ||
-          (op.kind === "absent_upsert" && op.payload.returnDate),
-      )
-    ) {
-      throw new Error(
-        `Для ${contradiction.fullName || contradiction.personId} спочатку закрийте відкритий СЗЧ / тимчасову відсутність, потім ставте на штат.`,
-      );
-    }
-    throw new Error(
-      "Одна або кілька операцій не мають усіх даних для безпечного застосування",
-    );
+  const applyBlockReason = personApplyBlockReason(consideredOps);
+  if (applyBlockReason) {
+    throw new Error(applyBlockReason);
   }
 
   const fileName = `ЄЖООС_станом_на_${plan.timesheetDayLabel.replaceAll(".", "-")}.xlsx`;
@@ -369,6 +434,7 @@ export async function applyConfirmedEjoosOps(input: {
     directXml = directXml && applied.directXml;
     working = await rereadWorkbookAfterBatch(blob, ejoos.fileName);
   }
+  blob = await restyleAllEjoosWrittenRows(blob, appliedOps);
   const protocolText = buildProtocolText(plan, appliedOps, {
     actor,
     at: new Date().toLocaleString("uk-UA"),
@@ -644,7 +710,11 @@ async function mutateToBlob(
     ejoos.file,
     touchedSheetNamesForOps(ops),
   );
-  return copyTimesheetRowStylesWithZip(finalized, timesheetStyleCopies);
+  const styled = await copyTimesheetRowStylesWithZip(
+    finalized,
+    timesheetStyleCopies,
+  );
+  return restyleAllEjoosWrittenRows(styled, ops);
 }
 
 /** Скасоване переведення: rollback попереднього ПЕРЕВ (не новий рух). */
@@ -1137,9 +1207,11 @@ async function applyTimesheetMonthHeader(input: {
     ? String(timesheet.rawRows[found.row - 1]?.[found.column - 1] ?? "")
     : "";
   const value = replaceTimesheetMonthHeaderText(current, expected);
-  return applyInlineStringWritesToWorkbook(input.file, timesheet.sheetName, [
-    { row, column, value },
-  ]);
+  return applyInlineStringWritesToWorkbook(
+    input.file,
+    timesheet.sheetName,
+    [{ row, column, value }],
+  );
 }
 
 async function applyExcludedClearsWithZip(input: {
@@ -1868,6 +1940,106 @@ function copySheetRowValues(
 
 type TimesheetStyleCopy = { sourceRow: number; targetRow: number };
 
+const collectTimesheetRowsToRestyle = (
+  ops: EjoosSyncOp[],
+  styleCopies: TimesheetStyleCopy[],
+) => {
+  const rows = new Set<number>();
+  for (const job of styleCopies) {
+    rows.add(job.sourceRow);
+    rows.add(job.targetRow);
+  }
+  for (const op of ops) {
+    for (const raw of [
+      op.payload.timesheetExcelRow,
+      op.payload.historyTimesheetExcelRow,
+      op.payload.previousIndexTimesheetExcelRow,
+      op.payload.previousTimesheetExcelRow,
+      op.payload.dispositionTimesheetExcelRow,
+      op.payload.clearTimesheetExcelRow,
+      op.payload.excelRow,
+    ]) {
+      const row = Number(raw || 0);
+      if (row >= 7) rows.add(row);
+    }
+  }
+  return rows;
+};
+
+const collectShpoRowsToRestyle = (ops: EjoosSyncOp[]) => {
+  const rows = new Set<number>();
+  for (const op of ops) {
+    for (const raw of [
+      op.payload.shpoExcelRow,
+      op.payload.previousShpoExcelRow,
+      op.payload.dispositionShpoExcelRow,
+    ]) {
+      const row = Number(raw || 0);
+      if (row >= 7) rows.add(row);
+    }
+  }
+  return rows;
+};
+
+const collectOosRowsToRestyle = (ops: EjoosSyncOp[]) => {
+  const rows = new Set<number>();
+  for (const op of ops) {
+    for (const raw of [op.payload.oosExcelRow, op.payload.excludedSourceExcelRow]) {
+      const row = Number(raw || 0);
+      if (row >= 7) rows.add(row);
+    }
+  }
+  return rows;
+};
+
+const collectExcludedRowsToRestyle = (ops: EjoosSyncOp[]) => {
+  const rows = new Set<number>();
+  for (const op of ops) {
+    for (const raw of [op.payload.excludedExcelRow, op.payload.clearExcludedExcelRow]) {
+      const row = Number(raw || 0);
+      if (row >= 7) rows.add(row);
+    }
+    for (const row of excludedRowsToClear(op.payload)) {
+      if (row >= 7) rows.add(row);
+    }
+  }
+  return rows;
+};
+
+const collectAbsentRowsToRestyle = (ops: EjoosSyncOp[]) => {
+  const rows = new Set<number>();
+  for (const op of ops) {
+    for (const raw of [op.payload.existingExcelRow, op.payload.excelRow]) {
+      const row = Number(raw || 0);
+      if (row >= 6) rows.add(row);
+    }
+  }
+  return rows;
+};
+
+const collectArrivalRowsToRestyle = (ops: EjoosSyncOp[]) => {
+  const rows = new Set<number>();
+  for (const op of ops) {
+    const row = Number(op.payload.arrivalExcelRow || 0);
+    if (row >= 6) rows.add(row);
+  }
+  return rows;
+};
+
+async function restyleAllEjoosWrittenRows(
+  file: Blob,
+  ops: EjoosSyncOp[],
+): Promise<Blob> {
+  let blob = file;
+  blob = await restyleTimesheetDataRows(blob, collectTimesheetRowsToRestyle(ops, []));
+  blob = await restyleShpoDataRows(blob, collectShpoRowsToRestyle(ops));
+  blob = await restyleOosDataRows(blob, collectOosRowsToRestyle(ops));
+  blob = await restyleExcludedDataRows(blob, collectExcludedRowsToRestyle(ops));
+  blob = await restyleAbsentDataRows(blob, collectAbsentRowsToRestyle(ops));
+  blob = await restyleArrivalDataRows(blob, collectArrivalRowsToRestyle(ops));
+  return blob;
+}
+
 function recordTimesheetStyleCopy(
   jobs: TimesheetStyleCopy[],
   sourceRow: number,
@@ -2102,10 +2274,14 @@ const paintTimesheetArchiveDays = (
   payload: Record<string, string>,
 ) => {
   if (rowNumber <= 0) return;
-  const activeFromDay = dayFromOrderLabel(payload.timesheetActiveFrom || "");
+  const activeFromDay =
+    dayFromOrderLabel(
+      payload.timesheetActiveFrom || payload.orderDate || "",
+    ) || 1;
   if (
     timesheetRowIsHistoryOnly(timesheet, rowNumber, activeFromDay) &&
-    !payload.transferCancelOrder
+    !payload.transferCancelOrder &&
+    payload.returningFromDisposition !== "1"
   ) {
     return;
   }

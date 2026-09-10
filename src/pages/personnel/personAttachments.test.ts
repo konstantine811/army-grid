@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { api, type BackendPersonDocument } from "../../api";
+import * as idbDataCache from "../../data/idbDataCache";
 import type { EjournalPreviewRow } from "../ejournal/ejournalTypes";
 import {
   buildOrphanAttachmentMigrationPairs,
@@ -121,13 +122,16 @@ describe("loadPersonDocumentsForRow", () => {
     vi.spyOn(api, "listPersonDocuments").mockResolvedValue([
       document("current-doc", "current-id", "ДАВИДЕНКО Олександр Володимирович"),
     ]);
-    vi.spyOn(api, "listAllPersonDocuments").mockResolvedValue([
+    vi.spyOn(idbDataCache, "peekDataCache").mockReturnValue([
       document(
         "legacy-doc",
         "p:давиденко олександр володимирович:1985-03-08",
         "ДАВИДЕНКО Олександр Володимирович",
       ),
     ]);
+    const listAllSpy = vi
+      .spyOn(api, "listAllPersonDocuments")
+      .mockResolvedValue([]);
 
     const result = await loadPersonDocumentsForRow(row);
 
@@ -135,6 +139,7 @@ describe("loadPersonDocumentsForRow", () => {
       "current-doc",
       "legacy-doc",
     ]);
+    expect(listAllSpy).not.toHaveBeenCalled();
     vi.restoreAllMocks();
   });
 });

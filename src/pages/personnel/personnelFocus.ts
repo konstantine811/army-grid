@@ -14,6 +14,10 @@ export type PersonnelFocusTarget = {
 
 const normalizeFocusPart = (value: unknown) => String(value ?? "").trim();
 
+/** Overview rows use synthetic ids (`roster:…`); they are not personnel `__dbRowId`. */
+export const isOverviewSyntheticPersonnelRowId = (rowId: string) =>
+  rowId.startsWith("roster:") || rowId.startsWith("overview:");
+
 export const normalizePersonnelFocusTarget = (target: {
   rowId?: unknown;
   externalId?: unknown;
@@ -91,7 +95,7 @@ export const findPersonnelRowByFocusTarget = (
   const rowId = normalizeFocusPart(focusTarget.rowId);
   const externalId = normalizeFocusPart(focusTarget.externalId);
 
-  if (rowId) {
+  if (rowId && !isOverviewSyntheticPersonnelRowId(rowId)) {
     const byRowId = rows.find(
       (row) => normalizeFocusPart(row.__dbRowId) === rowId,
     );

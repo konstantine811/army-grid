@@ -9,6 +9,7 @@ export function PersonnelVirtualList({
   photoByExternalId,
   onNeedPhotos,
   onSelect,
+  onPhotoLoadError,
   keyboardEnabled = true,
 }: {
   items: PersonnelRecord[];
@@ -16,6 +17,7 @@ export function PersonnelVirtualList({
   photoByExternalId: Record<string, string>;
   onNeedPhotos?: (externalIds: string[]) => void;
   onSelect: (rowId: string) => void;
+  onPhotoLoadError?: (externalId: string) => void;
   keyboardEnabled?: boolean;
 }) {
   const parentRef = useRef<HTMLDivElement | null>(null);
@@ -137,7 +139,15 @@ export function PersonnelVirtualList({
             >
               <span className="personnel-list-thumb" aria-hidden>
                 {photo ? (
-                  <img alt="" src={photo} />
+                  <img
+                    alt=""
+                    decoding="async"
+                    src={photo}
+                    onError={() => {
+                      const externalId = record.summary.externalId;
+                      if (externalId) onPhotoLoadError?.(externalId);
+                    }}
+                  />
                 ) : (
                   <PersonSearchOutlinedIcon fontSize="small" />
                 )}

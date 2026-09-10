@@ -12,6 +12,7 @@ import {
   mergeRosterRowsIntoOverview,
   overviewStatusFilterLabel,
   rosterRowToOverviewRow,
+  summarizeNovaStaffForUnits,
   summarizeNovaStaffFromRoster,
   summarizeStaffFromRoster,
 } from "./overviewRosterMerge";
@@ -136,6 +137,29 @@ describe("rosterRowToOverviewRow", () => {
     );
     expect(row?.unit).toBe("Мінометний взвод");
   });
+
+  it("assigns unique ids when the same person appears on multiple roster rows", () => {
+    const shared = {
+      column_1: "нова",
+      column_2: "2 піхотна рота",
+      column_14: "СТЕПАНЕНКО Ігор Валентинович",
+      column_31: "1981-09-07",
+    };
+    const rowA = rosterRowToOverviewRow(
+      { ...shared, __dbRowId: "r1" } as EjournalPreviewRow,
+      {},
+      { rowIndex: 0 },
+    );
+    const rowB = rosterRowToOverviewRow(
+      { ...shared, __dbRowId: "r2" } as EjournalPreviewRow,
+      {},
+      { rowIndex: 1 },
+    );
+    expect(rowA?.externalId).toBe(rowB?.externalId);
+    expect(rowA?.id).not.toBe(rowB?.id);
+    expect(rowA?.id).toBe("roster:row:r1");
+    expect(rowB?.id).toBe("roster:row:r2");
+  });
 });
 
 describe("buildStaffOverviewRowsFromRoster", () => {
@@ -222,6 +246,29 @@ describe("fillDownRosterUnitRows", () => {
       "2 піхотна рота",
       "3 піхотна рота",
     ]);
+  });
+
+  it("stops fill-down after an explicit стара battalion row", () => {
+    const rows = fillDownRosterUnitRows([
+      {
+        column_1: "нова",
+        column_2: "2 піхотна рота",
+        column_14: "Іванов Іван",
+      },
+      {
+        column_1: "нова",
+        column_5: "Стрілець",
+        column_14: "Петренко Петро",
+      },
+      {
+        column_1: "стара",
+        column_5: "Кулеметник",
+        column_14: "Старий Олег",
+      },
+    ] as EjournalPreviewRow[]);
+
+    expect(rows[1]?.column_2).toBe("2 піхотна рота");
+    expect(rows[2]?.column_2).toBeUndefined();
   });
 });
 
@@ -397,5 +444,38 @@ describe("mergeRosterRowsIntoOverview", () => {
     expect(summary.positions).toBe(2);
     expect(summary.people).toBe(1);
     expect(summary.vacant).toBe(1);
+  });
+
+  it("counts Підрахунок staff only for nova staff lines in the selected unit", () => {
+    const rosterRows = [
+      { column_1: "нова", column_2: "2 піхотна рота", column_14: "Іванов Іван" },
+      { column_1: "нова", column_2: "2 піхотна рота", column_5: "Стрілець" },
+      { column_1: "нова", column_2: "2 піхотна рота" },
+      { column_1: "нова", column_2: "3 піхотна рота", column_14: "Петренко Петро" },
+      { column_1: "стара", column_2: "2 піхотна рота", column_14: "Старий Олег" },
+    ] as EjournalPreviewRow[];
+
+    const summary = summarizeNovaStaffForUnits(rosterRows, ["2 піхотна рота"]);
+
+    expect(summary.staff).toBe(2);
+    expect(summary.listedPeople).toHaveLength(1);
+  });
+
+  it("ignores a second duplicate unit header block below the first company section", () => {
+    const rosterRows = [
+      { column_1: "нова", column_2: "2 піхотна рота", column_14: "Іванов Іван" },
+      { column_1: "нова", column_5: "Стрілець", column_14: "Петренко Петро" },
+      { column_1: "нова", column_2: "3 піхотна рота", column_14: "Сидоренко Сидір" },
+      { column_1: "нова", column_2: "2 піхотна рота", column_14: "Архівний Олег" },
+      { column_1: "нова", column_5: "Гранатометник", column_14: "Архівний Друг" },
+    ] as EjournalPreviewRow[];
+
+    const summary = summarizeNovaStaffForUnits(rosterRows, ["2 піхотна рота"]);
+
+    expect(summary.staff).toBe(2);
+    expect(summary.listedPeople.map((person) => person.fullName)).toEqual([
+      "Іванов Іван",
+      "Петренко Петро",
+    ]);
   });
 });

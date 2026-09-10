@@ -64,3 +64,39 @@ export const overviewNameMatchesQuery = (personName: string, queryName: string) 
     personTokens.some((part) => tokensMatch(part, token)),
   );
 };
+
+/** Pre-normalized blob for global search — built once per row set, not per keystroke. */
+export const buildOverviewRowSearchText = (
+  row: {
+    name?: string;
+    externalId?: string;
+    rank?: string;
+    positionTitle?: string;
+    unit?: string;
+    statusLabel?: string;
+    fighterDirection?: string;
+    fighterExitDate?: string;
+    fighterReturnDate?: string;
+    fighterTotalDays?: string;
+    fighterStatus?: string;
+  },
+  documentLabels = "",
+) =>
+  [
+    row.name,
+    row.externalId,
+    row.rank,
+    row.positionTitle,
+    row.unit,
+    row.statusLabel,
+    row.fighterDirection,
+    row.fighterExitDate,
+    row.fighterReturnDate,
+    row.fighterTotalDays,
+    row.fighterStatus,
+    documentLabels,
+  ]
+    .join(" ")
+    .split(" ")
+    .map(normalizeRosterMatchText)
+    .join(" ");
