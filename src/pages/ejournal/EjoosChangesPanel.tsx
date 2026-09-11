@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Box,
   Button,
@@ -46,6 +46,8 @@ type ChangesView = "list" | "queue";
 const manualTypeLabels: Record<ManualEjoosOperationType, string> = {
   exclude_transfer: "ПЕРЕВ / вибуття",
   dismissal: "ЗВІЛЬН / звільнення зі служби",
+  exclusion: "ВИКЛЮЧ / виключення зі списків",
+  move_to_disposition: "РОЗПОРЯДЖ / у розпорядження",
   position_change: "Призначення / зміна посади",
   rank_change: "Зміна звання",
 };
@@ -56,6 +58,9 @@ const emptyManualOperation = (): ManualEjoosOperationInput => ({
   orderNumber: "",
   orderDate: new Date().toISOString().slice(0, 10),
   destination: "",
+  basisIssuer: "",
+  basisNumber: "",
+  basisDate: "",
   nextPositionIndex: "",
   nextRank: "",
 });
@@ -124,6 +129,8 @@ export function EjoosChangesPanel() {
     reviewOnly?: boolean;
   } | null>(null);
   const [bulkApplyOpen, setBulkApplyOpen] = useState(false);
+  const manualSavePending = useRef(false);
+  const [manualSaving, setManualSaving] = useState(false);
   const [manualOpen, setManualOpen] = useState(false);
   const [manualEditingOpId, setManualEditingOpId] = useState("");
   const [manualQuery, setManualQuery] = useState("");
@@ -172,7 +179,7 @@ export function EjoosChangesPanel() {
     );
     if (
       !op ||
-      !["exclude_transfer", "position_change", "rank_change"].includes(op.kind)
+      !["exclude_transfer", "move_to_disposition", "position_change", "rank_change"].includes(op.kind)
     ) {
       return;
     }
@@ -187,11 +194,16 @@ export function EjoosChangesPanel() {
       type:
         op.kind === "exclude_transfer" && op.payload.type === "ЗВІЛЬН"
           ? "dismissal"
-          : (op.kind as ManualEjoosOperationType),
+          : op.kind === "exclude_transfer" && op.payload.type === "ВИКЛЮЧ"
+            ? "exclusion"
+            : (op.kind as ManualEjoosOperationType),
       personKey: person?.key || "",
       orderNumber: op.payload.orderNumber || "",
       orderDate: dateForInput(op.payload.orderDate || ""),
       destination: op.payload.destination || "",
+      basisIssuer: op.payload.basisIssuer || "",
+      basisNumber: op.payload.basisNumber || "",
+      basisDate: dateForInput(op.payload.basisDate || ""),
       nextPositionIndex: op.payload.nextIndex || "",
       nextRank: op.payload.nextRank || "",
     });
@@ -279,7 +291,7 @@ export function EjoosChangesPanel() {
           </label>
           <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
             <label className="ejoos-manual-field">
-              <span>Номер наказу</span>
+              <span>{manualValues.type === "move_to_disposition" || manualValues.type === "exclusion" ? "Номер стройового наказу" : "Номер наказу"}</span>
               <input
                 className="ejoos-search"
                 value={manualValues.orderNumber}
@@ -292,7 +304,7 @@ export function EjoosChangesPanel() {
               />
             </label>
             <label className="ejoos-manual-field">
-              <span>Дата наказу</span>
+              <span>{manualValues.type === "move_to_disposition" || manualValues.type === "exclusion" ? "Дата стройового наказу" : "Дата наказу"}</span>
               <input
                 type="date"
                 className="ejoos-search"
@@ -307,11 +319,15 @@ export function EjoosChangesPanel() {
             </label>
           </Stack>
           {manualValues.type === "exclude_transfer" ||
-          manualValues.type === "dismissal" ? (
+          manualValues.type === "dismissal" ||
+          manualValues.type === "exclusion" ||
+          manualValues.type === "move_to_disposition" ? (
             <label className="ejoos-manual-field">
               <span>
                 {manualValues.type === "dismissal"
                   ? "Підстава / куди після звільнення"
+                  : manualValues.type === "exclusion" ? "Підстава виключення"
+                  : manualValues.type === "move_to_disposition" ? "У чиє розпорядження"
                   : "Куди вибув"}
               </span>
               <input
@@ -326,10 +342,35 @@ export function EjoosChangesPanel() {
                 placeholder={
                   manualValues.type === "dismissal"
                     ? "Наприклад: звільнений у запас"
+                    : manualValues.type === "exclusion" ? "Наприклад: НА_ЩИТІ"
+                    : manualValues.type === "move_to_disposition" ? "У розпорядження командира військової частини А4862"
                     : "Назва частини / установи"
                 }
               />
             </label>
+          ) : null}
+          {manualValues.type === "move_to_disposition" || manualValues.type === "exclusion" ? (
+            <>
+              <label className="ejoos-manual-field">
+                <span>Ким виданий наказ-підстава</span>
+                <input className="ejoos-search" value={manualValues.basisIssuer || ""}
+                  onChange={(event) => setManualValues(current => ({ ...current, basisIssuer: event.target.value }))}
+                  placeholder="Наприклад: командувача Сухопутних військ Збройних Сил України" />
+              </label>
+              <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
+                <label className="ejoos-manual-field">
+                  <span>Номер наказу-підстави</span>
+                  <input className="ejoos-search" value={manualValues.basisNumber || ""}
+                    onChange={(event) => setManualValues(current => ({ ...current, basisNumber: event.target.value }))}
+                    placeholder="Наприклад: №743-РС" />
+                </label>
+                <label className="ejoos-manual-field">
+                  <span>Дата наказу-підстави</span>
+                  <input type="date" className="ejoos-search" value={manualValues.basisDate || ""}
+                    onChange={(event) => setManualValues(current => ({ ...current, basisDate: event.target.value }))} />
+                </label>
+              </Stack>
+            </>
           ) : null}
           {manualValues.type === "position_change" ? (
             <label className="ejoos-manual-field">
@@ -369,23 +410,31 @@ export function EjoosChangesPanel() {
         </Button>
         <Button
           variant="contained"
-          disabled={!manualValues.personKey || isLoading}
+          disabled={!manualValues.personKey || isLoading || manualSaving}
           onClick={() => {
+            if (manualSavePending.current) return;
+            manualSavePending.current = true;
+            setManualSaving(true);
             const save = manualEditingOpId
               ? updateManualOperation(manualEditingOpId, manualValues)
               : addManualOperation(manualValues);
             void save
               .then(() => {
+                setView("list");
+                setFilter("ALL");
+                setQuery("");
+                setListQuery("");
                 setManualOpen(false);
                 setManualEditingOpId("");
                 setManualQuery("");
                 setManualValues(emptyManualOperation());
               })
-              .catch(() => undefined);
+              .catch(() => undefined)
+              .finally(() => { manualSavePending.current = false; setManualSaving(false); });
           }}
           sx={{ color: "#1a1a14" }}
         >
-          {manualEditingOpId ? "Зберегти зміни" : "Створити preview"}
+          {manualSaving ? "Зберігаю…" : manualEditingOpId ? "Зберегти зміни" : "Створити preview"}
         </Button>
       </DialogActions>
     </Dialog>

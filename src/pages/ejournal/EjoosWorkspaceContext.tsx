@@ -1,3 +1,4 @@
+import { styleEjoosExport } from "./ejoosExportStyle";
 import {
   useCallback,
   useEffect,
@@ -79,6 +80,10 @@ import {
   replaceEjoosTabInUrl,
   type EjoosWorkspaceTab,
 } from "../../app/navigation";
+import {
+  readRememberedAsOfIso,
+  writeRememberedAsOfIso,
+} from "./ejoosAsOfDate";
 import { readOperatorSettings } from "./ejoosStatusMap";
 import { runHeavyJob } from "../../workers/runHeavyJob";
 import {
@@ -415,7 +420,7 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
     });
   }, [live, ejoosSnapshot, ensureEjoosSnapshot]);
 
-  const sourceAsOfOverrideRef = useRef("");
+  const sourceAsOfOverrideRef = useRef(readRememberedAsOfIso());
 
   const loadPersistedManualOperations = useCallback(
     async (
@@ -642,7 +647,8 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
 
   const rebuildOperations = async (sourceAsOfDate?: string) => {
     if (sourceAsOfDate !== undefined) {
-      sourceAsOfOverrideRef.current = sourceAsOfDate;
+      sourceAsOfOverrideRef.current =
+        writeRememberedAsOfIso(sourceAsOfDate) || sourceAsOfDate;
     }
     if (!pbSnapshot) {
       setError("Немає відкритого 1ПБ для аналізу");
@@ -1405,7 +1411,7 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
       );
       const file = base64ToFile(full.fileBase64, downloadName);
       const cleaned = await sanitizeEjoosWorkbookBlob(file);
-      downloadBlobFile(downloadName, cleaned);
+      downloadBlobFile(downloadName, await styleEjoosExport(cleaned));
       const warnCorrupt =
         full.version >= 26
           ? " Якщо Excel скаржиться на файл — у «Історії» відкотіться на версію до v26 і скачайте її."
@@ -1431,7 +1437,7 @@ export function EjoosWorkspaceProvider({ children }: { children: ReactNode }) {
       );
       const file = base64ToFile(full.fileBase64, downloadName);
       const cleaned = await sanitizeEjoosWorkbookBlob(file);
-      downloadBlobFile(downloadName, cleaned);
+      downloadBlobFile(downloadName, await styleEjoosExport(cleaned));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Не вдалося скачати");
     } finally {

@@ -315,6 +315,14 @@ export function PersonnelPage({
   /** PDF bytes for crop when preview uses a streaming URL without fileData in memory. */
   const [questionnairePreviewFile, setQuestionnairePreviewFile] =
     useState<File | null>(null);
+  const [isLoadingQuestionnairePreview, setIsLoadingQuestionnairePreview] =
+    useState(false);
+  const questionnairePreviewCacheRef = useRef<{
+    externalId: string;
+    url: string;
+    file: File;
+  } | null>(null);
+  const questionnairePreviewLoadSeqRef = useRef(0);
   const [isDiskFloatingCrop, setIsDiskFloatingCrop] = useState(false);
   const [isDiskSearchOpen, setIsDiskSearchOpen] = useState(false);
   const [isUploadingQuestionnaire, setIsUploadingQuestionnaire] =
@@ -432,9 +440,15 @@ export function PersonnelPage({
     useMemo((): QuestionnairePdfSource | null => {
       if (pendingQuestionnaireFile) return { file: pendingQuestionnaireFile };
       if (diskPreviewFile) return { file: diskPreviewFile };
+      if (questionnairePreviewFile) return { file: questionnairePreviewFile };
       if (questionnaire?.fileData) return { fileData: questionnaire.fileData };
       return null;
-    }, [diskPreviewFile, pendingQuestionnaireFile, questionnaire?.fileData]);
+    }, [
+      diskPreviewFile,
+      pendingQuestionnaireFile,
+      questionnairePreviewFile,
+      questionnaire?.fileData,
+    ]);
   const editableFields = useMemo(
     () =>
       PERSON_CARD_FIELDS.map((field) => ({
@@ -829,11 +843,13 @@ export function PersonnelPage({
 
   useEffect(() => {
     return () => {
-      if (questionnairePreviewUrl) {
-        revokeQuestionnairePreviewUrl(questionnairePreviewUrl);
+      const cached = questionnairePreviewCacheRef.current;
+      if (cached) {
+        revokeQuestionnairePreviewUrl(cached.url);
+        questionnairePreviewCacheRef.current = null;
       }
     };
-  }, [questionnairePreviewUrl]);
+  }, []);
 
   const exportCurrentQuestionnaire = async () => {
     const externalId = selectedSummary.externalId;
@@ -1806,6 +1822,7 @@ export function PersonnelPage({
         return next;
       });
       notifyPersonnelAttachmentChanged(externalId, "questionnaire");
+      releaseQuestionnairePreviewCache();
       closeQuestionnairePreview();
       setMessage(`Анкету видалено: ${selectedSummary.name}.`);
     } catch (error) {
@@ -1847,83 +1864,105 @@ export function PersonnelPage({
     openPhotoCrop(file, { floating: true });
   };
 
+  const releaseQuestionnairePreviewCache = (exceptExternalId?: string) => {
+    const cached = questionnairePreviewCacheRef.current;
+    if (!cached) return;
+    if (exceptExternalId && cached.externalId === exceptExternalId) return;
+    revokeQuestionnairePreviewUrl(cached.url);
+    questionnairePreviewCacheRef.current = null;
+  };
+
   const closeQuestionnairePreview = () => {
+    questionnairePreviewLoadSeqRef.current += 1;
+    setIsLoadingQuestionnairePreview(false);
     setIsQuestionnairePreviewOpen(false);
     setIsDiskFloatingPreview(false);
     setDiskPreviewFile(null);
-    setQuestionnairePreviewFile(null);
     setPendingQuestionnaireFile(null);
     setQuestionnairePreviewTitle("");
-    setQuestionnairePreviewUrl((current) => {
-      if (current) revokeQuestionnairePreviewUrl(current);
-      return "";
-    });
+    setQuestionnairePreviewUrl("");
+    setQuestionnairePreviewFile(null);
   };
 
   const openQuestionnairePreview = async (
     fileData = questionnaire?.fileData,
   ) => {
     const externalId = selectedSummary.externalId;
-    let nextUrl = "";
-    let previewFile: File | null = null;
+    const previewTitle = `Анкета · ${selectedSummary.name}${
+      questionnaireExportFileName ? ` · ${questionnaireExportFileName}` : ""
+    }`;
+
+    if (fileData?.trim()) {
+      releaseQuestionnairePreviewCache();
+      const nextUrl = dataUrlToObjectUrl(fileData);
+      const previewFile = dataUrlToFile(fileData, questionnaireExportFileName);
+      setPendingQuestionnaireFile(null);
+      setDiskPreviewFile(null);
+      setQuestionnairePreviewFile(previewFile);
+      setIsDiskFloatingPreview(false);
+      setQuestionnairePreviewTitle(previewTitle);
+      setQuestionnairePreviewUrl(nextUrl);
+      setIsQuestionnairePreviewOpen(true);
+      return;
+    }
+
+    if (!externalId || pendingQuestionnaireFile || diskPreviewFile) return;
+
+    const cached = questionnairePreviewCacheRef.current;
+    if (cached?.externalId === externalId) {
+      setPendingQuestionnaireFile(null);
+      setDiskPreviewFile(null);
+      setQuestionnairePreviewFile(cached.file);
+      setIsDiskFloatingPreview(false);
+      setQuestionnairePreviewTitle(previewTitle);
+      setQuestionnairePreviewUrl(cached.url);
+      setIsQuestionnairePreviewOpen(true);
+      return;
+    }
+
+    const requestSeq = questionnairePreviewLoadSeqRef.current + 1;
+    questionnairePreviewLoadSeqRef.current = requestSeq;
+    releaseQuestionnairePreviewCache();
+    setPendingQuestionnaireFile(null);
+    setDiskPreviewFile(null);
+    setQuestionnairePreviewFile(null);
+    setIsDiskFloatingPreview(false);
+    setQuestionnairePreviewTitle(previewTitle);
+    setQuestionnairePreviewUrl("");
+    setIsLoadingQuestionnairePreview(true);
+    setIsQuestionnairePreviewOpen(true);
 
     try {
-      if (fileData?.trim()) {
-        nextUrl = dataUrlToObjectUrl(fileData);
-        previewFile = dataUrlToFile(fileData, questionnaireExportFileName);
-      } else if (externalId && !pendingQuestionnaireFile && !diskPreviewFile) {
-        nextUrl = await api.createPersonQuestionnairePreviewUrl(
-          externalId,
-          questionnaireExportFileName,
-        );
-        try {
-          const blob = await api.fetchPersonQuestionnaireFile(
-            externalId,
-            questionnaireExportFileName,
-          );
-          previewFile = new File([blob], questionnaireExportFileName, {
-            type: blob.type || "application/pdf",
-          });
-        } catch {
-          const full = await loadPersonQuestionnaireFull(externalId);
-          if (full?.fileData?.trim()) {
-            previewFile = dataUrlToFile(
-              full.fileData,
-              questionnaireExportFileName,
-            );
-          }
-        }
-      } else {
-        return;
-      }
+      const blob = await api.fetchPersonQuestionnaireFile(
+        externalId,
+        questionnaireExportFileName,
+      );
+      if (requestSeq !== questionnairePreviewLoadSeqRef.current) return;
+
+      const previewFile = new File([blob], questionnaireExportFileName, {
+        type: blob.type || "application/pdf",
+      });
+      const nextUrl = URL.createObjectURL(blob);
+      questionnairePreviewCacheRef.current = {
+        externalId,
+        url: nextUrl,
+        file: previewFile,
+      };
+      setQuestionnairePreviewFile(previewFile);
+      setQuestionnairePreviewUrl(nextUrl);
     } catch (error) {
+      if (requestSeq !== questionnairePreviewLoadSeqRef.current) return;
+      setIsQuestionnairePreviewOpen(false);
       setMessage(
         error instanceof Error
           ? `Не вдалося відкрити анкету: ${error.message}`
           : "Не вдалося відкрити анкету.",
       );
-      return;
+    } finally {
+      if (requestSeq === questionnairePreviewLoadSeqRef.current) {
+        setIsLoadingQuestionnairePreview(false);
+      }
     }
-
-    setPendingQuestionnaireFile(null);
-    setDiskPreviewFile(null);
-    setQuestionnairePreviewFile(previewFile);
-    if (!previewFile) {
-      setMessage(
-        "PDF відкрито для перегляду, але файл для вирізання фото не завантажився. Спробуйте «Оновити з БД» або завантажити анкету знову.",
-      );
-    }
-    setIsDiskFloatingPreview(false);
-    setQuestionnairePreviewTitle(
-      `Анкета · ${selectedSummary.name}${
-        questionnaireExportFileName ? ` · ${questionnaireExportFileName}` : ""
-      }`,
-    );
-    setQuestionnairePreviewUrl((current) => {
-      if (current) revokeQuestionnairePreviewUrl(current);
-      return nextUrl;
-    });
-    setIsQuestionnairePreviewOpen(true);
   };
 
   const openQuestionnaireInNewTab = async () => {
@@ -2011,6 +2050,7 @@ export function PersonnelPage({
         [externalId]: true,
       }));
       notifyPersonnelAttachmentChanged(externalId, "questionnaire");
+      releaseQuestionnairePreviewCache();
       setMessage(
         `Анкету збережено в БД: ${selectedSummary.name} · ${exportFileName}.`,
       );
@@ -3201,8 +3241,11 @@ export function PersonnelPage({
         title={questionnairePreviewTitle || `Анкета · ${selectedSummary.name}`}
         previewUrl={questionnairePreviewUrl}
         pendingFile={Boolean(pendingQuestionnaireFile)}
-        isUploading={isUploadingQuestionnaire}
+        isUploading={isUploadingQuestionnaire || isLoadingQuestionnairePreview}
         placement={isDiskFloatingPreview ? "left" : "center"}
+        childrenHint={
+          isLoadingQuestionnairePreview ? "Завантажую PDF анкети…" : undefined
+        }
         defaultWidth={isDiskFloatingPreview ? 560 : 760}
         defaultHeight={isDiskFloatingPreview ? 720 : 820}
         cropFile={questionnaireCropFile}

@@ -5,6 +5,7 @@ import {
   readWorkbookSnapshot,
 } from "../../excelRoundTrip";
 import { applyConfirmedEjoosOps } from "./ejoosSyncApply";
+import { buildManualEjoosOperation } from "./ejoosManualOperation";
 import { parseExcluded } from "./ejoosLiveViews";
 import { parseEjoosOos, parseEjoosShpo, type EjoosSyncOp, type EjoosSyncPlan } from "./ejoosSyncPlan";
 import {
@@ -252,6 +253,65 @@ const fillCanonicalSheets = async () => {
     EJOOS_SYNC_READ_OPTIONS,
   );
 };
+
+describe("new manual movement operations", () => {
+  it.each(["move_to_disposition", "exclusion"] as const)("applies %s to workbook sheets", async (type) => {
+    const ejoos = await fillCanonicalSheets();
+    const operation = buildManualEjoosOperation({
+      ejoos, timesheetDay: 25,
+      values: { type, personKey: "id:111", orderNumber: "245", orderDate: "2026-08-24",
+        destination: type === "exclusion" ? "НА_ЩИТІ" : "у розпорядження командира військової частини А4862",
+        basisIssuer: "командира військової частини А4862", basisNumber: "743-РС", basisDate: "2026-08-24" },
+    });
+    expect(operation.class).toBe("ready");
+    const result = await applyConfirmedEjoosOps({ ejoos, plan: dummyPlan([operation]), ops: [operation] });
+    const saved = await readWorkbookSnapshot(new File([result.blob], "result.xlsx", { type: XLSX_MIME }), EJOOS_SYNC_READ_OPTIONS);
+    const shpo = saved.sheets.find(sheet => /ШПО/.test(sheet.sheetName))!;
+    const oos = saved.sheets.find(sheet => /ООС/.test(sheet.sheetName))!;
+    const excluded = saved.sheets.find(sheet => /Виключені/.test(sheet.sheetName))!;
+    expect(shpo.rawRows[6]?.[6] || "").toBe("");
+    if (type === "move_to_disposition") {
+      expect(parseEjoosOos(oos).some(person => person.personId === "111")).toBe(true);
+      expect(shpo.rawRows.some(row => row[6] === "ХУБАЄВ Іван")).toBe(true);
+      expect(excluded.rawRows.some(row => row[2] === "111")).toBe(false);
+    } else {
+      expect(parseEjoosOos(oos).some(person => person.personId === "111")).toBe(false);
+      const excludedPerson = excluded.rawRows.find(row => String(row[2]) === "111");
+      expect(excludedPerson?.[31]).toBe("НА_ЩИТІ");
+    }
+  });
+});
+
+describe("disposition idempotency and status templates", () => {
+  it.each([0, 1, 2])("keeps one ШПО record with ВП when %i disposition records already exist", async (existingCount) => {
+    const initial = await fillCanonicalSheets();
+    const module = await import("xlsx-populate/browser/xlsx-populate-no-encryption");
+    const wb = await module.default.fromDataAsync(await initial.file.arrayBuffer());
+    const shpo = wb.sheet(0);
+    for (let index = 0; index < existingCount; index += 1) {
+      shpo.cell(15 + index, 2).value(", який знаходиться у розпорядженні командира військової частини А4862");
+      shpo.cell(15 + index, 3).value("ВІДПУСТКА ДЛЯ ЛІКУВАННЯ ПІСЛЯ   ПОРАНЕННЯ");
+      shpo.cell(15 + index, 6).value("солдат");
+      shpo.cell(15 + index, 7).value("ХУБАЄВ Іван");
+      shpo.cell(15 + index, 8).value("111");
+    }
+    const ejoos = await readWorkbookSnapshot(new File([await wb.outputAsync("blob") as Blob], "ejoos.xlsx", { type: XLSX_MIME }), EJOOS_SYNC_READ_OPTIONS);
+    const operation = buildManualEjoosOperation({ ejoos, timesheetDay: 25, values: { type: "move_to_disposition", personKey: "id:111", orderNumber: "245", orderDate: "2026-08-24", destination: "у розпорядження командира військової частини А4862" } });
+    operation.payload.absenceType = "ВІДПУСТКА ДЛЯ ЛІКУВАННЯ ПІСЛЯ   ПОРАНЕННЯ";
+    operation.payload.absenceCode = "";
+    const duplicate = { ...operation, id: "second-preview" };
+    const result = await applyConfirmedEjoosOps({ ejoos, plan: dummyPlan([operation, duplicate]), ops: [operation, duplicate] });
+    const saved = await readWorkbookSnapshot(new File([result.blob], "saved.xlsx", { type: XLSX_MIME }), EJOOS_SYNC_READ_OPTIONS);
+    const rows = saved.sheets.find(sheet => /ШПО/.test(sheet.sheetName))!.rawRows;
+    const matches = rows.filter(row => String(row[7]) === "111");
+    expect(matches).toHaveLength(1);
+    expect(matches[0][2]).toBe("ВП");
+    expect(rows[0][0]).toBe("1. ШПО");
+    const replay = await applyConfirmedEjoosOps({ ejoos: saved, plan: dummyPlan([operation]), ops: [operation] });
+    const replayed = await readWorkbookSnapshot(new File([replay.blob], "replayed.xlsx", { type: XLSX_MIME }), EJOOS_SYNC_READ_OPTIONS);
+    expect(replayed.sheets.find(sheet => /ШПО/.test(sheet.sheetName))!.rawRows.filter(row => String(row[7]) === "111")).toHaveLength(1);
+  });
+});
 
 describe("bulk apply re-reads workbook between batches", () => {
   it("applies multiple disposition families in one bulk queue", async () => {

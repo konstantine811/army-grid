@@ -12,6 +12,7 @@ import {
   personNameMatchesOrphanNameKey,
   personPhotoThumbnailUrlForRow,
   questionnaireFileMatchesPerson,
+  shouldAcceptQuestionnaireAttachment,
 } from "./personAttachments";
 import {
   buildPersonIdentityFingerprint,
@@ -280,6 +281,21 @@ describe("personNameMatchesOrphanNameKey", () => {
   });
 });
 
+describe("shouldAcceptQuestionnaireAttachment", () => {
+  it("accepts a questionnaire found by lookup id even when the filename differs", () => {
+    expect(
+      shouldAcceptQuestionnaireAttachment(
+        {
+          personExternalId: "2163435",
+          fileName: "01 ПОТАПОВ Олексій (Круглий).pdf",
+        } as never,
+        ["2163435", "name:потапов олексій олександрович"],
+        ["ПОТАПОВ Олексій Олександрович"],
+      ),
+    ).toBe(true);
+  });
+});
+
 describe("questionnaireFileMatchesPerson", () => {
   it("matches a shorter filename without по батькові", () => {
     expect(
@@ -298,6 +314,18 @@ describe("questionnaireFileMatchesPerson", () => {
         "ШЕВЦОВ ДМИТРО СЕРГІЙОВИЧ",
       ]),
     ).toBe(false);
+    expect(
+      questionnaireFileMatchesPerson(
+        "01 ПОТАПОВ Олексій Олександрович (Круглий).pdf",
+        ["ПОТАПОВ Олексій Олександрович"],
+      ),
+    ).toBe(true);
+    expect(
+      questionnaireFileMatchesPerson(
+        "25 Анкета РЕБІНЧАК Володимир Михайлович (Крафт).pdf",
+        ["РЕБІНЧАК Володимир Михайлович"],
+      ),
+    ).toBe(true);
   });
 
   it("does not mark a shared FIO questionnaire for two namesakes", () => {

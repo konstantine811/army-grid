@@ -1,3 +1,4 @@
+import { styleEjoosExport } from "./ejoosExportStyle";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
@@ -20,6 +21,10 @@ import {
 } from "../../api";
 import { formatApiDateTime } from "../../shared/format";
 import { EjoosAsOfDateControl } from "./EjoosAsOfDateControl";
+import {
+  readRememberedAsOfIso,
+  writeRememberedAsOfIso,
+} from "./ejoosAsOfDate";
 import {
   type ExcelWorkbookSnapshot,
   EJOOS_SYNC_READ_OPTIONS,
@@ -75,7 +80,7 @@ export function EjoosLiveSyncPanel() {
     null,
   );
   const [plan, setPlan] = useState<EjoosSyncPlan | null>(null);
-  const [sourceAsOf, setSourceAsOf] = useState("");
+  const [sourceAsOf, setSourceAsOf] = useState(readRememberedAsOfIso);
   const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
   const [manualCodes, setManualCodes] = useState<Record<string, string>>({});
   const [manualFields, setManualFields] = useState<
@@ -386,7 +391,7 @@ export function EjoosLiveSyncPanel() {
         changeProtocol,
         notes: `Застосовано ${selectedOps.length} змін з ${plan.pbName}`,
       });
-      downloadBlobFile(result.fileName, resultBlob);
+      downloadBlobFile(result.fileName, await styleEjoosExport(resultBlob));
       downloadTextFile(
         `протокол_ЕЖООС_v${saved.version}.txt`,
         protocolWithVersion,
@@ -435,7 +440,7 @@ export function EjoosLiveSyncPanel() {
           "У цій версії збережено 1ПБ (sh/Рух/archive), а не ЕЖООС. Імпортуйте канонічний ЕЖООС і застосуйте зміни знову.",
         );
       }
-      downloadBlobFile(downloadName, file);
+      downloadBlobFile(downloadName, await styleEjoosExport(file));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Не вдалося скачати");
     } finally {
@@ -793,7 +798,7 @@ export function EjoosLiveSyncPanel() {
                   appliedLabel={plan.timesheetDayLabel}
                   busy={isLoading || !ejoosSnapshot || !pbSnapshot}
                   onApply={(isoDate) => {
-                    setSourceAsOf(isoDate);
+                    setSourceAsOf(writeRememberedAsOfIso(isoDate) || isoDate);
                     if (!ejoosSnapshot || !pbSnapshot) return;
                     const gen = (planGenRef.current += 1);
                     setIsLoading(true);

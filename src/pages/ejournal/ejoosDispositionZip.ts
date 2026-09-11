@@ -9,6 +9,7 @@ import {
   type EjoosSyncOp,
   type EjoosSyncPlan,
 } from "./ejoosSyncPlan";
+import { mapPbStatusToEjoos } from "./ejoosStatusMap";
 import { canonicalName, normId } from "./ejoosIdentity";
 import {
   dayFromOrderLabel,
@@ -637,7 +638,7 @@ const dispositionTarget = (
       return { row, styleRow: styleRow || row };
     }
   }
-  let row = lastRow + 1;
+  let row = (lastRow || sheet.rawRows.length) + 1;
   while (reserved.has(row)) row += 1;
   reserved.add(row);
   return { row, styleRow: styleRow || Math.max(1, lastRow) };
@@ -707,7 +708,9 @@ const dispositionLocation = (place: string) => {
 const shpoDispositionMark = (op: EjoosSyncOp) => {
   const code = String(op.payload.absenceCode || "").trim();
   if (code && code.length <= 8) return code;
-  const raw = String(op.payload.absenceType || "").trim();
+  const raw = String(op.payload.absenceType || code || "").trim();
+  const mapped = mapPbStatusToEjoos(raw).timesheetCode;
+  if (mapped) return mapped;
   if (/безвіст/iu.test(raw)) return "ЗБ";
   if (/сзч|самовіл/iu.test(raw)) return "СЗЧ";
   if (/полон/iu.test(raw)) return "пол";
@@ -725,6 +728,7 @@ type DispositionContext = {
   absentWrites: ZipCellWrite[];
   timesheetWrites: ZipCellWrite[];
   reservedShpoRows: Set<number>;
+  personShpoTargets: Map<string, { row: number; styleRow: number }>;
   reservedAbsentRows: Set<number>;
   reservedTimesheetRows: Set<number>;
 };
@@ -751,7 +755,7 @@ const collectWrites = (op: EjoosSyncOp, ctx: DispositionContext) => {
   const absentWrites = ctx.absentWrites;
   const timesheetWrites = ctx.timesheetWrites;
   const oldShpoRow = Number(op.payload.shpoExcelRow || 0);
-  if (oldShpoRow > 0 && occupantMatchesOp(shpo, oldShpoRow, 7, 8, op)) {
+  if (oldShpoRow > 0 && !/розпоряджен/iu.test(textAt(shpo, oldShpoRow, 2)) && occupantMatchesOp(shpo, oldShpoRow, 7, 8, op)) {
     for (const column of [6, 7, 8, 18]) {
       shpoWrites.push({ row: oldShpoRow, column, value: null });
     }
@@ -761,8 +765,21 @@ const collectWrites = (op: EjoosSyncOp, ctx: DispositionContext) => {
   const statusMark = shpoDispositionMark(op);
   const place = dispositionPlace(op.payload.destination);
   // Якщо особа вже стоїть у блоці «у розпорядженні», другий раз не додаємо.
-  if (op.payload.skipShpoDisposition !== "1") {
-    const target = dispositionTarget(shpo, ctx.reservedShpoRows);
+  const existingRows = shpo.rawRows.flatMap((_, index) => {
+    const row = index + 1;
+    const id = textAt(shpo, row, 8);
+    if (op.personId && id && normId(id) !== normId(op.personId)) return [];
+    return /розпоряджен/iu.test(textAt(shpo, row, 2)) && occupantMatchesOp(shpo, row, 7, 8, op) ? [row] : [];
+  });
+  const personKey = op.personId ? `id:${normId(op.personId)}` : `name:${canonicalName(op.fullName)}`;
+  if (existingRows.length || op.payload.skipShpoDisposition !== "1") {
+    const target = ctx.personShpoTargets.get(personKey) ?? (existingRows.length
+      ? { row: existingRows[0], styleRow: existingRows[0] }
+      : dispositionTarget(shpo, ctx.reservedShpoRows));
+    ctx.personShpoTargets.set(personKey, target);
+    for (const duplicate of existingRows.filter(row => row !== target.row)) {
+      for (const column of [2, 3, 6, 7, 8]) shpoWrites.push({ row: duplicate, column, value: null });
+    }
     for (const [column, value] of [
       [2, dispositionLocation(place)],
       [3, statusMark],
@@ -842,7 +859,7 @@ const collectWrites = (op: EjoosSyncOp, ctx: DispositionContext) => {
     op.payload.orderDate || "",
     timesheetMonthStartMs,
   );
-  const absenceCode = op.payload.absenceCode || statusMark;
+  const absenceCode = statusMark;
   const absenceSpans = parseTimesheetAbsenceSpans(
     op.payload.timesheetAbsenceSpans || "",
   );
@@ -922,6 +939,22 @@ const collectWrites = (op: EjoosSyncOp, ctx: DispositionContext) => {
       plan,
       op,
     );
+    const section = findTimesheetDispositionSection(timesheet, plan);
+    if (section) {
+      const end = section.slice?.endRow ?? section.lastRow;
+      for (let row = section.headerRow + 1; row <= end; row += 1) {
+        if (row === target.row || !isDispositionSubsectionDataRow(timesheet, row, target.cols)) continue;
+        const id = textAt(timesheet, row, target.cols.id);
+        if (op.personId && id && normId(id) !== normId(op.personId)) continue;
+        if (!rowMatchesDispositionOp(timesheet, row, op, target.cols)) continue;
+        const departures = (timesheet.rawRows[row - 1] || []).slice(8, 39)
+          .map(value => String(value || "")).filter(value => /вибув/iu.test(value));
+        // Retain separate historical episodes; clear only duplicate current records.
+        if (departures.some(value => !value.includes(op.payload.orderDate || "") ||
+          !value.replace(/№\s*/g, "№").includes(`№${(op.payload.orderNumber || "").replace(/^№\s*/, "")}`))) continue;
+        for (let column = 1; column <= 40; column += 1) timesheetWrites.push({ row, column, value: null });
+      }
+    }
     if (target.isNewRow) {
       seedDispositionTimesheetRowStyles(
         timesheetWrites,
@@ -950,7 +983,7 @@ const collectWrites = (op: EjoosSyncOp, ctx: DispositionContext) => {
       keepOpenSzch && staffTimesheetRow > 0 ? staffTimesheetRow : 0,
     );
     if (
-      staffTimesheetRow > 0 &&
+      staffTimesheetRow > 0 && staffTimesheetRow !== target.row &&
       occupantMatchesOp(timesheet, staffTimesheetRow, 7, 8, op)
     ) {
       const staffEpisodeOp = staffReturnPlacementOp(op, ctx.allOps);
@@ -1177,10 +1210,18 @@ export async function applyDispositionWithZip(input: {
     absentWrites: [],
     timesheetWrites: [],
     reservedShpoRows: new Set<number>(),
+    personShpoTargets: new Map(),
     reservedAbsentRows: new Set<number>(),
     reservedTimesheetRows: new Set<number>(),
   };
-  for (const op of ops) collectWrites(op, ctx);
+  const events = new Map<string, EjoosSyncOp>();
+  for (const op of ops) {
+    const key = [op.personId ? `id:${normId(op.personId)}` : `name:${canonicalName(op.fullName)}`,
+      op.payload.orderDate, (op.payload.orderNumber || "").replace(/^№\s*/, "").trim()].join("|");
+    const previous = events.get(key);
+    if (!previous || op.payload.manualOperation === "1") events.set(key, op);
+  }
+  for (const op of events.values()) collectWrites(op, ctx);
   const { shpoWrites, absentWrites, timesheetWrites } = ctx;
 
   let blob: Blob | File = ejoos.file;

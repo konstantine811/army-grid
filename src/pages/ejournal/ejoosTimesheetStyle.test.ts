@@ -2,6 +2,7 @@ import JSZip from "jszip";
 import { describe, expect, it } from "vitest";
 import { expandSharedFormulas } from "./ejoosWorkbookSanitize";
 import { copyTimesheetRowStylesWithZip } from "./ejoosExcludeTransferZip";
+import { EJOOS_TEXT_NUM_FMT_ID } from "./ejoosStaffIndexFormat";
 import {
   applyInlineStringWritesToWorkbook,
   shiftSheetRowsDown,
@@ -563,5 +564,45 @@ describe("timesheet occupied styles", () => {
     }
     expect(sheetXml).toMatch(/r="G201"/);
     expect(sheetXml).toMatch(/r="B202"/);
+  });
+
+  it("writes timesheet staff index as text, not custom date format", async () => {
+    const module = await import(
+      "xlsx-populate/browser/xlsx-populate-no-encryption"
+    );
+    const workbook = await module.default.fromBlankAsync();
+    const sheet = workbook.sheet(0);
+    sheet.name("6. Табель");
+    sheet
+      .cell(7, 2)
+      .value("2103378")
+      .style({ numberFormat: "MMMM yyyy", horizontalAlignment: "center" });
+    const blob = (await workbook.outputAsync("blob")) as Blob;
+
+    const next = await applyInlineStringWritesToWorkbook(blob, /табель/i, [
+      {
+        row: 8,
+        column: 2,
+        value: "2110786",
+        styleSourceRow: 7,
+        styleSourceColumn: 2,
+        keepNeighborStyle: true,
+      },
+    ]);
+    const zip = await JSZip.loadAsync(await next.arrayBuffer());
+    const sheetXml = await zip.file("xl/worksheets/sheet1.xml")?.async("string");
+    const stylesXml = await zip.file("xl/styles.xml")?.async("string");
+    const cell = sheetXml?.match(/<c\b[^>]*\br="B8"[^>]*>[\s\S]*?<\/c>/i)?.[0];
+    expect(cell).toBeTruthy();
+    expect(cell).toMatch(/\bt="(?:inlineStr|s)"/i);
+    expect(cell).not.toMatch(/<v>2110786<\/v>/);
+    const styleId = cellStyleId(sheetXml || "", "B8");
+    const cellXfsBody =
+      stylesXml?.match(/<cellXfs\b[^>]*>([\s\S]*?)<\/cellXfs>/i)?.[1] ?? "";
+    const xf = [...cellXfsBody.matchAll(/<xf\b[^>]*(?:\/>|>[\s\S]*?<\/xf>)/gi)]
+      .map((match) => match[0])[Number(styleId)] ?? "";
+    expect(xf).toMatch(new RegExp(`numFmtId="${EJOOS_TEXT_NUM_FMT_ID}"`, "i"));
+    expect(xf).toMatch(/applyNumberFormat="1"/i);
+    await module.default.fromDataAsync(await next.arrayBuffer());
   });
 });

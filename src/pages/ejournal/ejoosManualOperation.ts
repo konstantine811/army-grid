@@ -3,16 +3,20 @@ import type { BackendEjournalManualOperation } from "../../api";
 import {
   findUnvacatedTargetOccupant,
   parseEjoosOos,
+  parseEjoosAbsents,
   parseEjoosShpo,
   parseEjoosTimesheetDay,
   parseEjoosTimesheetPeople,
   type EjoosSyncOp,
 } from "./ejoosSyncPlan";
+import { mapPbStatusToEjoos } from "./ejoosStatusMap";
 import { canonicalName } from "./ejoosIdentity";
 
 export type ManualEjoosOperationType =
   | "exclude_transfer"
   | "dismissal"
+  | "exclusion"
+  | "move_to_disposition"
   | "position_change"
   | "rank_change";
 
@@ -30,6 +34,9 @@ export type ManualEjoosOperationInput = {
   orderNumber: string;
   orderDate: string;
   destination?: string;
+  basisIssuer?: string;
+  basisNumber?: string;
+  basisDate?: string;
   nextPositionIndex?: string;
   nextRank?: string;
 };
@@ -40,7 +47,7 @@ export const manualInputFromBackend = (
   const input = draft.input as Partial<ManualEjoosOperationInput>;
   if (
     !input ||
-    !["exclude_transfer", "dismissal", "position_change", "rank_change"].includes(
+    !["exclude_transfer", "dismissal", "exclusion", "move_to_disposition", "position_change", "rank_change"].includes(
       String(input.type),
     ) ||
     !input.personKey
@@ -53,6 +60,9 @@ export const manualInputFromBackend = (
     orderNumber: String(input.orderNumber || ""),
     orderDate: String(input.orderDate || ""),
     destination: String(input.destination || ""),
+    basisIssuer: String(input.basisIssuer || ""),
+    basisNumber: String(input.basisNumber || ""),
+    basisDate: String(input.basisDate || ""),
     nextPositionIndex: String(input.nextPositionIndex || ""),
     nextRank: String(input.nextRank || ""),
   };
@@ -188,7 +198,7 @@ export const buildManualEjoosOperation = (input: {
   const commonReady = Boolean(orderNumber && orderDate);
   const base: EjoosSyncOp = {
     id: manualId(values, person),
-    kind: values.type === "dismissal" ? "exclude_transfer" : values.type,
+    kind: values.type === "dismissal" || values.type === "exclusion" ? "exclude_transfer" : values.type,
     class: "needs_input",
     sheet: "",
     personId: shpo?.personId || oos?.personId || person.personId,
@@ -204,12 +214,62 @@ export const buildManualEjoosOperation = (input: {
       manualOperation: "1",
       orderNumber,
       orderDate,
+      basisIssuer: values.basisIssuer?.trim() || "",
+      basisNumber: values.basisNumber?.trim().replace(/^№\s*/u, "") || "",
+      basisDate: ukDate(values.basisDate || ""),
     },
     checkedDefault: false,
   };
 
-  if (values.type === "exclude_transfer" || values.type === "dismissal") {
+  const basisLabel = [
+    base.payload.basisIssuer,
+    base.payload.basisNumber ? `№${base.payload.basisNumber}` : "",
+    base.payload.basisDate ? `від ${base.payload.basisDate}` : "",
+  ].filter(Boolean).join(" ");
+  const basisSuffix = basisLabel ? ` · підстава: ${basisLabel}` : "";
+
+  if (values.type === "move_to_disposition") {
+    const destination = values.destination?.trim() || "";
+    const absence = parseEjoosAbsents(findSheet(ejoos, /тимчасов.*відсут/i))
+      .find(item => samePerson(person, item) && !item.actualReturn);
+    const absenceCode = mapPbStatusToEjoos(absence?.ground || "").timesheetCode || "";
+    const ready = Boolean(commonReady && destination && shpo && oos && activeTimesheet && currentPosition);
+    return {
+      ...base,
+      class: ready ? "ready" : "needs_input",
+      sheet: "1. ШПО → розпорядження / 2. ООС / 6. Табель",
+      before: `штатна посада ${currentPosition || "—"}`,
+      after: `РОЗПОРЯДЖ → ${destination || "(вкажіть розпорядження)"} · наказ №${orderNumber || "?"} від ${orderDate || "?"}${basisSuffix}`,
+      why: ready
+        ? "Ручний РОЗПОРЯДЖ: звільнити штатну посаду, перенести у розпорядження та оновити Табель; особа залишається в ООС"
+        : "Вкажіть розпорядження та реквізити наказу; потрібні поточні записи особи у ШПО, ООС і Табелі",
+      payload: {
+        ...base.payload,
+        type: "РОЗПОРЯДЖ",
+        destination,
+        previousIndex: currentPosition,
+        shpoExcelRow: shpo ? String(shpo.excelRow) : "",
+        oosExcelRow: oos ? String(oos.excelRow) : "",
+        timesheetExcelRow: activeTimesheet ? String(activeTimesheet.excelRow) : "",
+        timesheetStaffIndex: currentPosition,
+        remainsInOos: String(Boolean(oos)),
+        timesheetFound: String(Boolean(activeTimesheet)),
+        absenceExcelRow: absence ? String(absence.excelRow) : "",
+        absenceType: absence?.ground || "",
+        absenceCode,
+        keepOpenSzchTimesheet: ["СЗЧ", "ЗБ"].includes(absenceCode) ? "1" : "",
+        absenceDate: absence?.departDate || "",
+        absencePlace: absence?.place || "",
+        needsAbsenceRecord: "",
+      },
+      checkedDefault: ready,
+    };
+  }
+
+  if (values.type === "exclude_transfer" || values.type === "dismissal" || values.type === "exclusion") {
     const isDismissal = values.type === "dismissal";
+    const isExclusion = values.type === "exclusion";
+    const operationType = isDismissal ? "ЗВІЛЬН" : isExclusion ? "ВИКЛЮЧ" : "ПЕРЕВ";
     const destination = values.destination?.trim() || "";
     const ready = Boolean(
       commonReady &&
@@ -223,20 +283,20 @@ export const buildManualEjoosOperation = (input: {
       class: ready ? "ready" : activeTimesheet ? "needs_input" : "conflict",
       sheet: "3. Виключені → 6. Табель → 1. ШПО / 2. ООС",
       before: `${base.rank || "?"} ${base.fullName} · інд. ${currentPosition || "—"}`,
-      after: `виключити: ${isDismissal ? "ЗВІЛЬН" : "ПЕРЕВ"} → ${destination || "(вкажіть підставу / куди)"} · дата ${orderDate || "?"}`,
+      after: `виключити: ${operationType} → ${destination || "(вкажіть підставу / куди)"} · дата ${orderDate || "?"}${basisSuffix}`,
       why: !activeTimesheet
-        ? "Ручний ПЕРЕВ заблоковано: не знайдено активного рядка особи в Табелі"
+        ? `Ручний ${operationType} заблоковано: не знайдено активного рядка особи в Табелі`
         : ready
-          ? `Ручний ${isDismissal ? "ЗВІЛЬН" : "ПЕРЕВ"}: перенести в «Виключені», створити історію Табеля та очистити ШПО/ООС`
+          ? `Ручний ${operationType}: перенести в «Виключені», створити історію Табеля та очистити ШПО/ООС`
           : "Заповніть підставу/місце вибуття, номер і дату наказу",
       payload: {
         ...base.payload,
-        type: isDismissal ? "ЗВІЛЬН" : "ПЕРЕВ",
+        type: operationType,
         destination,
         documentsDest: destination,
         timesheetDestination: destination,
         excludeDate: orderDate,
-        exclusionReason: isDismissal ? "ЗВІЛЬНЕННЯ" : "ПЕРЕВЕДЕННЯ",
+        exclusionReason: isDismissal ? "ЗВІЛЬНЕННЯ" : isExclusion ? destination : "ПЕРЕВЕДЕННЯ",
         fromRank: base.rank,
         fromName: base.fullName,
         fromPersonId: base.personId,

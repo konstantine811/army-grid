@@ -68,699 +68,131 @@ import {
   extractUnitPhrasesFromPosition,
 } from "./ejoosTimesheetUnitSections";
 import { findDuplicateOosById } from "./ejoosOosText";
+import {
+  canonicalName,
+  dateMs,
+  isJournalPersonId,
+  norm,
+  normId,
+  normKey,
+} from "./ejoos/parse/cellText";
+import {
+  cell,
+  findCol,
+  findEjoosSheet,
+  headerMap,
+  idCell,
+  journalIdCell,
+} from "./ejoos/parse/sheetLookup";
+import {
+  collectProcessedMovementKeys,
+  createMovementKey,
+  isCancelledMovementRecord,
+  isContractMovementType,
+  isSzchCancellation,
+  isTransferCancellation,
+  parseContractDatesFromChangeText,
+  parsePbArchive,
+  parsePbMovements,
+  parsePbShPeople,
+  parseRankPromotion,
+} from "./ejoos/parse/pb";
+import {
+  parseAsOfDateLabel,
+  parseTimesheetDayFromPbName,
+  resolveJournalTimesheetDay,
+  sourceTimesheetHorizonNote,
+} from "./ejoos/plan/journalDay";
+import {
+  MONTH_ROLLOVER_BLOCK_MESSAGE,
+  planBlocksWorkbookApply,
+  refreshPlanTimesheetHorizon,
+  SOURCE_DATE_UNKNOWN_MESSAGE,
+  TIMESHEET_MONTH_HEADER_UNKNOWN_MESSAGE,
+  workbookApplyBlockMessage,
+} from "./ejoos/plan/planGuards";
+import { opId } from "./ejoos/plan/opId";
+import { planAbsentArchiveOps } from "./ejoos/plan/absentFromArchive";
+import { planSzchAbsentCloseOps } from "./ejoos/plan/szchAbsentClose";
+import { planTempArrivalCloseOps } from "./ejoos/plan/tempArrivalClose";
+import { planRankAndContractOps } from "./ejoos/plan/rankAndContract";
+import { planAbsentCloseFromShOps } from "./ejoos/plan/absentCloseFromSh";
+import { planTimesheetDayFromShOps } from "./ejoos/plan/timesheetDayFromSh";
+import { planTimesheetDayFromArchiveOps } from "./ejoos/plan/timesheetDayFromArchive";
+import { planDispositionMovementOps } from "./ejoos/plan/movements/disposition";
+import { planExcludeTransferMovementOps } from "./ejoos/plan/movements/excludeTransfer";
+import { planPositionChangeMovementOps } from "./ejoos/plan/movements/positionChange";
+import { planShpoOccupantOps, planShpoReconcileOps } from "./ejoos/plan/shpoOccupant";
+import { planTimesheetDayCleanup } from "./ejoos/plan/timesheetDayCleanup";
+import { planManualArrivalMovementOp } from "./ejoos/plan/movements/manualArrivalMovement";
+import { planTransferScopeUnclearOp } from "./ejoos/plan/movements/transferScopeUnclear";
+import {
+  formatTransferDestinationForTimesheetMark as formatTransferDestinationForTimesheet,
+  hasActualReturn,
+  isPositionIndex,
+  isRankAssignmentEvent,
+  positionChangeDestination,
+  unitCodeFromMovement,
+} from "./ejoos/plan/movementContext";
+import type { PbMovement } from "./ejoos/types/pb";
+import type { EjoosSyncOp, EjoosSyncPlan } from "./ejoos/types/syncOp";
+import type {
+  EjoosAbsentRow,
+  EjoosArrivalRow,
+  EjoosExcludedRow,
+  EjoosOosRow,
+  EjoosShpoRow,
+  EjoosTimesheetPersonScan,
+  EjoosTimesheetRow,
+} from "./ejoos/types/workbookRows";
 
 export { extractTimesheetDestinationFromPosition };
 
-export type EjoosOpClass = "ready" | "needs_input" | "conflict";
+export type {
+  EjoosOpClass,
+  EjoosOpKind,
+  EjoosSyncOp,
+  EjoosSyncPlan,
+} from "./ejoos/types/syncOp";
+export type {
+  PbArchivePeriod,
+  PbMovement,
+  PbShPerson,
+} from "./ejoos/types/pb";
+export type {
+  EjoosAbsentRow,
+  EjoosArrivalRow,
+  EjoosExcludedRow,
+  EjoosOosRow,
+  EjoosShpoRow,
+  EjoosTimesheetPersonScan,
+  EjoosTimesheetRow,
+  JournalTimesheetDay,
+} from "./ejoos/types/workbookRows";
 
-export type EjoosOpKind =
-  | "timesheet_day"
-  | "shpo_occupant"
-  | "absent_upsert"
-  | "absent_close"
-  | "exclude_transfer"
-  | "move_to_disposition"
-  | "data_mismatch"
-  | "position_change"
-  | "rank_change"
-  | "contract_update"
-  | "arrival"
-  | "other_manual";
-
-export type EjoosSyncOp = {
-  id: string;
-  kind: EjoosOpKind;
-  class: EjoosOpClass;
-  sheet: string;
-  personId: string;
-  fullName: string;
-  positionIndex: string;
-  rank: string;
-  before: string;
-  after: string;
-  sourceRef: string;
-  why: string;
-  confidence: "high" | "review" | "manual";
-  /** Extra payload for apply */
-  payload: Record<string, string>;
-  /** Stable source-event key persisted after a successful DB version write. */
-  movementKey?: string;
-  checkedDefault: boolean;
+export {
+  collectProcessedMovementKeys,
+  createMovementKey,
+  findEjoosSheet,
+  isContractMovementType,
+  parseContractDatesFromChangeText,
+  parsePbArchive,
+  parsePbMovements,
+  parsePbShPeople,
+  parseRankPromotion,
+  parseAsOfDateLabel,
+  parseTimesheetDayFromPbName,
+  planBlocksWorkbookApply,
+  refreshPlanTimesheetHorizon,
+  resolveJournalTimesheetDay,
+  sourceTimesheetHorizonNote,
+  workbookApplyBlockMessage,
+  SOURCE_DATE_UNKNOWN_MESSAGE,
+  TIMESHEET_MONTH_HEADER_UNKNOWN_MESSAGE,
+  MONTH_ROLLOVER_BLOCK_MESSAGE,
 };
-
-export type EjoosSyncPlan = {
-  ejoosName: string;
-  pbName: string;
-  timesheetDay: number;
-  timesheetDayLabel: string;
-  /** Місяць Табеля ЕЖООС ≠ місяць 1ПБ — apply заборонено. */
-  monthRolloverRequired?: boolean;
-  /** Назва 1ПБ без дати — горизонт Табеля невідомий. */
-  sourceDateUnknown?: boolean;
-  /** Заголовок місяця «6. Табель» не знайдено — apply заборонено. */
-  timesheetMonthHeaderUnknown?: boolean;
-  ejoosTimesheetMonthLabel?: string;
-  ops: EjoosSyncOp[];
-  summary: {
-    ready: number;
-    needsInput: number;
-    conflict: number;
-  };
-  limitsNote?: string;
-};
-
-const norm = (value: CellValue | unknown) => {
-  if (value instanceof Date && !Number.isNaN(value.getTime())) {
-    const day = String(value.getDate()).padStart(2, "0");
-    const month = String(value.getMonth() + 1).padStart(2, "0");
-    return `${day}.${month}.${value.getFullYear()}`;
-  }
-  if (
-    typeof value === "number" &&
-    Number.isFinite(value) &&
-    value > 20000 &&
-    value < 80000
-  ) {
-    // Excel serial date
-    const utc = Date.UTC(1899, 11, 30) + Math.floor(value) * 86400000;
-    const date = new Date(utc);
-    const day = String(date.getUTCDate()).padStart(2, "0");
-    const month = String(date.getUTCMonth() + 1).padStart(2, "0");
-    return `${day}.${month}.${date.getUTCFullYear()}`;
-  }
-  if (value && typeof value === "object" && !(value instanceof Date)) {
-    const maybe = value as { text?: () => string; value?: () => unknown };
-    if (typeof maybe.text === "function") return norm(maybe.text());
-    if (typeof maybe.value === "function") return norm(maybe.value());
-    return "";
-  }
-  return String(value ?? "")
-    .replace(/\s+/g, " ")
-    .trim();
-};
-
-const normKey = (value: string) =>
-  value
-    .toLowerCase()
-    .replace(/[''`´]/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-
-/** Уточнення на кшталт «(08.02.1985 р.н.)» — не інше ПІБ, а лише позначка. */
-const canonicalName = (value: string) =>
-  normKey(
-    value
-      .replace(/\([^)]*\)/g, " ")
-      .replace(/[.,;]/g, " ")
-      .replace(/\s+/g, " "),
-  );
-
-const dateMs = (value: string) => {
-  const match = String(value ?? "").match(
-    /(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})/,
-  );
-  if (!match) return 0;
-  const year =
-    Number(match[3]) < 100 ? 2000 + Number(match[3]) : Number(match[3]);
-  const result = Date.UTC(year, Number(match[2]) - 1, Number(match[1]));
-  return Number.isFinite(result) ? result : 0;
-};
-
-export const findEjoosSheet = (
-  workbook: ExcelWorkbookSnapshot,
-  matcher: RegExp,
-) => workbook.sheets.find((sheet) => matcher.test(sheet.sheetName));
 
 const findSheet = findEjoosSheet;
-
-const headerMap = (row: CellValue[]) => {
-  const map = new Map<string, number>();
-  row.forEach((cell, index) => {
-    const key = normKey(norm(cell));
-    if (key && !map.has(key)) map.set(key, index);
-  });
-  return map;
-};
-
-const findCol = (map: Map<string, number>, ...needles: RegExp[]) => {
-  for (const [key, index] of map.entries()) {
-    if (needles.some((re) => re.test(key))) return index;
-  }
-  return -1;
-};
-
-const cell = (row: CellValue[] | undefined, index: number) =>
-  index >= 0 ? norm(row?.[index]) : "";
-
-/** Штатний ID 1ПБ/ЕЖООС — коротке число, не РНОКПП/ІПН з 8+ цифр. */
-const isJournalPersonId = (value: string) => /^\d{1,7}$/.test(value.trim());
-
-/** ID is never an Excel date. Reject date-shaped fallback values instead of showing them as IDs. */
-const normId = (value: CellValue | unknown) => {
-  if (value instanceof Date) return "";
-  const text =
-    typeof value === "number" && Number.isFinite(value)
-      ? String(Math.trunc(value))
-      : String(value ?? "")
-          .replace(/\s+/g, " ")
-          .trim();
-  if (/^\d{1,2}[./-]\d{1,2}[./-]\d{2,4}$/.test(text)) return "";
-  return text === "0" || text === "0.0" ? "" : text;
-};
-
-const journalIdCell = (row: CellValue[] | undefined, index: number) => {
-  const value = idCell(row, index);
-  return isJournalPersonId(value) ? value : "";
-};
-
-const idCell = (row: CellValue[] | undefined, index: number) =>
-  index >= 0 ? normId(row?.[index]) : "";
-
-export type PbShPerson = {
-  excelRow: number;
-  personId: string;
-  fullName: string;
-  rank: string;
-  positionIndex: string;
-  positionTitle: string;
-  status: string;
-  /** Якщо є в sh — «Звідки прибув». */
-  arrivedFrom: string;
-};
-
-export type PbArchivePeriod = {
-  excelRow: number;
-  periodNumber: string;
-  personId: string;
-  fullName: string;
-  rank: string;
-  positionTitle: string;
-  absenceType: string;
-  departDate: string;
-  place: string;
-  orderNumber: string;
-  orderDate: string;
-  plannedReturn: string;
-  /** Фактична / дата повернення, якщо є. */
-  returnDate: string;
-  returnOrderNumber: string;
-  returnOrderDate: string;
-};
-
-export type PbMovement = {
-  excelRow: number;
-  movementNumber: string;
-  type: string;
-  personId: string;
-  fullName: string;
-  rank: string;
-  previousIndex: string;
-  nextIndex: string;
-  destination: string;
-  orderNumber: string;
-  orderDate: string;
-  basisNumber: string;
-  basisDate: string;
-  changeText: string;
-  status: string;
-  note: string;
-  /** Колонка «Звідки» / «Звідки прибув», якщо є в Рух. */
-  arrivedFrom: string;
-};
-
-export const createMovementKey = (event: PbMovement) => {
-  const identity = event.personId
-    ? `id:${normKey(event.personId)}`
-    : `name:${normKey(event.fullName)}`;
-  if (identity.endsWith(":")) return "";
-  return [
-    identity,
-    normKey(event.type),
-    normKey(event.orderDate),
-    normKey(event.orderNumber),
-    normKey(event.previousIndex),
-    normKey(event.nextIndex),
-  ].join("|");
-};
-
-export const collectProcessedMovementKeys = (
-  versions: Array<{ changeProtocol?: unknown }> | null | undefined,
-) => {
-  const keys = new Set<string>();
-  for (const version of versions ?? []) {
-    const protocol = version.changeProtocol;
-    if (!protocol || typeof protocol !== "object") continue;
-    const ops = (protocol as { ops?: unknown }).ops;
-    if (!Array.isArray(ops)) continue;
-    for (const op of ops) {
-      if (!op || typeof op !== "object") continue;
-      const key = (op as { movementKey?: unknown }).movementKey;
-      if (typeof key === "string" && key.trim()) keys.add(key.trim());
-    }
-  }
-  return keys;
-};
-
-/** «Куди» у Рух часто = «x» / порожньо; тоді військова частина є в примітці. */
-const resolveMovementDestination = (rawDest: string, note: string) => {
-  const clean = (value: string) => {
-    const text = value.replace(/\s+/g, " ").trim();
-    if (!text) return "";
-    const upper = text.toUpperCase();
-    if (
-      upper === "X" ||
-      upper === "Х" ||
-      upper === "0" ||
-      upper === "0.0" ||
-      upper === "-" ||
-      upper === "—" ||
-      upper === "." ||
-      upper.includes("РОЗПОР") ||
-      upper.includes("ПЕРЕВ") ||
-      upper.includes("ПОСАД") ||
-      upper.includes("ПРИБ") ||
-      upper.includes("ЗВІЛ")
-    ) {
-      return "";
-    }
-    return text;
-  };
-  const destination = clean(rawDest);
-  if (destination) return destination;
-  const noteText = note.replace(/\s+/g, " ").trim();
-  return /(?:[АA]\s*\d{4}(?!\d)|військов(?:ої|а)\s+частин)/iu.test(noteText)
-    ? noteText
-    : "";
-};
-
-const formatTransferDestinationForTimesheet = (value: string) => {
-  const codes = [...value.matchAll(/[АA]\s*(\d{4})(?!\d)/giu)].map(
-    (match) => `А${match[1]}`,
-  );
-  const unique = [...new Set(codes)];
-  return unique.length ? unique.join(" / ") : value;
-};
-
-/**
- * «2103791 Старший кухар → 2103179 Стрілець 3 піхотного відділення …» —
- * для «куди вибув» потрібна лише нова посада без службового індексу.
- */
-const positionChangeDestination = (event: PbMovement) => {
-  const text = norm(event.changeText);
-  if (!text) return norm(event.destination);
-  const tail =
-    text
-      .split(/→|->|=>/)
-      .pop()
-      ?.trim() || text;
-  return tail.replace(/^\d{5,}[\s.:;-]*/, "").trim() || tail;
-};
-
-/**
- * У колонці повернення archive часто стоїть «до окремого розпорядження», «0»
- * або «-». Період вважаємо закритим лише за фактичною датою.
- */
-const hasActualReturn = (value: string) => Boolean(dateMs(value));
-
-/** У `sh` замість індексу бувають маркери «ВИВЕДЕНО», «#N/A» тощо. */
-const isPositionIndex = (value: string) => /^\d{5,}$/.test(value.trim());
-
-const normalizeRankLabel = (value: string) =>
-  value
-    .replace(/\s+/g, " ")
-    .trim()
-    .replace(/^(?:звання|військов(?:е|ое)\s+звання)\s+/i, "")
-    .toLocaleLowerCase("uk-UA");
-
-/** «солдат → СТАРШИЙ СОЛДАТ» або лише нове звання в «Яка зміна». */
-export const parseRankPromotion = (event: PbMovement) => {
-  const text = [event.changeText, event.note].filter(Boolean).join(" ");
-  const match = text.match(
-    /([А-ЯІЇЄҐа-яіїєґ'’.\-\s]{3,}?)\s*(?:→|->|=>|—)\s*([А-ЯІЇЄҐа-яіїєґ'’.\-\s]{3,})/u,
-  );
-  if (match) {
-    return {
-      previousRank: normalizeRankLabel(match[1]),
-      nextRank: normalizeRankLabel(match[2]),
-    };
-  }
-  const nextRank =
-    normalizeRankLabel(event.changeText) || normalizeRankLabel(event.rank);
-  const previousRank = normalizeRankLabel(event.rank);
-  return {
-    previousRank: previousRank === nextRank ? "" : previousRank,
-    nextRank,
-  };
-};
-
-const isRankAssignmentEvent = (event: PbMovement) => {
-  if (event.type === "ЗВАННЯ" || event.type.startsWith("ЗВАН")) return true;
-  return false;
-};
-
-export const isContractMovementType = (type: string) =>
-  type === "КОНТРАКТ" || /МОТИВАЦ.*КОНТР/iu.test(type);
-
-const normalizeContractDate = (value: string) => {
-  const match = norm(value).match(
-    /^(\d{1,2})[./-](\d{1,2})[./-](\d{2}|\d{4})$/,
-  );
-  if (!match) return norm(value);
-  const year = match[3].length === 2 ? `20${match[3]}` : match[3];
-  return `${match[1].padStart(2, "0")}.${match[2].padStart(2, "0")}.${year}`;
-};
-
-export const parseContractDatesFromChangeText = (value: string) => {
-  const match = norm(value).match(
-    /(?:^|\s)(?:з|із)\s+(\d{1,2}[./-]\d{1,2}[./-](?:\d{2}|\d{4}))\s+до\s+(\d{1,2}[./-]\d{1,2}[./-](?:\d{2}|\d{4}))(?:$|[\s,.;])/iu,
-  );
-  return {
-    contractFrom: match ? normalizeContractDate(match[1]) : "",
-    contractTo: match ? normalizeContractDate(match[2]) : "",
-  };
-};
-
-const unitCodeFromMovement = (event: PbMovement) =>
-  formatTransferDestinationForTimesheet(
-    [event.destination, event.changeText, event.note].join(" "),
-  );
-
-const isSzchCancellation = (event: PbMovement) =>
-  /СКАС(?:УВАННЯ|ОВАНО|УВАТИ)?.*СЗЧ|СЗЧ.*СКАС/iu.test(
-    [event.type, event.status, event.note, event.changeText].join(" "),
-  );
-
-const movementBlob = (event: PbMovement) =>
-  [
-    event.type,
-    event.status,
-    event.note,
-    event.changeText,
-    event.destination,
-  ].join(" ");
-
-/** Окремий рядок «СКАСУВАННЯ переведення», а не скасований рядок ПЕРЕВ. */
-const isTransferCancellation = (event: PbMovement) => {
-  if (isSzchCancellation(event)) return false;
-  if (
-    event.type === "ПЕРЕВ" ||
-    event.type === "ПОСАДА" ||
-    event.type === "ЗВАННЯ"
-  ) {
-    return false;
-  }
-  if (event.type === "СКАСУВАННЯ") return true;
-  const text = movementBlob(event);
-  return /скас(?:уванн|овано|увано|увати)/iu.test(text) && /перев/iu.test(text);
-};
-
-/** Анульований рядок РУХ: «скасовано» у статусі, примітці або «куди». */
-const isCancelledMovementRecord = (event: PbMovement) => {
-  if (isSzchCancellation(event) || isTransferCancellation(event)) return false;
-  const fields = [
-    event.status,
-    event.note,
-    event.destination,
-    event.changeText,
-  ];
-  return fields.some((value) => {
-    const text = String(value ?? "").trim();
-    if (!text) return false;
-    if (/^скас(?:овано|увано)$/iu.test(text)) return true;
-    return /(?:^|[\s,;./(])скас(?:овано|увано)(?:$|[\s,;./)])/iu.test(text);
-  });
-};
-
-export const parsePbShPeople = (
-  workbook: ExcelWorkbookSnapshot,
-): PbShPerson[] => {
-  const sheet = findSheet(workbook, /^sh$/i);
-  if (!sheet) return [];
-  const headers = headerMap(sheet.rawRows[0] ?? []);
-  const idCol = findCol(headers, /^id$/);
-  const nameCol = findCol(headers, /^піб$/, /прізвище/);
-  const rankCol = findCol(headers, /зван/);
-  const indexCol = findCol(headers, /індекс\s*посад/);
-  const posCol = findCol(headers, /^посада$/);
-  const statusCol = findCol(headers, /^статус$/, /^перебуван/);
-  const fromCol = findCol(headers, /звідки.*прибув|^звідки$/);
-  const people: PbShPerson[] = [];
-
-  sheet.rawRows.slice(1).forEach((row, offset) => {
-    const fullName = cell(row, nameCol);
-    const positionIndex = cell(row, indexCol);
-    const status = cell(row, statusCol);
-    const personId = idCell(row, idCol);
-    if (!fullName && !personId && !positionIndex) return;
-    if (!fullName && (!status || status === "0")) return;
-    people.push({
-      excelRow: offset + 2,
-      personId: personId && personId !== "0" ? personId : "",
-      fullName,
-      rank: cell(row, rankCol),
-      positionIndex,
-      positionTitle: cell(row, posCol),
-      status,
-      arrivedFrom: cell(row, fromCol),
-    });
-  });
-  return people;
-};
-
-export const parsePbArchive = (
-  workbook: ExcelWorkbookSnapshot,
-): PbArchivePeriod[] => {
-  const sheet = findSheet(workbook, /^archive$/i);
-  if (!sheet) return [];
-  const headerRowIndex = sheet.rawRows.findIndex((row) =>
-    /вид\s*вибут|прізвище/i.test(row.map(norm).join(" ")),
-  );
-  if (headerRowIndex < 0) return [];
-  const headers = headerMap(sheet.rawRows[headerRowIndex] ?? []);
-  const idCol = findCol(headers, /^id$/);
-  const nameCol = findCol(headers, /прізвище|піб/);
-  const rankCol = findCol(headers, /зван/);
-  const typeCol = findCol(headers, /вид\s*вибут/);
-  const dateCol = findCol(headers, /з якої дати|дата вибут/);
-  const placeCol = findCol(headers, /куди виб/);
-  const orderNumCol = findCol(headers, /номер наказу вибут/);
-  const orderDateCol = findCol(headers, /дата наказу вибут/);
-  const plannedCol = findCol(headers, /планова дата/);
-  // Фактичне повернення — колонки 29–31 («Дата прибуття» / «Дата наказу» /
-  // «Номер наказу»), не «Планова дата прибуття» і не наказ вибуття.
-  const returnCol = findCol(
-    headers,
-    /^дата прибуття$/,
-    /фактичн.*(?:поверн|прибут)/,
-    /^дата поверн/,
-  );
-  const returnOrderNumCol = findCol(
-    headers,
-    /^номер наказу$/,
-    /номер наказу\s*(?:прибут|поверн)/,
-    /наказ\s*(?:на\s+)?(?:прибут|поверн)/,
-  );
-  const returnOrderDateCol = findCol(
-    headers,
-    /^дата наказу$/,
-    /дата наказу\s*(?:прибут|поверн)/,
-  );
-  const posCol = findCol(headers, /займана посад|посада/);
-  const numCol = findCol(headers, /№\s*з\/п|^№$/);
-  const periods: PbArchivePeriod[] = [];
-
-  sheet.rawRows.slice(headerRowIndex + 1).forEach((row, offset) => {
-    const fullName = cell(row, nameCol);
-    if (!fullName) return;
-    periods.push({
-      excelRow: headerRowIndex + offset + 2,
-      periodNumber: cell(row, numCol),
-      personId: idCell(row, idCol),
-      fullName,
-      rank: cell(row, rankCol),
-      positionTitle: cell(row, posCol),
-      absenceType: cell(row, typeCol),
-      departDate: cell(row, dateCol),
-      place: cell(row, placeCol),
-      orderNumber: cell(row, orderNumCol),
-      orderDate: cell(row, orderDateCol),
-      plannedReturn: cell(row, plannedCol),
-      returnDate: cell(row, returnCol),
-      returnOrderNumber: cell(row, returnOrderNumCol),
-      returnOrderDate: cell(row, returnOrderDateCol),
-    });
-  });
-  return periods;
-};
-
-export const parsePbMovements = (
-  workbook: ExcelWorkbookSnapshot,
-): PbMovement[] => {
-  const sheet = findSheet(workbook, /^рух$/i);
-  if (!sheet) return [];
-  const headers = headerMap(sheet.rawRows[0] ?? []);
-  const numCol = findCol(headers, /^№$/);
-  const typeCol = findCol(headers, /^тип$/);
-  const idCol = findCol(headers, /^id$/);
-  const nameCol = findCol(headers, /^піб$/);
-  const rankCol = findCol(headers, /зван/);
-  const statusCol = findCol(headers, /^статус$/);
-  const prevIdxCol = findCol(headers, /індекс.*попер|попер.*індекс/);
-  const nextIdxCol = findCol(
-    headers,
-    /індекс.*як|яка зміна.*індекс|індекси посад \(яка/,
-  );
-  const changeCol = (() => {
-    for (const [key, index] of headers.entries()) {
-      if (/яка зміна/.test(key) && !/індекс/.test(key)) return index;
-    }
-    return findCol(headers, /попер/);
-  })();
-  const destCol = findCol(headers, /^куди(?:\s|$)/, /куди.*(?:перев|виб)/);
-  const fromCol = findCol(headers, /звідки.*прибув|^звідки$/);
-  const noteCol = findCol(headers, /^примітка$/);
-  const orderNumCol = findCol(headers, /^наказ$/);
-  const orderDateCol = findCol(headers, /^дата$/);
-  const movements: PbMovement[] = [];
-
-  const normalizeType = (value: string) => {
-    const text = value.toUpperCase();
-    if (text.includes("ПОСАД")) return "ПОСАДА";
-    if (text.includes("ПРИБ")) return "ПРИБУВ";
-    if (text.includes("ЗМІНИШТАТ") || text.includes("ЗМІНИ ШТАТ")) {
-      return "ПОСАДА";
-    }
-    if (text.includes("РОЗПОР")) return "РОЗПОРЯДЖ";
-    if (text.includes("СКАС")) {
-      if (text.includes("СЗЧ") || text.includes("САМОВІЛ")) return "СЗЧ";
-      return "СКАСУВАННЯ";
-    }
-    if (text.includes("ПЕРЕВ")) return "ПЕРЕВ";
-    if (text.includes("ЗВАН")) return "ЗВАННЯ";
-    if (text.includes("ЗВІЛ")) return "ЗВІЛЬН";
-    if (text.includes("СЗЧ") || text.includes("САМОВІЛ")) return "СЗЧ";
-    if (
-      text.includes("БЕЗВІСТ") ||
-      /(?:^|[^А-ЯІЇЄҐ])ЗБ(?:$|[^А-ЯІЇЄҐ])/.test(text)
-    ) {
-      return "БЕЗВІСТИ";
-    }
-    return text || "—";
-  };
-
-  sheet.rawRows.slice(1).forEach((row, offset) => {
-    const type = normalizeType(cell(row, typeCol >= 0 ? typeCol : 4));
-    const fullName = cell(row, nameCol >= 0 ? nameCol : 6);
-    const movementNumber = cell(row, numCol >= 0 ? numCol : 1);
-    if (!fullName && !movementNumber) return;
-    if (type === "—" && !fullName) return;
-    const note = cell(row, noteCol >= 0 ? noteCol : 18);
-    const rawDest = cell(row, destCol);
-    movements.push({
-      excelRow: offset + 2,
-      movementNumber,
-      type,
-      // ID беремо лише з явно знайденої колонки. Позиційний fallback міг
-      // прочитати дату народження як ID, якщо структура РУХ змінилася.
-      personId: idCell(row, idCol),
-      fullName,
-      // Звання читаємо лише з колонки, яку однозначно визначено заголовком.
-      // Позиційний fallback F міг підставити стороннє значення з іншого макета.
-      rank: cell(row, rankCol),
-      previousIndex: cell(row, prevIdxCol),
-      nextIndex: cell(row, nextIdxCol),
-      destination:
-        type === "ПЕРЕВ"
-          ? resolveOutboundTransferDestination(rawDest, note)
-          : resolveMovementDestination(rawDest, note),
-      orderNumber: cell(row, orderNumCol),
-      orderDate: cell(row, orderDateCol),
-      // У поточному форматі РУХ: O+P — документ-підстава, I+J — стройовий наказ.
-      basisNumber: cell(row, 14),
-      basisDate: cell(row, 15),
-      changeText: cell(row, changeCol),
-      status: cell(row, statusCol >= 0 ? statusCol : 2),
-      note,
-      arrivedFrom: cell(row, fromCol),
-    });
-  });
-  return movements;
-};
-
-export type EjoosAbsentRow = {
-  excelRow: number;
-  personId: string;
-  fullName: string;
-  rank: string;
-  positionIndex: string;
-  ground: string;
-  place: string;
-  departDate: string;
-  actualReturn: string;
-};
-
-export type EjoosTimesheetRow = {
-  excelRow: number;
-  personId: string;
-  fullName: string;
-  rank: string;
-  positionIndex: string;
-  dayValue: string;
-};
-
-/** Повний рядок Табеля: штатний або історичний, з усіма днями місяця. */
-export type EjoosTimesheetPersonScan = {
-  excelRow: number;
-  personId: string;
-  fullName: string;
-  rank: string;
-  positionIndex: string;
-  hasDepartureText: boolean;
-  firstDepartureDay: number;
-  plusDays: number[];
-  /** 1-based day → нормалізована позначка (або «вибув»). */
-  dayCodes: string[];
-  departureText?: string;
-};
-
-export type EjoosShpoRow = {
-  excelRow: number;
-  positionIndex: string;
-  personId: string;
-  fullName: string;
-  rank: string;
-};
-
-export type EjoosArrivalRow = {
-  excelRow: number;
-  personId: string;
-  fullName: string;
-  rank: string;
-  positionIndex: string;
-  arriveDate: string;
-  fromUnit: string;
-};
-
-export type EjoosOosRow = {
-  excelRow: number;
-  personId: string;
-  fullName: string;
-  rank: string;
-  positionIndex: string;
-  serviceType: string;
-  contractFrom: string;
-  contractTo: string;
-};
-
-export type EjoosExcludedRow = {
-  excelRow: number;
-  personId: string;
-  fullName: string;
-  orderNumber: string;
-  orderDate: string;
-  destination: string;
-  note: string;
-};
 
 export const parseEjoosAbsents = (
   sheet: ExcelSheetSnapshot | undefined,
@@ -1046,123 +478,6 @@ export const parseEjoosExcluded = (
   return rows;
 };
 
-export type JournalTimesheetDay = {
-  day: number;
-  label: string;
-  sourceDateUnknown?: boolean;
-};
-
-const journalDayFromParts = (
-  day: number,
-  month: number,
-  year: number,
-): JournalTimesheetDay => ({
-  day,
-  label: `${String(day).padStart(2, "0")}.${String(month).padStart(2, "0")}.${year}`,
-  sourceDateUnknown: false,
-});
-
-export const SOURCE_DATE_UNKNOWN_MESSAGE =
-  "SOURCE_DATE_UNKNOWN: не вдалося визначити дату 1ПБ. Вкажіть «станом на» вручну.";
-
-export const TIMESHEET_MONTH_HEADER_UNKNOWN_MESSAGE =
-  "TIMESHEET_MONTH_HEADER_UNKNOWN: заголовок місяця в I2 не прочитано. Місяць беремо з дати 1ПБ.";
-
-export const MONTH_ROLLOVER_BLOCK_MESSAGE =
-  "MONTH_ROLLOVER_REQUIRED: місяць Табеля ЕЖООС не збігається з місяцем 1ПБ. Заголовок не перейменовуємо — потрібен новий файл ЕЖООС на цей місяць.";
-
-/** ISO `YYYY-MM-DD` або `DD.MM.YYYY` — явна дата «станом на». */
-export const parseAsOfDateLabel = (value: string): JournalTimesheetDay => {
-  const iso = String(value || "")
-    .trim()
-    .match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (iso) {
-    const year = Number(iso[1]);
-    const month = Number(iso[2]);
-    const day = Number(iso[3]);
-    if (day >= 1 && day <= 31 && month >= 1 && month <= 12) {
-      return journalDayFromParts(day, month, year);
-    }
-  }
-  return parseTimesheetDayFromPbName(value);
-};
-
-export const parseTimesheetDayFromPbName = (
-  fileName: string,
-  _fallback?: Date,
-): JournalTimesheetDay => {
-  const match = fileName.match(/(\d{2})[._-](\d{2})[._-](\d{2,4})/);
-  if (match) {
-    const day = Number(match[1]);
-    if (day >= 1 && day <= 31) {
-      const month = Number(match[2]);
-      const yearRaw = Number(match[3]);
-      const year = yearRaw < 100 ? 2000 + yearRaw : yearRaw;
-      return journalDayFromParts(day, month, year);
-    }
-  }
-  // Also 1ПБ_25082026
-  const compact = fileName.match(/_(\d{2})(\d{2})(\d{4})/);
-  if (compact) {
-    const day = Number(compact[1]);
-    const month = Number(compact[2]);
-    const year = Number(compact[3]);
-    return journalDayFromParts(day, month, year);
-  }
-  return { day: 0, label: "", sourceDateUnknown: true };
-};
-
-/** День табеля з назви файлу 1ПБ / ЄЖООС. Без дати — SOURCE_DATE_UNKNOWN. */
-export const resolveJournalTimesheetDay = parseTimesheetDayFromPbName;
-
-export const sourceTimesheetHorizonNote = (timesheetDayLabel: string) =>
-  `Джерело 1ПБ станом на ${timesheetDayLabel}. Табель буде оновлено лише по ${timesheetDayLabel}.`;
-
-export const workbookApplyBlockMessage = (
-  plan:
-    | Pick<
-        EjoosSyncPlan,
-        | "monthRolloverRequired"
-        | "sourceDateUnknown"
-        | "timesheetMonthHeaderUnknown"
-      >
-    | null
-    | undefined,
-) => {
-  if (!plan) return "";
-  if (plan.sourceDateUnknown) return SOURCE_DATE_UNKNOWN_MESSAGE;
-  return "";
-};
-
-export const planBlocksWorkbookApply = (
-  plan:
-    | Pick<
-        EjoosSyncPlan,
-        | "monthRolloverRequired"
-        | "sourceDateUnknown"
-        | "timesheetMonthHeaderUnknown"
-      >
-    | null
-    | undefined,
-) => Boolean(workbookApplyBlockMessage(plan));
-
-/**
- * Горизонт Табеля = дата джерела 1ПБ. Не дотягуємо до «сьогодні»:
- * у файлі за 25.08 немає даних за 26–31, тож `+` туди не вигадуємо.
- */
-export const refreshPlanTimesheetHorizon = (
-  plan: Pick<EjoosSyncPlan, "timesheetDay" | "timesheetDayLabel">,
-  _now = new Date(),
-): Pick<EjoosSyncPlan, "timesheetDay" | "timesheetDayLabel"> => ({
-  timesheetDay: plan.timesheetDay,
-  timesheetDayLabel: plan.timesheetDayLabel,
-});
-
-const opId = (parts: string[]) =>
-  parts
-    .map((part) => part.replace(/\s+/g, "_").slice(0, 40))
-    .filter(Boolean)
-    .join("__");
 
 export const buildEjoosSyncPlan = (
   ejoos: ExcelWorkbookSnapshot,
@@ -2542,1080 +1857,125 @@ export const buildEjoosSyncPlan = (
   };
 
   const ops: EjoosSyncOp[] = [];
-  const absenceRowsClosedByMovement = new Set<number>();
-  const latestSzchCancellationByPerson = new Map<string, PbMovement>();
-  for (const event of activeMovementsAll) {
-    if (!isSzchCancellation(event)) continue;
-    const key = event.personId
-      ? `id:${event.personId}`
-      : `name:${normKey(event.fullName)}`;
-    if (!key.endsWith(":")) latestSzchCancellationByPerson.set(key, event);
-  }
-  for (const event of latestSzchCancellationByPerson.values()) {
-    if (!eventInLeadWindow(event)) continue;
-    const open =
-      (event.personId && openById.get(event.personId)) ||
-      openByName.get(normKey(event.fullName)) ||
-      null;
-    const person = shPeople.find(
-      (candidate) =>
-        (event.personId &&
-          candidate.personId &&
-          event.personId === candidate.personId) ||
-        normKey(candidate.fullName) === normKey(event.fullName),
-    );
-    const timesheetRow =
-      activeTimesheetRowOf(
-        event.personId,
-        event.fullName,
-        person?.positionIndex || "",
-      ) ||
-      (person?.positionIndex && dayByIndex.get(person.positionIndex)) ||
-      ejoosDays.find(
-        (row) => normKey(row.fullName) === normKey(event.fullName),
-      ) ||
-      null;
-    // Закритий запис і вже виставлений «+» означають, що скасування СЗЧ
-    // проведене повністю; повторну операцію не створюємо.
-    if (!open && timesheetRow?.dayValue === "+") continue;
-    const returnDate = event.orderDate || timesheetDayLabel;
-    if (open) absenceRowsClosedByMovement.add(open.excelRow);
-    ops.push({
-      id: opId([
-        "szch_cancel",
-        event.personId || event.fullName,
-        String(event.excelRow),
-      ]),
-      kind: "absent_close",
-      class: timesheetRow ? "ready" : "needs_input",
-      sheet: open ? "5. Тимчасово відсутні / 6. Табель" : "6. Табель",
-      personId: event.personId || open?.personId || "",
-      fullName: event.fullName || open?.fullName || "",
-      positionIndex: person?.positionIndex || open?.positionIndex || "",
-      rank: person?.rank || event.rank || open?.rank || "",
-      before: open
-        ? `СЗЧ відкрито з ${open.departDate || "?"}`
-        : "відкритого періоду СЗЧ у «Тимч. відсутні» немає",
-      after: `скасування СЗЧ / повернення ${returnDate}`,
-      sourceRef: `Рух!R${event.excelRow} СТАТУС=«${event.status}»`,
-      why: open
-        ? "Скасування СЗЧ закриває період тимчасової відсутності та відновлює «+» у Табелі"
-        : "Відкритого рядка СЗЧ немає: ШПО/ООС не змінюємо, відновлюємо «+» у Табелі",
-      confidence: timesheetRow ? "high" : "manual",
-      payload: {
-        excelRow: open ? String(open.excelRow) : "",
-        returnDate,
-        timesheetExcelRow: timesheetRow ? String(timesheetRow.excelRow) : "",
-        returnDay: returnDate,
-        movementNumber: event.movementNumber,
-        orderNumber: event.orderNumber,
-        orderDate: event.orderDate,
-      },
-      movementKey: createMovementKey(event),
-      checkedDefault: Boolean(timesheetRow),
-    });
-  }
-
+  const szchAbsent = planSzchAbsentCloseOps({
+    activeMovementsAll,
+    shPeople,
+    ejoosDays,
+    timesheetDayLabel,
+    openById,
+    openByName,
+    dayByIndex,
+    eventInLeadWindow,
+    activeTimesheetRowOf,
+  });
+  ops.push(...szchAbsent.ops);
+  const absenceRowsClosedByMovement = szchAbsent.absenceRowsClosedByMovement;
   // SHPO / Табель occupant identity from sh (by position index)
-  shPeople.forEach((person) => {
-    if (!person.positionIndex || !person.fullName) return;
-    const pendingPositionOp = ops.some(
-      (op) =>
-        op.kind === "position_change" &&
-        isSamePerson(person, op) &&
-        op.positionIndex === person.positionIndex &&
-        op.class === "ready",
-    );
-    const positionEvent = positionEventForShPerson(person);
-    const shpo = shpoByIndex.get(person.positionIndex);
-    const ts =
-      staffIndexTimesheetForPerson(
-        person.personId,
-        person.fullName,
-        person.positionIndex,
-      ) || dayByIndex.get(person.positionIndex);
-    if (!shpo && !ts) return;
+  ops.push(
+    ...planShpoOccupantOps({
+      shPeople,
+      existingOps: ops,
+      shpoByIndex,
+      dayByIndex,
+      arrivalById,
+      arrivalByName,
+      oosPersonById,
+      oosPersonByName,
+      positionEventForShPerson,
+      alreadyVacatedForAbsence,
+      byPersonName,
+      staffIndexTimesheetForPerson,
+      findLatestExcludedRow,
+      personStillInEjoos,
+      transferCancelForPerson,
+      staffEpisodePaintPayload,
+      isSamePerson,
+    }),
+  );
 
-    if (positionEvent || pendingPositionOp) return;
-    const inTempArrivals = Boolean(
-      (person.personId && arrivalById.get(person.personId)) ||
-      byPersonName(arrivalByName, person.personId, person.fullName),
-    );
-    if (
-      alreadyVacatedForAbsence(person.personId, person.fullName) &&
-      !inTempArrivals
-    ) {
-      return;
-    }
+  ops.push(
+    ...planAbsentCloseFromShOps({
+      shPeople,
+      archive,
+      openById,
+      openByName,
+      arrivalById,
+      arrivalByName,
+      absenceRowsClosedByMovement,
+      timesheetDayLabel,
+      mapStatus,
+      dateInLeadWindow,
+      alreadyVacatedForAbsence,
+      isSamePerson,
+      byPersonName,
+      activeTimesheetRowOf,
+      augustAbsenceSpansFor,
+    }),
+  );
+  ops.push(
+    ...planTimesheetDayFromShOps({
+      shPeople,
+      ejoosDays,
+      archiveAll,
+      timesheetDay,
+      timesheetDayLabel,
+      dayByIndex,
+      shpoByIndex,
+      timesheetScanByRow,
+      arrivalById,
+      arrivalByName,
+      mapStatus,
+      alreadyVacatedForAbsence,
+      positionEventForShPerson,
+      isSamePerson,
+      byPersonName,
+      timesheetRowsOf,
+      activeTimesheetRowOf,
+      augustAbsenceSpansFor,
+      staffEpisodePaintPayload,
+      findFalseHopExcludedRow,
+    }),
+  );
 
-    const beforeName = shpo?.fullName || (!shpo ? ts?.fullName : "") || "—";
-    const beforeRank = shpo?.rank || (!shpo ? ts?.rank : "") || "—";
-    const beforeId = shpo?.personId || (!shpo ? ts?.personId : "") || "—";
-    const afterName = person.fullName;
-    const afterRank = person.rank || "—";
-    const afterId = person.personId || "—";
-    const occupantOos =
-      (person.personId && oosPersonById.get(person.personId)) ||
-      byPersonName(oosPersonByName, person.personId, person.fullName) ||
-      null;
-    const occupantExcluded = occupantOos
-      ? null
-      : findLatestExcludedRow(person.personId, person.fullName);
 
-    const nameChanged = normKey(beforeName) !== normKey(afterName);
-    const rankChanged = normKey(beforeRank) !== normKey(afterRank);
-    const idChanged =
-      Boolean(person.personId) &&
-      beforeId !== "—" &&
-      beforeId !== person.personId;
-    const needsRestoreFromExcluded =
-      !personStillInEjoos(person.personId, person.fullName) &&
-      Boolean(
-        occupantExcluded ||
-        transferCancelForPerson(person.personId, person.fullName),
-      );
+  ops.push(
+    ...planAbsentArchiveOps({
+      archive,
+      ejoosAbsents,
+      openById,
+      openByName,
+      shPersonById,
+      shPersonByName,
+      absenceRowsClosedByMovement,
+      existingOps: ops,
+      mapStatus,
+      isSamePerson,
+      byPersonName,
+      laterArchivePeriodOf,
+      alreadyVacatedForAbsence,
+      inboundStaffPlacementThisMonth,
+      activeTimesheetRowOf,
+      staffEpisodePaintPayload,
+    }),
+  );
 
-    if (
-      !nameChanged &&
-      !rankChanged &&
-      !idChanged &&
-      !needsRestoreFromExcluded
-    ) {
-      return;
-    }
-    // Сама різниця у званні — не кадрова зміна зайнятості. Її показуємо
-    // як DATA_MISMATCH і не підставляємо звання з sh автоматично.
-    if (rankChanged && !nameChanged && !idChanged) return;
-
-    // Same index, different person ID → conflict (do not auto-apply)
-    if (idChanged && nameChanged) {
-      ops.push({
-        id: opId([
-          "shpo_conflict",
-          person.positionIndex,
-          person.personId || afterName,
-        ]),
-        kind: "shpo_occupant",
-        class: "conflict",
-        sheet: "1. ШПО / 6. Табель",
-        personId: person.personId,
-        fullName: person.fullName,
-        positionIndex: person.positionIndex,
-        rank: person.rank,
-        before: `${beforeRank} ${beforeName} (ID ${beforeId})`,
-        after: `${afterRank} ${afterName} (ID ${afterId})`,
-        sourceRef: `sh!R${person.excelRow} індекс ${person.positionIndex}`,
-        why: "На тому ж індексі посади інший ID/ПІБ — потрібна ручна перевірка перед зміною зайнятості",
-        confidence: "review",
-        payload: {
-          shpoExcelRow: shpo ? String(shpo.excelRow) : "",
-          timesheetExcelRow: ts ? String(ts.excelRow) : "",
-          nextName: afterName,
-          nextRank: afterRank,
-          nextPersonId: afterId,
-          excludedSourceExcelRow: occupantExcluded
-            ? String(occupantExcluded.excelRow)
-            : "",
-        },
-        checkedDefault: false,
-      });
-      return;
-    }
-
-    const episodePaint = staffEpisodePaintPayload(
-      person.personId,
-      person.fullName,
-      person.positionIndex,
-      ts?.excelRow || 0,
-    );
-    ops.push({
-      id: opId(["shpo", person.positionIndex, person.personId || afterName]),
-      kind: "shpo_occupant",
-      class: "ready",
-      sheet: "1. ШПО / 6. Табель",
-      personId: person.personId,
-      fullName: person.fullName,
-      positionIndex: person.positionIndex,
-      rank: person.rank,
-      before: `${beforeRank} ${beforeName} (ID ${beforeId})`,
-      after: `${afterRank} ${afterName} (ID ${afterId})`,
-      sourceRef: `sh!R${person.excelRow} індекс ${person.positionIndex}`,
-      why: needsRestoreFromExcluded
-        ? `Особа є в sh на ${person.positionIndex}, але в активних ШПО/ООС її немає. Відновити зайнятість${occupantExcluded ? ` і картку ООС з «Виключені» R${occupantExcluded.excelRow}` : ""}`
-        : "Зайнятість посади в ЕЖООС відрізняється від sh — оновити ПІБ/звання/ID",
-      confidence: "high",
-      payload: {
-        shpoExcelRow: shpo ? String(shpo.excelRow) : "",
-        timesheetExcelRow: ts ? String(ts.excelRow) : "",
-        nextName: afterName,
-        nextRank: afterRank,
-        nextPersonId: person.personId,
-        excludedSourceExcelRow: occupantExcluded
-          ? String(occupantExcluded.excelRow)
-          : "",
-        ...episodePaint,
-        timesheetActiveFrom:
-          episodePaint.timesheetActiveFrom ||
-          (needsRestoreFromExcluded
-            ? transferCancelForPerson(person.personId, person.fullName)
-                ?.orderDate || ""
-            : ""),
-        timesheetPreserveHistory: needsRestoreFromExcluded
-          ? "1"
-          : episodePaint.timesheetPreserveHistory,
-      },
-      checkedDefault: true,
-    });
-  });
-
-  shPeople.forEach((person) => {
-    if (!person.status || person.status === "0") return;
-    const hasPositionEvent = Boolean(positionEventForShPerson(person));
-    const inTempArrivals = Boolean(
-      (person.personId && arrivalById.get(person.personId)) ||
-      byPersonName(arrivalByName, person.personId, person.fullName),
-    );
-    if (
-      alreadyVacatedForAbsence(person.personId, person.fullName) &&
-      !inTempArrivals
-    ) {
-      return;
-    }
-    const mapped = mapStatus(person.status);
-
-    if (mapped.timesheetCode === "+") {
-      const open =
-        (person.personId && openById.get(person.personId)) ||
-        byPersonName(openByName, person.personId, person.fullName) ||
-        openByName.get(normKey(person.fullName)) ||
-        null;
-      const archiveReturn = archive.find(
-        (period) =>
-          isSamePerson(person, period) &&
-          hasActualReturn(period.returnDate) &&
-          (canonicalName(period.absenceType) ===
-            canonicalName(open?.ground || "") ||
-            !open?.ground),
-      );
-      if (
-        open &&
-        !absenceRowsClosedByMovement.has(open.excelRow) &&
-        (dateInLeadWindow(open.departDate) ||
-          (archiveReturn && dateInLeadWindow(archiveReturn.returnDate)))
-      ) {
-        const returnDate = archiveReturn?.returnDate || timesheetDayLabel;
-        const returnOrder = [
-          archiveReturn?.returnOrderDate,
-          archiveReturn?.returnOrderNumber,
-        ]
-          .filter(Boolean)
-          .join(" ");
-        ops.push({
-          id: opId([
-            "absent_close",
-            open.personId || open.fullName,
-            String(open.excelRow),
-          ]),
-          kind: "absent_close",
-          class: "ready",
-          sheet: "5. Тимчасово відсутні",
-          personId: person.personId || open.personId,
-          fullName: person.fullName || open.fullName,
-          positionIndex: person.positionIndex || open.positionIndex,
-          rank: person.rank,
-          before: `відкрито: ${open.ground || "—"} з ${open.departDate || "?"} → ${open.place || "?"}`,
-          after: returnOrder
-            ? `фактичне прибуття: ${returnDate} · ${returnOrder}`
-            : `фактичне прибуття: ${returnDate}`,
-          sourceRef: archiveReturn
-            ? `archive!R${archiveReturn.excelRow} → повернення ${returnDate}`
-            : `sh!R${person.excelRow} → В СТРОЮ; ЕЖООС sheet5 R${open.excelRow}`,
-          why: archiveReturn
-            ? "У archive є фактичне повернення — закриваємо «Тимч. відсутні» цією датою і наказом, не днем зрізу sh"
-            : "У 1ПБ знову «в строю», а в «Тимч. відсутні» період ще відкритий",
-          confidence: "high",
-          payload: {
-            excelRow: String(open.excelRow),
-            returnDate,
-            returnOrderNumber: archiveReturn?.returnOrderNumber || "",
-            returnOrderDate: archiveReturn?.returnOrderDate || "",
-            timesheetExcelRow: String(
-              activeTimesheetRowOf(
-                person.personId,
-                person.fullName,
-                person.positionIndex,
-              )?.excelRow || "",
-            ),
-            returnDay: returnDate,
-            timesheetAbsenceSpans: encodeTimesheetAbsenceSpans(
-              augustAbsenceSpansFor(person.personId, person.fullName),
-            ),
-            timesheetActiveFrom: "",
-            timesheetSkipHistory: "1",
-          },
-          checkedDefault: true,
-        });
-        absenceRowsClosedByMovement.add(open.excelRow);
-      }
-    }
-
-    // Постановку на штат фарбує position_change; окремий timesheet_day тут
-    // лише дублює і може зіпсувати коди СЗЧ на початку місяця.
-    if (hasPositionEvent) return;
-    const archiveControlsReportDay = augustAbsenceSpansFor(
-      person.personId,
-      person.fullName,
-    ).some(
-      (span) =>
-        Boolean(span.code) &&
-        span.fromDay <= timesheetDay &&
-        span.toDay >= timesheetDay,
-    );
-    // Archive is the chronological authority for an active absence. Its
-    // dedicated paint pass below handles the whole period; a second sh-based
-    // day operation would either duplicate it or ask for a manual code.
-    if (archiveControlsReportDay) return;
-    const personTimesheetScan =
-      timesheetRowsOf(person.personId, person.fullName).find(
-        (row) => !row.hasDepartureText,
-      ) || timesheetRowsOf(person.personId, person.fullName)[0];
-    const personTimesheet =
-      activeTimesheetRowOf(
-        person.personId,
-        person.fullName,
-        person.positionIndex,
-      ) ||
-      (personTimesheetScan
-        ? ejoosDays.find(
-            (row) => row.excelRow === personTimesheetScan.excelRow,
-          ) || {
-            excelRow: personTimesheetScan.excelRow,
-            personId: personTimesheetScan.personId,
-            fullName: personTimesheetScan.fullName,
-            rank: personTimesheetScan.rank,
-            positionIndex: personTimesheetScan.positionIndex,
-            dayValue: String(
-              personTimesheetScan.dayCodes[timesheetDay] || "",
-            ).trim(),
-          }
-        : null);
-    const indexTimesheet = person.positionIndex
-      ? (dayByIndex.get(person.positionIndex) ?? null)
-      : null;
-    const timesheetRow = personTimesheet || indexTimesheet;
-    const timesheetScan = timesheetRow
-      ? timesheetScanByRow.get(timesheetRow.excelRow)
-      : undefined;
-    const confirmedReturn = archiveAll.some(
-      (period) =>
-        isSamePerson(person, period) && hasActualReturn(period.returnDate),
-    );
-    const before = personTimesheet?.dayValue || "—";
-    const afterCode = mapped.timesheetCode;
-    const horizonFills = timesheetHorizonFillDays({
-      dayCodes: timesheetScan?.dayCodes ?? [],
-      horizon: timesheetDay,
-      reportCode: afterCode || "+",
-      confirmedReturn,
-    });
-    const continuedMark =
-      horizonFills.find((item) => item.day === timesheetDay)?.mark || "";
-    const onMatchingShpo = Boolean(
-      person.positionIndex &&
-      shpoByIndex.get(person.positionIndex) &&
-      isSamePerson(person, shpoByIndex.get(person.positionIndex)!),
-    );
-    const indexTakenByOther = Boolean(
-      indexTimesheet &&
-      (indexTimesheet.personId || indexTimesheet.fullName) &&
-      !isSamePerson(person, indexTimesheet),
-    );
-    const missingFromTimesheet =
-      !personTimesheet && onMatchingShpo && mapped.timesheetCode === "+";
-    if (missingFromTimesheet) {
-      const restorePaint = staffEpisodePaintPayload(
-        person.personId,
-        person.fullName,
-        person.positionIndex,
-        indexTimesheet?.excelRow || 0,
-      );
-      ops.push({
-        id: opId(["ts_restore", person.personId || person.positionIndex]),
-        kind: "timesheet_day",
-        class: "needs_input",
-        sheet: "6. Табель",
-        personId: person.personId,
-        fullName: person.fullName,
-        positionIndex: person.positionIndex,
-        rank: person.rank,
-        before: "немає в Табелі",
-        after: `відновити на ${person.positionIndex}${
-          indexTakenByOther ? " — рядок зайнятий іншою особою" : ""
-        }`,
-        sourceRef: `sh!R${person.excelRow} СТАТУС=«${person.status}» · ШПО інд. ${person.positionIndex}`,
-        why: indexTakenByOther
-          ? "У ШПО особа є і в строю, але рядок Табеля на цьому індексі зайнятий іншою людиною — не перезаписуємо автоматично"
-          : "У ШПО особа вже стоїть на актуальній посаді і в строю, а в Табелі її немає. Кадровий рух не проводимо — лише відновити рядок Табеля після перевірки",
-        confidence: "review",
-        payload: {
-          type: "PAINT_ARCHIVE",
-          timesheetCode: afterCode || "+",
-          day: String(timesheetDay),
-          excelRow:
-            !indexTakenByOther && indexTimesheet
-              ? String(indexTimesheet.excelRow)
-              : "",
-          statusRaw: person.status,
-          restorePerson: "1",
-          nextName: person.fullName,
-          nextPersonId: person.personId,
-          nextRank: shpoByIndex.get(person.positionIndex)?.rank || "",
-          timesheetActiveFrom: restorePaint.timesheetActiveFrom,
-          timesheetPreserveHistory: restorePaint.timesheetPreserveHistory,
-          timesheetAbsenceSpans: restorePaint.timesheetAbsenceSpans,
-          historyTimesheetExcelRow: restorePaint.historyTimesheetExcelRow,
-          historyTimesheetAbsenceSpans:
-            restorePaint.historyTimesheetAbsenceSpans,
-          timesheetSkipHistory: "1",
-        },
-        checkedDefault: false,
-      });
-    }
-
-    if (!missingFromTimesheet && afterCode) {
-      const after =
-        afterCode === "+" && continuedMark && continuedMark !== "+"
-          ? continuedMark
-          : afterCode;
-      const needsHorizonFill = horizonFills.length > 0;
-      const falseHopExcluded = findFalseHopExcludedRow(
-        person.personId,
-        person.fullName,
-      );
-      if (before !== after || needsHorizonFill || falseHopExcluded) {
-        const isReady = mapped.confidence === "high" && Boolean(timesheetRow);
-        const fillingGaps =
-          needsHorizonFill &&
-          (before === after ||
-            before === "—" ||
-            !String(before || "").trim() ||
-            (after === "+" && before === "+"));
-        ops.push({
-          id: opId([
-            "ts",
-            person.personId || person.positionIndex,
-            String(timesheetDay),
-            after,
-          ]),
-          kind: "timesheet_day",
-          class: !timesheetRow
-            ? "needs_input"
-            : mapped.confidence === "manual"
-              ? "needs_input"
-              : mapped.confidence === "review"
-                ? "conflict"
-                : "ready",
-          sheet: falseHopExcluded ? "6. Табель / 3. Виключені" : "6. Табель",
-          personId: person.personId,
-          fullName: person.fullName,
-          positionIndex: person.positionIndex,
-          rank: person.rank,
-          before,
-          after,
-          sourceRef: `sh!R${person.excelRow} СТАТУС=«${person.status}»`,
-          why: falseHopExcluded
-            ? `Внутрішня ПОСАДА 1ПБ не є вибуттям — прибрати хибний рядок Виключені R${falseHopExcluded.excelRow}${
-                before !== after ? `; Табель ${before} → ${after}` : ""
-              }`
-            : fillingGaps
-              ? `У Табелі порожні дні до зрізу ${timesheetDayLabel} — продовжуємо «${after}», не лише день ${timesheetDay}`
-              : isTimesheetAbsenceCode(after) && afterCode === "+"
-                ? `Відкритий «${after}» без фактичного прибуття — лишаємо той самий статус по ${timesheetDayLabel}`
-                : mapped.reason,
-          confidence: mapped.confidence,
-          payload: {
-            timesheetCode: after,
-            day: String(timesheetDay),
-            excelRow: timesheetRow ? String(timesheetRow.excelRow) : "",
-            statusRaw: person.status,
-            confirmedReturn: confirmedReturn ? "1" : "",
-            clearExcludedExcelRow: falseHopExcluded
-              ? String(falseHopExcluded.excelRow)
-              : "",
-          },
-          checkedDefault: isReady,
-        });
-      }
-    } else if (
-      !missingFromTimesheet &&
-      mapped.confidence !== "high" &&
-      mapped.ruleId !== "absent_archive"
-    ) {
-      const alreadyPresent = before === "+";
-      const continueAbsence =
-        continuedMark &&
-        continuedMark !== "+" &&
-        isTimesheetAbsenceCode(continuedMark);
-      const defaultsToPresent =
-        Boolean(timesheetRow) &&
-        !continueAbsence &&
-        (before === "—" || alreadyPresent);
-      if (continueAbsence) {
-        ops.push({
-          id: opId([
-            "ts_continue",
-            person.personId || person.fullName,
-            continuedMark,
-          ]),
-          kind: "timesheet_day",
-          class: "ready",
-          sheet: "6. Табель",
-          personId: person.personId,
-          fullName: person.fullName,
-          positionIndex: person.positionIndex,
-          rank: person.rank,
-          before,
-          after: continuedMark,
-          sourceRef: `sh!R${person.excelRow} СТАТУС=«${person.status}»`,
-          why: `Відкритий «${continuedMark}» без прибуття — продовжуємо по ${timesheetDayLabel}, не ставимо «+»`,
-          confidence: "high",
-          payload: {
-            day: String(timesheetDay),
-            excelRow: timesheetRow ? String(timesheetRow.excelRow) : "",
-            statusRaw: person.status,
-            timesheetCode: continuedMark,
-          },
-          checkedDefault: true,
-        });
-      } else if (horizonFills.length && alreadyPresent) {
-        ops.push({
-          id: opId([
-            "ts_fill",
-            person.personId || person.fullName,
-            String(timesheetDay),
-          ]),
-          kind: "timesheet_day",
-          class: "ready",
-          sheet: "6. Табель",
-          personId: person.personId,
-          fullName: person.fullName,
-          positionIndex: person.positionIndex,
-          rank: person.rank,
-          before,
-          after: "+",
-          sourceRef: `sh!R${person.excelRow} СТАТУС=«${person.status}»`,
-          why: `У Табелі порожні дні до зрізу ${timesheetDayLabel} — добиваємо «+»`,
-          confidence: "high",
-          payload: {
-            day: String(timesheetDay),
-            excelRow: timesheetRow ? String(timesheetRow.excelRow) : "",
-            statusRaw: person.status,
-            timesheetCode: "+",
-          },
-          checkedDefault: true,
-        });
-      } else if (!alreadyPresent) {
-        ops.push({
-          id: opId([
-            "ts_manual",
-            person.personId || person.fullName,
-            person.status,
-          ]),
-          kind: "timesheet_day",
-          class: defaultsToPresent ? "ready" : "needs_input",
-          sheet: "6. Табель",
-          personId: person.personId,
-          fullName: person.fullName,
-          positionIndex: person.positionIndex,
-          rank: person.rank,
-          before,
-          after: defaultsToPresent ? "+" : "(оберіть код)",
-          sourceRef: `sh!R${person.excelRow} СТАТУС=«${person.status}»`,
-          why: defaultsToPresent
-            ? "У Табелі за поточний день порожньо — за замовчуванням ставимо «+»"
-            : mapped.reason,
-          confidence: defaultsToPresent ? "high" : "manual",
-          payload: {
-            day: String(timesheetDay),
-            excelRow: timesheetRow ? String(timesheetRow.excelRow) : "",
-            statusRaw: person.status,
-            timesheetCode: defaultsToPresent ? "+" : "",
-          },
-          checkedDefault: defaultsToPresent,
-        });
-      }
-    }
-  });
-
-  archive.forEach((period) => {
-    const open =
-      (period.personId && openById.get(period.personId)) ||
-      byPersonName(openByName, period.personId, period.fullName) ||
-      openByName.get(normKey(period.fullName)) ||
-      null;
-    const sameAbsentPeriod = (row: EjoosAbsentRow) => {
-      if (!isSamePerson(period, row)) return false;
-      const sameKind =
-        canonicalName(row.ground) === canonicalName(period.absenceType) ||
-        (isDispositionAbsenceStatus(row.ground) &&
-          isDispositionAbsenceStatus(period.absenceType));
-      const sameDepart =
-        Boolean(dateMs(row.departDate)) &&
-        dateMs(row.departDate) === dateMs(period.departDate);
-      return sameKind && (sameDepart || !row.departDate);
-    };
-    const recorded = ejoosAbsents.find(sameAbsentPeriod) ?? null;
-    const reuseAbsent =
-      recorded || (open && sameAbsentPeriod(open) ? open : null);
-    if (
-      recorded?.actualReturn &&
-      dateMs(recorded.actualReturn) === dateMs(period.returnDate)
-    ) {
-      return;
-    }
-    const complete = Boolean(
-      period.absenceType && (period.departDate || period.plannedReturn),
-    );
-    const before = reuseAbsent
-      ? `${reuseAbsent.ground} / ${reuseAbsent.place} / ${reuseAbsent.departDate}`
-      : "(немає запису в «Тимч. відсутні»)";
-    const returnOrderText = [
-      period.returnOrderDate,
-      period.returnOrderNumber
-        ? `№${period.returnOrderNumber.replace(/^№/i, "")}`
-        : "",
-    ]
-      .filter(Boolean)
-      .join(" ");
-    const after = [
-      `${period.absenceType || "?"} → ${period.place || "?"} з ${period.departDate || "?"}`,
-      period.returnDate
-        ? `повернення ${period.returnDate}${returnOrderText ? ` · ${returnOrderText}` : ""}`
-        : "",
-    ]
-      .filter(Boolean)
-      .join(" · ");
-    const needsClose =
-      hasActualReturn(period.returnDate) &&
-      Boolean(reuseAbsent) &&
-      dateMs(reuseAbsent?.actualReturn || "") !== dateMs(period.returnDate);
-    // Відкритий період тієї ж особи (по ID) уже є — різниця в по батькові
-    // або в форматі рядка не є новою кадровою подією.
-    const sameAbsenceKind =
-      open &&
-      (canonicalName(open.ground) === canonicalName(period.absenceType) ||
-        (isDispositionAbsenceStatus(open.ground) &&
-          isDispositionAbsenceStatus(period.absenceType)));
-    const newerDifferentAbsence =
-      open &&
-      !sameAbsenceKind &&
-      !hasActualReturn(open.actualReturn) &&
-      Boolean(dateMs(open.departDate)) &&
-      Boolean(dateMs(period.departDate)) &&
-      dateMs(period.departDate) > dateMs(open.departDate);
-    if (
-      newerDifferentAbsence &&
-      !absenceRowsClosedByMovement.has(open.excelRow) &&
-      !ops.some(
-        (op) =>
-          op.kind === "absent_close" &&
-          Number(op.payload.excelRow || 0) === open.excelRow,
-      )
-    ) {
-      ops.push({
-        id: opId([
-          "close-superseded-absence",
-          period.personId || period.fullName,
-          String(open.excelRow),
-          period.departDate,
-        ]),
-        kind: "absent_close",
-        class: "ready",
-        sheet: "5. Тимчасово відсутні",
-        personId: period.personId || open.personId,
-        fullName: period.fullName || open.fullName,
-        positionIndex: open.positionIndex,
-        rank: period.rank || open.rank,
-        before: `${open.ground} з ${open.departDate || "?"} ще відкритий`,
-        after: `закрити ${period.departDate} — далі ${period.absenceType || "інший період"}`,
-        sourceRef: `archive!R${period.excelRow} · «Тимч. відсутні» R${open.excelRow}`,
-        why: `Новий archive-період «${period.absenceType || "відсутність"}» починається ${period.departDate}; попередній «${open.ground || "період"}» не може залишатися відкритим паралельно.`,
-        confidence: "high",
-        payload: {
-          type: "CLOSE_SUPERSEDED_OPEN_ABSENCE",
-          excelRow: String(open.excelRow),
-          returnDate: period.departDate,
-          returnDay: period.departDate,
-          timesheetSkipHistory: "1",
-        },
-        checkedDefault: true,
-      });
-    }
-    if (sameAbsenceKind && !hasActualReturn(period.returnDate)) {
-      const later = laterArchivePeriodOf(period);
-      const shNow =
-        (period.personId && shPersonById.get(period.personId)) ||
-        byPersonName(shPersonByName, period.personId, period.fullName) ||
-        null;
-      const shPresent =
-        Boolean(shNow) && mapStatus(shNow!.status).timesheetCode === "+";
-      const openRow = reuseAbsent || open;
-      if (
-        later &&
-        shPresent &&
-        openRow &&
-        !hasActualReturn(openRow.actualReturn)
-      ) {
-        ops.push({
-          id: opId([
-            "close-stale-abs",
-            period.personId || period.fullName,
-            String(openRow.excelRow),
-          ]),
-          kind: "absent_close",
-          class: "ready",
-          sheet: "5. Тимчасово відсутні",
-          personId: period.personId || openRow.personId,
-          fullName: period.fullName || openRow.fullName,
-          positionIndex: shNow?.positionIndex || openRow.positionIndex,
-          rank: shNow?.rank || period.rank || openRow.rank,
-          before: `${openRow.ground} з ${openRow.departDate || "?"} ще відкритий`,
-          after: `закрити ${later.departDate} — далі вже ${later.absenceType || "інший період"}`,
-          sourceRef: `archive!R${period.excelRow} · «Тимч. відсутні» R${openRow.excelRow}`,
-          why: `Старий відкритий «${openRow.ground}» перекритий пізнішим періодом ${later.absenceType || ""} з ${later.departDate}. У sh особа в строю — лікування в Табелі після відпустки не продовжуємо.`,
-          confidence: "high",
-          payload: {
-            type: "CLOSE_SUPERSEDED_OPEN_ABSENCE",
-            excelRow: String(openRow.excelRow),
-            returnDate: later.departDate,
-            returnDay: later.departDate,
-            timesheetSkipHistory: "1",
-          },
-          checkedDefault: true,
-        });
-      }
-      return;
-    }
-    if (reuseAbsent && absenceRowsClosedByMovement.has(reuseAbsent.excelRow)) {
-      return;
-    }
-    if (
-      alreadyVacatedForAbsence(period.personId, period.fullName) &&
-      open &&
-      !inboundStaffPlacementThisMonth(period.personId, period.fullName)
-    ) {
-      return;
-    }
-    if (open && before === after) return;
-    if (recorded && !hasActualReturn(period.returnDate)) return;
-    const shPerson =
-      (period.personId && shPersonById.get(period.personId)) ||
-      byPersonName(shPersonByName, period.personId, period.fullName) ||
-      null;
-    const archiveReturnVsSh = archiveReturnContradictsCurrentSh(
-      shPerson ? mapStatus(shPerson.status).timesheetCode : "",
-      mapStatus(period.absenceType).timesheetCode,
-      hasActualReturn(period.returnDate),
-    );
-    if (archiveReturnVsSh) {
-      ops.push({
-        id: opId([
-          "archive_sh_return",
-          period.personId || period.fullName,
-          String(period.excelRow),
-        ]),
-        kind: "absent_upsert",
-        class: "needs_input",
-        sheet: "5. Тимч. відсутні / archive vs sh",
-        personId: shPerson?.personId || period.personId,
-        fullName: shPerson?.fullName || period.fullName,
-        positionIndex: shPerson?.positionIndex || "",
-        rank: period.rank,
-        before,
-        after: `archive: повернення ${period.returnDate}; sh досі ${shPerson?.status || period.absenceType}`,
-        sourceRef: `archive!R${period.excelRow} · sh`,
-        why: `NEEDS_REVIEW: archive вже має повернення ${period.returnDate}, а поточний sh досі ${shPerson?.status || "відсутній"}. Не закриваємо період і не тягнемо СЗЧ/ЗБ до дня звіту — перевірте, що саме застаріло.`,
-        confidence: "manual",
-        payload: {
-          mismatchKind: "ARCHIVE_RETURN_SH_STILL_ABSENT",
-          absenceType: period.absenceType,
-          place: period.place,
-          departDate: period.departDate,
-          returnDate: period.returnDate,
-          statusRaw: shPerson?.status || "",
-          existingExcelRow: reuseAbsent ? String(reuseAbsent.excelRow) : "",
-        },
-        checkedDefault: false,
-      });
-      return;
-    }
-    const activeTs = activeTimesheetRowOf(
-      period.personId,
-      period.fullName,
-      shPerson?.positionIndex || "",
-    );
-    const episodePaint = staffEpisodePaintPayload(
-      period.personId,
-      period.fullName,
-      shPerson?.positionIndex || "",
-      activeTs?.excelRow || 0,
-    );
-    const returnOrderNo = period.returnOrderNumber
-      ? `№${period.returnOrderNumber.replace(/^№/i, "")}`
-      : "";
-
-    ops.push({
-      id: opId([
-        "absent_up",
-        period.personId || period.fullName,
-        period.periodNumber || String(period.excelRow),
-      ]),
-      kind: "absent_upsert",
-      class: complete ? "ready" : "needs_input",
-      sheet: "5. Тимчасово відсутні",
-      personId: shPerson?.personId || period.personId,
-      fullName: shPerson?.fullName || period.fullName,
-      positionIndex: shPerson?.positionIndex || "",
-      rank: period.rank,
-      before,
-      after,
-      sourceRef: `archive!R${period.excelRow} №${period.periodNumber || "—"}`,
-      why: complete
-        ? period.returnDate
-          ? `Закрити період ${period.absenceType || "відсутності"} фактичним поверненням ${period.returnDate}${returnOrderNo ? ` ${returnOrderNo}` : ""}. Коди відсутності — у «Тимч. відсутні»${episodePaint.historyTimesheetExcelRow ? " і на історичному рядку Табеля" : ""}, не на новому штатному епізоді.`
-          : "Відкритий період цього місяця з archive — внести у «Тимч. відсутні»"
-        : "В archive неповні поля (дата/підстава) — дозаповніть перед застосуванням",
-      confidence: complete ? "high" : "manual",
-      payload: {
-        absenceType: period.absenceType,
-        place: period.place,
-        departDate: period.departDate,
-        orderNumber: period.orderNumber,
-        orderDate: period.orderDate,
-        plannedReturn: period.plannedReturn || "?",
-        returnDate: period.returnDate,
-        returnOrderNumber: period.returnOrderNumber,
-        returnOrderDate: period.returnOrderDate,
-        periodNumber: period.periodNumber,
-        positionTitle: period.positionTitle,
-        timesheetExcelRow: activeTs ? String(activeTs.excelRow) : "",
-        timesheetSkipHistory: "1",
-        ...episodePaint,
-        historyDepartDate: "",
-        historyOrderNumber: "",
-        historyDepartDest: "",
-        timesheetCode:
-          dateMs(period.departDate) &&
-          dateMs(period.returnDate) &&
-          dateMs(period.returnDate) <= dateMs(period.departDate)
-            ? ""
-            : mapStatus(period.absenceType).timesheetCode || "",
-        existingExcelRow: reuseAbsent ? String(reuseAbsent.excelRow) : "",
-      },
-      checkedDefault: complete && (!reuseAbsent || needsClose),
-    });
-  });
-
-  for (const row of ejoosAbsents.filter((item) => !item.actualReturn)) {
-    if (absenceRowsClosedByMovement.has(row.excelRow)) continue;
-    if (
-      ops.some(
-        (op) =>
-          op.kind === "absent_close" &&
-          Number(op.payload.excelRow || 0) === row.excelRow,
-      )
-    ) {
-      continue;
-    }
-    const shNow =
-      (row.personId && shPersonById.get(row.personId)) ||
-      byPersonName(shPersonByName, row.personId, row.fullName) ||
-      null;
-    if (!shNow || mapStatus(shNow.status).timesheetCode !== "+") continue;
-    const later = laterArchivePeriodOf({
-      personId: row.personId,
-      fullName: row.fullName,
-      departDate: row.departDate,
-    });
-    if (!later) continue;
-    ops.push({
-      id: opId([
-        "close-stale-abs",
-        row.personId || row.fullName,
-        String(row.excelRow),
-      ]),
-      kind: "absent_close",
-      class: "ready",
-      sheet: "5. Тимчасово відсутні",
-      personId: row.personId || shNow.personId,
-      fullName: row.fullName || shNow.fullName,
-      positionIndex: shNow.positionIndex || row.positionIndex,
-      rank: shNow.rank || row.rank,
-      before: `${row.ground} з ${row.departDate || "?"} ще відкритий`,
-      after: `закрити ${later.departDate} — далі вже ${later.absenceType || "інший період"}`,
-      sourceRef: `«Тимч. відсутні» R${row.excelRow} · archive далі ${later.absenceType || ""}`,
-      why: `Старий відкритий «${row.ground}» перекритий пізнішим періодом ${later.absenceType || ""} з ${later.departDate}. У sh особа в строю — після відпустки в Табелі має бути «+», не «лік».`,
-      confidence: "high",
-      payload: {
-        type: "CLOSE_SUPERSEDED_OPEN_ABSENCE",
-        excelRow: String(row.excelRow),
-        returnDate: later.departDate,
-        returnDay: later.departDate,
-        timesheetSkipHistory: "1",
-      },
-      checkedDefault: true,
-    });
-  }
-
-  const timesheetAlreadyPainted = (personId: string, fullName: string) =>
-    ops.some(
-      (op) =>
-        isSamePerson({ personId, fullName }, op) &&
-        Boolean(
-          op.payload.timesheetAbsenceSpans ||
-          op.payload.timesheetActiveFrom ||
-          op.payload.restoreTimesheet === "1",
-        ),
-    );
-  for (const person of shPeople) {
-    if (!personStillInSh(person.personId, person.fullName)) continue;
-    if (positionEventForShPerson(person)) continue;
-    if (timesheetAlreadyPainted(person.personId, person.fullName)) continue;
-    if (
-      ops.some(
-        (op) =>
-          op.payload.mismatchKind === "ARCHIVE_RETURN_SH_STILL_ABSENT" &&
-          isSamePerson(person, op),
-      )
-    ) {
-      continue;
-    }
-    const spans = augustAbsenceSpansFor(person.personId, person.fullName);
-    const appointmentDate = staffAppointmentDateFor(
-      person.personId,
-      person.fullName,
-      person.positionIndex,
-    );
-    const inboundDate = inboundStaffDateFor(person.personId, person.fullName);
-    const active = activeTimesheetRowOf(
-      person.personId,
-      person.fullName,
-      person.positionIndex,
-    );
-    if (!active) continue;
-    const episodePaint = staffEpisodePaintPayload(
-      person.personId,
-      person.fullName,
-      person.positionIndex,
-      active.excelRow,
-    );
-    const activeFromLabel =
-      episodePaint.timesheetActiveFrom || appointmentDate || inboundDate || "";
-    let activeFromDay =
-      journalDayFromDateMs(dateMs(activeFromLabel), leadWindowStart) || 1;
-    const scan = timesheetScanByRow.get(active.excelRow);
-    if (
-      scan?.hasDepartureText &&
-      !scan.plusDays.some((day) => day >= Math.max(1, activeFromDay))
-    ) {
-      continue;
-    }
-    // Якщо дату постановки з РУХ не взяли, а рядок уже «−» потім «+», і СЗЧ
-    // закінчився до першого «+» — це той самий штатний епізод, не фарбуємо СЗЧ.
-    if (activeFromDay <= 1 && scan?.plusDays.length) {
-      const firstPlus = Math.min(...scan.plusDays);
-      const absenceEndedBeforePlus =
-        spans.length > 0 &&
-        firstPlus > 1 &&
-        spans.every((span) => span.toDay < firstPlus);
-      const prefixInactive =
-        firstPlus > 1 &&
-        Array.from({ length: firstPlus - 1 }, (_, index) => index + 1).every(
-          (day) => {
-            const actual = (scan.dayCodes[day] || "").trim();
-            return (
-              !actual || actual === "вибув" || sameTimesheetDayMark(actual, "-")
-            );
-          },
-        );
-      if (absenceEndedBeforePlus && prefixInactive) {
-        activeFromDay = firstPlus;
-      }
-    }
-    const episodeSpans =
-      activeFromDay > 1
-        ? clipAbsenceSpansToActiveEpisode(spans, activeFromDay)
-        : spans;
-    const firstPlusDay = scan?.plusDays.length ? Math.min(...scan.plusDays) : 0;
-    const falseInactivePrefix =
-      activeFromDay <= 1 &&
-      !spans.length &&
-      firstPlusDay > 1 &&
-      Array.from({ length: firstPlusDay - 1 }, (_, index) => index + 1).some(
-        (day) => sameTimesheetDayMark(scan?.dayCodes[day] || "", "-"),
-      );
-    if (
-      !episodeSpans.length &&
-      activeFromDay <= 1 &&
-      !spans.length &&
-      !falseInactivePrefix
-    ) {
-      continue;
-    }
-    let mismatch = false;
-    for (let day = 1; day <= timesheetDay; day += 1) {
-      const expected = timesheetMarkFromArchive(day, {
-        activeFromDay,
-        lastDay: timesheetDay,
-        spans: episodeSpans,
-        fillBeforeActive: activeFromDay > 1,
-      });
-      if (!expected) continue;
-      const actual = (scan?.dayCodes[day] || "").trim();
-      if (actual === "вибув") continue;
-      if (sameTimesheetDayMark(actual, expected)) continue;
-      mismatch = true;
-      break;
-    }
-    if (!mismatch) continue;
-    ops.push({
-      id: opId(["ts_archive", person.personId || person.fullName]),
-      kind: "timesheet_day",
-      class: "ready",
-      sheet: "6. Табель",
-      personId: person.personId,
-      fullName: person.fullName,
-      positionIndex: person.positionIndex,
-      rank: person.rank,
-      before: "позначки днів не збігаються з archive",
-      after:
-        activeFromDay > 1
-          ? `штатний рядок з ${activeFromLabel}: до постановки «-», далі «+»`
-          : episodeSpans.length
-            ? `фактичні коди з archive (${episodeSpans.map((span) => `${span.fromDay}–${span.toDay}:${span.code}`).join(", ")})`
-            : `активний рядок з ${activeFromLabel}`,
-      sourceRef: `archive + sh · Табель R${active.excelRow}`,
-      why:
-        activeFromDay > 1
-          ? "Новий штатний епізод: коди відсутності на цей рядок не переносимо. СЗЧ лишається в «Тимч. відсутні» та на історичному рядку Табеля, якщо він є."
-          : "Табель ведемо за фактичною хронологією archive, не з РУХ. Історичний рядок з вибуттям не перераховуємо.",
-      confidence: "high",
-      payload: {
-        type: "PAINT_ARCHIVE",
-        excelRow: String(active.excelRow),
-        ...episodePaint,
-        timesheetActiveFrom:
-          episodePaint.timesheetActiveFrom || activeFromLabel,
-        timesheetAbsenceSpans: encodeTimesheetAbsenceSpans(episodeSpans),
-        timesheetPreserveHistory:
-          activeFromDay > 1 ? "1" : episodePaint.timesheetPreserveHistory,
-        historyDepartDate: "",
-        historyOrderNumber: "",
-        historyDepartDest: "",
-      },
-      checkedDefault: true,
-    });
-  }
+  ops.push(
+    ...planTimesheetDayFromArchiveOps({
+      shPeople,
+      existingOps: ops,
+      timesheetDay,
+      leadWindowStart,
+      timesheetScanByRow,
+      personStillInSh,
+      positionEventForShPerson,
+      isSamePerson,
+      augustAbsenceSpansFor,
+      staffAppointmentDateFor,
+      inboundStaffDateFor,
+      activeTimesheetRowOf,
+      staffEpisodePaintPayload,
+    }),
+  );
 
   const seenTransferCancelReview = new Set<string>();
   for (const event of movementsAll) {
@@ -3935,166 +2295,29 @@ export const buildEjoosSyncPlan = (
   const staleMovementCutoff = reportDate ? reportDate - 90 * 86400000 : 0;
 
   const pendingRankByPerson = new Map<string, EjoosSyncOp>();
-  const latestRankEventByPerson = new Map<string, PbMovement>();
-  for (const event of activeMovementsAll) {
-    if (!isRankAssignmentEvent(event) || !eventInLeadWindow(event)) continue;
-    const key = movementPersonKey(event);
-    if (!key) continue;
-    const previous = latestRankEventByPerson.get(key);
-    if (
-      !previous ||
-      movementEventTime(event) > movementEventTime(previous) ||
-      (movementEventTime(event) === movementEventTime(previous) &&
-        event.excelRow > previous.excelRow)
-    ) {
-      latestRankEventByPerson.set(key, event);
-    }
+  let latestRankEventByPerson = new Map<string, PbMovement>();
+  const rankAndContract = planRankAndContractOps({
+    activeMovementsAll,
+    ejoosDays,
+    eventInLeadWindow,
+    movementPersonKey,
+    movementEventTime,
+    personStillInEjoos,
+    isSamePerson,
+    byPersonName,
+    shpoPersonById,
+    shpoPersonByName,
+    oosPersonById,
+    oosPersonByName,
+    dayById,
+    staffIndexTimesheetForPerson,
+    isContractMovementType,
+  });
+  ops.push(...rankAndContract.ops);
+  for (const [key, value] of rankAndContract.pendingRankByPerson) {
+    pendingRankByPerson.set(key, value);
   }
-  for (const event of latestRankEventByPerson.values()) {
-    if (!personStillInEjoos(event.personId, event.fullName)) continue;
-    const { previousRank, nextRank } = parseRankPromotion(event);
-    if (!nextRank) continue;
-    const shpo =
-      (event.personId && shpoPersonById.get(event.personId)) ||
-      byPersonName(shpoPersonByName, event.personId, event.fullName) ||
-      null;
-    const oos =
-      (event.personId && oosPersonById.get(event.personId)) ||
-      byPersonName(oosPersonByName, event.personId, event.fullName) ||
-      null;
-    const ts =
-      staffIndexTimesheetForPerson(
-        event.personId,
-        event.fullName,
-        shpo?.positionIndex || "",
-      ) ||
-      (event.personId && dayById.get(event.personId)) ||
-      ejoosDays.find((row) => isSamePerson(event, row)) ||
-      null;
-    const currentRank = oos?.rank || shpo?.rank || ts?.rank || "";
-    if (currentRank && normKey(currentRank) === normKey(nextRank)) continue;
-    const canApply = Boolean(
-      event.orderNumber && event.orderDate && (shpo || oos || ts),
-    );
-    const rankOp: EjoosSyncOp = {
-      id: opId([
-        "rank",
-        event.personId || event.fullName,
-        event.orderNumber || String(event.excelRow),
-      ]),
-      kind: "rank_change",
-      class: canApply ? "ready" : "needs_input",
-      sheet: "1. ШПО / 2. ООС / 6. Табель",
-      personId: shpo?.personId || oos?.personId || event.personId,
-      fullName: shpo?.fullName || oos?.fullName || event.fullName,
-      positionIndex:
-        shpo?.positionIndex ||
-        oos?.positionIndex ||
-        ts?.positionIndex ||
-        event.previousIndex ||
-        event.nextIndex,
-      rank: nextRank,
-      before: currentRank || previousRank || "—",
-      after: `${nextRank} · наказ №${event.orderNumber || "?"} від ${event.orderDate || "?"}`,
-      sourceRef: `Рух!R${event.excelRow} №${event.movementNumber} · ЗВАННЯ`,
-      why: canApply
-        ? "Серпневе присвоєння звання треба провести до виключення, інакше в «Виключені» піде старе звання"
-        : "У РУХ не вистачає номера/дати наказу про присвоєння звання",
-      confidence: canApply ? "high" : "manual",
-      payload: {
-        previousRank: currentRank || previousRank,
-        nextRank,
-        orderNumber: event.orderNumber,
-        orderDate: event.orderDate,
-        shpoExcelRow: shpo ? String(shpo.excelRow) : "",
-        oosExcelRow: oos ? String(oos.excelRow) : "",
-        timesheetExcelRow: ts ? String(ts.excelRow) : "",
-      },
-      movementKey: createMovementKey(event),
-      checkedDefault: canApply,
-    };
-    ops.push(rankOp);
-    const key = movementPersonKey(event);
-    if (key) pendingRankByPerson.set(key, rankOp);
-    if (event.personId) pendingRankByPerson.set(`id:${event.personId}`, rankOp);
-  }
-
-  const latestContractEventByPerson = new Map<string, PbMovement>();
-  for (const event of activeMovementsAll) {
-    if (!isContractMovementType(event.type) || !eventInLeadWindow(event)) {
-      continue;
-    }
-    const key = movementPersonKey(event);
-    if (!key) continue;
-    const previous = latestContractEventByPerson.get(key);
-    if (
-      !previous ||
-      movementEventTime(event) > movementEventTime(previous) ||
-      (movementEventTime(event) === movementEventTime(previous) &&
-        event.excelRow > previous.excelRow)
-    ) {
-      latestContractEventByPerson.set(key, event);
-    }
-  }
-  for (const event of latestContractEventByPerson.values()) {
-    if (!personStillInEjoos(event.personId, event.fullName)) continue;
-    const oos =
-      (event.personId && oosPersonById.get(event.personId)) ||
-      byPersonName(oosPersonByName, event.personId, event.fullName) ||
-      null;
-    const parsedDates = parseContractDatesFromChangeText(event.changeText);
-    const isMotivationContract = /МОТИВАЦ.*КОНТР/iu.test(event.type);
-    const contractFrom =
-      parsedDates.contractFrom || event.basisDate || event.orderDate;
-    const contractTo =
-      parsedDates.contractTo ||
-      (isMotivationContract ? "" : norm(event.changeText));
-    const serviceType = "контракт";
-    const alreadyApplied = Boolean(
-      oos &&
-      normKey(oos.serviceType) === normKey(serviceType) &&
-      dateMs(oos.contractFrom) === dateMs(contractFrom) &&
-      normKey(oos.contractTo) === normKey(contractTo),
-    );
-    if (alreadyApplied) continue;
-    const canApply = Boolean(oos && contractFrom && contractTo);
-    ops.push({
-      id: opId([
-        "contract",
-        event.personId || event.fullName,
-        event.orderNumber || String(event.excelRow),
-      ]),
-      kind: "contract_update",
-      class: canApply ? "ready" : "needs_input",
-      sheet: "2. ООС",
-      personId: oos?.personId || event.personId,
-      fullName: oos?.fullName || event.fullName,
-      positionIndex:
-        oos?.positionIndex || event.nextIndex || event.previousIndex,
-      rank: oos?.rank || event.rank,
-      before: oos
-        ? `${oos.serviceType || "вид служби не вказано"} · ${oos.contractFrom || "дата не вказана"} · ${oos.contractTo || "строк не вказаний"}`
-        : "рядок ООС не знайдено",
-      after: `${serviceType} · ${contractFrom} · ${contractTo}`,
-      sourceRef: `Рух!R${event.excelRow} №${event.movementNumber} · КОНТРАКТ`,
-      why: canApply
-        ? "Подія КОНТРАКТ заповнює вид служби та строки контракту в колонках 17–19 аркуша ООС"
-        : "Для події КОНТРАКТ не знайдено рядок ООС або дату/строк контракту",
-      confidence: canApply ? "high" : "manual",
-      payload: {
-        oosExcelRow: oos ? String(oos.excelRow) : "",
-        serviceType,
-        contractFrom,
-        contractTo,
-        orderNumber: event.orderNumber,
-        orderDate: event.orderDate,
-        basisNumber: event.basisNumber,
-        basisDate: event.basisDate,
-      },
-      movementKey: createMovementKey(event),
-      checkedDefault: canApply,
-    });
-  }
+  latestRankEventByPerson = rankAndContract.latestRankEventByPerson;
 
   const latestAbsenceOnlyOf = (personId: string, fullName: string) => {
     let found: PbMovement | null = null;
@@ -4177,38 +2400,8 @@ export const buildEjoosSyncPlan = (
       return;
     }
     if (isAmbiguousStaffTransfer(event)) {
-      ops.push({
-        id: opId([
-          "scope",
-          event.personId || event.fullName,
-          String(event.excelRow),
-        ]),
-        kind: "other_manual",
-        class: "needs_input",
-        sheet: "Рух / Виключені або ШПО",
-        personId: event.personId,
-        fullName: event.fullName,
-        positionIndex: event.nextIndex || event.previousIndex,
-        rank: event.rank,
-        before: event.destination || event.changeText || "ПЕРЕВ",
-        after: "уточнити: внутрішня зміна посади чи вибуття до іншої в/ч",
-        sourceRef: `Рух!R${event.excelRow} №${event.movementNumber}`,
-        why: "Не визначено, чи це переведення всередині 1ПБ, чи вибуття до іншої військової частини. Без «куди вибув» / в/ч А#### масово не застосовуємо.",
-        confidence: "manual",
-        payload: {
-          type: "TRANSFER_SCOPE_UNCLEAR",
-          transferScope: "unclear",
-          destination: event.destination,
-          note: event.note,
-          changeText: event.changeText,
-          orderNumber: event.orderNumber,
-          orderDate: event.orderDate,
-          previousIndex: event.previousIndex,
-          nextIndex: event.nextIndex,
-        },
-        movementKey: createMovementKey(event),
-        checkedDefault: false,
-      });
+      const scopeOp = planTransferScopeUnclearOp(event);
+      if (scopeOp) ops.push(scopeOp);
       return;
     }
     const hasCurrentTrace = Boolean(
@@ -4233,1390 +2426,195 @@ export const buildEjoosSyncPlan = (
     if (isAbsenceOnlyMovement(event)) return;
 
     if (event.type === "РОЗПОРЯДЖ") {
-      const samePerson = (personId: string, fullName: string) =>
-        isSamePerson(event, { personId, fullName });
-      const inCurrentSh = personStillInSh(event.personId, event.fullName);
-      const inActiveShpo = onStaffShpo(event.personId, event.fullName);
-      const hasOpenAbsence = ejoosAbsents.some(
-        (row) =>
-          (samePerson(row.personId, row.fullName) ||
-            (event.fullName &&
-              row.fullName &&
-              canonicalName(row.fullName) === canonicalName(event.fullName))) &&
-          !row.actualReturn,
-      );
-      const inActiveOos = Boolean(
-        (event.personId && oosPersonById.has(event.personId)) ||
-        byPersonName(oosPersonByName, event.personId, event.fullName),
-      );
-
-      // Стара подія РУХ не є завданням сама по собі. Якщо людини вже немає
-      // в актуальних джерелах і немає відкритої відсутності, стан вважаємо
-      // відпрацьованим раніше (ALREADY_PROCESSED / NO_ACTION).
-      if (!inCurrentSh && !inActiveShpo && !inActiveOos && !hasOpenAbsence) {
-        return;
-      }
-
-      const oldPosition = shpoByPositionIndex.get(event.previousIndex);
-      const oldPositionFreed =
-        !oldPosition || !samePerson(oldPosition.personId, oldPosition.fullName);
-      const remainsInOos = inActiveOos;
-      const hasSzchContext = Boolean(
-        (event.personId && activeSzchPersonIds.has(event.personId)) ||
-        [...personNameKeys(event.personId, event.fullName)].some((key) =>
-          activeSzchPersonNames.has(key),
-        ),
-      );
-      const szchRemains = ejoosAbsents.some(
-        (row) =>
-          (samePerson(row.personId, row.fullName) ||
-            (event.fullName &&
-              row.fullName &&
-              canonicalName(row.fullName) === canonicalName(event.fullName))) &&
-          isDispositionAbsenceStatus(row.ground) &&
-          !row.actualReturn,
-      );
-      const dispositionInShpo = personInTextRows(event, shpoDispositionRows);
-      const dispositionInTimesheet = personInTextRows(
+      const disposition = planDispositionMovementOps({
         event,
+        activeMovementsAll,
+        activeSzchPersonIds,
+        activeSzchPersonNames,
+        activeTimesheetRowOf,
+        alreadyVacatedForAbsence,
+        archiveAll,
+        augustAbsenceSpansFor,
+        absenceSpansBeforeEpisode,
+        byPersonName,
+        canonicalName,
+        createMovementKey,
+        dateMs,
+        dayByIndex,
+        ejoosAbsents,
+        ejoosDays,
+        encodeTimesheetAbsenceSpans,
+        eventInLeadWindow,
+        formatDispositionTimesheetDeparture,
+        hasActualReturn,
+        isDispositionAbsenceStatus,
+        isOwnUnitStaffMove,
+        isSamePerson,
+        isTimesheetStaffPositionRow,
+        isVacantStaffRow,
+        journalDayFromDateMs,
+        leadWindowStart,
+        mapStatus,
+        movementEventTime,
+        movementPersonKey,
+        onStaffShpo,
+        oosPersonById,
+        oosPersonByName,
+        opId,
+        personInTextRows,
+        personNameKeys,
+        personStillInSh,
+        positionChainByPerson,
+        priorMonthDispositionMonthLabel,
+        shpoByPositionIndex,
+        shpoDispositionRows,
+        shpoPersonById,
+        shpoPersonByName,
+        shpoStrayRowByName,
+        shpoSzchRows,
+        staffIndexTimesheetForPerson,
+        staffPositionTitleForIndex,
+        timesheetDay,
+        timesheetDayLabel,
         timesheetDispositionStaffRows,
-      );
-      const szchReflectedElsewhere =
-        personInTextRows(event, shpoSzchRows) ||
-        personInTextRows(event, timesheetSzchRows);
-      const absenceStateReflected =
-        !hasSzchContext || szchRemains || szchReflectedElsewhere;
-      const dispositionStateReflected =
-        dispositionInShpo || dispositionInTimesheet;
-      const openArchivePeriods = archiveAll
-        .filter(
-          (period) =>
-            samePerson(period.personId, period.fullName) &&
-            !hasActualReturn(period.returnDate),
-        )
-        .sort((a, b) => b.excelRow - a.excelRow);
-      // Стан у РУХ (СЗЧ / БЕЗВІСТИ) головніший за випадковий останній період
-      // архіву: інакше в блок розпорядження потрапляє «ЛІКУВАННЯ» чи службовий
-      // рядок «ВНЕСЕННЯ ДАНИХ».
-      const activeArchivePeriod =
-        openArchivePeriods.find((period) =>
-          isDispositionAbsenceStatus(period.absenceType),
-        ) ?? openArchivePeriods[0];
-      const timesheetRow =
-        activeTimesheetRowOf(
-          event.personId,
-          event.fullName,
-          event.previousIndex,
-        ) ||
-        timesheetRowByCanonicalName(event.fullName) ||
-        (event.previousIndex
-          ? (() => {
-              const scan = staffIndexTimesheetForPerson(
-                event.personId,
-                event.fullName,
-                event.previousIndex,
-              );
-              if (!scan) return null;
-              return (
-                ejoosDays.find((row) => row.excelRow === scan.excelRow) ?? {
-                  excelRow: scan.excelRow,
-                  personId: scan.personId || event.personId,
-                  fullName: scan.fullName || event.fullName,
-                  rank: scan.rank || event.rank,
-                  positionIndex: scan.positionIndex || event.previousIndex,
-                  dayValue: "",
-                }
-              );
-            })()
-          : null);
-      // Рядок особи в ШПО/Табелі може бути вже в блоці розпорядження — тоді
-      // його не чіпаємо. Закривати треба лише штатний рядок.
-      const shpoDispositionExcelRows = new Set(
-        shpoDispositionRows.map((row) => row.excelRow),
-      );
-      const timesheetDispositionExcelRows = new Set(
-        timesheetDispositionStaffRows.map((row) => row.excelRow),
-      );
-      const personShpoRow =
-        (event.personId && shpoPersonById.get(event.personId)) ||
-        byPersonName(shpoPersonByName, event.personId, event.fullName) ||
-        byPersonName(shpoStrayRowByName, event.personId, event.fullName) ||
-        null;
-      const staffShpoRow =
-        oldPosition && samePerson(oldPosition.personId, oldPosition.fullName)
-          ? oldPosition
-          : personShpoRow &&
-              !shpoDispositionExcelRows.has(personShpoRow.excelRow)
-            ? personShpoRow
-            : null;
-      const staffTimesheetRow =
-        (timesheetRow &&
-        (!timesheetDispositionExcelRows.has(timesheetRow.excelRow) ||
-          isTimesheetStaffPositionRow(timesheetRow.excelRow))
-          ? timesheetRow
-          : null) ||
-        (event.previousIndex &&
-        dayByIndex.get(event.previousIndex) &&
-        (isVacantStaffRow(dayByIndex.get(event.previousIndex)!) ||
-          isSamePerson(
-            { personId: event.personId, fullName: event.fullName },
-            dayByIndex.get(event.previousIndex)!,
-          ))
-          ? dayByIndex.get(event.previousIndex)!
-          : null);
-
-      // РОЗПОРЯДЖ не є виключенням зі списків частини: ООС та СЗЧ
-      // зберігаються, а до «3. Виключені» особа не переноситься.
-      if (
-        oldPositionFreed &&
-        !staffShpoRow &&
-        !staffTimesheetRow &&
-        ((absenceStateReflected && dispositionStateReflected) ||
-          (remainsInOos && hasOpenAbsence) ||
-          alreadyVacatedForAbsence(event.personId, event.fullName))
-      ) {
-        return;
-      }
-
-      // Розпорядження проводимо лише після непроведених змін посади:
-      // спочатку історія 2103791 → 2103179, і лише потім вивід у розпорядження.
-      const pendingPositionSteps = (
-        positionChainByPerson.get(movementPersonKey(event)) ?? []
-      ).filter((pending) => pending.excelRow < event.excelRow);
-      if (pendingPositionSteps.length) {
-        const first = pendingPositionSteps[0];
-        const last = pendingPositionSteps[pendingPositionSteps.length - 1];
-        const total = pendingPositionSteps.length + 1;
-        ops.push({
-          id: opId([
-            "disposition-after-position",
-            event.movementNumber || String(event.excelRow),
-          ]),
-          kind: "other_manual",
-          class: "needs_input",
-          sheet: "ШПО → розпорядження / Тимчасово відсутні / Табель",
-          personId: event.personId,
-          fullName: event.fullName,
-          rank: event.rank,
-          positionIndex: event.previousIndex,
-          before: `у ЕЖООС ще штатна посада ${first.previousIndex}`,
-          after: `спочатку зміна посади ${first.previousIndex} → ${last.nextIndex}, потім розпорядження з ${event.previousIndex || "—"}`,
-          sourceRef: `Рух!R${event.excelRow} №${event.movementNumber}`,
-          why: `Крок ${total} з ${total}: розпорядження проводимо після зміни посади, інакше зникне історія переходу ${first.previousIndex} → ${last.nextIndex}.`,
-          confidence: "manual",
-          payload: {
-            type: event.type,
-            chainWaiting: "1",
-            chainStep: String(total),
-            chainTotal: String(total),
-            awaitFromIndex: first.previousIndex,
-            awaitToIndex: last.nextIndex,
-            awaitOrderNumber: first.orderNumber,
-            awaitOrderDate: first.orderDate,
-            previousIndex: event.previousIndex,
-            destination: event.destination || event.changeText,
-            orderNumber: event.orderNumber,
-            orderDate: event.orderDate,
-          },
-          checkedDefault: false,
-        });
-        return;
-      }
-
-      // Запис у «5. Тимчасово відсутні» веде sync з archive (absent_upsert),
-      // не move_to_disposition — інакше дубль «ДОДАТИ РЯДОК» поверх archive.
-      const openAbsentRow = ejoosAbsents.find(
-        (row) =>
-          (samePerson(row.personId, row.fullName) ||
-            (event.fullName &&
-              row.fullName &&
-              canonicalName(row.fullName) === canonicalName(event.fullName))) &&
-          !row.actualReturn,
-      );
-      const needsTimesheetClose = Boolean(staffTimesheetRow);
-      const keepOpenAbsenceTimesheet = Boolean(
-        hasSzchContext || szchRemains || openAbsentRow,
-      );
-      const timesheetNeedsCreate =
-        keepOpenAbsenceTimesheet &&
-        !staffTimesheetRow &&
-        Boolean(event.previousIndex);
-      const dispositionAbsenceHint =
-        (openAbsentRow?.ground &&
-        isDispositionAbsenceStatus(openAbsentRow.ground)
-          ? norm(openAbsentRow.ground)
-          : "") ||
-        activeArchivePeriod?.absenceType ||
-        event.status ||
-        "";
-      const keepTimesheetRowInPlace = /безвіст/i.test(dispositionAbsenceHint);
-      const indexTimesheet = event.previousIndex
-        ? dayByIndex.get(event.previousIndex)
-        : undefined;
-      const vacateTimesheetStaffSlot =
-        keepOpenAbsenceTimesheet &&
-        !keepTimesheetRowInPlace &&
-        Boolean(
-          staffTimesheetRow &&
-          indexTimesheet &&
-          staffTimesheetRow.excelRow === indexTimesheet.excelRow,
-        );
-      const canMoveToDisposition = Boolean(
-        staffShpoRow || needsTimesheetClose || timesheetNeedsCreate,
-      );
-      if (canMoveToDisposition) {
-        const orderMs = dateMs(event.orderDate || event.basisDate);
-        const orderInJournalMonth =
-          !orderMs ||
-          !leadWindowStart ||
-          journalDayFromDateMs(orderMs, leadWindowStart) > 0;
-        const journalMonthBlocked = Boolean(
-          orderMs && leadWindowStart && !orderInJournalMonth,
-        );
-        const laterStaffPlacementInWindow = activeMovementsAll.some(
-          (movement) =>
-            samePerson(movement.personId, movement.fullName) &&
-            movement.type === "ПОСАДА" &&
-            isOwnUnitStaffMove(movement) &&
-            eventInLeadWindow(movement) &&
-            (movementEventTime(movement) > movementEventTime(event) ||
-              (movementEventTime(movement) === movementEventTime(event) &&
-                movement.excelRow > event.excelRow)),
-        );
-        if (
-          journalMonthBlocked &&
-          (dispositionStateReflected || laterStaffPlacementInWindow)
-        ) {
-          return;
-        }
-        const targetMonthLabel = priorMonthDispositionMonthLabel(
-          event.orderDate || event.basisDate || "",
-        );
-        const absenceStatus =
-          (openAbsentRow?.ground &&
-          isDispositionAbsenceStatus(openAbsentRow.ground)
-            ? norm(openAbsentRow.ground)
-            : "") ||
-          (isDispositionAbsenceStatus(event.status)
-            ? norm(event.status)
-            : "") ||
-          activeArchivePeriod?.absenceType ||
-          event.status ||
-          "РОЗПОРЯДЖЕННЯ";
-        const mappedAbsence = mapStatus(absenceStatus);
-        const absenceCode =
-          mappedAbsence.timesheetCode ||
-          (/безвіст/iu.test(absenceStatus) ? "ЗБ" : "") ||
-          (/сзч|самовіл/iu.test(absenceStatus) ? "СЗЧ" : "") ||
-          absenceStatus;
-        const dispositionTimesheetDeparture =
-          formatDispositionTimesheetDeparture(
-            event.destination || event.changeText,
-            event.orderNumber,
-            event.orderDate,
-          );
-        const openAbsenceLabel = /безвіст/iu.test(absenceStatus)
-          ? "БЕЗВІСТИ"
-          : /сзч|самовіл/iu.test(absenceStatus)
-            ? "СЗЧ"
-            : "";
-        ops.push({
-          id: opId([
-            "move-to-disposition",
-            event.movementNumber || String(event.excelRow),
-          ]),
-          kind: "move_to_disposition",
-          // Без даних архіву запис відсутності заповнити нічим.
-          class: journalMonthBlocked ? "needs_input" : "ready",
-          sheet: journalMonthBlocked
-            ? "ШПО → розпорядження / Табель (місяць наказу)"
-            : "ШПО → розпорядження / Тимчасово відсутні / Табель",
-          personId: event.personId || staffShpoRow?.personId || "",
-          fullName: event.fullName || staffShpoRow?.fullName || "",
-          rank: event.rank || staffShpoRow?.rank || "",
-          positionIndex: event.previousIndex,
-          before: `штатна посада ${event.previousIndex}`,
-          after: [
-            event.destination || event.changeText || "у розпорядження",
-            absenceStatus,
-            keepOpenAbsenceTimesheet
-              ? `Табель 01–${String(timesheetDay).padStart(2, "0")} ${absenceCode}; ${event.orderDate || "у дату наказу"} — ${dispositionTimesheetDeparture}; далі «-»`
-              : staffTimesheetRow || timesheetNeedsCreate
-                ? `Табель до ${event.orderDate || "наказу"} «+»; у дату наказу — ${dispositionTimesheetDeparture}; далі до кінця місяця «-»`
-                : "",
-            openAbsentRow || szchRemains
-              ? `${openAbsenceLabel || "відсутність"} лишається відкритою`
-              : hasSzchContext
-                ? "відсутність додасть sync з archive"
-                : "",
-            !keepOpenAbsenceTimesheet &&
-            !staffTimesheetRow &&
-            !timesheetNeedsCreate &&
-            !dispositionInTimesheet
-              ? "штатний рядок Табеля не знайдено — перевірити"
-              : timesheetNeedsCreate
-                ? `додати рядок у блок «ВИБУВ У РОЗПОРЯДЖЕННЯ…» з ${absenceCode}`
-                : "",
-            !remainsInOos ? "в ООС активного запису немає" : "",
-          ]
-            .filter(Boolean)
-            .join(" · "),
-          sourceRef: `Рух!R${event.excelRow} №${event.movementNumber}`,
-          why: journalMonthBlocked
-            ? `Наказ у ${targetMonthLabel}, а зараз «станом на» ${timesheetDayLabel}. Змініть дату на ${event.orderDate || "місяць наказу"} і перебудуйте — тоді застосуйте розпорядження.`
-            : keepOpenAbsenceTimesheet
-            ? openAbsenceLabel === "БЕЗВІСТИ"
-              ? "БЕЗВІСТИ → РОЗПОРЯДЖ: звільнити ШПО (фінальний sh wins), ООС і відкритий БЕЗВІСТИ лишити; у Табелі до дати наказу ЗБ, у дату наказу — вибуття в розпорядження, далі «-». Виключені не змінюються."
-              : "СЗЧ → РОЗПОРЯДЖ: звільнити ШПО (фінальний sh wins), ООС і відкритий СЗЧ лишити; у Табелі до дати наказу СЗЧ, у дату наказу — вибуття в розпорядження, далі «-». Виключені не змінюються."
-            : "РОЗПОРЯДЖ звільняє стару штатну посаду, але залишає особу в ООС. Виключені не змінюються.",
-          confidence: journalMonthBlocked
-            ? "manual"
-            : activeArchivePeriod
-              ? "high"
-              : "review",
-          payload: {
-            type: event.type,
-            previousIndex: event.previousIndex,
-            destination: event.destination || event.changeText,
-            orderNumber: event.orderNumber,
-            orderDate: event.orderDate,
-            basisNumber: event.basisNumber,
-            basisDate: event.basisDate,
-            shpoExcelRow: String(staffShpoRow?.excelRow || ""),
-            timesheetExcelRow: String(staffTimesheetRow?.excelRow || ""),
-            positionTitle: staffPositionTitleForIndex(
-              staffShpoRow?.positionIndex || event.previousIndex,
-            ),
-            skipShpoDisposition: dispositionInShpo ? "1" : "",
-            absenceExcelRow: String(openAbsentRow?.excelRow || ""),
-            needsAbsenceRecord: "",
-            absenceType: absenceStatus,
-            absenceCode,
-            absenceDate: activeArchivePeriod?.departDate || "",
-            absencePlace: activeArchivePeriod?.place || "",
-            absenceOrderNumber: activeArchivePeriod?.orderNumber || "",
-            absenceOrderDate: activeArchivePeriod?.orderDate || "",
-            plannedReturn: activeArchivePeriod?.plannedReturn || "",
-            remainsInOos: String(remainsInOos),
-            timesheetFound: String(
-              Boolean(staffTimesheetRow) || timesheetNeedsCreate,
-            ),
-            timesheetCreateRow: timesheetNeedsCreate ? "1" : "",
-            timesheetStaffIndex: event.previousIndex || "",
-            restorePerson:
-              staffTimesheetRow &&
-              isVacantStaffRow(staffTimesheetRow) &&
-              !staffTimesheetRow.fullName &&
-              !staffTimesheetRow.personId
-                ? "1"
-                : "",
-            keepOpenSzchTimesheet: keepOpenAbsenceTimesheet ? "1" : "",
-            vacateTimesheetStaffSlot: vacateTimesheetStaffSlot ? "1" : "",
-            hasSzchContext: String(hasSzchContext),
-            szchRemains: String(szchRemains),
-            szchReflectedElsewhere: String(szchReflectedElsewhere),
-            dispositionInShpo: String(dispositionInShpo),
-            dispositionInTimesheet: String(dispositionInTimesheet),
-            timesheetAbsenceSpans: journalMonthBlocked
-              ? ""
-              : encodeTimesheetAbsenceSpans(
-                  (() => {
-                    const spans = augustAbsenceSpansFor(
-                      event.personId || staffShpoRow?.personId || "",
-                      event.fullName || staffShpoRow?.fullName || "",
-                    );
-                    if (!keepOpenAbsenceTimesheet) return spans;
-                    const orderDay =
-                      orderMs && leadWindowStart
-                        ? journalDayFromDateMs(orderMs, leadWindowStart)
-                        : 0;
-                    return orderDay > 1
-                      ? absenceSpansBeforeEpisode(spans, orderDay)
-                      : spans;
-                  })(),
-                ),
-            journalMonthBlocked: journalMonthBlocked ? "1" : "",
-            suggestedAsOfDate: event.orderDate || "",
-            targetMonthLabel,
-          },
-          movementKey: createMovementKey(event),
-          checkedDefault: !journalMonthBlocked,
-        });
-        return;
-      }
-
-      const missing = [
-        !dispositionStateReflected &&
-          "перевірити відображення розпорядження у ШПО або Табелі",
-        hasSzchContext &&
-          !absenceStateReflected &&
-          "перевірити чинний запис відсутності у Тимчасово відсутніх",
-      ].filter(Boolean);
-      ops.push({
-        id: opId([
-          "disposition-review",
-          event.movementNumber || String(event.excelRow),
-        ]),
-        kind: "other_manual",
-        class: "conflict",
-        sheet: "ШПО / ООС / Тимчасово відсутні / Табель",
-        personId: event.personId,
-        fullName: event.fullName,
-        rank: event.rank,
-        positionIndex: event.previousIndex,
-        before: `РОЗПОРЯДЖ зі штатної посади ${event.previousIndex || "—"}`,
-        after: missing.join("; "),
-        sourceRef: `Рух!R${event.excelRow} №${event.movementNumber}`,
-        why: "РОЗПОРЯДЖ не видаляє особу з ООС і не додає її до Виключених без окремої події виключення зі списків частини.",
-        confidence: "manual",
-        payload: {
-          type: event.type,
-          previousIndex: event.previousIndex,
-          destination: event.destination || event.changeText,
-          orderNumber: event.orderNumber,
-          orderDate: event.orderDate,
-          oldPositionFreed: String(oldPositionFreed),
-          remainsInOos: String(remainsInOos),
-          hasSzchContext: String(hasSzchContext),
-          szchRemains: String(szchRemains),
-          szchReflectedElsewhere: String(szchReflectedElsewhere),
-          dispositionInShpo: String(dispositionInShpo),
-          dispositionInTimesheet: String(dispositionInTimesheet),
-          dispositionStateReflected: String(dispositionStateReflected),
-        },
-        checkedDefault: false,
+        timesheetRowByCanonicalName,
+        timesheetSzchRows,
+        norm,
       });
-      return;
+      ops.push(...disposition.ops);
+      if (disposition.handled) return;
     }
 
-    const isExternalUnitDeparture =
-      isOutboundStaffMove(event) &&
-      !(
-        event.type === "ПЕРЕВ" &&
-        internalPositionMovementRows.has(event.excelRow)
-      ) &&
-      !(event.type === "ПОСАДА" && isPositionChangeRow(event.excelRow));
-    if (isExternalUnitDeparture) {
-      const existingExcludedEarly = findMovementExcludedRow(event);
-      const sourcePositionTitle = sourcePositionTitleForOutbound(event);
-      if (wasMovementProcessed(event) && existingExcludedEarly) {
-        if (
-          timesheetClosedFor(
-            event.personId,
-            event.fullName,
-            sourcePositionTitle,
-          )
-        ) {
-          return;
-        }
-      }
-      const inboundPlacement = inboundStaffPlacementBefore(event);
-      const unrecordedSameMonthTransit = isUnrecordedSameMonthTransit({
-        hasInboundPlacement: Boolean(inboundPlacement),
-        alreadyExcluded: Boolean(existingExcludedEarly),
-        stillInSh: personStillInSh(event.personId, event.fullName),
-        stillInEjoos: personStillInEjoos(event.personId, event.fullName),
-      });
-      const transferProcessState = externalTransferProcessState({
-        onStaffShpo: onStaffShpo(event.personId, event.fullName),
-        onStaffOos: onStaffOos(event.personId, event.fullName),
-        hasMatchingExcluded: Boolean(existingExcludedEarly),
-        timesheetClosed: timesheetClosedFor(
-          event.personId,
-          event.fullName,
-          sourcePositionTitle,
-        ),
-      });
-      if (
-        skipExternalIfAlreadyProcessed({
-          stillInEjoos: personStillInEjoos(event.personId, event.fullName),
-          unrecordedTransit: unrecordedSameMonthTransit,
-          processState: transferProcessState,
-        })
-      ) {
-        return;
-      }
-      // Скасоване переведення не є чинним: новий рядок у Виключені не пишемо,
-      // навіть якщо історичний запис від того наказу вже є.
-      if (cancelledExternalTransferRows.has(event.excelRow)) return;
-      {
-        const cancel = transferCancelOf(event);
-        if (cancel && movementEventTime(cancel) >= movementEventTime(event)) {
-          return;
-        }
-      }
-      // Вибуття підтверджуємо не лише рядком РУХ: людини вже не повинно бути
-      // в актуальному sh. Повернення 07.08 після вибуття 05.08 теж скасовує
-      // виключення — Атрахов знову чинний occupant.
-      if (
-        laterReturnSupersedesOutbound({
-          stillInSh: personStillInSh(event.personId, event.fullName),
-          returnedAfterOutbound: Boolean(
-            inboundStaffDateFor(event.personId, event.fullName),
-          ),
-        }) ||
-        absenceOnlyBlocksExclusion({
-          absenceAt: openDispositionAbsenceMs(event.personId, event.fullName),
-          outboundAt: movementEventTime(event),
-        })
-      ) {
-        return;
-      }
-      const existingExcluded = existingExcludedEarly;
-      const alreadyExcluded = Boolean(existingExcluded);
-      const destinationRaw = event.destination || "";
-      const destinationUpper = destinationRaw.toUpperCase();
-      const rawDestination =
-        !destinationRaw ||
-        destinationUpper.includes("РОЗПОР") ||
-        destinationUpper.includes("ПЕРЕВ") ||
-        destinationUpper === event.type ||
-        isOwnFirstPbDestination(destinationRaw)
-          ? ""
-          : destinationRaw;
-      // Якщо «Куди» = 0 або лишилось 1ПБ, військова частина часто в S / примітці (А7400).
-      const unitFromS = unitCodeFromMovement(event);
-      const exclusionPlace =
-        rawDestination ||
-        (/[АA]\s*\d{4}/iu.test(unitFromS) ? unitFromS : "") ||
-        event.note ||
-        event.changeText;
-      // Табель: «вибув до/у» + підрозділ з «Яка зміна» без назви посади.
-      // Код в/ч А#### лишається для Виключених (AE / підстава), не для Табеля.
-      const timesheetDestination = (() => {
-        const positionSource =
-          positionChangeDestination(event) || event.changeText;
-        const fromPosition =
-          extractTimesheetDestinationFromPosition(positionSource);
-        if (fromPosition) return fromPosition;
-        const unitPhrase =
-          formatTransferDestinationForTimesheet(
-            [rawDestination, event.note, unitFromS, event.changeText]
-              .filter(Boolean)
-              .join(" "),
-          ) || rawDestination;
-        if (
-          /[АA]\s*\d{4}/iu.test(unitPhrase) ||
-          /в\s*\/\s*ч/iu.test(unitPhrase)
-        ) {
-          return event.note && /[АA]\s*\d{4}|в\s*\/\s*ч/iu.test(event.note)
-            ? event.note
-            : unitPhrase;
-        }
-        return unitPhrase;
-      })();
-      const exclusionReason =
-        event.type === "ПЕРЕВ" || event.type === "ПОСАДА"
-          ? "ПЕРЕВЕДЕННЯ"
-          : event.type === "ЗВІЛЬН"
-            ? "ЗВІЛЬНЕННЯ"
-            : "Розпорядження";
-      const shpoAtOldIndex =
-        event.previousIndex || inboundPlacement?.nextIndex
-          ? (shpoByIndex.get(
-              event.previousIndex || inboundPlacement?.nextIndex || "",
-            ) ?? null)
-          : null;
-      // Індекс після вибуття міг зайняти хтось інший (Хубаєв → Атрахов на
-      // 2103764). ШПО/Табель чіпаємо лише якщо рядок цієї самої особи.
-      const shpo =
-        (event.personId &&
-          ejoosShpo.find((row) => row.personId === event.personId)) ||
-        ejoosShpo.find((row) => isSamePerson(event, row)) ||
-        (shpoAtOldIndex && isSamePerson(event, shpoAtOldIndex)
-          ? shpoAtOldIndex
-          : null);
-      const oos =
-        (event.personId && oosPersonById.get(event.personId)) ||
-        byPersonName(oosPersonByName, event.personId, event.fullName) ||
-        null;
-      const staffIndexLeft =
-        (isPositionIndex(event.previousIndex) && event.previousIndex) ||
-        (isPositionIndex(inboundPlacement?.nextIndex || "") &&
-          inboundPlacement!.nextIndex) ||
-        "";
-      // Для вибуття у «Виключені» базові персональні дані мають іти з ЕЖООС.
-      // Якщо в серпні було ЗВАННЯ раніше за цей ПЕРЕВ — беремо нове звання,
-      // навіть якщо картка ООС/ШПО ще не оновлена.
-      const rankBeforeTransfer = [...latestRankEventByPerson.values()].find(
-        (rankEvent) =>
-          isSamePerson(event, rankEvent) &&
-          movementEventTime(rankEvent) <= movementEventTime(event),
-      );
-      const pendingRank =
-        pendingRankByPerson.get(movementPersonKey(event)) ||
-        (event.personId
-          ? pendingRankByPerson.get(`id:${event.personId}`)
-          : null);
-      const promotedRank =
-        pendingRank?.payload.nextRank ||
-        (rankBeforeTransfer
-          ? parseRankPromotion(rankBeforeTransfer).nextRank
-          : "");
-      const fromRank =
-        promotedRank || oos?.rank || shpo?.rank || event.rank || "";
-      const fromName = oos?.fullName || shpo?.fullName || event.fullName || "";
-      const occupiedIndex =
-        shpo?.positionIndex ||
-        String(oos?.positionIndex || "").match(/\d{5,}/)?.[0] ||
-        oos?.positionIndex ||
-        "";
-      // У «Виключені» пишемо посаду, з якої вибув із 1ПБ (РУХ), навіть якщо
-      // внутрішню ПОСАДУ в ЕЖООС ще не провели.
-      const fromIndex = staffIndexLeft || occupiedIndex;
-      const fromId = personIdFromShpo(ejoosShpo, {
-        fullName: fromName,
-        positionIndex: occupiedIndex || shpo?.positionIndex || "",
-        personId: oos?.personId || event.personId || shpo?.personId,
-      });
-      const arrival =
-        arrivalOf(fromId, fromName) ||
-        arrivalOf(event.personId, event.fullName);
-      const namedTimesheetRows = [
-        ...timesheetRowsOf(fromId, fromName),
-        ...timesheetRowsOf(event.personId, event.fullName),
-      ].filter(
-        (row, index, rows) =>
-          rows.findIndex((other) => other.excelRow === row.excelRow) === index,
-      );
-      const timesheetWrite = (() => {
-        const base = excludedTimesheetWrite(
-          namedTimesheetRows,
-          fromIndex && isVacantStaffRow(dayByIndex.get(fromIndex))
-            ? dayByIndex.get(fromIndex)?.excelRow || 0
-            : 0,
-        );
-        const historyRow = namedTimesheetRows.find(
-          (row) => row.hasDepartureText,
-        );
-        if (
-          base.replaceInPlace &&
-          historyRow &&
-          timesheetSheet &&
-          sourcePositionTitle &&
-          !timesheetRowInExpectedUnitSection(
-            timesheetSheet,
-            historyRow.excelRow,
-            sourcePositionTitle,
-          )
-        ) {
-          return {
-            createHistory: false,
-            replaceInPlace: false,
-            sourceExcelRow: historyRow.excelRow,
-          };
-        }
-        return base;
-      })();
-      // Колонки «наказ» і перша «дата» — стройовий наказ. Окремі реквізити
-      // підстави (наприклад 668-РС від 03.08.2026) сюди не підставляємо.
-      const excludeDate = event.orderDate;
-      const hasRequiredExcludedFields = Boolean(
-        exclusionPlace &&
-        exclusionReason &&
-        excludeDate &&
-        event.orderNumber &&
-        event.orderDate,
-      );
-      const staleExcluded = staleExcludedForMovement(event);
-      const staleClear = staleExcludedClearPayload(staleExcluded);
-      const staleClearNote = staleExcluded.length
-        ? ` Попередн${staleExcluded.length === 1 ? "ій рядок" : "і рядки"} Виключені R${staleExcluded.map((row) => row.excelRow).join(", R")} прибираємо — лишаємо чинне ПЕРЕВ.`
-        : "";
-      const excludeEpisodePaint =
-        fromIndex && timesheetWrite.sourceExcelRow
-          ? staffEpisodePaintPayload(
-              fromId || event.personId,
-              fromName,
-              fromIndex,
-              timesheetWrite.sourceExcelRow,
-            )
-          : null;
+    const excludeTransfer = planExcludeTransferMovementOps({
+      event,
+      existingOps: ops,
+      absenceOnlyBlocksExclusion,
+      archiveAll,
+      arrivalOf,
+      byPersonName,
+      cancelledExternalTransferRows,
+      createMovementKey,
+      dayByIndex,
+      ejoosShpo,
+      excludedTimesheetWrite,
+      externalTransferProcessState,
+      extractTimesheetDestinationFromPosition,
+      findMovementExcludedRow,
+      formatTransferDestinationForTimesheet,
+      inboundStaffDateFor,
+      inboundStaffPlacementBefore,
+      internalPositionMovementRows,
+      isOutboundStaffMove,
+      isOwnFirstPbDestination,
+      isPositionChangeRow,
+      isPositionIndex,
+      isSamePerson,
+      isUnrecordedSameMonthTransit,
+      isVacantStaffRow,
+      latestRankEventByPerson,
+      movementEventTime,
+      movementPersonKey,
+      onStaffOos,
+      onStaffShpo,
+      oosPersonById,
+      oosPersonByName,
+      openDispositionAbsenceMs,
+      opId,
+      parseRankPromotion,
+      pendingRankByPerson,
+      personIdFromShpo,
+      personStillInEjoos,
+      personStillInSh,
+      positionChangeDestination,
+      shpoByIndex,
+      skipExternalIfAlreadyProcessed,
+      sourcePositionTitleForOutbound,
+      staffEpisodePaintPayload,
+      staleExcludedForMovement,
+      staleExcludedClearPayload,
+      timesheetClosedFor,
+      timesheetRowInExpectedUnitSection,
+      timesheetRowsOf,
+      timesheetSheet,
+      transferCancelOf,
+      unitCodeFromMovement,
+      wasMovementProcessed,
+      laterReturnSupersedesOutbound,
+    });
+    ops.push(...excludeTransfer.ops);
+    if (excludeTransfer.handled) return;
 
-      ops.push({
-        id: opId([
-          "excl",
-          event.movementNumber || String(event.excelRow),
-          event.type,
-        ]),
-        kind: "exclude_transfer",
-        class:
-          hasRequiredExcludedFields && Boolean(shpo || fromName)
-            ? "ready"
-            : "needs_input",
-        sheet: "Виключені → Табель → ШПО/ООС",
-        personId: fromId || event.personId,
-        fullName: fromName,
-        positionIndex: fromIndex,
-        rank: fromRank,
-        before: shpo
-          ? occupiedIndex && occupiedIndex !== fromIndex
-            ? `ШПО R${shpo.excelRow}: ${fromRank} ${fromName} · інд. ${occupiedIndex} (кінцева посада РУХ ${fromIndex})`
-            : `ШПО R${shpo.excelRow}: ${fromRank} ${fromName} · інд. ${fromIndex}`
-          : unrecordedSameMonthTransit
-            ? `немає в ШПО/ООС · транзит ${inboundPlacement?.orderDate || "?"} → ${event.orderDate || "?"}`
-            : "в обліку (ШПО не знайдено — перевірте вручну)",
-        after: `${alreadyExcluded ? "доробити очищення після виключення" : "виключити"}: ${event.type} → ${exclusionPlace || "(куди?)"} · табель: ${timesheetDestination || "(куди?)"} · ${exclusionReason} · наказ №${event.orderNumber || "?"} від ${event.orderDate || "?"}`,
-        sourceRef: `Рух!R${event.excelRow} №${event.movementNumber}`,
-        why: alreadyExcluded
-          ? `Рядок у Виключених уже є — не дублюємо його, доробляємо Табель → ШПО/ООС. Тимч. відсутні/прибулі не чіпаємо.${staleClearNote}`
-          : unrecordedSameMonthTransit
-            ? `Постановка ${inboundPlacement?.orderDate || "?"} на ${fromIndex || "штабний індекс"} і вибуття ${event.orderDate || "?"} у цьому місяці, але в ЕЖООС особи не було. Пишемо Виключені + історичний Табель; зайнятий індекс ШПО/ООС не чіпаємо.`
-            : hasRequiredExcludedFields
-              ? pendingRank
-                ? `Спочатку звання ${pendingRank.payload.nextRank} (№${pendingRank.payload.orderNumber || "?"} від ${pendingRank.payload.orderDate || "?"}), потім ${event.type} → ${exclusionPlace}: Виключені → Табель → очистка ШПО/ООС`
-                : inboundPlacement
-                  ? `Ланцюг: ${inboundPlacement.orderDate || "?"} ${inboundPlacement.type} ${inboundPlacement.previousIndex || "?"} → ${inboundPlacement.nextIndex || fromIndex} (лишився б у ООС); далі ${event.type} №${event.orderNumber || "?"} від ${event.orderDate || "?"} — вибув з 1ПБ, в sh немає. Виключені з інд. ${fromIndex}; внутрішню постановку на штат не проводимо.`
-                  : `${event.type} з «куди»: алгоритм Виключені → Табель (історія) → очистка ШПО/ООС. Відкритий рядок «Тимч. прибулі» закриваємо.${staleClearNote}`
-              : "У РУХ не вистачає фактичного місця вибуття або реквізитів стройового наказу",
-        confidence:
-          hasRequiredExcludedFields && (shpo || unrecordedSameMonthTransit)
-            ? "high"
-            : "manual",
-        payload: {
-          movementNumber: event.movementNumber,
-          type: event.type,
-          destination: exclusionPlace,
-          timesheetDestination,
-          orderNumber: event.orderNumber,
-          orderDate: event.orderDate,
-          excludeDate,
-          timesheetActiveFrom:
-            excludeEpisodePaint?.timesheetActiveFrom ||
-            (unrecordedSameMonthTransit || arrival
-              ? inboundPlacement?.orderDate || ""
-              : ""),
-          timesheetAbsenceSpans: excludeEpisodePaint?.timesheetAbsenceSpans || "",
-          timesheetPreserveHistory:
-            excludeEpisodePaint?.timesheetPreserveHistory || "",
-          historyTimesheetExcelRow:
-            excludeEpisodePaint?.historyTimesheetExcelRow || "",
-          historyTimesheetAbsenceSpans:
-            excludeEpisodePaint?.historyTimesheetAbsenceSpans || "",
-          timesheetCreateHistory: timesheetWrite.createHistory ? "1" : "",
-          timesheetReplaceInPlace: timesheetWrite.replaceInPlace ? "1" : "",
-          transitSameMonth: unrecordedSameMonthTransit ? "1" : "",
-          basisNumber: event.basisNumber,
-          basisDate: event.basisDate,
-          previousIndex: staffIndexLeft || event.previousIndex,
-          nextIndex: event.nextIndex,
-          occupiedPositionIndex: occupiedIndex,
-          priorPlacementRow: inboundPlacement
-            ? String(inboundPlacement.excelRow)
-            : "",
-          priorPlacementType: inboundPlacement?.type || "",
-          priorPlacementDate: inboundPlacement?.orderDate || "",
-          priorPlacementOrder: inboundPlacement?.orderNumber || "",
-          priorPlacementFromIndex: inboundPlacement?.previousIndex || "",
-          priorPlacementToIndex: inboundPlacement?.nextIndex || "",
-          arrivedFrom:
-            inboundPlacement?.previousIndex ||
-            inboundPlacement?.destination ||
-            "",
-          appointmentOrderNumber: inboundPlacement?.orderNumber || "",
-          appointmentOrderDate: inboundPlacement?.orderDate || "",
-          arrivalExcelRow: arrival ? String(arrival.excelRow) : "",
-          arrivalDepartDate:
-            inboundPlacement?.orderDate || event.orderDate || "",
-          arrivalDepartOrderNumber:
-            inboundPlacement?.orderNumber || event.orderNumber || "",
-          arrivalDepartOrderDate:
-            inboundPlacement?.orderDate || event.orderDate || "",
-          excludedExcelRow: existingExcluded
-            ? String(existingExcluded.excelRow)
-            : "",
-          oosExcelRow: oos ? String(oos.excelRow) : "",
-          shpoExcelRow: shpo ? String(shpo.excelRow) : "",
-          timesheetExcelRow: timesheetWrite.sourceExcelRow
-            ? String(timesheetWrite.sourceExcelRow)
-            : "",
-          fromRank,
-          fromName,
-          fromPersonId: fromId || event.personId,
-          fromPositionIndex: fromIndex,
-          lastRankOrderNumber:
-            pendingRank?.payload.orderNumber ||
-            rankBeforeTransfer?.orderNumber ||
-            "",
-          lastRankOrderDate:
-            pendingRank?.payload.orderDate ||
-            rankBeforeTransfer?.orderDate ||
-            "",
-          // AE «Куди вибув / Куди направлені документи»: дослівно з РУХ
-          // «Яка зміна». Підрозділ/вч з «Куди» лишається для Табеля/підстави.
-          documentsDest: event.changeText || "",
-          changeText: event.changeText || "",
-          positionTitle: sourcePositionTitle || "",
-          exclusionReason,
-          awaitRankChange: pendingRank ? "1" : "",
-          ...staleClear,
-        },
-        movementKey: createMovementKey(event),
-        checkedDefault:
-          hasRequiredExcludedFields &&
-          Boolean(shpo || unrecordedSameMonthTransit),
-      });
-      if (
-        /відсутн.*архів|в архіві/iu.test(`${event.status} ${event.note}`) &&
-        !archiveAll.some((period) => isSamePerson(event, period)) &&
-        !ops.some(
-          (op) =>
-            op.payload.mismatchKind === "ARCHIVE_REFERENCE_MISSING" &&
-            isSamePerson(event, op),
-        )
-      ) {
-        ops.push({
-          id: opId(["archive_missing", event.personId || event.fullName]),
-          kind: "data_mismatch",
-          class: "needs_input",
-          sheet: "Дані джерел / archive",
-          personId: fromId || event.personId,
-          fullName: fromName,
-          positionIndex: fromIndex,
-          rank: fromRank,
-          before: event.status || "ВІДСУТНІЙ в АРХІВІ",
-          after: "ARCHIVE_REFERENCE_MISSING → перевірити archive",
-          sourceRef: `Рух!R${event.excelRow} СТАТУС=«${event.status}»`,
-          why: "У РУХ стоїть «ВІДСУТНІЙ в АРХІВІ», але в archive немає запису за ПІБ чи ID. ЛІК / ВІД / СЗЧ не вигадуємо — кадровий маршрут вибуття це не скасовує.",
-          confidence: "review",
-          payload: {
-            type: "ARCHIVE_REFERENCE_MISSING",
-            mismatchKind: "ARCHIVE_REFERENCE_MISSING",
-            statusRaw: event.status,
-          },
-          checkedDefault: false,
-        });
-      }
-      return;
-    }
+    const positionChange = planPositionChangeMovementOps({
+      event,
+      absenceSpansBeforeEpisode,
+      alreadyVacatedForAbsence,
+      archiveAll,
+      arrivalOf,
+      augustAbsenceSpansFor,
+      byPersonName,
+      cancelledTransferOf,
+      chainedPositionRows,
+      clipAbsenceSpansToActiveEpisode,
+      createMovementKey,
+      dateMs,
+      dayById,
+      dayByIndex,
+      ejoosDays,
+      ejoosOos,
+      encodeTimesheetAbsenceSpans,
+      extractTimesheetDestinationFromPosition,
+      findLatestExcludedRow,
+      findMovementExcludedRow,
+      findNonStaffOccupantExcelRow,
+      inboundStaffDateFor,
+      isInternalStaffIndexHop,
+      isOwnUnitStaffMove,
+      isPositionIndex,
+      isPositionChangeRow,
+      isSamePerson,
+      isVacantStaffRow,
+      journalDayFromDateMs,
+      journalMonthStartLabel,
+      latestPositionByName,
+      leadWindowStart,
+      movementPersonKey,
+      normKey,
+      oosById,
+      oosByName,
+      openAbsenceOf,
+      opId,
+      ownUnitIndexHistoryOf,
+      ownUnitMoveSuperseded,
+      positionChainByPerson,
+      positionChangeDestination,
+      positionCloseWritesExcluded,
+      priorEpisodeTimesheetOf,
+      shPersonById,
+      shPersonByName,
+      shpoByIndex,
+      shpoPersonById,
+      shpoPersonByName,
+      shpoSheet,
+      staffAppointmentDateFor,
+      staffIndexTimesheetForPerson,
+      timesheetEpisodeStartFor,
+      timesheetNeedsTransferCancelSplit,
+      timesheetPeople,
+      timesheetRowsOf,
+      timesheetSheet,
+      transferCancelOf,
+      wasMovementProcessed,
+    });
+    ops.push(...positionChange.ops);
+    if (positionChange.handled) return;
 
-    if (isPositionChangeRow(event.excelRow)) {
-      if (ownUnitMoveSuperseded(event)) return;
-      const chained = chainedPositionRows.has(event.excelRow);
-      const personChain = positionChainByPerson.get(movementPersonKey(event));
-      // Ланцюг має пріоритет: інакше по одній особі вийшло б дві різні
-      // операції зміни посади з різних рядків РУХ.
-      if (personChain?.length && !chained) return;
-      if (personChain?.length) {
-        const last = personChain[personChain.length - 1];
-        if (event.excelRow !== last.excelRow) return;
-      }
-      if (
-        !chained &&
-        latestPositionByName.get(normKey(event.fullName))?.excelRow !==
-          event.excelRow
-      ) {
-        return;
-      }
-      const shPerson =
-        (event.personId && shPersonById.get(event.personId)) ||
-        byPersonName(shPersonByName, event.personId, event.fullName) ||
-        null;
-      // `sh` is authoritative for the current occupant and usually contains the
-      // stable ID which may be absent in РУХ.
-      const personId = shPerson?.personId || event.personId;
-      const fullName = shPerson?.fullName || event.fullName;
-      const rank = shPerson?.rank || event.rank;
-      const arrival = arrivalOf(personId, fullName);
-      // Відкрита відсутність не скасовує постановку з «Тимчасово прибулі».
-      if (alreadyVacatedForAbsence(personId, fullName) && !arrival) {
-        return;
-      }
-      // У кроці ланцюга особи вже може не бути в sh на цьому індексі
-      // (далі за датою — розпорядження), тому цільовий індекс беремо з РУХ.
-      const shIndex = isPositionIndex(shPerson?.positionIndex || "")
-        ? shPerson!.positionIndex
-        : "";
-      const nextIndex = chained
-        ? event.nextIndex || shIndex || event.previousIndex
-        : shIndex || event.nextIndex || event.previousIndex;
-      // Без коректного нового індексу писати нову посаду нікуди.
-      if (!isPositionIndex(nextIndex)) return;
-      const targetShpo = nextIndex
-        ? (shpoByIndex.get(nextIndex) ?? null)
-        : null;
-      const indexTimesheet = nextIndex
-        ? (dayByIndex.get(nextIndex) ?? null)
-        : null;
-      const existingOos =
-        (personId && oosById.get(personId)) ||
-        byPersonName(oosByName, personId, fullName) ||
-        ejoosOos.find((row) => isSamePerson({ personId, fullName }, row)) ||
-        null;
-      const excludedSource = existingOos
-        ? null
-        : findLatestExcludedRow(personId, fullName);
-      const transferCancel = transferCancelOf(event);
-      const cancelledTransfer = cancelledTransferOf({ personId, fullName });
-      const personTimesheetRows = timesheetRowsOf(personId, fullName);
-      const personStaffTimesheet = staffIndexTimesheetForPerson(
-        personId,
-        fullName,
-        nextIndex,
-      );
-      const personActiveTimesheet =
-        [...personTimesheetRows]
-          .filter((row) => !row.hasDepartureText)
-          .sort(
-            (left, right) => right.plusDays.length - left.plusDays.length,
-          )[0] ?? null;
-      const targetTimesheet = (() => {
-        const vacantStaff = isVacantStaffRow(indexTimesheet)
-          ? indexTimesheet
-          : null;
-        if (transferCancel) {
-          if (personStaffTimesheet) return personStaffTimesheet;
-          if (personActiveTimesheet) return personActiveTimesheet;
-          if (vacantStaff) return vacantStaff;
-          if (
-            indexTimesheet &&
-            isSamePerson({ personId, fullName }, indexTimesheet)
-          ) {
-            return indexTimesheet;
-          }
-          return indexTimesheet;
-        }
-        const staffScan = personStaffTimesheet
-          ? timesheetPeople.find(
-              (row) => row.excelRow === personStaffTimesheet.excelRow,
-            )
-          : undefined;
-        // Реальне вибуття: історичний «вибув» не зафарбовуємо — новий епізод
-        // пишемо на вакантний штатний рядок.
-        if (vacantStaff && staffScan?.hasDepartureText) return vacantStaff;
-        if (personStaffTimesheet && !staffScan?.hasDepartureText) {
-          return personStaffTimesheet;
-        }
-        if (personActiveTimesheet) return personActiveTimesheet;
-        if (vacantStaff) return vacantStaff;
-        if (personStaffTimesheet) return personStaffTimesheet;
-        if (
-          indexTimesheet &&
-          isSamePerson({ personId, fullName }, indexTimesheet)
-        ) {
-          return indexTimesheet;
-        }
-        return indexTimesheet;
-      })();
-      const actualExclusionEvidence = Boolean(
-        cancelledTransfer && findMovementExcludedRow(cancelledTransfer),
-      );
-      const historyTimesheet =
-        personTimesheetRows.find(
-          (row) =>
-            row.hasDepartureText && row.excelRow !== targetTimesheet?.excelRow,
-        ) ?? null;
-      const currentTimesheet =
-        historyTimesheet ||
-        (personId && dayById.get(personId)) ||
-        ejoosDays.find((row) => isSamePerson({ personId, fullName }, row)) ||
-        null;
-      const samePersonRow = (
-        row: { personId: string; fullName: string } | null | undefined,
-      ) => Boolean(row && isSamePerson({ personId, fullName }, row));
-      const previousShpo = event.previousIndex
-        ? (shpoByIndex.get(event.previousIndex) ?? null)
-        : null;
-      const previousIndexTimesheet = event.previousIndex
-        ? (dayByIndex.get(event.previousIndex) ?? null)
-        : null;
-      // Рядок особи в ШПО може бути без індексу (лише ПІБ) — його теж треба
-      // звільнити, але цільовий рядок нової посади не чіпаємо.
-      const personShpoRow =
-        (personId && shpoPersonById.get(personId)) ||
-        byPersonName(shpoPersonByName, personId, fullName) ||
-        null;
-      const oldShpo = samePersonRow(previousShpo)
-        ? previousShpo
-        : personShpoRow && personShpoRow.excelRow !== targetShpo?.excelRow
-          ? personShpoRow
-          : null;
-      const previousShpoTimesheet = samePersonRow(previousIndexTimesheet)
-        ? previousIndexTimesheet
-        : null;
-      // Стару штатну посаду звільняємо в ШПО/Табелі. У «Виключені» рядок
-      // пишемо лише коли це не внутрішній стрибок 1ПБ→1ПБ.
-      const closeOldPosition = Boolean(
-        event.previousIndex &&
-        event.previousIndex !== nextIndex &&
-        (oldShpo || previousShpoTimesheet),
-      );
-      const internalStaffHop = isInternalStaffIndexHop(event);
-      const writeExcludedOnClose = positionCloseWritesExcluded({
-        closeOldPosition: closeOldPosition ? "1" : "",
-        internalStaffHop: internalStaffHop ? "1" : "",
-      });
-      const returningToStaffIndex = Boolean(
-        shPerson &&
-        nextIndex === shPerson.positionIndex &&
-        historyTimesheet?.hasDepartureText &&
-        isOwnUnitStaffMove(event) &&
-        !samePersonRow(targetShpo) &&
-        !transferCancel,
-      );
-      // Якщо особа вже стоїть на цільовому індексі в ЕЖООС і стару посаду
-      // закривати не треба — у РУХ лише історія. Внутрішній стрибок теж
-      // не вигадує «Виключені»: залишки старого Табеля чистить детектор дублів.
-      if (
-        samePersonRow(targetShpo) &&
-        !returningToStaffIndex &&
-        (!closeOldPosition || internalStaffHop)
-      ) {
-        const arrivalStillOpen = Boolean(arrival);
-        const oosMissing = !existingOos;
-        if (
-          !arrivalStillOpen &&
-          !oosMissing &&
-          (!transferCancel ||
-            !timesheetNeedsTransferCancelSplit(
-              personId,
-              fullName,
-              nextIndex,
-              transferCancel.orderDate,
-            ))
-        ) {
-          return;
-        }
-      }
-      // Старий рядок «Тимчасово прибулі» лишається історією. Якщо особа вже
-      // на штатній посаді, це не постановка з тимчасового прибуття.
-      const isTempArrivalPlacement = Boolean(arrival) && !closeOldPosition;
-      const openAbsence = openAbsenceOf(personId, fullName);
-      const dispositionShpoExcelRow = findNonStaffOccupantExcelRow(
-        shpoSheet,
-        personId,
-        fullName,
-        { index: 0, name: 6, id: 7 },
-      );
-      const dispositionTimesheetExcelRow = findNonStaffOccupantExcelRow(
-        timesheetSheet,
-        personId,
-        fullName,
-        { index: 1, name: 6, id: 7 },
-      );
-      const returningFromDisposition = Boolean(
-        dispositionShpoExcelRow ||
-        dispositionTimesheetExcelRow ||
-        openAbsence ||
-        /розпорядж/iu.test(
-          `${personChain?.[0]?.previousIndex || ""} ${event.previousIndex}`,
-        ),
-      );
-      const indexHistory = (() => {
-        const fromChain = (personChain?.length ? personChain : [event])
-          .filter((item) => isPositionIndex(item.nextIndex))
-          .map((item) => ({
-            index: item.nextIndex,
-            date: item.orderDate || item.basisDate || event.orderDate,
-          }));
-        if (fromChain.length > 1) return fromChain;
-        const extra = ownUnitIndexHistoryOf(personId, fullName);
-        return extra.length ? extra : fromChain;
-      })();
-      const newestFirstHistory = [...indexHistory].reverse();
-      const oosHistoryIndexes = newestFirstHistory
-        .map((item) => item.index)
-        .filter((index, idx, all) => all.indexOf(index) === idx)
-        .join("\n");
-      const oosHistoryDates = newestFirstHistory
-        .filter(
-          (item, idx, all) =>
-            all.findIndex((other) => other.index === item.index) === idx,
-        )
-        .map((item) => item.date)
-        .join("\n");
-      const staffTimesheetFrom =
-        timesheetEpisodeStartFor(personId, fullName, nextIndex) ||
-        inboundStaffDateFor(personId, fullName) ||
-        event.orderDate;
-      const monthSpans = augustAbsenceSpansFor(personId, fullName);
-      const latestArchiveReturn = returningFromDisposition
-        ? [...archiveAll]
-            .filter((period) => isSamePerson({ personId, fullName }, period))
-            .filter((period) => hasActualReturn(period.returnDate))
-            .sort(
-              (left, right) =>
-                dateMs(right.returnDate) - dateMs(left.returnDate),
-            )[0]
-        : null;
-      const carryAbsenceFromMonthStart =
-        !returningFromDisposition &&
-        monthSpans.some((span) => span.fromDay === 1);
-      const timesheetActiveFrom = returningFromDisposition
-        ? event.orderDate ||
-          latestArchiveReturn?.returnDate ||
-          (openAbsence?.actualReturn &&
-          hasActualReturn(openAbsence.actualReturn)
-            ? openAbsence.actualReturn
-            : "")
-        : carryAbsenceFromMonthStart
-          ? journalMonthStartLabel
-          : returningToStaffIndex
-            ? event.orderDate
-            : staffTimesheetFrom;
-      const timesheetPreserveHistory =
-        transferCancel ||
-        carryAbsenceFromMonthStart ||
-        returningFromDisposition ||
-        journalDayFromDateMs(dateMs(timesheetActiveFrom), leadWindowStart) <= 1
-          ? ""
-          : "1";
-      const staleTimesheet =
-        timesheetRowsOf(personId, fullName).find(
-          (row) =>
-            row.excelRow !== targetTimesheet?.excelRow && !row.hasDepartureText,
-        ) ?? null;
-      const newPositionText = positionChangeDestination(event);
-      const timesheetDestination =
-        extractTimesheetDestinationFromPosition(newPositionText) ||
-        newPositionText;
-      const chainIndexes = indexHistory
-        .map((item) => item.index)
-        .filter(Boolean);
-      const chainNote =
-        chainIndexes.length > 1 ? `Ланцюг ${chainIndexes.join(" → ")}: ` : "";
-      const canApply = Boolean(
-        (shPerson || chained || returningFromDisposition) &&
-        nextIndex &&
-        targetShpo &&
-        targetTimesheet,
-      );
-      const applyNow = canApply;
-      const processedBefore = wasMovementProcessed(event);
-
-      ops.push({
-        id: opId(["pos", event.movementNumber || String(event.excelRow)]),
-        kind: "position_change",
-        class: applyNow ? "ready" : "needs_input",
-        sheet: returningFromDisposition
-          ? "5. Тимч. відсутні → 1. ШПО / 2. ООС / 6. Табель"
-          : writeExcludedOnClose
-            ? "3. Виключені → 6. Табель → 1. ШПО / 2. ООС"
-            : closeOldPosition
-              ? "1. ШПО / 2. ООС / 6. Табель"
-              : isTempArrivalPlacement
-                ? "4. Тимч. прибулі → 1. ШПО / 2. ООС / 6. Табель"
-                : "1. ШПО / 2. ООС / 6. Табель",
-        personId,
-        fullName,
-        positionIndex: nextIndex,
-        rank,
-        before: returningFromDisposition
-          ? `у розпорядженні / ${openAbsence?.ground || "СЗЧ"}`
-          : closeOldPosition
-            ? `штатна посада ${event.previousIndex}`
-            : isTempArrivalPlacement
-              ? `тимчасово прибулий${arrival?.positionIndex ? ` · інд. ${arrival.positionIndex}` : ""}`
-              : event.previousIndex || "?",
-        after: `штатна посада ${nextIndex || event.changeText || "?"}${
-          oosHistoryIndexes && oosHistoryIndexes.includes("\n")
-            ? ` · ООС ${oosHistoryIndexes.replaceAll("\n", " → ")}`
-            : ""
-        }`,
-        sourceRef: `Рух!R${event.excelRow} №${event.movementNumber}`,
-        why:
-          chainNote +
-          (processedBefore
-            ? "Подія є в історії застосувань, але фактичний стан ШПО/ООС/Табеля потребує повторного проведення"
-            : !canApply
-              ? "Не знайдено однозначний рядок нового індексу в ШПО/Табелі — потрібна ручна перевірка"
-              : returningFromDisposition
-                ? `Повернення із СЗЧ / розпорядження: закрити період, прибрати з блоку «у розпорядженні», поставити на ${nextIndex}${
-                    chainIndexes.length > 1
-                      ? `, історія ООС ${[...chainIndexes].reverse().join(", ")}`
-                      : ""
-                  }`
-                : closeOldPosition
-                  ? writeExcludedOnClose
-                    ? `зміна посади в межах 1ПБ: закрити ${event.previousIndex} у Виключених і Табелі, поставити на ${nextIndex}, ООС лишити активним`
-                    : `внутрішня зміна посади 1ПБ ${event.previousIndex} → ${nextIndex}: оновити ШПО/ООС/Табель, у «Виключені» не пишемо`
-                  : isTempArrivalPlacement
-                    ? `ПОСАДА №${event.orderNumber || "?"} від ${event.orderDate || "?"}: закрити тимчасове прибуття, поставити на штат ${nextIndex}; Табель з ${staffTimesheetFrom || event.orderDate || "дати наказу"}, коди archive в цьому ж кроці`
-                    : transferCancel
-                      ? `Серпневий ланцюг: ПОСАДА ${nextIndex} з ${staffAppointmentDateFor(personId, fullName, nextIndex) || event.orderDate || "?"}; ПЕРЕВ №${cancelledTransfer?.orderNumber || "?"} скасовано №${transferCancel.orderNumber || "?"} — один рядок Табеля, запис у «Виключені» прибираємо`
-                      : returningToStaffIndex
-                        ? `Повернення на ${nextIndex} з ${event.orderDate || "?"}: історичний рядок з вибуттям лишаємо, новий активний з «+» від дати наказу`
-                        : event.type === "ПЕРЕВ"
-                          ? "Внутрішній ПЕРЕВ у межах 1ПБ підтверджений поточним sh: змінити штатну позицію, ООС і Табель"
-                          : "ПОСАДА підтверджена поточним sh: оновити штатну позицію, ООС і Табель"),
-        confidence: applyNow ? "high" : "manual",
-        payload: {
-          movementNumber: event.movementNumber,
-          previousIndex: event.previousIndex,
-          nextIndex,
-          changeText: event.changeText,
-          orderNumber: event.orderNumber,
-          orderDate: event.orderDate,
-          basisNumber: event.basisNumber,
-          basisDate: event.basisDate,
-          nextName: fullName,
-          nextRank: rank,
-          nextPersonId: personId,
-          positionTitle: shPerson?.positionTitle || "",
-          statusRaw: shPerson?.status || event.status,
-          isTempArrivalPlacement: isTempArrivalPlacement ? "1" : "",
-          arrivalExcelRow: arrival ? String(arrival.excelRow) : "",
-          oosExcelRow: existingOos ? String(existingOos.excelRow) : "",
-          oosHistoryIndexes,
-          oosHistoryDates,
-          shpoExcelRow: targetShpo ? String(targetShpo.excelRow) : "",
-          timesheetExcelRow: targetTimesheet
-            ? String(targetTimesheet.excelRow)
-            : "",
-          previousTimesheetExcelRow: transferCancel
-            ? ""
-            : returningToStaffIndex && historyTimesheet
-              ? String(historyTimesheet.excelRow)
-              : currentTimesheet &&
-                  currentTimesheet.excelRow !== targetTimesheet?.excelRow
-                ? String(currentTimesheet.excelRow)
-                : "",
-          clearTimesheetExcelRow: staleTimesheet
-            ? String(staleTimesheet.excelRow)
-            : "",
-          timesheetActiveFrom,
-          timesheetSkipHistory: "1",
-          timesheetPreserveHistory,
-          timesheetBindStaffIndex: isTempArrivalPlacement ? nextIndex : "",
-          returningToStaffIndex: returningToStaffIndex ? "1" : "",
-          returningFromDisposition: returningFromDisposition ? "1" : "",
-          dispositionShpoExcelRow: dispositionShpoExcelRow
-            ? String(dispositionShpoExcelRow)
-            : "",
-          dispositionTimesheetExcelRow: dispositionTimesheetExcelRow
-            ? String(dispositionTimesheetExcelRow)
-            : "",
-          openAbsenceExcelRow: openAbsence ? String(openAbsence.excelRow) : "",
-          timesheetAbsenceSpans: encodeTimesheetAbsenceSpans(
-            (() => {
-              const activeDay =
-                journalDayFromDateMs(
-                  dateMs(timesheetActiveFrom),
-                  leadWindowStart,
-                ) || 1;
-              if (carryAbsenceFromMonthStart) return monthSpans;
-              return clipAbsenceSpansToActiveEpisode(monthSpans, activeDay);
-            })(),
-          ),
-          historyTimesheetExcelRow: (() => {
-            if (transferCancel || carryAbsenceFromMonthStart) return "";
-            const fromDay = journalDayFromDateMs(
-              dateMs(timesheetActiveFrom),
-              leadWindowStart,
-            );
-            if (fromDay <= 1) return "";
-            const prior = priorEpisodeTimesheetOf(
-              personId,
-              fullName,
-              targetTimesheet?.excelRow || 0,
-              nextIndex,
-            );
-            return prior ? String(prior.excelRow) : "";
-          })(),
-          historyTimesheetAbsenceSpans: encodeTimesheetAbsenceSpans(
-            carryAbsenceFromMonthStart
-              ? []
-              : absenceSpansBeforeEpisode(
-                  monthSpans,
-                  journalDayFromDateMs(
-                    dateMs(timesheetActiveFrom),
-                    leadWindowStart,
-                  ) || 1,
-                ),
-          ),
-          arrivedFrom: event.arrivedFrom || arrival?.fromUnit || "",
-          arrivalDepartDate: arrival ? event.orderDate : "",
-          arrivalDepartOrderNumber: arrival ? event.orderNumber : "",
-          arrivalDepartOrderDate: arrival ? event.orderDate : "",
-          cancelledTransferOrder: cancelledTransfer?.orderNumber || "",
-          cancelledTransferDate: cancelledTransfer?.orderDate || "",
-          cancelledTransferDest:
-            cancelledTransfer?.destination ||
-            cancelledTransfer?.changeText ||
-            "",
-          actualExclusionEvidence: actualExclusionEvidence ? "1" : "",
-          chainStep: personChain?.length ? String(personChain.length) : "",
-          chainTotal: personChain?.length ? String(personChain.length) : "",
-          closeOldPosition: closeOldPosition ? "1" : "",
-          internalStaffHop: internalStaffHop ? "1" : "",
-          previousShpoExcelRow:
-            closeOldPosition && oldShpo ? String(oldShpo.excelRow) : "",
-          previousIndexTimesheetExcelRow:
-            closeOldPosition && previousShpoTimesheet
-              ? String(previousShpoTimesheet.excelRow)
-              : "",
-          excludeDate: writeExcludedOnClose ? event.orderDate : "",
-          documentsDest: writeExcludedOnClose
-            ? event.changeText || newPositionText
-            : "",
-          timesheetDestination: closeOldPosition ? timesheetDestination : "",
-          exclusionReason: writeExcludedOnClose ? "ПЕРЕВЕДЕННЯ 1 ПБ" : "",
-          fromRank: oldShpo?.rank || previousShpoTimesheet?.rank || rank,
-          fromName: oldShpo?.fullName || fullName,
-          fromPersonId: oldShpo?.personId || personId,
-          fromPositionIndex: event.previousIndex,
-          excludedSourceExcelRow: excludedSource
-            ? String(excludedSource.excelRow)
-            : "",
-          transferCancelOrder: transferCancel?.orderNumber || "",
-          transferCancelDate: transferCancel?.orderDate || "",
-        },
-        movementKey: createMovementKey(event),
-        checkedDefault: applyNow,
-      });
-      return;
-    }
-
-    if (event.type === "ПРИБУВ" || event.type === "ЗВІЛЬН") {
-      if (
-        (event.type === "ПРИБУВ" &&
-          personStillInEjoos(event.personId, event.fullName)) ||
-        (event.type === "ЗВІЛЬН" &&
-          !personStillInEjoos(event.personId, event.fullName))
-      ) {
-        return;
-      }
-      const laterPlacement = latestPositionByName.get(normKey(event.fullName));
-      if (
-        event.type === "ПРИБУВ" &&
-        laterPlacement &&
-        laterPlacement.excelRow > event.excelRow
-      ) {
-        // Arrival is historical once a later ПОСАДА has put the person on штат.
-        return;
-      }
-      const processedBefore = wasMovementProcessed(event);
-      ops.push({
-        id: opId([
-          "mov",
-          event.type,
-          event.movementNumber || String(event.excelRow),
-        ]),
-        kind: event.type === "ПРИБУВ" ? "arrival" : "other_manual",
-        class: "needs_input",
-        sheet: event.type === "ПРИБУВ" ? "2. ООС" : "3. Виключені",
-        personId: event.personId,
-        fullName: event.fullName,
-        positionIndex: event.nextIndex || event.previousIndex,
-        rank: event.rank,
-        before: "—",
-        after: `${event.type}: ${event.destination || event.changeText || "потрібні реквізити"}`,
-        sourceRef: `Рух!R${event.excelRow} №${event.movementNumber}`,
-        why: processedBefore
-          ? "Подію вже застосовували, але поточний стан ЕЖООС їй не відповідає"
-          : `${event.type} не застосовується автоматично — заповніть накази/звідки/куди`,
-        confidence: "manual",
-        payload: {
-          movementNumber: event.movementNumber,
-          type: event.type,
-          destination: event.destination,
-          orderNumber: event.orderNumber,
-          orderDate: event.orderDate,
-        },
-        movementKey: createMovementKey(event),
-        checkedDefault: false,
-      });
-    }
+    const manualArrivalOp = planManualArrivalMovementOp({
+      event,
+      latestPositionByName,
+      personStillInEjoos,
+      wasMovementProcessed,
+    });
+    if (manualArrivalOp) ops.push(manualArrivalOp);
   };
 
   effectiveMovements.forEach(considerMovement);
@@ -5682,64 +2680,6 @@ export const buildEjoosSyncPlan = (
       considerMovement(transfer);
     }
   }
-  const staffTimesheetRows = new Set(
-    [...dayByIndex.values()].map((row) => row.excelRow),
-  );
-  for (const row of timesheetPeople) {
-    if (!staffTimesheetRows.has(row.excelRow)) continue;
-    if (personStillInSh(row.personId, row.fullName)) continue;
-    if (transferCancelForPerson(row.personId, row.fullName)) continue;
-    const transfer = finalExternalTransferFor(row.personId, row.fullName);
-    if (
-      absenceOnlyBlocksExclusion({
-        absenceAt: openDispositionAbsenceMs(row.personId, row.fullName),
-        outboundAt: transfer ? movementEventTime(transfer) : 0,
-      })
-    ) {
-      continue;
-    }
-    if (!transfer) continue;
-    if (!excludeAlreadyPlanned(row.personId, row.fullName)) {
-      considerMovement(transfer);
-    }
-    if (excludeAlreadyPlanned(row.personId, row.fullName)) continue;
-    const history = timesheetRowsOf(row.personId, row.fullName).find(
-      (other) => other.excelRow !== row.excelRow && other.hasDepartureText,
-    );
-    ops.push({
-      id: opId([
-        "stale-tab",
-        row.personId || row.fullName,
-        String(row.excelRow),
-      ]),
-      kind: "timesheet_day",
-      class: "ready",
-      sheet: "6. Табель",
-      personId: row.personId,
-      fullName: row.fullName,
-      positionIndex: row.positionIndex,
-      rank: row.rank,
-      before: `штатний рядок R${row.excelRow}: ${row.fullName || "ПІБ"} ще стоїть на ${row.positionIndex}`,
-      after:
-        "прибрати ПІБ/ID зі штатної позиції; історичний рядок з вибуттям лишити",
-      sourceRef: history
-        ? `Табель!R${row.excelRow} · історія R${history.excelRow}`
-        : `Табель!R${row.excelRow}`,
-      why: "Особа відсутня в актуальному sh і має чинне зовнішнє переведення, але персональні дані лишилися на старій штатній позиції Табеля. Історичний рядок — не поточний стан; штатний рядок треба очистити.",
-      confidence: "high",
-      payload: {
-        type: "STALE_TAB_PERSON_ROW",
-        clearStalePerson: "1",
-        excelRow: String(row.excelRow),
-        keepHistoryRow: history ? String(history.excelRow) : "",
-      },
-      movementKey: createMovementKey(transfer),
-      checkedDefault: true,
-    });
-  }
-
-  const excludedClearAlreadyPlanned = (excelRow: number) =>
-    ops.some((op) => excludedRowsToClear(op.payload).includes(excelRow));
   const latestOutboundTransferOf = (personId: string, fullName: string) =>
     [...activeMovementsAll]
       .filter(
@@ -5752,228 +2692,35 @@ export const buildEjoosSyncPlan = (
       .sort(
         (left, right) => movementEventTime(right) - movementEventTime(left),
       )[0] ?? null;
-  const seenStaleExcludedPeople = new Set<string>();
-  for (const row of ejoosExcluded) {
-    const key = movementPersonKey(row);
-    if (!key || seenStaleExcludedPeople.has(key)) continue;
-    seenStaleExcludedPeople.add(key);
-    if (personStillInSh(row.personId, row.fullName)) continue;
-    const latest = latestOutboundTransferOf(row.personId, row.fullName);
-    if (!latest) continue;
-    const stale = staleExcludedForMovement(latest).filter(
-      (item) => !excludedClearAlreadyPlanned(item.excelRow),
-    );
-    if (!stale.length) continue;
-    ops.push({
-      id: opId([
-        "clear-stale-excl",
-        row.personId || row.fullName,
-        stale.map((item) => String(item.excelRow)).join("-"),
-      ]),
-      kind: "timesheet_day",
-      class: "ready",
-      sheet: "3. Виключені",
-      personId: row.personId || latest.personId,
-      fullName: row.fullName || latest.fullName,
-      positionIndex: latest.previousIndex || "",
-      rank: latest.rank || "",
-      before: `Виключені ${stale.map((item) => `R${item.excelRow}`).join(", ")} — старі ПЕРЕВ`,
-      after: `прибрати дублі; лишити чинне ПЕРЕВ №${latest.orderNumber || "?"} від ${latest.orderDate || "?"}`,
-      sourceRef: stale.map((item) => `Виключені!R${item.excelRow}`).join(" · "),
-      why: "Особа вже має чинне зовнішнє ПЕРЕВ. Попередні рядки «Виключені» не видалились — лишаємо один актуальний запис.",
-      confidence: "high",
-      payload: {
-        type: "CLEAR_STALE_EXCLUSION_DUPLICATE",
-        ...staleExcludedClearPayload(stale),
-      },
-      checkedDefault: true,
-    });
-  }
-  for (const row of ejoosExcluded) {
-    if (excludedClearAlreadyPlanned(row.excelRow)) continue;
-    if (!isFalseInternalHopExclusion(row)) continue;
-    if (!personStillInSh(row.personId, row.fullName)) continue;
-    if (!personStillInEjoos(row.personId, row.fullName)) continue;
-    const shPerson =
-      (row.personId && shPersonById.get(row.personId)) ||
-      byPersonName(shPersonByName, row.personId, row.fullName) ||
-      null;
-    const timesheetRow = activeTimesheetRowOf(
-      row.personId,
-      row.fullName,
-      shPerson?.positionIndex || "",
-    );
-    ops.push({
-      id: opId([
-        "clear-hop-excl",
-        row.personId || row.fullName,
-        String(row.excelRow),
-      ]),
-      kind: "timesheet_day",
-      class: "ready",
-      sheet: "3. Виключені",
-      personId: row.personId || shPerson?.personId || "",
-      fullName: row.fullName || shPerson?.fullName || "",
-      positionIndex: shPerson?.positionIndex || "",
-      rank: shPerson?.rank || "",
-      before: `Виключені R${row.excelRow}: ${row.note || "ПЕРЕВЕДЕННЯ 1 ПБ"}`,
-      after: "прибрати — особа досі в 1ПБ на штатній посаді",
-      sourceRef: `Виключені!R${row.excelRow}`,
-      why: "Внутрішня зміна посади 1ПБ потрапила в «Виключені» помилково. Людина є в актуальному sh і в ШПО/ООС — рядок виключення прибираємо.",
-      confidence: "high",
-      payload: {
-        type: "CLEAR_INTERNAL_HOP_EXCLUSION",
-        clearExcludedExcelRow: String(row.excelRow),
-        excelRow: timesheetRow ? String(timesheetRow.excelRow) : "",
-      },
-      checkedDefault: true,
-    });
-  }
-
-  for (const row of timesheetPeople) {
-    if (staffTimesheetRows.has(row.excelRow)) continue;
-    const cancel = transferCancelForPerson(row.personId, row.fullName);
-    if (!cancel || !eventInLeadWindow(cancel)) continue;
-    if (!personStillInSh(row.personId, row.fullName)) continue;
-    const staff = row.positionIndex
-      ? dayByIndex.get(row.positionIndex)
-      : undefined;
-    const staffScan = staff
-      ? timesheetScanByRow.get(staff.excelRow)
-      : undefined;
-    // Штатний рядок ще з «вибув» — це не дубль, а стан до відновлення.
-    if (staffScan?.hasDepartureText) continue;
-    const shPerson =
-      (row.personId && shPersonById.get(row.personId)) ||
-      byPersonName(shPersonByName, row.personId, row.fullName) ||
-      null;
-    const personId = row.personId || shPerson?.personId || "";
-    const fullName = row.fullName || shPerson?.fullName || "";
-    const host =
-      ops.find(
-        (op) =>
-          op.kind === "position_change" &&
-          isSamePerson({ personId, fullName }, op),
-      ) ||
-      ops.find(
-        (op) =>
-          op.kind === "absent_upsert" &&
-          isSamePerson({ personId, fullName }, op),
-      ) ||
-      ops.find(
-        (op) =>
-          op.kind !== "data_mismatch" &&
-          op.kind !== "timesheet_day" &&
-          isSamePerson({ personId, fullName }, op),
-      );
-    if (host) {
-      host.payload.duplicateTimesheetExcelRow = String(row.excelRow);
-      host.payload.clearStalePerson = "1";
-      host.payload.clearTimesheetIndex = "1";
-      continue;
-    }
-    ops.push({
-      id: opId(["dup-tab-cancel", personId || fullName, String(row.excelRow)]),
-      kind: "timesheet_day",
-      class: "ready",
-      sheet: "6. Табель",
-      personId,
-      fullName,
-      positionIndex: row.positionIndex || shPerson?.positionIndex || "",
-      rank: row.rank || shPerson?.rank || "",
-      before: `дубль R${row.excelRow}: ${fullName || "ПІБ"} · «вибув» після скасованого переведення`,
-      after: "прибрати другий рядок — за серпень лишається один активний запис",
-      sourceRef: `Табель!R${row.excelRow}`,
-      why: "Переведення скасовано в тому ж місяці. Другий рядок Табеля з «вибув» не є окремою фактичною наявністю і не потрібен.",
-      confidence: "high",
-      payload: {
-        type: "DUPLICATE_TAB_AFTER_CANCEL",
-        clearStalePerson: "1",
-        clearTimesheetIndex: "1",
-        excelRow: String(row.excelRow),
-      },
-      movementKey: createMovementKey(cancel),
-      checkedDefault: true,
-    });
-  }
-
-  const timesheetOccupantByIndex = new Map(
-    shPeople
-      .filter((person) => person.positionIndex)
-      .map((person) => [
-        person.positionIndex,
-        { personId: person.personId, fullName: person.fullName },
-      ]),
-  );
-  const clearedTimesheetRows = new Set(
-    ops
-      .filter(
-        (op) =>
-          op.kind === "timesheet_day" &&
-          op.payload.clearStalePerson === "1" &&
-          Number(op.payload.excelRow || 0) > 0,
-      )
-      .map((op) => Number(op.payload.excelRow)),
-  );
-  const namesForTimesheetId = new Map<string, Set<string>>();
-  for (const row of timesheetPeople) {
-    const id = String(row.personId || "").trim();
-    const name = canonicalName(row.fullName);
-    if (!id || !name) continue;
-    const names = namesForTimesheetId.get(id) ?? new Set<string>();
-    names.add(name);
-    namesForTimesheetId.set(id, names);
-  }
-  const uniqueTimesheetPersonId = (personId: string) => {
-    const id = String(personId || "").trim();
-    if (!id) return "";
-    const names = namesForTimesheetId.get(id);
-    if (!names || names.size > 1) return "";
-    return id;
-  };
-  for (const item of findDuplicateTimesheetExtras(
+  planTimesheetDayCleanup({
+    ops,
     timesheetPeople,
-    timesheetOccupantByIndex,
-  )) {
-    if (clearedTimesheetRows.has(item.extra.excelRow)) continue;
-    clearedTimesheetRows.add(item.extra.excelRow);
-    const keepName =
-      item.keep.fullName || item.keep.personId || "канонічний рядок";
-    ops.push({
-      id: opId([
-        "dup-tab-row",
-        item.extra.personId || item.extra.fullName,
-        String(item.extra.excelRow),
-      ]),
-      kind: "timesheet_day",
-      class: "ready",
-      sheet: "6. Табель",
-      personId: uniqueTimesheetPersonId(item.extra.personId),
-      fullName: item.extra.fullName,
-      positionIndex: item.extra.positionIndex,
-      rank: "",
-      before: `дубль R${item.extra.excelRow}: ${item.extra.fullName || "ПІБ"} на ${item.extra.positionIndex || "індексі"}`,
-      after: `прибрати рядок — лишається R${item.keep.excelRow} (${keepName})`,
-      sourceRef: `Табель!R${item.extra.excelRow} · канон R${item.keep.excelRow}`,
-      why:
-        item.reason === "leftover_history"
-          ? "Після вибуття в Табелі лишився другий іменний рядок. Історію з «вибув» лишаємо, копію з ПІБ прибираємо."
-          : item.reason === "internal_hop"
-            ? "Внутрішня зміна посади в 1ПБ: один місячний рядок. Копію з «вибув до відділення/взводу» прибираємо."
-            : item.reason === "same_person"
-              ? "У Табелі не може бути двох активних записів однієї особи. Повторне застосування раніше дописувало копію замість штатного рядка."
-              : "Один штатний індекс — один активний рядок Табеля. Історія з «вибув» лишається, зайві копії з «+» прибираємо.",
-      confidence: "high",
-      payload: {
-        type: "DUPLICATE_TAB_ROW",
-        clearStalePerson: "1",
-        clearTimesheetIndex: "1",
-        excelRow: String(item.extra.excelRow),
-        keepTimesheetExcelRow: String(item.keep.excelRow),
-      },
-      checkedDefault: true,
-    });
-  }
+    ejoosExcluded,
+    dayByIndex,
+    timesheetScanByRow,
+    shPeople,
+    shPersonById,
+    shPersonByName,
+    excludeAlreadyPlanned,
+    finalExternalTransferFor,
+    considerMovement,
+    personStillInSh,
+    transferCancelForPerson,
+    eventInLeadWindow,
+    absenceOnlyBlocksExclusion,
+    openDispositionAbsenceMs,
+    movementEventTime,
+    timesheetRowsOf,
+    excludedRowsToClear,
+    staleExcludedForMovement,
+    staleExcludedClearPayload,
+    latestOutboundTransferOf,
+    activeTimesheetRowOf,
+    byPersonName,
+    personStillInEjoos,
+    isSamePerson,
+    movementPersonKey,
+  });
 
   for (const [personId, variants] of nameVariantsById) {
     if (variants.size < 2) continue;
@@ -6120,231 +2867,49 @@ export const buildEjoosSyncPlan = (
       checkedDefault: false,
     });
   }
+  ops.push(
+    ...planTempArrivalCloseOps({
+      shPeople,
+      movementsAll,
+      shpoByIndex,
+      ejoosOos,
+      dayByIndex,
+      oosById,
+      oosByName,
+      journalMonthStartLabel,
+      existingOps: ops,
+      arrivalOf,
+      isSamePerson,
+      eventInLeadWindow,
+      movementEventTime,
+      isPositionIndex,
+      byPersonName,
+      staffIndexTimesheetForPerson,
+      staffAppointmentDateFor,
+      timesheetEpisodeStartFor,
+      inboundStaffDateFor,
+      staffEpisodePaintPayload,
+    }),
+  );
 
-  // Особа вже на штаті (sh + ШПО), але «Тимчасово прибулі» лишилось відкритим.
-  // Типово: ПРИБУВ з БРЕЗ без окремої ПОСАДИ в РУХ — ПРИБУВ не проходить
-  // considerMovement, бо personStillInEjoos=true.
-  for (const person of shPeople) {
-    const nextIndex = person.positionIndex;
-    if (!nextIndex || !isPositionIndex(nextIndex) || !person.fullName) continue;
-    const personId = person.personId;
-    const fullName = person.fullName;
-    const arrival = arrivalOf(personId, fullName);
-    if (!arrival) continue;
-    if (
-      ops.some(
-        (op) =>
-          op.kind === "position_change" &&
-          isSamePerson({ personId, fullName }, op),
-      )
-    ) {
-      continue;
-    }
-    const targetShpo = shpoByIndex.get(nextIndex) ?? null;
-    if (!targetShpo || !isSamePerson({ personId, fullName }, targetShpo)) {
-      continue;
-    }
-    const placementEvent =
-      [...movementsAll]
-        .filter(
-          (event) =>
-            isSamePerson({ personId, fullName }, event) &&
-            eventInLeadWindow(event) &&
-            (event.type === "ПРИБУВ" || isOwnUnitStaffMove(event)) &&
-            (event.nextIndex === nextIndex ||
-              String(event.changeText || "").includes(nextIndex) ||
-              event.type === "ПРИБУВ"),
-        )
-        .sort(
-          (left, right) =>
-            movementEventTime(right) - movementEventTime(left) ||
-            right.excelRow - left.excelRow,
-        )[0] ?? null;
-    const existingOos =
-      (personId && oosById.get(personId)) ||
-      byPersonName(oosByName, personId, fullName) ||
-      ejoosOos.find((row) => isSamePerson({ personId, fullName }, row)) ||
-      null;
-    const indexTimesheet = dayByIndex.get(nextIndex) ?? null;
-    const personStaffTimesheet = staffIndexTimesheetForPerson(
-      personId,
-      fullName,
-      nextIndex,
-    );
-    const targetTimesheet =
-      personStaffTimesheet ||
-      (indexTimesheet &&
-      isSamePerson({ personId, fullName }, indexTimesheet)
-        ? indexTimesheet
-        : null) ||
-      indexTimesheet;
-    const rank = person.rank || placementEvent?.rank || targetShpo.rank;
-    const orderDate =
-      placementEvent?.orderDate ||
-      placementEvent?.basisDate ||
-      staffAppointmentDateFor(personId, fullName, nextIndex) ||
-      arrival.arriveDate ||
-      "";
-    const orderNumber = placementEvent?.orderNumber || "";
-    const staffTimesheetFrom =
-      timesheetEpisodeStartFor(personId, fullName, nextIndex) ||
-      inboundStaffDateFor(personId, fullName) ||
-      orderDate;
-    const timesheetActiveFrom =
-      staffTimesheetFrom || orderDate || journalMonthStartLabel;
-    const episodePaint = staffEpisodePaintPayload(
-      personId,
-      fullName,
-      nextIndex,
-      targetTimesheet?.excelRow || 0,
-    );
-    const canApply = Boolean(targetShpo && targetTimesheet);
-    ops.push({
-      id: opId([
-        "temp-arrival-close",
-        personId || canonicalName(fullName),
-        nextIndex,
-      ]),
-      kind: "position_change",
-      class: canApply ? "ready" : "needs_input",
-      sheet: "4. Тимч. прибулі → 1. ШПО / 2. ООС / 6. Табель",
-      personId,
-      fullName,
-      positionIndex: nextIndex,
-      rank,
-      before: `тимчасово прибулий${arrival.fromUnit ? ` · ${arrival.fromUnit}` : ""}`,
-      after: `штатна посада ${nextIndex}`,
-      sourceRef: placementEvent
-        ? `Рух!R${placementEvent.excelRow} №${placementEvent.movementNumber}`
-        : `sh!R${person.excelRow} · ${nextIndex}`,
-      why: placementEvent
-        ? `ПРИБУВ/постановка №${orderNumber || "?"} від ${orderDate || "?"}: закрити тимчасове прибуття, зафіксувати в ООС штат ${nextIndex}`
-        : `Особа вже на штаті ${nextIndex} за sh/ШПО — закрити відкритий рядок «Тимчасово прибулі» та оновити ООС`,
-      confidence: canApply ? "high" : "manual",
-      payload: {
-        movementNumber: placementEvent?.movementNumber || "",
-        previousIndex: placementEvent?.previousIndex || arrival.fromUnit || "БРЕЗ",
-        nextIndex,
-        changeText: placementEvent?.changeText || "",
-        orderNumber,
-        orderDate,
-        basisNumber: placementEvent?.basisNumber || "",
-        basisDate: placementEvent?.basisDate || "",
-        nextName: fullName,
-        nextRank: rank,
-        nextPersonId: personId,
-        positionTitle: person.positionTitle || "",
-        statusRaw: person.status || placementEvent?.status || "",
-        isTempArrivalPlacement: "1",
-        arrivalExcelRow: String(arrival.excelRow),
-        arrivalDepartDate: orderDate,
-        arrivalDepartOrderNumber: orderNumber,
-        arrivalDepartOrderDate: orderDate,
-        oosExcelRow: existingOos ? String(existingOos.excelRow) : "",
-        oosHistoryIndexes: nextIndex,
-        oosHistoryDates: orderDate,
-        shpoExcelRow: String(targetShpo.excelRow),
-        timesheetExcelRow: targetTimesheet
-          ? String(targetTimesheet.excelRow)
-          : "",
-        timesheetActiveFrom:
-          episodePaint.timesheetActiveFrom || timesheetActiveFrom,
-        timesheetSkipHistory: "1",
-        timesheetPreserveHistory: episodePaint.timesheetPreserveHistory || "",
-        timesheetBindStaffIndex: nextIndex,
-        reconcileTempArrival: "1",
-        ...episodePaint,
-      },
-      checkedDefault: canApply,
-    });
-  }
-
-  // Фінальна звірка: актуальна sh — джерело правди для зайнятості штатного індексу.
-  for (const [positionIndex, shPerson] of shOccupantByIndex) {
-    const inTempArrivals = Boolean(
-      (shPerson.personId && arrivalById.get(shPerson.personId)) ||
-      byPersonName(arrivalByName, shPerson.personId, shPerson.fullName),
-    );
-    if (
-      alreadyVacatedForAbsence(shPerson.personId, shPerson.fullName) &&
-      !inTempArrivals
-    ) {
-      continue;
-    }
-    const shpo = shpoByIndex.get(positionIndex);
-    const shpoMatches =
-      Boolean(shpo) &&
-      isSamePerson(shPerson, shpo!) &&
-      normKey(shpo?.fullName || "") === normKey(shPerson.fullName);
-    if (shpoMatches) continue;
-    const hasShpoOp = ops.some(
-      (op) =>
-        (op.kind === "shpo_occupant" || op.kind === "position_change") &&
-        isSamePerson(shPerson, op) &&
-        op.positionIndex === positionIndex &&
-        op.class === "ready",
-    );
-    if (hasShpoOp) continue;
-    const ts =
-      staffIndexTimesheetForPerson(
-        shPerson.personId,
-        shPerson.fullName,
-        positionIndex,
-      ) || dayByIndex.get(positionIndex);
-    const returnEvent = [...activeMovementsAll]
-      .filter(
-        (event) =>
-          isSamePerson(shPerson, event) &&
-          eventInLeadWindow(event) &&
-          isOwnUnitStaffMove(event) &&
-          (event.nextIndex === positionIndex ||
-            String(event.changeText || "").includes(positionIndex)),
-      )
-      .sort(
-        (left, right) =>
-          movementEventTime(right) - movementEventTime(left) ||
-          right.excelRow - left.excelRow,
-      )[0];
-    const episodePaint = staffEpisodePaintPayload(
-      shPerson.personId,
-      shPerson.fullName,
-      positionIndex,
-      ts?.excelRow || 0,
-    );
-    ops.push({
-      id: opId([
-        "shpo-reconcile",
-        positionIndex,
-        shPerson.personId || shPerson.fullName,
-      ]),
-      kind: "shpo_occupant",
-      class: "ready",
-      sheet: "1. ШПО / 6. Табель",
-      personId: shPerson.personId,
-      fullName: shPerson.fullName,
-      positionIndex,
-      rank: shPerson.rank,
-      before: shpo?.fullName
-        ? `${shpo.rank || "?"} ${shpo.fullName} (ID ${shpo.personId || "—"})`
-        : "вакантно",
-      after: `${shPerson.rank || "?"} ${shPerson.fullName} (ID ${shPerson.personId || "—"})`,
-      sourceRef: `sh!R${shPerson.excelRow} · фінальна зайнятість ${positionIndex}`,
-      why: "Після всіх рухів на цьому індексі актуальна sh визначає поточного військовослужбовця. Відновлюємо ШПО/Табель за sh, історію попередніх осіб не чіпаємо.",
-      confidence: "high",
-      payload: {
-        shpoExcelRow: shpo ? String(shpo.excelRow) : "",
-        timesheetExcelRow: ts ? String(ts.excelRow) : "",
-        nextName: shPerson.fullName,
-        nextRank: shPerson.rank,
-        nextPersonId: shPerson.personId,
-        reconcileFromSh: "1",
-        ...episodePaint,
-        timesheetActiveFrom:
-          episodePaint.timesheetActiveFrom || returnEvent?.orderDate || "",
-      },
-      checkedDefault: true,
-    });
-  }
+  ops.push(
+    ...planShpoReconcileOps({
+      shOccupantByIndex,
+      existingOps: ops,
+      activeMovementsAll,
+      shpoByIndex,
+      dayByIndex,
+      arrivalById,
+      arrivalByName,
+      alreadyVacatedForAbsence,
+      byPersonName,
+      staffIndexTimesheetForPerson,
+      eventInLeadWindow,
+      movementEventTime,
+      staffEpisodePaintPayload,
+      isSamePerson,
+    }),
+  );
 
   for (const person of shPeople) {
     if (!personStillInSh(person.personId, person.fullName)) continue;

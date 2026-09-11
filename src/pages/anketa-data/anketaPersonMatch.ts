@@ -391,6 +391,27 @@ export const matchAnketaRowToPersonnelDetailed = (
     return { match: null, ambiguous: [], similar: [] };
   }
 
+  const externalId = normalizeAnketaExternalIdKey(anketaRow.externalId);
+  if (externalId) {
+    const byId = index.byExternalId.get(externalId);
+    if (byId) {
+      const nameKey = normalizeNameKey(anketaRow.fullName);
+      const personnelKey = normalizeNameKey(byId.summary.name);
+      const namesCompatible =
+        anketaPersonnelNamesMatch(anketaRow.fullName, byId.summary.name) ||
+        (nameKey &&
+          personnelKey &&
+          shortNameKeyFromFull(nameKey) === shortNameKeyFromFull(personnelKey));
+      if (namesCompatible) {
+        return {
+          match: { ...byId, matchBy: "externalId" },
+          ambiguous: [],
+          similar: [],
+        };
+      }
+    }
+  }
+
   const nameKey = normalizeNameKey(anketaRow.fullName);
   const shortKey = nameKey ? shortNameKeyFromFull(nameKey) : "";
   const similarFallback =

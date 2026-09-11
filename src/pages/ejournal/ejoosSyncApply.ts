@@ -26,6 +26,7 @@ import {
   applyOosHistoryPresentation,
   applyRankLabelsWithZip,
 } from "./ejoosOosZip";
+import { writeStaffIndexToCell } from "./ejoosStaffIndexFormat";
 import {
   applyInlineStringWritesToWorkbook,
   restyleAbsentDataRows,
@@ -832,7 +833,7 @@ function undoCancelledTransferOnTimesheet(
   if (fullName) timesheet.cell(rowNumber, col("G")).value(fullName);
   if (personId) timesheet.cell(rowNumber, col("H")).value(personId);
   if (input.positionIndex) {
-    timesheet.cell(rowNumber, col("B")).value(input.positionIndex);
+    writeStaffIndexToCell(timesheet.cell(rowNumber, col("B")), input.positionIndex);
   }
 
   const departDay = dayFromOrderLabel(payload.cancelledTransferDate);
@@ -1082,7 +1083,7 @@ function applyPositionChange(input: {
     timesheet.cell(timesheetRow, col("H")).value(personId || null);
     const bindIndex = op.payload.timesheetBindStaffIndex || nextIndex;
     if (bindIndex && op.payload.isTempArrivalPlacement === "1") {
-      timesheet.cell(timesheetRow, col("B")).value(bindIndex);
+      writeStaffIndexToCell(timesheet.cell(timesheetRow, col("B")), bindIndex);
     }
     paintTimesheetArchiveDays(timesheet, timesheetRow, plan, {
       ...op.payload,
@@ -1689,7 +1690,9 @@ function applyExcludeTransfer(input: {
     // D в ООС інколи є формульною/нестандартною клітинкою, яку xlsx-populate
     // повертає не як просте значення. План уже зчитав актуальний індекс із ООС,
     // тому закріплюємо його явно після переносу базової картки.
-    if (positionIndex) excluded.cell(targetRow, col("D")).value(positionIndex);
+    if (positionIndex) {
+      writeStaffIndexToCell(excluded.cell(targetRow, col("D")), positionIndex);
+    }
     // Звання вже визначене у плані з ЕЖООС; РУХ тут лише fallback.
     if (rank) excluded.cell(targetRow, col("A")).value(rank);
     if (op.payload.lastRankOrderDate) {
@@ -1778,7 +1781,9 @@ function applyExcludeTransfer(input: {
         occupiedTimesheetStyleRow(timesheet, keepRow),
         keepRow,
       );
-      if (positionIndex) timesheet.cell(keepRow, col("B")).value(positionIndex);
+      if (positionIndex) {
+        writeStaffIndexToCell(timesheet.cell(keepRow, col("B")), positionIndex);
+      }
       writeClosedEpisode(keepRow);
     }
     clearOtherTimesheetPersonRows(timesheet, {

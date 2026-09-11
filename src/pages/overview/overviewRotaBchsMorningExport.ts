@@ -920,6 +920,73 @@ const writeSideSections = (
   return rowNumber;
 };
 
+export const computeBchsMorningSummaryFromSections = (
+  sections: BchsMorningSection[],
+  rows: BackendPersonnelOverviewRow[],
+  staffCount: number,
+  rosterRows?: EjournalPreviewRow[] | null,
+) => {
+  const people = (id: string) =>
+    sections.find((section) => section.id === id)?.people ?? [];
+  const count = (id: string) => people(id).length;
+  const listed = new Set(
+    sections.flatMap((section) =>
+      section.people.map((person) => person.sourceOrder),
+    ),
+  ).size;
+  const fieldCounts = computeBchsMorningSummaryFieldCounts(rows, rosterRows);
+  const detached = fieldCounts.detached;
+  const treatment = count("hospital") + count("medPoint");
+  const absent =
+    count("training") +
+    detached +
+    treatment +
+    count("leave") +
+    count("awol") +
+    count("missing") +
+    count("dead");
+  const awayOrders = new Set(
+    sections
+      .filter((section) => section.side !== "left" || section.id === "awol")
+      .flatMap((section) => section.people.map((person) => person.sourceOrder)),
+  );
+  const remaining = sections
+    .filter(
+      (section) =>
+        section.side === "left" &&
+        !["management", "support", "platoonLeaders", "awol"].includes(section.id),
+    )
+    .flatMap((section) => section.people)
+    .filter((person) => !awayOrders.has(person.sourceOrder));
+  const readyInRemaining = remaining.filter(
+    (person) => normalizeText(person.combatReadiness) === "бг",
+  ).length;
+
+  return {
+    staff: staffCount,
+    listed,
+    trainingTrip: count("training"),
+    detached,
+    treatment,
+    treatmentPeople: [...people("hospital"), ...people("medPoint")],
+    vacation: count("leave"),
+    awol: count("awol"),
+    missing: count("missing"),
+    killed: count("dead"),
+    absent,
+    management: fieldCounts.management,
+    support: fieldCounts.support,
+    platoon: people("platoonLeaders").filter((person) =>
+      isMorningInServiceStatus(person.status),
+    ).length,
+    attached: fieldCounts.attached,
+    onExit: count("mission"),
+    battleReady: fieldCounts.battleReady,
+    available: remaining.length - readyInRemaining,
+    inRanks: fieldCounts.inRanks,
+  };
+};
+
 export const writeMorningSummary = (
   sheet: any,
   sections: BchsMorningSection[],
@@ -930,39 +997,20 @@ export const writeMorningSummary = (
     rosterRows?: EjournalPreviewRow[] | null;
   },
 ) => {
-  const people = (id: string) => sections.find(section => section.id === id)?.people ?? [];
-  const count = (id: string) => people(id).length;
-  const total = new Set(
-    sections.flatMap((section) => section.people.map((person) => person.sourceOrder)),
-  ).size;
-  const fieldCounts = computeBchsMorningSummaryFieldCounts(
+  const totals = computeBchsMorningSummaryFromSections(
+    sections,
     options.rows,
+    options.staffCount,
     options.rosterRows,
   );
-  const detached = fieldCounts.detached;
-  const absent = count("training") + detached + count("hospital") + count("medPoint") + count("leave") + count("awol") + count("missing") + count("dead");
-  const awayOrders = new Set(
-    sections
-      .filter((section) => section.side !== "left" || section.id === "awol")
-      .flatMap((section) => section.people.map((person) => person.sourceOrder)),
-  );
-  const remaining = sections
-    .filter((section) => section.side === "left" && !["management", "support", "platoonLeaders", "awol"].includes(section.id))
-    .flatMap((section) => section.people)
-    .filter((person) => !awayOrders.has(person.sourceOrder));
-  const readyInRemaining = remaining.filter((person) =>
-    normalizeText(person.combatReadiness) === "бг",
-  ).length;
   const values: Record<number, number> = {
-    6: options.staffCount, 7: total, 9: count("training"), 10: detached,
-    11: count("hospital") + count("medPoint"), 12: count("leave"), 13: count("awol"),
-    14: count("missing"), 16: count("dead"), 17: absent,
-    19: fieldCounts.management, 20: fieldCounts.support,
-    21: people("platoonLeaders").filter((person) =>
-      isMorningInServiceStatus(person.status),
-    ).length,
-    23: count("mission"), 25: fieldCounts.battleReady,
-    26: remaining.length - readyInRemaining, 27: fieldCounts.inRanks,
+    6: totals.staff, 7: totals.listed, 9: totals.trainingTrip, 10: totals.detached,
+    11: totals.treatment, 12: totals.vacation, 13: totals.awol,
+    14: totals.missing, 16: totals.killed, 17: totals.absent,
+    19: totals.management, 20: totals.support,
+    21: totals.platoon,
+    23: totals.onExit, 25: totals.battleReady,
+    26: totals.available, 27: totals.inRanks,
   };
   const labels: Record<number, string> = {5: options.unitLabel, 6: "За штатом", 7: "Всього по списку", 8: "З них відсутні:", 9: "Навчання/відрядження", 10: "Відкомандировані", 11: "Лікування", 12: "Відпустка/Лікувальна відпустка", 13: "СЗЧ", 14: "Зниклі безвісти", 16: "Загиблі", 17: "Всього відсутніх:", 18: "З них в строю", 19: "Управління", 20: "Забезпечення", 21: "Взводні (наявність)", 23: "На виконанні", 25: "БГ", 26: "В наявності", 27: "Всього в строю:"};
   for (const [row, label] of Object.entries(labels)) sheet.cell(Number(row), 21).value(label);

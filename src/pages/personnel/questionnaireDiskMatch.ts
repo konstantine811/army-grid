@@ -15,14 +15,42 @@ export const normalizeDiskNamePart = (value: string) =>
     .replace(/\s+/g, " ")
     .trim();
 
+const DISK_FILE_PREFIX_TOKENS = new Set(["анкета", "anketa", "піб", "pib"]);
+
+/** Drop leading «01», «25 Анкета» and similar noise from questionnaire PDF names. */
+export const stripDiskFileNamePrefixTokens = (tokens: string[]) => {
+  let start = 0;
+  while (start < tokens.length) {
+    const token = tokens[start]!;
+    if (/^\d+$/.test(token) || DISK_FILE_PREFIX_TOKENS.has(token)) {
+      start += 1;
+      continue;
+    }
+    break;
+  }
+  return tokens.slice(start);
+};
+
 export const getNormalizedDiskNameTokens = (value: string) => {
   const withoutExtension = String(value ?? "").replace(/\.pdf$/i, "");
   const withoutCallsign = withoutExtension.replace(/\([^)]*\)/g, " ");
   return normalizeDiskNamePart(withoutCallsign).split(" ").filter(Boolean);
 };
 
+export const getNormalizedDiskFileNameTokens = (value: string) =>
+  stripDiskFileNamePrefixTokens(getNormalizedDiskNameTokens(value));
+
 export const parseDiskFio = (value: string): ParsedDiskFio => {
   const tokens = getNormalizedDiskNameTokens(value);
+  return {
+    surname: tokens[0] ?? "",
+    firstName: tokens[1] ?? "",
+    patronymic: tokens[2] ?? "",
+  };
+};
+
+export const parseDiskFileFio = (value: string): ParsedDiskFio => {
+  const tokens = getNormalizedDiskFileNameTokens(value);
   return {
     surname: tokens[0] ?? "",
     firstName: tokens[1] ?? "",
@@ -95,7 +123,7 @@ export const isPlausibleDiskQuestionnaireMatch = (
   callSign = "",
 ) => {
   const person = parseDiskFio(fullName);
-  const tokens = getNormalizedDiskNameTokens(fileName);
+  const tokens = getNormalizedDiskFileNameTokens(fileName);
   if (!tokens.length) return false;
 
   if (tokens.length === 1) {
@@ -108,7 +136,7 @@ export const isPlausibleDiskQuestionnaireMatch = (
     );
   }
 
-  const file = alignFileFio(person, parseDiskFio(fileName));
+  const file = alignFileFio(person, parseDiskFileFio(fileName));
   if (partsConflict(person.firstName, file.firstName)) return false;
   if (partsConflict(person.patronymic, file.patronymic)) return false;
   if (partsConflict(person.surname, file.surname)) return false;
@@ -119,7 +147,7 @@ export const isExactFioFileNameMatch = (fullName: string, fileName: string) => {
   const person = parseDiskFio(fullName);
   if (!person.surname || !person.firstName || !person.patronymic) return false;
 
-  const fileTokens = getNormalizedDiskNameTokens(fileName);
+  const fileTokens = getNormalizedDiskFileNameTokens(fileName);
   const personKey = [person.surname, person.firstName, person.patronymic].join("|");
   for (let index = 0; index <= fileTokens.length - 3; index += 1) {
     const fileKey = fileTokens.slice(index, index + 3).join("|");
@@ -135,7 +163,7 @@ export const isUniqueSurnameFirstFileNameMatch = (
 ) => {
   const person = parseDiskFio(fullName);
   if (!person.surname || !person.firstName) return false;
-  const fileTokens = getNormalizedDiskNameTokens(fileName);
+  const fileTokens = getNormalizedDiskFileNameTokens(fileName);
   if (fileTokens.length < 2) return false;
   if (fileTokens[0] !== person.surname || fileTokens[1] !== person.firstName) {
     return false;

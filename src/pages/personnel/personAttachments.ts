@@ -14,6 +14,7 @@ import {
 } from "../../data/idbDataCache";
 import { loadSharedQuestionnairesMeta } from "../../data/personnelBootstrap";
 import { sanitizeFileName } from "../../shared/browserExport";
+import { normalizeAnketaExternalIdKey } from "../anketa-data/anketaPersonMatch";
 import type { EjournalPreviewRow } from "../ejournal/ejournalTypes";
 import { readRosterColumnValue } from "../excel-fill/rosterSourceSnapshot";
 import {
@@ -97,10 +98,25 @@ const FILE_NAME_NOISE = new Set([
   "scan",
 ]);
 
+const stripQuestionnaireFileNamePrefixTokens = (tokens: string[]) => {
+  let start = 0;
+  while (start < tokens.length) {
+    const token = tokens[start]!;
+    if (/^\d+$/.test(token) || FILE_NAME_NOISE.has(token)) {
+      start += 1;
+      continue;
+    }
+    break;
+  }
+  return tokens.slice(start);
+};
+
 const nameTokensOf = (value: string) =>
-  normalizeAttachmentNameKey(String(value ?? "").replace(/\.pdf$/i, ""))
-    .split(" ")
-    .filter((token) => token.length > 1 && !FILE_NAME_NOISE.has(token));
+  stripQuestionnaireFileNamePrefixTokens(
+    normalizeAttachmentNameKey(String(value ?? "").replace(/\.pdf$/i, ""))
+      .split(" ")
+      .filter((token) => token.length > 1 && !FILE_NAME_NOISE.has(token)),
+  );
 
 const nameTokensMatchFileName = (fullName: string, fileName: string) => {
   const personTokens = nameTokensOf(fullName);
@@ -114,6 +130,23 @@ const nameTokensMatchFileName = (fullName: string, fileName: string) => {
   return true;
 };
 
+export const attachmentIdsMatch = (left: string, right: string) => {
+  const a = String(left ?? "").trim();
+  const b = String(right ?? "").trim();
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const normalizedLeft = normalizeAnketaExternalIdKey(a);
+  const normalizedRight = normalizeAnketaExternalIdKey(b);
+  return Boolean(
+    normalizedLeft &&
+      normalizedRight &&
+      normalizedLeft === normalizedRight,
+  );
+};
+
+const lookupSetMatchesId = (lookupIds: readonly string[], id: string) =>
+  lookupIds.some((candidate) => attachmentIdsMatch(candidate, id));
+
 /** Чи PDF-анкета належить цій людині (за назвою файлу). */
 export const questionnaireFileMatchesPerson = (
   fileName: string | null | undefined,
@@ -124,6 +157,19 @@ export const questionnaireFileMatchesPerson = (
   const text = String(fileName ?? "").trim();
   if (!text || /^questionnaire\.pdf$/i.test(text)) return true;
   return normalizedNames.some((name) => nameTokensMatchFileName(name, text));
+};
+
+/** Чи прийняти знайдену анкету для цих lookup-id / імен. */
+export const shouldAcceptQuestionnaireAttachment = (
+  questionnaire: BackendPersonQuestionnaire | null | undefined,
+  lookupIds: readonly string[],
+  names: Array<string | null | undefined>,
+) => {
+  if (!questionnaire) return false;
+  if (!String(questionnaire.fileName ?? "").trim()) return true;
+  const storedId = String(questionnaire.personExternalId ?? "").trim();
+  if (storedId && lookupSetMatchesId(lookupIds, storedId)) return true;
+  return questionnaireFileMatchesPerson(questionnaire.fileName, names);
 };
 
 /** Чи є PDF-анкета для рядка ООС / штатки (як у картці персоналу). */
@@ -157,25 +203,43 @@ export const rowHasListedQuestionnaire = (
   return false;
 };
 
-const loadQuestionnaireIndex = async () => {
-  const cached = peekDataCache<BackendPersonQuestionnaireMeta[]>(
-    CacheKeys.questionnairesMeta,
+const loadQuestionnaireIndex = async (force = false) =>
+  loadSharedQuestionnairesMeta({ force }).catch(
+    () => [] as BackendPersonQuestionnaireMeta[],
   );
-  if (cached?.length) return cached;
-  return loadSharedQuestionnairesMeta().catch(() => []);
+
+const tryDirectQuestionnaireLookup = async (lookupIds: readonly string[]) => {
+  const tried = new Set<string>();
+  for (const candidate of lookupIds) {
+    const id = normalizeAnketaExternalIdKey(candidate);
+    if (!id || !/^\d+$/.test(id) || tried.has(id)) continue;
+    tried.add(id);
+    const questionnaire = await api.getPersonQuestionnaire(id).catch(() => null);
+    if (
+      questionnaire?.personExternalId?.trim() ||
+      questionnaire?.fileName?.trim()
+    ) {
+      return {
+        questionnaire,
+        resolvedExternalId:
+          questionnaire.personExternalId?.trim() || id,
+      };
+    }
+  }
+  return null;
 };
 
 const resolveQuestionnaireViaIndex = async (
   lookupIds: string[],
   names: string[],
   allowFileNameFallback = true,
+  forceIndex = false,
 ) => {
-  const items = await loadQuestionnaireIndex();
-  const lookupSet = new Set(lookupIds);
+  const items = await loadQuestionnaireIndex(forceIndex);
 
   for (const meta of items) {
     const id = meta.personExternalId?.trim();
-    if (!id || !lookupSet.has(id)) continue;
+    if (!id || !lookupSetMatchesId(lookupIds, id)) continue;
     return {
       questionnaire: questionnaireMetaToStub(meta),
       resolvedExternalId: id,
@@ -187,17 +251,24 @@ const resolveQuestionnaireViaIndex = async (
   const fileHits = items.filter((meta) =>
     questionnaireFileMatchesPerson(meta.fileName, names),
   );
-  const uniqueFileHit =
-    fileHits.length === 1
-      ? fileHits[0]
-      : fileHits.find((meta) => {
-          const id = meta.personExternalId?.trim();
-          return Boolean(id && lookupSet.has(id));
-        });
-  if (uniqueFileHit?.personExternalId?.trim()) {
-    const id = uniqueFileHit.personExternalId.trim();
+  if (!fileHits.length) return null;
+
+  const byLookupId = fileHits.find((meta) => {
+    const id = meta.personExternalId?.trim();
+    return Boolean(id && lookupSetMatchesId(lookupIds, id));
+  });
+  if (byLookupId?.personExternalId?.trim()) {
+    const id = byLookupId.personExternalId.trim();
     return {
-      questionnaire: questionnaireMetaToStub(uniqueFileHit),
+      questionnaire: questionnaireMetaToStub(byLookupId),
+      resolvedExternalId: id,
+    };
+  }
+
+  if (fileHits.length === 1 && fileHits[0]?.personExternalId?.trim()) {
+    const id = fileHits[0].personExternalId.trim();
+    return {
+      questionnaire: questionnaireMetaToStub(fileHits[0]),
       resolvedExternalId: id,
     };
   }
@@ -528,6 +599,8 @@ export const loadPersonPhotoThumbnailForRow = async (
 export type LoadPersonQuestionnaireOptions = {
   /** Два однофамільці — не підставляти PDF лише за назвою файлу. */
   nameIsAmbiguous?: boolean;
+  /** Оновити список анкет з API перед пошуком. */
+  refreshIndex?: boolean;
 };
 
 const readWarmDocumentsCatalog = async (): Promise<BackendPersonDocument[]> => {
@@ -601,18 +674,23 @@ export const loadPersonQuestionnaireForRow = async (
     lookupIds,
     expectedNames,
     allowFileNameFallback,
+    Boolean(options?.refreshIndex),
   );
   if (indexed) return indexed;
 
+  const direct = await tryDirectQuestionnaireLookup(lookupIds);
+  if (direct) return direct;
+
   if (fallback) {
-    const items = await loadQuestionnaireIndex();
-    const meta = items.find(
-      (item) => item.personExternalId?.trim() === fallback,
+    const items = await loadQuestionnaireIndex(Boolean(options?.refreshIndex));
+    const meta = items.find((item) =>
+      lookupSetMatchesId([fallback], item.personExternalId?.trim() ?? ""),
     );
     if (meta) {
+      const id = meta.personExternalId?.trim() || fallback;
       return {
         questionnaire: questionnaireMetaToStub(meta),
-        resolvedExternalId: fallback,
+        resolvedExternalId: id,
       };
     }
   }

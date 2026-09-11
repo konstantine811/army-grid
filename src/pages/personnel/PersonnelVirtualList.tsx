@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef } from "react";
 import { PersonSearchOutlinedIcon } from "@/components/sci/icons";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import type { PersonnelRecord } from "./personnelUtils";
@@ -22,14 +22,29 @@ export function PersonnelVirtualList({
 }) {
   const parentRef = useRef<HTMLDivElement | null>(null);
   const lastScrolledIdRef = useRef("");
+  const itemsKey = useMemo(
+    () => items.map((item) => item.row.__dbRowId ?? "").join("\u0000"),
+    [items],
+  );
   const rowVirtualizer = useVirtualizer({
     count: items.length,
     getScrollElement: () => parentRef.current,
     estimateSize: () => 66,
     overscan: 12,
     gap: 8,
+    getItemKey: (index) => items[index]?.row.__dbRowId ?? index,
   });
+  const rowVirtualizerRef = useRef(rowVirtualizer);
+  rowVirtualizerRef.current = rowVirtualizer;
   const virtualItems = rowVirtualizer.getVirtualItems();
+
+  useLayoutEffect(() => {
+    const parent = parentRef.current;
+    if (!parent) return;
+    parent.scrollTop = 0;
+    lastScrolledIdRef.current = "";
+    rowVirtualizerRef.current.measure();
+  }, [itemsKey]);
   const visiblePhotoIds = virtualItems
     .map((item) => items[item.index]?.summary.externalId ?? "")
     .filter(Boolean)
@@ -131,7 +146,7 @@ export function PersonnelVirtualList({
                 record.row.__dbRowId === selectedRowId ? "active" : ""
               }
               data-index={virtualRow.index}
-              key={record.row.__dbRowId ?? virtualRow.key}
+              key={virtualRow.key}
               ref={rowVirtualizer.measureElement}
               type="button"
               style={{ transform: `translateY(${virtualRow.start}px)` }}
@@ -143,6 +158,9 @@ export function PersonnelVirtualList({
                     alt=""
                     decoding="async"
                     src={photo}
+                    onLoad={() => {
+                      rowVirtualizerRef.current.measure();
+                    }}
                     onError={() => {
                       const externalId = record.summary.externalId;
                       if (externalId) onPhotoLoadError?.(externalId);

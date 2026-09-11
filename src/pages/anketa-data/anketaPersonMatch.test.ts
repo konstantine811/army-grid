@@ -147,7 +147,7 @@ describe("matchAnketaRowToPersonnelDetailed", () => {
     );
 
     expect(result.match?.summary.externalId).toBe("202");
-    expect(result.match?.matchBy).toBe("nameBirth");
+    expect(result.match?.matchBy).toBe("externalId");
   });
 
   it("disambiguates duplicate pib by birth date when id is missing", () => {
@@ -180,6 +180,29 @@ describe("matchAnketaRowToPersonnelDetailed", () => {
 
     expect(result.match?.matchBy).toBe("nameBirth");
     expect(result.match?.summary.birthDate).toBe("02.02.1990");
+  });
+
+  it("links by spreadsheet id when surname and first name match", () => {
+    const personnelRow = {
+      __dbRowId: "4",
+      id: "2163435",
+      column_14: "ПОТАПОВ ОЛЕКСІЙ ОЛЕКСАНДРОВИЧ",
+    } as EjournalPreviewRow;
+
+    const anketaRow = {
+      __rowId: "a2",
+      __rowNumber: 3,
+      fullName: "ПОТАПОВ Олексій Олександрович",
+      externalId: "2163435",
+    } as AnketaRow;
+
+    const result = matchAnketaRowToPersonnelDetailed(
+      anketaRow,
+      buildIndex([personnelRow]),
+    );
+
+    expect(result.match?.summary.externalId).toBe("2163435");
+    expect(result.match?.matchBy).toBe("externalId");
   });
 
   it("links when full name matches", () => {

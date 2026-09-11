@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { BackendPersonnelOverviewRow } from "../../api";
 import { isBchsWoundedByExcelNote } from "../bchs/bchsCalc";
 import {
   buildImportantOverviewExportFileName,
@@ -13,6 +14,42 @@ import {
   buildOverviewExportSheetOptions,
   formatOverviewExportFilterValue,
 } from "./overviewExport";
+
+const overviewFromRoster = (
+  row: Record<string, unknown>,
+  index = 0,
+): BackendPersonnelOverviewRow => ({
+  id: String(row.__dbRowId ?? index),
+  externalId: String(row.__dbRowId ?? index),
+  name: String(row.column_14 ?? ""),
+  unit: String(row.column_2 ?? ""),
+  rank: "",
+  status: "ON_DUTY",
+  statusLabel: String(row.column_21 ?? ""),
+  validFrom: null,
+  days: null,
+  plannedReturn: null,
+  place: "",
+  updatedAt: "",
+  staffSheetColumns: Object.fromEntries(
+    Object.entries(row)
+      .filter(([key]) => key.startsWith("column_"))
+      .map(([key, value]) => [key.replace("column_", "staff_"), String(value ?? "")]),
+  ),
+});
+
+const summarizeImportant = (
+  rosterRows: Record<string, unknown>[],
+  filters: Parameters<typeof buildImportantOverviewSummary>[1],
+  archivePeriods?: Parameters<typeof buildImportantOverviewSummary>[2],
+) =>
+  buildImportantOverviewSummary(
+    rosterRows as never[],
+    filters,
+    archivePeriods,
+    undefined,
+    rosterRows.map(overviewFromRoster),
+  );
 
 describe("overviewExport", () => {
   it("formats default filter labels", () => {
@@ -136,7 +173,14 @@ describe("overviewExport", () => {
       "Примітки",
       "Напрямок",
     ]);
-    expect(sheet[2]?.[0]).toMatchObject({ value: "Кулеметник" });
+    expect(sheet[1]?.[0]).toMatchObject({
+      textColor: "#17231E",
+      backgroundColor: "#F4C20D",
+    });
+    expect(sheet[2]?.[0]).toMatchObject({
+      value: "Кулеметник",
+      textColor: "#17231E",
+    });
     expect(sheet[2]?.[2]).toMatchObject({ value: "Іванов Іван" });
     expect(sheet[2]?.[8]).toMatchObject({ value: "На виконанні" });
     expect(buildImportantOverviewExportSheetOptions()).toMatchObject({
@@ -224,6 +268,54 @@ describe("overviewExport", () => {
     });
   });
 
+  it("keeps only the selected company when status is Усі", () => {
+    const allRows = [
+      {
+        name: "Командир батальйону",
+        unit: "управління батальйону",
+        status: "ON_DUTY",
+        statusLabel: "В строю",
+      },
+      {
+        name: "Командир 1 роти",
+        unit: "1 піхотна рота",
+        status: "ON_DUTY",
+        statusLabel: "В строю",
+      },
+      {
+        name: "Стрілець 2 роти",
+        unit: "2 піхотна рота",
+        status: "ON_DUTY",
+        statusLabel: "В строю",
+      },
+      {
+        name: "Медик 3 роти",
+        unit: "3 піхотна рота",
+        status: "MEDICAL",
+        statusLabel: "На лікуванні",
+      },
+    ] as never[];
+    const sheets = buildImportantOverviewExportSheets(
+      allRows,
+      {
+        activeFilters: [
+          { id: "unit", label: "Підрозділ", values: ["2 рота"] },
+          { id: "status", label: "Статус", values: ["Усі"] },
+        ],
+      },
+      allRows,
+    );
+    const peopleSheet = sheets.find((sheet) => sheet.sheet === "Усі");
+    const names = peopleSheet?.data
+      .slice(2)
+      .map((row) => row[2] && "value" in row[2] && row[2].value);
+
+    expect(names).toEqual(["Стрілець 2 роти"]);
+    expect(names).not.toContain("Командир батальйону");
+    expect(names).not.toContain("Командир 1 роти");
+    expect(names).not.toContain("Медик 3 роти");
+  });
+
   it("names the important workbook from unit, statuses and export date", () => {
     expect(
       buildImportantOverviewExportFileName(
@@ -253,6 +345,7 @@ describe("overviewExport", () => {
     const rosterRows = [
       {
         __dbRowId: "1",
+        column_1: "нова",
         column_2: "2 рота",
         column_14: "Іванов Іван",
         column_21: "Лікування",
@@ -261,6 +354,7 @@ describe("overviewExport", () => {
       },
       {
         __dbRowId: "2",
+        column_1: "нова",
         column_2: "2 рота",
         column_14: "Петренко Петро",
         column_21: "Відпустка",
@@ -269,17 +363,19 @@ describe("overviewExport", () => {
       },
       {
         __dbRowId: "3",
+        column_1: "нова",
         column_2: "2 рота",
-        column_14: "",
+        column_5: "Стрілець",
       },
       {
         __dbRowId: "4",
+        column_1: "нова",
         column_2: "3 рота",
         column_14: "Сидоренко Сидір",
       },
     ] as never[];
 
-    const summary = buildImportantOverviewSummary(rosterRows, filters);
+    const summary = summarizeImportant(rosterRows, filters);
     expect(summary).toMatchObject({
       unitLabel: "2 рота",
       staff: 3,
@@ -289,9 +385,9 @@ describe("overviewExport", () => {
       treatmentIllness: 1,
       vacation: 1,
       absent: 2,
-      management: 1,
-      support: 1,
-      onExit: 1,
+      management: 0,
+      support: 0,
+      onExit: 0,
       available: 0,
       inRanks: 0,
     });
@@ -312,10 +408,11 @@ describe("overviewExport", () => {
   });
 
   it("counts В наявності from В строю status, not the stay-place text", () => {
-    const summary = buildImportantOverviewSummary(
+    const summary = summarizeImportant(
       [
         {
           __dbRowId: "1",
+          column_1: "нова",
           column_2: "2 рота",
           column_14: "Іванов Іван Іванович",
           column_21: "В строю",
@@ -323,12 +420,13 @@ describe("overviewExport", () => {
         },
         {
           __dbRowId: "2",
+          column_1: "нова",
           column_2: "2 рота",
           column_14: "Петренко Петро Петрович",
           column_21: "Лікування",
           column_31: "В наявності",
         },
-      ] as never[],
+      ],
       {
         activeFilters: [
           { id: "unit", label: "Підрозділ", values: ["2 рота"] },
@@ -337,6 +435,60 @@ describe("overviewExport", () => {
     );
 
     expect(summary.available).toBe(1);
+  });
+
+  it("counts Управління like morning BCHS: в строю and взвод = ж", () => {
+    const summary = summarizeImportant(
+      [
+        {
+          column_1: "нова",
+          column_2: "3 піхотна рота",
+          column_3: "ж",
+          column_14: "РОТНИЙ Перший Іванович",
+          column_21: "В строю",
+          column_22: "Упр. взводу",
+        },
+        {
+          column_1: "нова",
+          column_2: "3 піхотна рота",
+          column_3: "ж",
+          column_14: "РОТНИЙ Другий Петрович",
+          column_21: "В строю",
+          column_22: "Упр. взводу",
+        },
+        {
+          column_1: "нова",
+          column_2: "3 піхотна рота",
+          column_3: "ж",
+          column_14: "РОТНИЙ Третій Сидорович",
+          column_21: "В строю БГ",
+          column_22: "Упр. взводу",
+        },
+        {
+          column_1: "нова",
+          column_2: "3 піхотна рота",
+          column_3: "ж",
+          column_14: "РОТНИЙ Четвертий Олегович",
+          column_21: "Відпустка",
+          column_22: "Упр. взводу",
+        },
+        {
+          column_1: "нова",
+          column_2: "3 піхотна рота",
+          column_3: "1 піхотний взвод",
+          column_14: "СТРІЛЕЦЬ Пятий Максимович",
+          column_21: "В строю",
+          column_22: "Упр. взводу",
+        },
+      ],
+      {
+        activeFilters: [
+          { id: "unit", label: "Підрозділ", values: ["3 піхотна рота"] },
+        ],
+      },
+    );
+
+    expect(summary.management).toBe(3);
   });
 
   it("splits Лікування by a universal wounding note regex", () => {
@@ -348,6 +500,7 @@ describe("overviewExport", () => {
     const rosterRows = [
       {
         __dbRowId: "1",
+        column_1: "нова",
         column_2: "2 рота",
         column_14: "Іванов Іван Іванович",
         column_21: "Лікування",
@@ -355,6 +508,7 @@ describe("overviewExport", () => {
       },
       {
         __dbRowId: "2",
+        column_1: "нова",
         column_2: "2 рота",
         column_14: "Петренко Петро Петрович",
         column_21: "Лікування",
@@ -362,6 +516,7 @@ describe("overviewExport", () => {
       },
       {
         __dbRowId: "3",
+        column_1: "нова",
         column_2: "2 рота",
         column_14: "Сидоренко Сидір Сидорович",
         column_21: "Лікування",
@@ -369,6 +524,7 @@ describe("overviewExport", () => {
       },
       {
         __dbRowId: "4",
+        column_1: "нова",
         column_2: "2 рота",
         column_14: "Коваленко Костянтин",
         column_21: "Лікування",
@@ -376,6 +532,7 @@ describe("overviewExport", () => {
       },
       {
         __dbRowId: "5",
+        column_1: "нова",
         column_2: "2 рота",
         column_14: "Мельник Максим",
         column_21: "Лікування",
@@ -383,6 +540,7 @@ describe("overviewExport", () => {
       },
       {
         __dbRowId: "6",
+        column_1: "нова",
         column_2: "3 рота",
         column_14: "Інший Іван",
         column_21: "Лікування",
@@ -390,7 +548,7 @@ describe("overviewExport", () => {
       },
     ] as never[];
 
-    const summary = buildImportantOverviewSummary(rosterRows, filters);
+    const summary = summarizeImportant(rosterRows, filters);
     expect(summary.treatment).toBe(5);
     expect(summary.treatmentWounded).toBe(3);
     expect(summary.treatmentIllness).toBe(2);
@@ -405,18 +563,21 @@ describe("overviewExport", () => {
     const rosterRows = [
       {
         __dbRowId: "1",
+        column_1: "нова",
         column_2: "2 рота",
         column_14: "Іванов Іван Іванович",
         column_21: "Лікування",
       },
       {
         __dbRowId: "2",
+        column_1: "нова",
         column_2: "2 рота",
         column_14: "Петренко Петро Петрович",
         column_21: "Лікування",
       },
       {
         __dbRowId: "3",
+        column_1: "нова",
         column_2: "3 рота",
         column_14: "Сидоренко Сидір Сидорович",
         column_21: "Лікування",
@@ -443,14 +604,40 @@ describe("overviewExport", () => {
       },
     ] as never[];
 
-    const summary = buildImportantOverviewSummary(
-      rosterRows,
-      filters,
-      archivePeriods,
-    );
+    const summary = summarizeImportant(rosterRows, filters, archivePeriods);
 
     expect(summary.treatmentWounded).toBe(1);
     expect(summary.treatmentIllness).toBe(1);
+  });
+
+  it("counts За штатом only in the first nova block of the selected rota", () => {
+    const firstBlock = Array.from({ length: 113 }, (_, index) => ({
+      column_1: "нова",
+      column_2: "3 піхотна рота",
+      column_5: "стрілець",
+      column_14: index === 0 ? "БІЛИЦЬКИЙ Сергій Володимирович" : "",
+    }));
+    const otherRota = Array.from({ length: 110 }, () => ({
+      column_1: "нова",
+      column_2: "1 піхотна рота",
+      column_5: "стрілець",
+    }));
+    const archiveBlock = Array.from({ length: 110 }, () => ({
+      column_1: "нова",
+      column_2: "3 піхотна рота",
+      column_5: "стрілець",
+    }));
+    const summary = summarizeImportant(
+      [...firstBlock, ...otherRota, ...archiveBlock],
+      {
+        activeFilters: [
+          { id: "unit", label: "Підрозділ", values: ["3 піхотна рота"] },
+        ],
+      },
+    );
+
+    expect(summary.staff).toBe(113);
+    expect(summary.listed).toBe(1);
   });
 
   it("matches wounding notes in any line of the cell", () => {

@@ -299,6 +299,7 @@ export const formatExcludedDestination = (value: string | undefined | null) =>
 export const formatExcludedListBasis = (payload: TransferUnitPayload) => {
   const type = String(payload.type || "");
   const raw = String(payload.exclusionReason || "").replace(/\s+/g, " ").trim();
+  if (/^ВИКЛЮЧ$/i.test(type)) return raw || "ВИКЛЮЧЕННЯ";
   const isDisposition = /розпорядж/i.test(type) || /розпорядж/i.test(raw);
   const isDismissal = /звільн/i.test(type) || /звільн/i.test(raw);
   const title = isDismissal

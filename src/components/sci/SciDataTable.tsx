@@ -85,6 +85,7 @@ type SciTableOptions<TData> = {
   tertiaryExportLabel?: string;
   quaternaryExportLabel?: string;
   quinaryExportLabel?: string;
+  senaryExportLabel?: string;
   copyLabel?: string;
   enableCopyText?: boolean;
   copyTextBuilder?: (
@@ -92,6 +93,10 @@ type SciTableOptions<TData> = {
   ) => string | Promise<string>;
   secondaryCopyLabel?: string;
   secondaryCopyTextBuilder?: (
+    context: SciDataTableExportContext<TData>,
+  ) => string | Promise<string>;
+  tertiaryCopyLabel?: string;
+  tertiaryCopyTextBuilder?: (
     context: SciDataTableExportContext<TData>,
   ) => string | Promise<string>;
   onExport?: (
@@ -107,6 +112,9 @@ type SciTableOptions<TData> = {
     context: SciDataTableExportContext<TData>,
   ) => void | Promise<void>;
   onQuinaryExport?: (
+    context: SciDataTableExportContext<TData>,
+  ) => void | Promise<void>;
+  onSenaryExport?: (
     context: SciDataTableExportContext<TData>,
   ) => void | Promise<void>;
   emptyMessage?: string;
@@ -199,8 +207,12 @@ export function MaterialReactTable<TData>({
   const [secondaryCopyState, setSecondaryCopyState] = useState<
     "idle" | "copied" | "error"
   >("idle");
+  const [tertiaryCopyState, setTertiaryCopyState] = useState<
+    "idle" | "copied" | "error"
+  >("idle");
   const copyResetRef = useRef<number | null>(null);
   const secondaryCopyResetRef = useRef<number | null>(null);
+  const tertiaryCopyResetRef = useRef<number | null>(null);
   useEffect(
     () => () => {
       if (copyResetRef.current != null) {
@@ -208,6 +220,9 @@ export function MaterialReactTable<TData>({
       }
       if (secondaryCopyResetRef.current != null) {
         window.clearTimeout(secondaryCopyResetRef.current);
+      }
+      if (tertiaryCopyResetRef.current != null) {
+        window.clearTimeout(tertiaryCopyResetRef.current);
       }
     },
     [],
@@ -498,8 +513,10 @@ export function MaterialReactTable<TData>({
     Boolean(table.onTertiaryExport) ||
     Boolean(table.onQuaternaryExport) ||
     Boolean(table.onQuinaryExport) ||
+    Boolean(table.onSenaryExport) ||
     table.enableCopyText === true ||
-    Boolean(table.secondaryCopyTextBuilder);
+    Boolean(table.secondaryCopyTextBuilder) ||
+    Boolean(table.tertiaryCopyTextBuilder);
   const hasColumnFilters =
     table.enableColumnFilters !== false &&
     visibleColumns.some((column) => column.enableColumnFilter !== false);
@@ -635,6 +652,47 @@ export function MaterialReactTable<TData>({
                   : (table.secondaryCopyLabel ?? "Копіювати")}
             </button>
           ) : null}
+          {table.tertiaryCopyTextBuilder ? (
+            <button
+              type="button"
+              className={
+                tertiaryCopyState === "copied"
+                  ? "sci-data-table-export is-copied"
+                  : tertiaryCopyState === "error"
+                    ? "sci-data-table-export is-error"
+                    : "sci-data-table-export"
+              }
+              onClick={() => {
+                const builder = table.tertiaryCopyTextBuilder;
+                if (!builder) return;
+                const context = {
+                  rows: sortedRows,
+                  allRows: table.data,
+                  columns: visibleExportColumns,
+                  filters: activeExportFilters,
+                };
+                void Promise.resolve(builder(context))
+                  .then((text) => copyTextToClipboard(text ?? ""))
+                  .catch(() => false)
+                  .then((ok) => {
+                    if (tertiaryCopyResetRef.current != null) {
+                      window.clearTimeout(tertiaryCopyResetRef.current);
+                    }
+                    setTertiaryCopyState(ok ? "copied" : "error");
+                    tertiaryCopyResetRef.current = window.setTimeout(() => {
+                      setTertiaryCopyState("idle");
+                      tertiaryCopyResetRef.current = null;
+                    }, 1800);
+                  });
+              }}
+            >
+              {tertiaryCopyState === "copied"
+                ? "Скопійовано"
+                : tertiaryCopyState === "error"
+                  ? "Не вдалося"
+                  : (table.tertiaryCopyLabel ?? "Копіювати місця")}
+            </button>
+          ) : null}
           {table.onExport ? (
             <button
               type="button"
@@ -713,6 +771,22 @@ export function MaterialReactTable<TData>({
               }
             >
               {table.quinaryExportLabel ?? "Експорт ППД"}
+            </button>
+          ) : null}
+          {table.onSenaryExport ? (
+            <button
+              type="button"
+              className="sci-data-table-export"
+              onClick={() =>
+                void table.onSenaryExport?.({
+                  rows: filteredRows,
+                  allRows: table.data,
+                  columns: visibleExportColumns,
+                  filters: activeExportFilters,
+                })
+              }
+            >
+              {table.senaryExportLabel ?? "Експорт командирів"}
             </button>
           ) : null}
           {table.enableColumnVisibility !== false ? (

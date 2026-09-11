@@ -1,4 +1,9 @@
 import JSZip from "jszip";
+import {
+  EJOOS_TEXT_NUM_FMT_ID,
+  isEjoosStaffIndexColumn,
+  normalizeStaffIndexValue,
+} from "./ejoosStaffIndexFormat";
 import { EJOOS_WRITE_STYLE } from "./ejoosStyleConfig";
 import {
   expandSharedFormulas,
@@ -962,13 +967,18 @@ const buildCenterRegularXf = (
   sourceXf: string | undefined,
   fontId: string,
   wrapText: boolean,
+  forceTextFormat = false,
 ) => {
-  const numFmtId = xfAttr(sourceXf, "numFmtId", "0");
+  const numFmtId = forceTextFormat
+    ? EJOOS_TEXT_NUM_FMT_ID
+    : xfAttr(sourceXf, "numFmtId", "0");
   const fillId = xfAttr(sourceXf, "fillId", "0");
   const borderId = xfAttr(sourceXf, "borderId", "0");
   const xfId = xfAttr(sourceXf, "xfId", "0");
   const applyNumberFormat =
-    numFmtId !== "0" || /applyNumberFormat="(?:1|true)"/i.test(sourceXf || "")
+    forceTextFormat ||
+    numFmtId !== "0" ||
+    /applyNumberFormat="(?:1|true)"/i.test(sourceXf || "")
       ? ` applyNumberFormat="1"`
       : "";
   const applyFill =
@@ -988,6 +998,7 @@ const styleMatchesCenterRegular = (
   styleId: string,
   wrapText: boolean,
   fontSize = EJOOS_DATA_FONT_SIZE,
+  forceTextFormat = false,
 ) => {
   const xf = xfXmlForStyle(stylesXml, styleId);
   if (!xf || !xfAppliesAlignment(xf)) return false;
@@ -998,7 +1009,13 @@ const styleMatchesCenterRegular = (
     return false;
   }
   const hasWrap = /wrapText="(?:1|true)"/i.test(xf);
-  return wrapText ? hasWrap : !hasWrap;
+  if (wrapText ? !hasWrap : hasWrap) return false;
+  if (forceTextFormat) {
+    const numFmtId = xf.match(/\bnumFmtId="(\d+)"/i)?.[1];
+    if (numFmtId !== EJOOS_TEXT_NUM_FMT_ID) return false;
+    if (!/applyNumberFormat="(?:1|true)"/i.test(xf)) return false;
+  }
+  return true;
 };
 
 /**
@@ -1009,6 +1026,7 @@ const ensureCenterRegularStyle = (
   stylesXml: string,
   sourceStyleId: string | undefined,
   wrapText: boolean,
+  forceTextFormat = false,
 ) => {
   const block = cellXfsBlock(stylesXml);
   const xfs = block
@@ -1028,7 +1046,13 @@ const ensureCenterRegularStyle = (
   let xml = fontEnsured.xml;
   if (
     sourceStyleId &&
-    styleMatchesCenterRegular(xml, sourceStyleId, wrapText, targetFontSize)
+    styleMatchesCenterRegular(
+      xml,
+      sourceStyleId,
+      wrapText,
+      targetFontSize,
+      forceTextFormat,
+    )
   ) {
     return { xml, styleId: sourceStyleId };
   }
@@ -1036,7 +1060,12 @@ const ensureCenterRegularStyle = (
   if (!xfs.length) {
     return { xml, styleId: sourceStyleId };
   }
-  const built = buildCenterRegularXf(sourceXf, fontEnsured.fontId, wrapText);
+  const built = buildCenterRegularXf(
+    sourceXf,
+    fontEnsured.fontId,
+    wrapText,
+    forceTextFormat,
+  );
   const existing = xfs.findIndex((xf) => xf === built);
   if (existing >= 0) return { xml, styleId: String(existing) };
   const open = block[0].slice(0, block[0].indexOf(">") + 1);
@@ -1360,25 +1389,38 @@ export async function applyInlineStringWritesToWorkbook(
   const xmlTemplateRow = needsNeighborStyle
     ? findWrapTemplateRow(sheetXml, sstXml, "D", skipStyleRows, stylesXml)
     : 0;
+  const normalizeStaffIndexWrite = (write: ZipCellWrite): ZipCellWrite => {
+    if (
+      write.styleOnly ||
+      write.value == null ||
+      !isEjoosStaffIndexColumn(sheetNameOrRe, write.column, write.row)
+    ) {
+      return write;
+    }
+    const text = normalizeStaffIndexValue(write.value);
+    if (!text) return { ...write, value: null };
+    return { ...write, value: text, sharedStringIndex: undefined };
+  };
   const resolvedWrites = writes.map((write) => {
-    if (isPlainDataSheet && write.copyNeighborStyle) {
+    const normalized = normalizeStaffIndexWrite(write);
+    if (isPlainDataSheet && normalized.copyNeighborStyle) {
       return {
-        ...write,
+        ...normalized,
         copyNeighborStyle: false,
         keepNeighborStyle: true,
-        styleSourceRow: write.styleSourceRow || write.row,
-        styleSourceColumn: write.styleSourceColumn || write.column,
+        styleSourceRow: normalized.styleSourceRow || normalized.row,
+        styleSourceColumn: normalized.styleSourceColumn || normalized.column,
       };
     }
-    if (!write.copyNeighborStyle) return write;
+    if (!normalized.copyNeighborStyle) return normalized;
     const fallback =
-      write.styleSourceRow && write.styleSourceRow >= 7
-        ? write.styleSourceRow
+      normalized.styleSourceRow && normalized.styleSourceRow >= 7
+        ? normalized.styleSourceRow
         : 7;
     const template = xmlTemplateRow || fallback;
     return {
-      ...write,
-      styleSourceRow: write.styleSourceRow || template,
+      ...normalized,
+      styleSourceRow: normalized.styleSourceRow || template,
     };
   });
   for (const write of resolvedWrites) {
@@ -1470,12 +1512,22 @@ export async function applyInlineStringWritesToWorkbook(
     const needsWrap = isPlainDataSheet
       ? false
       : write.wrapText ?? isWrapDataSheetTarget(sheetNameOrRe);
+    const forceTextFormat = isEjoosStaffIndexColumn(
+      sheetNameOrRe,
+      write.column,
+      write.row,
+    );
     if (!stylesXml) return sourceId;
-    const cacheKey = `${sourceId ?? "_none"}:${needsWrap ? "w" : "n"}`;
+    const cacheKey = `${sourceId ?? "_none"}:${needsWrap ? "w" : "n"}:${forceTextFormat ? "t" : "n"}`;
     if (centerStyleBySource.has(cacheKey)) {
       return centerStyleBySource.get(cacheKey);
     }
-    const ensured = ensureCenterRegularStyle(stylesXml, sourceId, needsWrap);
+    const ensured = ensureCenterRegularStyle(
+      stylesXml,
+      sourceId,
+      needsWrap,
+      forceTextFormat,
+    );
     stylesXml = ensured.xml;
     centerStyleBySource.set(cacheKey, ensured.styleId);
     return ensured.styleId;

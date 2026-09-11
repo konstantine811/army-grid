@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { BackendPersonnelOverviewRow } from "../../api";
 import {
+  buildOverviewLocationCountCopyText,
   buildOverviewRotaCopyText,
   buildOverviewWhatsAppCopyText,
 } from "./overviewCopyText";
@@ -25,6 +26,7 @@ const row = (
     staffSheetColumns: {
       staff_5: position,
       staff_7: fullPosition,
+      staff_21: statusLabel,
       staff_31: place,
     },
   }) as unknown as BackendPersonnelOverviewRow;
@@ -127,6 +129,42 @@ describe("buildOverviewWhatsAppCopyText", () => {
         "1 - Командир взводу - КОМАНДИР Петро - ППД",
         "2 - Головний сержант - СЕРЖАНТ Олег - ППД",
         "3 - Стрілець - СТРІЛЕЦЬ Іван - ППД",
+      ].join("\n"),
+    );
+  });
+});
+
+describe("buildOverviewLocationCountCopyText", () => {
+  it("counts every in-service place so the total matches В строю", () => {
+    const allRows = [
+      row("1", "ГУК Володимир Степанович", "В строю", "3 рота", "ППД Вишневе"),
+      row("2", "ГАПОН Андрій Вікторович", "Лікування", "3 рота", "ППД Вишневе"),
+      row("3", "ДРАГОЙ Микола Леонідович", "В строю", "3 рота", "ППД Павлоград"),
+      row("4", "ПОЛІГОННИЙ Іван", "В строю", "3 рота", "Полігон Д"),
+      row("5", "НА ВИКОНАННІ Іван", "В строю", "3 рота", "На виконанні"),
+      row("6", "ШПИТАЛЬ Іван", "Лікування", "3 рота", "Шпиталь"),
+      row("7", "ВІДПУСТКА Петро", "Відпустка", "3 рота", "Відпустка"),
+      row("8", "ЧУЖИЙ Боєць", "В строю", "2 рота", "ППД Вишневе"),
+    ];
+
+    expect(
+      buildOverviewLocationCountCopyText({
+        rows: [allRows[0]!],
+        allRows,
+        columns: [],
+        filters: [{ id: "unit", label: "Підрозділ", values: ["3 рота"] }],
+      }),
+    ).toBe(
+      [
+        "В строю: 4",
+        "На виконанні: 1",
+        "Полігон Д: 1",
+        "ППД Вишневе: 1",
+        "ППД Павлоград: 1",
+        "",
+        "Полігон Д: 1",
+        "Лікування: 2",
+        "Відпустка: 1",
       ].join("\n"),
     );
   });

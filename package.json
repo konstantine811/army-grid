@@ -11,6 +11,7 @@
     "build:personnel-merge": "node scripts/buildPersonnelMerge.mjs",
     "lint": "oxlint",
     "test": "vitest run",
+    "test:ejoos": "vitest run src/pages/ejournal/ejoos src/pages/ejournal/EjoosChangesPanel.test.ts",
     "test:watch": "vitest",
     "ejoos:style-probe": "jiti scripts/ejoosStyleProbe.ts",
     "ejoos:debug-person": "jiti scripts/debugEjoosApplyPerson.ts",

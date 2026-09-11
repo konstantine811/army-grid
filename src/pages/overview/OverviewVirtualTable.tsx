@@ -163,8 +163,10 @@ export function OverviewVirtualTable({
   onRotaGudzExport,
   onRotaBchsMorningExport,
   onPpdLocationExport,
+  onCommandersExport,
   copyTextBuilder,
   rotaCopyTextBuilder,
+  locationCopyTextBuilder,
   emptyMessage = "Немає записів за поточними фільтрами.",
   onColumnVisibilityChange,
 }: {
@@ -191,10 +193,16 @@ export function OverviewVirtualTable({
   onPpdLocationExport?: (
     context: SciDataTableExportContext<BackendPersonnelOverviewRow>,
   ) => void | Promise<void>;
+  onCommandersExport?: (
+    context: SciDataTableExportContext<BackendPersonnelOverviewRow>,
+  ) => void | Promise<void>;
   copyTextBuilder?: (
     context: SciDataTableExportContext<BackendPersonnelOverviewRow>,
   ) => string | Promise<string>;
   rotaCopyTextBuilder?: (
+    context: SciDataTableExportContext<BackendPersonnelOverviewRow>,
+  ) => string | Promise<string>;
+  locationCopyTextBuilder?: (
     context: SciDataTableExportContext<BackendPersonnelOverviewRow>,
   ) => string | Promise<string>;
   emptyMessage?: string;
@@ -466,6 +474,8 @@ export function OverviewVirtualTable({
     copyTextBuilder,
     secondaryCopyLabel: "Копіювати Роту",
     secondaryCopyTextBuilder: rotaCopyTextBuilder,
+    tertiaryCopyLabel: "Копіювати місця",
+    tertiaryCopyTextBuilder: locationCopyTextBuilder,
     enableGlobalFilter: false,
     enableRowVirtualization: true,
     estimatedRowHeight: 44,
@@ -483,6 +493,8 @@ export function OverviewVirtualTable({
     quaternaryExportLabel: "БЧС (ранковий ПБ)",
     onQuinaryExport: onPpdLocationExport,
     quinaryExportLabel: "ППД / Полігон",
+    onSenaryExport: onCommandersExport,
+    senaryExportLabel: "Командири",
     onColumnVisibilityChange,
     onVisibleRowsChange,
     initialState: {

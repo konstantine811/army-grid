@@ -66,6 +66,7 @@ export function AnketaPersonSidePanel({
   const nameMismatch = Boolean(
     anketaRow &&
       panel.match &&
+      !panel.questionnaire &&
       !anketaPersonnelNamesMatch(anketaRow.fullName, panel.match.summary.name),
   );
 
@@ -224,6 +225,25 @@ export function AnketaPersonSidePanel({
         <div className="person-card-scroll anketa-person-scroll">
           <div className="anketa-person-side-actions anketa-person-side-actions-top">
             <Button
+              variant="outlined"
+              size="small"
+              startIcon={<PictureAsPdfOutlinedIcon />}
+              disabled={
+                panel.isLoadingAttachments ||
+                nameMismatch ||
+                !panel.questionnaire
+              }
+              onClick={() => void panel.openQuestionnairePreview()}
+            >
+              {panel.isLoadingAttachments
+                ? "Завантаження анкети…"
+                : panel.questionnaire
+                  ? "Відкрити анкету (PDF)"
+                  : panel.match
+                    ? "Анкета не додана"
+                    : "Анкета недоступна"}
+            </Button>
+            <Button
               variant="contained"
               size="small"
               disabled={!panel.match || panel.isMerging || !panel.mergePreview?.labels.length}
@@ -307,35 +327,11 @@ export function AnketaPersonSidePanel({
             </div>
           ) : null}
 
-          <div className="person-edit-section">
-            <div className="panel-heading">Анкета (PDF)</div>
-            {panel.isLoadingAttachments ? (
-              <div className="person-document-empty">Завантаження…</div>
-            ) : panel.questionnaire ? (
-              <article className="person-document-shell is-ready">
-                <button
-                  className="person-document-item is-ready"
-                  type="button"
-                  onClick={() => void panel.openQuestionnairePreview()}
-                >
-                  <PictureAsPdfOutlinedIcon />
-                  <span>
-                    <strong>Анкета (PDF)</strong>
-                    <small>{panel.exportFileName} · переглянути</small>
-                  </span>
-                </button>
-              </article>
-            ) : (
-              <div className="person-document-empty">
-                <PictureAsPdfOutlinedIcon />
-                <span>
-                  {panel.match
-                    ? "Анкета ще не додана в БД"
-                    : "Потрібен зв’язок з особовим складом"}
-                </span>
-              </div>
-            )}
-          </div>
+          {panel.questionnaire ? (
+            <Typography variant="caption" color="text.secondary" sx={{ px: 0.5 }}>
+              {panel.exportFileName}
+            </Typography>
+          ) : null}
         </div>
       </aside>
 

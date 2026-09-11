@@ -114,4 +114,31 @@ describe("isPlausibleDiskQuestionnaireMatch", () => {
       ),
     ).toBe(true);
   });
+
+  it("ignores leading numbers and the word «Анкета» in file names", () => {
+    expect(
+      isPlausibleDiskQuestionnaireMatch(
+        "БЕЗУГЛИЙ Дмитро Юрійович",
+        "01 БЕЗУГЛИЙ Дмитро Юрійович (Безик).pdf",
+      ),
+    ).toBe(true);
+    expect(
+      isPlausibleDiskQuestionnaireMatch(
+        "РЕБІНЧАК Володимир Михайлович",
+        "25 Анкета РЕБІНЧАК Володимир Михайлович (Крафт).pdf",
+      ),
+    ).toBe(true);
+    expect(
+      isPlausibleDiskQuestionnaireMatch(
+        "БІЛИК Сергій Володимирович",
+        "26 Білик Сергій Володимирович.pdf",
+      ),
+    ).toBe(true);
+    expect(
+      isPlausibleDiskQuestionnaireMatch(
+        "НЕЧЕВ Юрій Валерійович",
+        "28 Нечев Юрій Валерійович_.pdf",
+      ),
+    ).toBe(true);
+  });
 });

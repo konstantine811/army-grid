@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/sci/SciPrimitives";
 import {
   formatUaDateTyping,
+  isAsOfPickerDayCommit,
   isoDateToUaLabel,
   isCompleteUaDate,
   uaDateToIso,
@@ -102,6 +103,10 @@ export function EjoosAsOfDateControl({
             const label = isoDateToUaLabel(iso);
             setDraft(label);
             setError("");
+            if (!isAsOfPickerDayCommit(pickerIso, iso)) {
+              setIsEditing(true);
+              return;
+            }
             setIsEditing(false);
             void onApply(iso);
           }}

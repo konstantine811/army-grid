@@ -1,7 +1,10 @@
 import type { BackendPersonnelOverviewRow } from "../../api";
 import type { SciDataTableExportContext } from "@/components/sci/SciDataTable";
 import { normalizeRosterMatchText } from "../personnel/fighterStatusImport";
+import { isBchsTreatmentStatus } from "../bchs/bchsCalc";
+import { resolveOverviewPpdLocationExportRows } from "./overviewPpdLocationExport";
 import { overviewStatusFilterLabel } from "./overviewRosterMerge";
+import { isMorningLeaveSectionPerson } from "./overviewRotaBchsMorningExport";
 import { capitalizeReportPosition } from "../documents/reportPosition";
 import {
   isPlatoonCommanderPosition,
@@ -102,6 +105,90 @@ export const buildOverviewRotaCopyText = (
   });
 
   return lines.join("\n");
+};
+
+const EMPTY_LOCATION_LABEL = "Без місця";
+
+const overviewRowStatus = (row: BackendPersonnelOverviewRow) =>
+  row.staffSheetColumns?.staff_21?.trim() || row.statusLabel?.trim() || "";
+
+const isOverviewInServiceRow = (row: BackendPersonnelOverviewRow) =>
+  normalizeRosterMatchText(overviewRowStatus(row)).includes("в строю");
+
+const namedUnitPeople = (rows: BackendPersonnelOverviewRow[]) =>
+  uniquePeople(rows).filter((row) => Boolean(row.name?.trim()));
+
+const isOverviewPolygonDRow = (row: BackendPersonnelOverviewRow) => {
+  const place = normalizeRosterMatchText(overviewRowPlace(row));
+  return place.includes("полігон д") || place.includes("полигон д");
+};
+
+const isOverviewLeaveRow = (row: BackendPersonnelOverviewRow) =>
+  isMorningLeaveSectionPerson(overviewRowStatus(row), overviewRowPlace(row));
+
+const isOverviewTreatmentRow = (row: BackendPersonnelOverviewRow) => {
+  if (isOverviewLeaveRow(row)) return false;
+  const status = overviewRowStatus(row);
+  const normalized = normalizeRosterMatchText(status);
+  return (
+    isBchsTreatmentStatus(status) ||
+    /лік\s*(пор|хвор)/.test(normalized) ||
+    normalized.startsWith("лік")
+  );
+};
+
+export const collectOverviewInServiceRows = (
+  rows: BackendPersonnelOverviewRow[],
+) =>
+  uniquePeople(rows).filter(
+    (row) => isOverviewInServiceRow(row) && Boolean(row.name?.trim()),
+  );
+
+export const buildOverviewLocationGroups = (
+  rows: BackendPersonnelOverviewRow[],
+) => {
+  const groups = new Map<
+    string,
+    { label: string; people: BackendPersonnelOverviewRow[] }
+  >();
+  collectOverviewInServiceRows(rows).forEach((row) => {
+    const label = overviewRowPlace(row) || EMPTY_LOCATION_LABEL;
+    const key = normalizeRosterMatchText(label) || EMPTY_LOCATION_LABEL;
+    const existing = groups.get(key);
+    if (existing) existing.people.push(row);
+    else groups.set(key, { label, people: [row] });
+  });
+  return [...groups.values()]
+    .map((group) => ({
+      ...group,
+      people: [...group.people].sort((left, right) =>
+        left.name.localeCompare(right.name, "uk", { sensitivity: "base" }),
+      ),
+    }))
+    .sort((left, right) => {
+      if (right.people.length !== left.people.length) {
+        return right.people.length - left.people.length;
+      }
+      return left.label.localeCompare(right.label, "uk", { sensitivity: "base" });
+    });
+};
+
+/** Кількість усіх, хто в строю, по місцях — сума збігається з «В строю». */
+export const buildOverviewLocationCountCopyText = (
+  context: SciDataTableExportContext<BackendPersonnelOverviewRow>,
+) => {
+  const rows = resolveOverviewPpdLocationExportRows(context);
+  const people = namedUnitPeople(rows);
+  const groups = buildOverviewLocationGroups(rows);
+  const total = groups.reduce((sum, group) => sum + group.people.length, 0);
+  return [
+    `В строю: ${total}`,
+    ...groups.map((group) => `${group.label}: ${group.people.length}`),
+    "",
+    `Полігон Д: ${people.filter(isOverviewPolygonDRow).length}`,
+    `Лікування: ${people.filter(isOverviewTreatmentRow).length}`,
+    `Відпустка: ${people.filter(isOverviewLeaveRow).length}`,
+  ].join("\n");
 };
 
 const textBlock = (label: string, rows: BackendPersonnelOverviewRow[]) => {

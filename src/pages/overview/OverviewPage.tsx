@@ -117,9 +117,11 @@ import { loadPbWorkbookFromDb } from "../ejournal/loadEjournalWorkbooksFromDb";
 import { parsePbArchive } from "../ejournal/ejoosParsers";
 import type { SciDataTableExportContext } from "@/components/sci/SciDataTable";
 import {
+  buildOverviewLocationCountCopyText,
   buildOverviewRotaCopyText,
   buildOverviewWhatsAppCopyText,
 } from "./overviewCopyText";
+import { exportOverviewCommandersReport } from "./overviewCommandersExport";
 import { exportOverviewPpdLocationReport } from "./overviewPpdLocationExport";
 import { exportOverviewRotaBchsMorningReport } from "./overviewRotaBchsMorningExport";
 import { exportOverviewRotaGudzReport } from "./overviewRotaGudzExport";
@@ -236,6 +238,9 @@ export function OverviewPage({ active = true }: { active?: boolean }) {
   >([]);
   const rosterLabelsRef = useRef<Record<string, string>>({});
   const photosRef = useRef<Record<string, string>>({});
+  const questionnairePreviewUrlCacheRef = useRef<Map<string, string>>(
+    new Map(),
+  );
   const requestedPhotoKeysRef = useRef(new Set<string>());
   const loadControllerRef = useRef<AbortController | null>(null);
   const loadSeqRef = useRef(0);
@@ -998,13 +1003,22 @@ export function OverviewPage({ active = true }: { active?: boolean }) {
       return;
     }
 
+    const sourceId =
+      questionnaireSourceIdByExternalId[target.externalId] ??
+      target.externalId;
+    const fileName = buildQuestionnaireExportFileName(target.name);
+    const cachedUrl = questionnairePreviewUrlCacheRef.current.get(sourceId);
+    if (cachedUrl) {
+      window.open(cachedUrl, "_blank", "noopener,noreferrer");
+      setMessage(`Анкета відкрита: ${target.name}`);
+      return;
+    }
+
     try {
       setMessage(`Відкриваю анкету: ${target.name}…`);
-      const url = await api.createPersonQuestionnairePreviewUrl(
-        questionnaireSourceIdByExternalId[target.externalId] ??
-          target.externalId,
-        buildQuestionnaireExportFileName(target.name),
-      );
+      const blob = await api.fetchPersonQuestionnaireFile(sourceId, fileName);
+      const url = URL.createObjectURL(blob);
+      questionnairePreviewUrlCacheRef.current.set(sourceId, url);
       window.open(url, "_blank", "noopener,noreferrer");
       setMessage(`Анкета відкрита: ${target.name}`);
     } catch (error) {
@@ -1306,6 +1320,21 @@ export function OverviewPage({ active = true }: { active?: boolean }) {
     }
   };
 
+  const exportCommandersReport = async (
+    context: SciDataTableExportContext<BackendPersonnelOverviewRow>,
+  ) => {
+    try {
+      const { count } = await exportOverviewCommandersReport(context);
+      setMessage(`Експортовано командирів: ${count}.`);
+    } catch (error) {
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "Не вдалося експортувати командирів.",
+      );
+    }
+  };
+
   const exportRotaBchsMorningReport = async (
     context: SciDataTableExportContext<BackendPersonnelOverviewRow>,
   ) => {
@@ -1525,8 +1554,12 @@ export function OverviewPage({ active = true }: { active?: boolean }) {
           onPpdLocationExport={(context) =>
             void exportPpdLocationReport(context)
           }
+          onCommandersExport={(context) =>
+            void exportCommandersReport(context)
+          }
           copyTextBuilder={buildOverviewWhatsAppCopyText}
           rotaCopyTextBuilder={buildOverviewRotaCopyText}
+          locationCopyTextBuilder={buildOverviewLocationCountCopyText}
         />
         <footer className="overview-table-footer">
           <span>

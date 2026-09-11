@@ -1,25 +1,20 @@
 import type { SciDataTableExportContext } from "@/components/sci/SciDataTable";
 import type { SheetData } from "write-excel-file/browser";
 import type { BackendPersonnelOverviewRow } from "../../api";
-import {
-  extractBchsAwayPeopleFromDbRows,
-  hasBchsFullName,
-  isBchsAwolStatus,
-  isBchsBusinessTripStatus,
-  isBchsDetachedStatus,
-  isBchsKilledStatus,
-  isBchsMissingStatus,
-  isBchsTrainingStatus,
-  isBchsTreatmentStatus,
-  isBchsVacationStatus,
-  isBchsWoundedByExcelNote,
-  normalizeBchsText,
-} from "../bchs/bchsCalc";
+import { isBchsWoundedByExcelNote } from "../bchs/bchsCalc";
 import type { EjournalPreviewRow } from "../ejournal/ejournalTypes";
 import { canonicalName, dateMs } from "../ejournal/ejoosIdentity";
 import type { PbArchivePeriod } from "../ejournal/ejoosParsers";
 import { normalizeRosterMatchText } from "../personnel/fighterStatusImport";
-import { overviewStatusFilterLabel } from "./overviewRosterMerge";
+import { matchesOverviewRotaUnitFilter } from "./overviewPpdLocationExport";
+import {
+  overviewStatusFilterLabel,
+  summarizeNovaStaffForUnits,
+} from "./overviewRosterMerge";
+import {
+  buildBchsMorningSections,
+  computeBchsMorningSummaryFromSections,
+} from "./overviewRotaBchsMorningExport";
 import { OVERVIEW_STAFF_COLUMN_HEADERS } from "./overviewStaffColumns";
 
 export type OverviewExportFilters = {
@@ -133,6 +128,7 @@ export const buildImportantOverviewExportSheetData = (
     value: column.label,
     fontWeight: "bold" as const,
     fontSize: 10,
+    textColor: EXPORT_COLORS.text,
     align: "center" as const,
     alignVertical: "center" as const,
     wrap: true,
@@ -145,6 +141,7 @@ export const buildImportantOverviewExportSheetData = (
     IMPORTANT_OVERVIEW_COLUMNS.map((column) => ({
       value: importantOverviewValue(row, column.id),
       fontSize: 10,
+      textColor: EXPORT_COLORS.text,
       align: "center" as const,
       alignVertical: "center" as const,
       wrap: true,
@@ -190,40 +187,40 @@ export type ImportantOverviewSummary = {
   inRanks: number;
 };
 
+const resolveImportantSummaryRows = (
+  filters: OverviewExportFilters,
+  overviewRows: BackendPersonnelOverviewRow[],
+) => {
+  const unitValues =
+    filters.activeFilters
+      ?.find((filter) => filter.id === "unit")
+      ?.values.filter(Boolean) ?? [];
+  const rows = unitValues.length
+    ? overviewRows.filter((row) =>
+        unitValues.some((unit) => matchesOverviewRotaUnitFilter(row.unit, unit)),
+      )
+    : overviewRows;
+  return { unitValues, rows };
+};
+
 export const buildImportantOverviewSummary = (
   rosterRows: EjournalPreviewRow[],
   filters: OverviewExportFilters,
   archivePeriods: PbArchivePeriod[] = [],
+  columns?: Array<{ key: string; letter?: string; originalIndex?: number }>,
+  overviewRows: BackendPersonnelOverviewRow[] = [],
 ): ImportantOverviewSummary => {
-  const unitValues =
-    filters.activeFilters?.find((filter) => filter.id === "unit")?.values ?? [];
-  const selectedUnits = new Set(
-    unitValues.map(normalizeRosterMatchText).filter(Boolean),
+  const { unitValues, rows } = resolveImportantSummaryRows(filters, overviewRows);
+  const { staff } = summarizeNovaStaffForUnits(rosterRows, unitValues, columns);
+  const unitLabel = unitValues.join(", ") || "1ПБ";
+  const sections = buildBchsMorningSections(rows, unitLabel, rosterRows);
+  const totals = computeBchsMorningSummaryFromSections(
+    sections,
+    rows,
+    staff,
+    rosterRows,
   );
-  const people = extractBchsAwayPeopleFromDbRows(rosterRows).filter(
-    (person) =>
-      !selectedUnits.size ||
-      selectedUnits.has(normalizeRosterMatchText(person.rosterUnit)),
-  );
-  const listedPeople = people.filter(hasBchsFullName);
-  const count = (matches: (person: (typeof listedPeople)[number]) => boolean) =>
-    listedPeople.filter(matches).length;
-  const placeContains = (
-    person: (typeof listedPeople)[number],
-    value: string,
-  ) => normalizeBchsText(person.medicalPlace).includes(value);
 
-  const trainingTrip = count(
-    (person) =>
-      isBchsTrainingStatus(person.status) ||
-      isBchsBusinessTripStatus(person.status),
-  );
-  const detached = count((person) => isBchsDetachedStatus(person.status));
-  const treatment = count((person) => isBchsTreatmentStatus(person.status));
-  const vacation = count((person) => isBchsVacationStatus(person.status));
-  const awol = count((person) => isBchsAwolStatus(person.status));
-  const missing = count((person) => isBchsMissingStatus(person.status));
-  const killed = count((person) => isBchsKilledStatus(person.status));
   const archiveNotesByName = new Map<string, string>();
   for (const period of archivePeriods) {
     if (dateMs(period.returnDate)) continue;
@@ -236,61 +233,41 @@ export const buildImportantOverviewSummary = (
       [archiveNotesByName.get(name), text].filter(Boolean).join("\n"),
     );
   }
-  const treatmentNoteText = (person: (typeof listedPeople)[number]) =>
-    [
-      person.medicalNote,
-      person.treatmentNote,
+  const treatmentWounded = totals.treatmentPeople.filter((person) => {
+    const row = rows[person.sourceOrder];
+    const note = [
+      row?.staffSheetColumns?.staff_32,
       person.status,
-      person.medicalPlace,
-      archiveNotesByName.get(canonicalName(person.fullName)) ?? "",
+      person.location,
+      archiveNotesByName.get(canonicalName(person.name)) ?? "",
     ]
       .filter(Boolean)
       .join("\n");
-  const treatmentWounded = count(
-    (person) =>
-      isBchsTreatmentStatus(person.status) &&
-      isBchsWoundedByExcelNote(treatmentNoteText(person)),
-  );
-  const treatmentIllness = Math.max(0, treatment - treatmentWounded);
-  const absent =
-    trainingTrip + detached + treatment + vacation + awol + missing + killed;
+    return isBchsWoundedByExcelNote(note);
+  }).length;
 
   return {
-    unitLabel: unitValues.join(", ") || "1ПБ",
-    staff: people.length,
-    listed: listedPeople.length,
-    trainingTrip,
-    detached,
-    treatment,
-    vacation,
-    awol,
-    missing,
-    killed,
+    unitLabel,
+    staff: totals.staff,
+    listed: totals.listed,
+    trainingTrip: totals.trainingTrip,
+    detached: totals.detached,
+    treatment: totals.treatment,
+    vacation: totals.vacation,
+    awol: totals.awol,
+    missing: totals.missing,
+    killed: totals.killed,
     treatmentWounded,
-    treatmentIllness,
-    absent,
-    management: count((person) =>
-      normalizeBchsText(person.roleType).includes("упр"),
-    ),
-    support: count((person) =>
-      normalizeBchsText(person.roleType).includes("забезпеч"),
-    ),
-    platoon: count((person) => placeContains(person, "взвод")),
-    attached: count(
-      (person) =>
-        normalizeBchsText(person.status).includes("приком") ||
-        placeContains(person, "приком"),
-    ),
-    onExit: count((person) => placeContains(person, "на виконанні")),
-    battleReady: count(
-      (person) =>
-        normalizeBchsText(person.combatReadiness) === "бг" ||
-        normalizeBchsText(person.medicalPlace) === "бг",
-    ),
-    available: count((person) =>
-      normalizeBchsText(person.status).includes("в строю"),
-    ),
-    inRanks: Math.max(0, listedPeople.length - absent),
+    treatmentIllness: Math.max(0, totals.treatment - treatmentWounded),
+    absent: totals.absent,
+    management: totals.management,
+    support: totals.support,
+    platoon: totals.platoon,
+    attached: totals.attached,
+    onExit: totals.onExit,
+    battleReady: totals.battleReady,
+    available: totals.available,
+    inRanks: totals.inRanks,
   };
 };
 
@@ -302,6 +279,7 @@ const summaryCell = (
   value,
   fontWeight: "bold" as const,
   fontSize: 11,
+  textColor: EXPORT_COLORS.text,
   align: columnSpan ? ("center" as const) : ("left" as const),
   alignVertical: "center" as const,
   backgroundColor,
@@ -356,6 +334,7 @@ export const buildImportantOverviewExportSheets = (
   allRows: BackendPersonnelOverviewRow[] = rows,
   rosterRows: EjournalPreviewRow[] = [],
   archivePeriods: PbArchivePeriod[] = [],
+  rosterColumns?: Array<{ key: string; letter?: string; originalIndex?: number }>,
 ) => {
   const statusFilter = filters.activeFilters?.find(
     (filter) => filter.id === "status",
@@ -364,12 +343,11 @@ export const buildImportantOverviewExportSheets = (
     (filter) => filter.id === "unit",
   );
   const selectedStatuses = statusFilter?.values.filter(Boolean) ?? [];
-  const selectedUnits = new Set(
-    (unitFilter?.values ?? []).map(normalizeRosterMatchText).filter(Boolean),
-  );
-  const unitRows = selectedUnits.size
+  const selectedUnits =
+    unitFilter?.values.filter(Boolean).map((value) => value.trim()) ?? [];
+  const unitRows = selectedUnits.length
     ? allRows.filter((row) =>
-        selectedUnits.has(normalizeRosterMatchText(row.unit)),
+        selectedUnits.some((unit) => matchesOverviewRotaUnitFilter(row.unit, unit)),
       )
     : allRows;
   const statuses = selectedStatuses.length > 1 ? selectedStatuses : [""];
@@ -383,7 +361,7 @@ export const buildImportantOverviewExportSheets = (
             normalizeRosterMatchText(overviewStatusFilterLabel(row)) ===
             normalizedStatus,
         )
-      : rows;
+      : unitRows;
     const activeFilters = filters.activeFilters?.map((filter) =>
       filter.id === "status" && selectedStatus
         ? { ...filter, values: [selectedStatus] }
@@ -429,7 +407,13 @@ export const buildImportantOverviewExportSheets = (
         {
           sheet: "Підрахунок",
           data: buildImportantOverviewSummarySheetData(
-            buildImportantOverviewSummary(rosterRows, filters, archivePeriods),
+            buildImportantOverviewSummary(
+              rosterRows,
+              filters,
+              archivePeriods,
+              rosterColumns,
+              unitRows,
+            ),
           ),
           columns: [{ width: 42 }, { width: 18 }],
           stickyRowsCount: 1,

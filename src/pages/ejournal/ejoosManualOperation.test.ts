@@ -7,6 +7,7 @@ import {
   buildManualEjoosOperation,
   collectManualEjoosPeople,
   hydrateManualEjoosOperation,
+  manualInputFromBackend,
 } from "./ejoosManualOperation";
 import {
   personCanEnterApplyQueue,
@@ -167,6 +168,61 @@ describe("manual EJOOS operation builder", () => {
         timesheetAction: "MOVE_TO_HISTORY",
       },
     });
+  });
+
+  it.each([
+    { type: "move_to_disposition" as const, kind: "move_to_disposition", event: "РОЗПОРЯДЖ", destination: ", який знаходиться у розпорядженні командира військової частини А4862", orderNumber: "№245", orderDate: "2026-08-24", basisIssuer: "командувача Сухопутних військ Збройних Сил України", basisNumber: "№743-РС", basisDate: "2026-08-24" },
+    { type: "exclusion" as const, kind: "exclude_transfer", event: "ВИКЛЮЧ", destination: "НА_ЩИТІ", orderNumber: "№ 234", orderDate: "2026-08-13", basisIssuer: "командира військової частини А4862", basisNumber: "№ 304-РС", basisDate: "2026-08-11" },
+  ])("builds and restores manual $event with both orders", (example) => {
+    const values = { ...baseValues, ...example };
+    const op = buildManualEjoosOperation({ ejoos: workbook(), timesheetDay: 25, values });
+    expect(op.kind).toBe(example.kind);
+    expect(op.class).toBe("ready");
+    expect(op.payload.type).toBe(example.event);
+    expect(op.payload.destination).toBe(example.destination);
+    expect(op.payload.basisIssuer).toBe(example.basisIssuer);
+    expect(op.payload.basisNumber).toBe(example.basisNumber.replace(/^№\s*/, ""));
+    expect(op.after).toContain(example.basisIssuer);
+    expect(personCanEnterApplyQueue(personChangesFromOps([op], 25)[0])).toBe(true);
+    if (example.type === "move_to_disposition") expect(op.payload.remainsInOos).toBe("true");
+    else expect(op.payload.exclusionReason).toBe("НА_ЩИТІ");
+    const draft = { id: "manual-new-kind", unitLabel: "1ПБ", status: "draft" as const, decision: "pending" as const, input: values, baseVersionId: "version-1", createdAt: "", updatedAt: "" };
+    expect(manualInputFromBackend(draft)).toMatchObject({ type: example.type, basisIssuer: example.basisIssuer, basisNumber: example.basisNumber, basisDate: example.basisDate });
+    const restored = hydrateManualEjoosOperation({ draft, ejoos: workbook(), timesheetDay: 25 });
+    expect(restored?.kind).toBe(example.kind);
+    expect(restored?.payload).toMatchObject(op.payload);
+  });
+
+  it("does not mark disposition ready when the destination or active source is missing", () => {
+    for (const [ejoos, destination] of [[workbook(), ""], [workbook({ withoutTimesheetPerson: true }), "у розпорядження командира"]] as const) {
+      const op = buildManualEjoosOperation({ ejoos, timesheetDay: 5, values: { ...baseValues, type: "move_to_disposition", destination } });
+      expect(op.class).toBe("needs_input");
+      expect(op.checkedDefault).toBe(false);
+    }
+  });
+
+  it.each([["СЗЧ", "СЗЧ"], ["БЕЗВІСТИ", "ЗБ"]])("keeps open %s when placing a person in disposition", (ground, code) => {
+    const ejoos = workbook();
+    const absence = Array(13).fill("");
+    absence[1] = "КІЯНЕНКО Андрій Олександрович";
+    absence[2] = "1961288";
+    absence[3] = "2103117";
+    absence[4] = ground;
+    ejoos.sheets.push(sheet("5. Тимчасово відсутні", [...Array.from({ length: 5 }, () => []), absence]));
+    const op = buildManualEjoosOperation({ ejoos, timesheetDay: 5, values: { ...baseValues, type: "move_to_disposition", destination: "у розпорядження командира" } });
+    expect(op.payload).toMatchObject({ absenceExcelRow: "6", absenceCode: code, keepOpenSzchTimesheet: "1", needsAbsenceRecord: "", remainsInOos: "true" });
+  });
+
+  it("uses the shared ВП template for a wounded recovery leave", () => {
+    const ejoos = workbook();
+    const absence = Array(13).fill("");
+    absence[1] = "КІЯНЕНКО Андрій Олександрович";
+    absence[2] = "1961288";
+    absence[4] = "ВІДПУСТКА ДЛЯ ЛІКУВАННЯ ПІСЛЯ   ПОРАНЕННЯ";
+    ejoos.sheets.push(sheet("5. Тимчасово відсутні", [...Array.from({ length: 5 }, () => []), absence]));
+    const op = buildManualEjoosOperation({ ejoos, timesheetDay: 5, values: { ...baseValues, type: "move_to_disposition", destination: "у розпорядження командира" } });
+    expect(op.payload.absenceCode).toBe("ВП");
+    expect(op.payload.keepOpenSzchTimesheet).toBe("");
   });
 
   it("reports the incumbent conflict for a manual position change", () => {
