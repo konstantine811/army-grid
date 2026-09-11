@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { EjournalPreviewRow } from "../ejournal/ejournalTypes";
 import { normalizePersonBirthKey } from "../personnel/personnelUtils";
+import { ROSTER_FIELD_PREFIX } from "../personnel/personnelRosterMerge";
 import {
+  buildAnketaInStaffRowIdSet,
   matchAnketaRowToPersonnelDetailed,
+  orderAnketaRowsForGapSearch,
   type AnketaPersonnelMatch,
 } from "./anketaPersonMatch";
 import type { AnketaRow } from "./anketaSheet";
@@ -222,5 +225,68 @@ describe("matchAnketaRowToPersonnelDetailed", () => {
 
     expect(result.match?.summary.name).toContain("ШЕВЧУК");
     expect(result.match?.matchBy).toBe("name");
+  });
+});
+
+describe("orderAnketaRowsForGapSearch", () => {
+  it("puts in-staff rows first while preserving sheet order within each group", () => {
+    const rows = [
+      { __rowId: "a", __rowNumber: 2, fullName: "А" } as AnketaRow,
+      { __rowId: "b", __rowNumber: 3, fullName: "Б" } as AnketaRow,
+      { __rowId: "c", __rowNumber: 4, fullName: "В" } as AnketaRow,
+    ];
+    const ordered = orderAnketaRowsForGapSearch(
+      rows,
+      new Set(["c", "a"]),
+    );
+    expect(ordered.map((row) => row.__rowId)).toEqual(["a", "c", "b"]);
+  });
+
+  it("returns original rows when everyone is in the same group", () => {
+    const rows = [
+      { __rowId: "a", __rowNumber: 2, fullName: "А" } as AnketaRow,
+      { __rowId: "b", __rowNumber: 3, fullName: "Б" } as AnketaRow,
+    ];
+    expect(
+      orderAnketaRowsForGapSearch(rows, new Set(["a", "b"])).map(
+        (row) => row.__rowId,
+      ),
+    ).toEqual(["a", "b"]);
+    expect(
+      orderAnketaRowsForGapSearch(rows, new Set()).map((row) => row.__rowId),
+    ).toEqual(["a", "b"]);
+  });
+});
+
+describe("buildAnketaInStaffRowIdSet", () => {
+  it("includes only anketa rows matched to personnel in the staff roster", () => {
+    const inStaffPerson = {
+      __dbRowId: "roster:1",
+      id: "101",
+      column_14: "КОВАЛЬ ІВАН ПЕТРОВИЧ",
+      [`${ROSTER_FIELD_PREFIX}column_14`]: "КОВАЛЬ ІВАН ПЕТРОВИЧ",
+    } as EjournalPreviewRow;
+    const archivePerson = {
+      __dbRowId: "2",
+      id: "202",
+      column_14: "ШЕВЧЕНКО ТАРАС ГРИГОРОВИЧ",
+    } as EjournalPreviewRow;
+    const index = buildIndex([inStaffPerson, archivePerson]);
+    const rows = [
+      {
+        __rowId: "a1",
+        __rowNumber: 2,
+        fullName: "КОВАЛЬ ІВАН ПЕТРОВИЧ",
+        externalId: "101",
+      } as AnketaRow,
+      {
+        __rowId: "a2",
+        __rowNumber: 3,
+        fullName: "ШЕВЧЕНКО ТАРАС ГРИГОРОВИЧ",
+        externalId: "202",
+      } as AnketaRow,
+    ];
+
+    expect([...buildAnketaInStaffRowIdSet(rows, index)]).toEqual(["a1"]);
   });
 });

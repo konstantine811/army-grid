@@ -84,8 +84,13 @@ export const saveAnketaEdits = async (edits: AnketaEditsMap) => {
   await writeDataCache(ANKETA_EDITS_CACHE_KEY, edits);
 };
 
+let syncAnketaEditsInFlight: Promise<AnketaEditsMap> | null = null;
+
 /** Завантажити правки: локальний кеш + синхронізація з сервером PostgreSQL. */
 export const syncAnketaEdits = async (): Promise<AnketaEditsMap> => {
+  if (syncAnketaEditsInFlight) return syncAnketaEditsInFlight;
+
+  syncAnketaEditsInFlight = (async () => {
   const local = await loadLocalAnketaEdits();
 
   let remoteRecords: BackendAnketaCellEdit[] = [];
@@ -129,6 +134,13 @@ export const syncAnketaEdits = async (): Promise<AnketaEditsMap> => {
   const merged = mergeEditsMaps(local, remote);
   await saveAnketaEdits(merged);
   return merged;
+  })();
+
+  try {
+    return await syncAnketaEditsInFlight;
+  } finally {
+    syncAnketaEditsInFlight = null;
+  }
 };
 
 export const loadAnketaEdits = syncAnketaEdits;

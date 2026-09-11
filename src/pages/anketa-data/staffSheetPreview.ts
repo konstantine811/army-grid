@@ -20,6 +20,8 @@ export const STAFF_SHEET_PREVIEW_COLUMNS = [
 ] as const;
 
 export type StaffSheetPreviewRow = {
+  /** Стабільний ключ для React (у штатці інколи дублюється __rowNumber). */
+  key: string;
   excelRowNumber: number;
   cells: string[];
 };
@@ -53,7 +55,11 @@ export const buildStaffSheetPreviewRows = (
       (left, right) =>
         (Number(left.__rowNumber) || 0) - (Number(right.__rowNumber) || 0),
     )
-    .map((row) => ({
+    .map((row, index) => ({
+      key: String(
+        row.__dbRowId ??
+          `staff-preview:${row.__rowNumber ?? 0}:${index}`,
+      ),
       excelRowNumber: Number(row.__rowNumber) || 0,
       cells: STAFF_SHEET_PREVIEW_COLUMNS.map((column) =>
         readRosterColumnValue(row, column.number).trim(),

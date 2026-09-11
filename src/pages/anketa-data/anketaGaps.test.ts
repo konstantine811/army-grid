@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { normalizeAnketaNameKey } from "./anketaPersonMatch";
+import {
+  normalizeAnketaNameKey,
+  orderAnketaRowsForGapSearch,
+} from "./anketaPersonMatch";
 import {
   ANKETA_ABSENT_QUESTIONNAIRE_VALUE,
   applyAbsentQuestionnaireClearsToRows,
@@ -257,5 +260,20 @@ describe("findNextAnketaEmptyCell walks from the current cell", () => {
 
     expect(next?.rowId).toBe("r2");
     expect(next?.columnId).toBe("rnokpp");
+  });
+
+  it("starts with in-staff rows when the list is reordered for gap search", () => {
+    const archive = person("АРХІВНИЙ", { rnokpp: "" });
+    archive.__rowId = "archive";
+    archive.__rowNumber = 2;
+    const inStaff = person("У ШТАТІ", { rnokpp: "" });
+    inStaff.__rowId = "staff";
+    inStaff.__rowNumber = 3;
+    const ordered = orderAnketaRowsForGapSearch(
+      [archive, inStaff],
+      new Set(["staff"]),
+    );
+    const first = findNextAnketaEmptyCell(ordered, null, ["rnokpp"]);
+    expect(first?.rowId).toBe("staff");
   });
 });

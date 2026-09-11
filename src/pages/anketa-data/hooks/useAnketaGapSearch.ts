@@ -35,9 +35,12 @@ import {
 } from "../anketaGaps";
 import { loadAnketaMissingNames } from "../anketaMissingList";
 import {
+  buildAnketaInStaffRowIdSet,
   expandAnketaNameKeySet,
   loadPersonnelIndexForAnketa,
   matchAnketaRowToPersonnel,
+  orderAnketaRowsForGapSearch,
+  type AnketaPersonnelIndex,
 } from "../anketaPersonMatch";
 import {
   loadPersonPhotoForRow,
@@ -115,7 +118,29 @@ export function useAnketaGapSearch({
   const [personPanelOpen, setPersonPanelOpen] = useState(false);
   const [emptySearchActive, setEmptySearchActive] = useState(false);
   const [isFillingAbsent, setIsFillingAbsent] = useState(false);
+  const [personnelIndex, setPersonnelIndex] = useState<AnketaPersonnelIndex | null>(
+    null,
+  );
   const suppressCellBlurSaveRef = useRef(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void loadPersonnelIndexForAnketa()
+      .then((index) => {
+        if (!cancelled) setPersonnelIndex(index);
+      })
+      .catch(() => {
+        if (!cancelled) setPersonnelIndex(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const gapSearchRows = useMemo(() => {
+    const inStaffRowIds = buildAnketaInStaffRowIdSet(rows, personnelIndex);
+    return orderAnketaRowsForGapSearch(rows, inStaffRowIds);
+  }, [rows, personnelIndex]);
 
   const deferredGapKeySet = useMemo(
     () => new Set(deferredGapKeys),
@@ -129,15 +154,15 @@ export function useAnketaGapSearch({
     [deferredGapKeySet, missingQuestionnaireNames],
   );
   const emptyCount = useMemo(
-    () => countAnketaEmptyCells(rows, gapColumnKeys, gapSearchOptions),
-    [rows, gapColumnKeys, gapSearchOptions],
+    () => countAnketaEmptyCells(gapSearchRows, gapColumnKeys, gapSearchOptions),
+    [gapSearchRows, gapColumnKeys, gapSearchOptions],
   );
   const gapStats = useMemo(
     () =>
-      summarizeAnketaGaps(rows, gapColumnKeys, {
+      summarizeAnketaGaps(gapSearchRows, gapColumnKeys, {
         excludeNameKeys: missingQuestionnaireNames,
       }),
-    [rows, gapColumnKeys, missingQuestionnaireNames],
+    [gapSearchRows, gapColumnKeys, missingQuestionnaireNames],
   );
   const focusedAnketaRow = useMemo(() => {
     if (!focusedEmpty) return null;
@@ -277,8 +302,12 @@ export function useAnketaGapSearch({
         header: ANKETA_COLUMNS[columnIndex]?.header ?? columnId,
         a1: cellA1 ?? "",
       };
-      const next = findNextAnketaEmptyCell(
+      const orderedNextRows = orderAnketaRowsForGapSearch(
         nextRows,
+        buildAnketaInStaffRowIdSet(nextRows, personnelIndex),
+      );
+      const next = findNextAnketaEmptyCell(
+        orderedNextRows,
         currentGap,
         gapColumnKeys,
         {
@@ -290,12 +319,12 @@ export function useAnketaGapSearch({
       if (next) {
         setFocusEpoch((epoch) => epoch + 1);
         setMessage(
-          `Збережено. Наступна порожня: ${next.a1} · ${next.header}. Залишилось: ${countAnketaEmptyCells(nextRows, gapColumnKeys, {
+          `Збережено. Наступна порожня: ${next.a1} · ${next.header}. Залишилось: ${countAnketaEmptyCells(orderedNextRows, gapColumnKeys, {
             skipKeys: skipKeysAfterSave,
             excludeNameKeys: missingQuestionnaireNames,
           })}.`,
         );
-        prefetchNextGapPerson(nextRows, next, gapColumnKeys, {
+        prefetchNextGapPerson(orderedNextRows, next, gapColumnKeys, {
           skipKeys: skipKeysAfterSave,
           excludeNameKeys: missingQuestionnaireNames,
         });
@@ -353,15 +382,25 @@ export function useAnketaGapSearch({
     };
     const next =
       direction === "first"
-        ? findNextAnketaEmptyCell(rows, null, gapColumnKeys, nextSearchOptions)
+        ? findNextAnketaEmptyCell(
+            gapSearchRows,
+            null,
+            gapColumnKeys,
+            nextSearchOptions,
+          )
         : direction === "nextPerson"
           ? findNextAnketaPersonEmptyCell(
-              rows,
+              gapSearchRows,
               focusedEmpty,
               gapColumnKeys,
               nextSearchOptions,
             )
-          : findNextAnketaEmptyCell(rows, focusedEmpty, gapColumnKeys, nextSearchOptions);
+          : findNextAnketaEmptyCell(
+              gapSearchRows,
+              focusedEmpty,
+              gapColumnKeys,
+              nextSearchOptions,
+            );
     if (!next) {
       setFocusedEmpty(null);
       setMessage(
@@ -379,7 +418,11 @@ export function useAnketaGapSearch({
     setEmptySearchActive(true);
     const personName =
       rows.find((row) => row.__rowId === next.rowId)?.fullName?.trim() || "";
-    const remaining = countAnketaEmptyCells(rows, gapColumnKeys, nextSearchOptions);
+    const remaining = countAnketaEmptyCells(
+      gapSearchRows,
+      gapColumnKeys,
+      nextSearchOptions,
+    );
     setMessage(
       direction === "nextPerson"
         ? `Наступний службовець · ${personName || `рядок ${next.rowNumber}`} · ${next.a1} · ${next.header}. Залишилось: ${remaining}.`
@@ -387,7 +430,7 @@ export function useAnketaGapSearch({
             skipKeys.length ? ` · відкладено: ${skipKeys.length}` : ""
           }.`,
     );
-    prefetchNextGapPerson(rows, next, gapColumnKeys, nextSearchOptions);
+    prefetchNextGapPerson(gapSearchRows, next, gapColumnKeys, nextSearchOptions);
   };
 
   const fillAbsentQuestionnaireCells = async () => {

@@ -657,15 +657,24 @@ async function requestGetOptional<T>(path: string): Promise<T | null> {
   })
 }
 
-async function requestBinary<T>(path: string, body: Blob, options: RequestInit = {}): Promise<T> {
+type ApiBinaryRequestInit = RequestInit & {
+  suppressErrorToast?: boolean
+}
+
+async function requestBinary<T>(
+  path: string,
+  body: Blob,
+  options: ApiBinaryRequestInit = {},
+): Promise<T> {
+  const { suppressErrorToast, ...fetchOptions } = options
   return apiRequestPool.run(
     async () => {
       const response = await measuredFetch(`${apiBaseUrl()}${path}`, {
-        ...options,
+        ...fetchOptions,
         body,
         headers: {
           ...authHeaders(),
-          ...options.headers,
+          ...fetchOptions.headers,
         },
       })
 
@@ -691,21 +700,21 @@ async function requestBinary<T>(path: string, body: Blob, options: RequestInit =
         }
         if (response.status === 403) {
           showBackendBlockedToast(message)
-        } else if (response.status !== 401) {
+        } else if (response.status !== 401 && !suppressErrorToast) {
           showAppToast({
             title: 'Помилка запису',
             description: message,
             variant: response.status >= 500 ? 'CRITICAL' : 'WARNING',
           })
         }
-        throw new Error(message)
+        throw attachHttpStatus(new Error(message), response.status)
       }
 
       return response.json() as Promise<T>
     },
     {
       priority: 'high',
-      signal: options.signal ?? undefined,
+      signal: fetchOptions.signal ?? undefined,
     },
   )
 }
@@ -1110,21 +1119,44 @@ export const api = {
     )
   },
 
-  upsertPersonQuestionnaire(personExternalId: string, payload: {
-    fileData: string
-    fileName?: string
-    mimeType?: string
-  }) {
+  upsertPersonQuestionnaire(
+    personExternalId: string,
+    payload: {
+      fileData: string
+      fileName?: string
+      mimeType?: string
+    },
+    options?: { suppressErrorToast?: boolean },
+  ) {
     return request<BackendPersonQuestionnaire>(
       `/ejournals/personnel/questionnaires/${encodeURIComponent(personExternalId)}`,
       {
         method: 'PATCH',
         body: JSON.stringify(payload),
+        suppressErrorToast: options?.suppressErrorToast,
       },
     )
   },
 
-  upsertPersonQuestionnaireFile(personExternalId: string, file: File) {
+  copyPersonQuestionnaire(
+    toPersonExternalId: string,
+    fromPersonExternalId: string,
+    options?: { suppressErrorToast?: boolean },
+  ) {
+    return request<BackendPersonQuestionnaire>(
+      `/ejournals/personnel/questionnaires/${encodeURIComponent(toPersonExternalId)}/copy-from/${encodeURIComponent(fromPersonExternalId)}`,
+      {
+        method: 'POST',
+        suppressErrorToast: options?.suppressErrorToast,
+      },
+    )
+  },
+
+  upsertPersonQuestionnaireFile(
+    personExternalId: string,
+    file: File,
+    options?: { suppressErrorToast?: boolean },
+  ) {
     return requestBinary<BackendPersonQuestionnaire>(
       `/ejournals/personnel/questionnaires/${encodeURIComponent(personExternalId)}/file`,
       file,
@@ -1134,6 +1166,7 @@ export const api = {
           'Content-Type': 'application/pdf',
           'X-File-Name': encodeURIComponent(file.name),
         },
+        suppressErrorToast: options?.suppressErrorToast,
       },
     )
   },

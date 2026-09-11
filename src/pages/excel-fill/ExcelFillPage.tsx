@@ -1959,10 +1959,10 @@ export function ExcelFillPage() {
             </thead>
             <tbody>
               {staffSheetPreviewRows.slice(0, 300).map((row) => (
-                <tr key={row.excelRowNumber}>
+                <tr key={row.key}>
                   <td>{row.excelRowNumber}</td>
                   {row.cells.map((value, index) => (
-                    <td key={`${row.excelRowNumber}-${index}`}>{value || "—"}</td>
+                    <td key={`${row.key}-${index}`}>{value || "—"}</td>
                   ))}
                 </tr>
               ))}

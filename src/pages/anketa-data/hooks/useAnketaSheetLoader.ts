@@ -11,16 +11,17 @@ import {
   bulkWriteAnketaCellEdits,
   countAnketaEdits,
   loadAnketaEdits,
-  type AnketaEditsMap,
 } from "../anketaEdits";
 import { readAnketaAppsScriptUrl } from "../anketaGaps";
 import { loadAnketaMissingNameKeys } from "../anketaMissingList";
 import {
+  buildAnketaInStaffRowIdSet,
   expandAnketaNameKeySet,
   loadPersonnelIndexForAnketa,
   matchAnketaRowToPersonnel,
   normalizeAnketaExternalIdKey,
   normalizeAnketaNameKey,
+  orderAnketaRowsForGapSearch,
 } from "../anketaPersonMatch";
 import {
   formatReconcileAnketaWithEjoosReport,
@@ -186,8 +187,12 @@ export function useAnketaSheetLoader() {
         Record<string, string>
       >();
 
-      for (let index = 0; index < rows.length; index += 1) {
-        const row = rows[index]!;
+      const orderedRows = orderAnketaRowsForGapSearch(
+        rows,
+        buildAnketaInStaffRowIdSet(rows, personnelIndex),
+      );
+      for (let index = 0; index < orderedRows.length; index += 1) {
+        const row = orderedRows[index]!;
         const match = matchAnketaRowToPersonnel(row, personnelIndex);
         const rowId = normalizeAnketaExternalIdKey(row.externalId);
         const rowName = normalizeAnketaNameKey(row.fullName);
@@ -245,9 +250,9 @@ export function useAnketaSheetLoader() {
         }
         const done = index + 1;
         const now = Date.now();
-        if (done === rows.length || now - lastProgressAt >= 250) {
+        if (done === orderedRows.length || now - lastProgressAt >= 250) {
           lastProgressAt = now;
-          setMessage(`Особовий склад → анкети… ${done}/${rows.length}`);
+          setMessage(`Особовий склад → анкети… ${done}/${orderedRows.length}`);
         }
       }
 
@@ -348,9 +353,6 @@ export function useAnketaSheetLoader() {
 
   useEffect(() => {
     void loadFromGoogle();
-    void loadAnketaEdits().then((edits: AnketaEditsMap) => {
-      setEditsCount(countAnketaEdits(edits));
-    });
     void loadAnketaMissingNameKeys()
       .then(({ keys }) => {
         setMissingQuestionnaireNames(expandAnketaNameKeySet(keys));

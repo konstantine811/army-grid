@@ -9084,9 +9084,11 @@ export function DocumentsPage(_props: {
           </Box>
           <Stack
             direction="row"
-            spacing={1}
-            useFlexGap
-            sx={{ flexWrap: "wrap", justifyContent: "flex-end" }}
+            sx={{
+              flexWrap: "wrap",
+              justifyContent: "flex-end",
+              gap: 1,
+            }}
           >
             <Button
               variant="outlined"

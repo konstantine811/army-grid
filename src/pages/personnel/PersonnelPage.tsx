@@ -139,7 +139,6 @@ import {
   loadAvailablePersonPhotoIds,
   loadPersonDocumentsForRow,
   loadPersonQuestionnaireForRow,
-  loadPersonQuestionnaireFull,
   peekAvailablePersonPhotoIds,
   personPhotoFullUrlForRow,
   pruneStalePersonPhotos,
@@ -740,32 +739,20 @@ export function PersonnelPage({
           resolvedExternalId &&
           resolvedExternalId !== externalId
         ) {
-          const source =
-            next.fileData?.trim()
-              ? next
-              : await loadPersonQuestionnaireFull(resolvedExternalId);
-          if (source?.fileData?.trim()) {
-            try {
-              const copied = await api.upsertPersonQuestionnaire(externalId, {
-                fileData: source.fileData,
-                fileName:
-                  source.fileName?.trim() ||
-                  next.fileName?.trim() ||
-                  sanitizeFileName(
-                    buildQuestionnaireExportFileName(selectedSummary.name),
-                  ),
-                mimeType: source.mimeType ?? next.mimeType ?? "application/pdf",
-              });
-              if (isCancelled) return;
-              setQuestionnaireByExternalId((current) => ({
-                ...current,
-                [externalId]: true,
-              }));
-              setQuestionnaire(copied ?? source);
-              return;
-            } catch {
-              // Show the PDF found under the previous identity even if copy fails.
-            }
+          try {
+            const copied = await api.copyPersonQuestionnaire(
+              externalId,
+              resolvedExternalId,
+            );
+            if (isCancelled) return;
+            setQuestionnaireByExternalId((current) => ({
+              ...current,
+              [externalId]: true,
+            }));
+            setQuestionnaire(copied ?? next);
+            return;
+          } catch {
+            // Show the PDF found under the previous identity even if copy fails.
           }
         }
         setQuestionnaire(next);

@@ -1050,10 +1050,57 @@ export type PersonAttachmentMigrationOptions = {
   documents?: BackendPersonDocument[];
 };
 
+type CopyQuestionnaireOptions = {
+  fileName?: string;
+  suppressErrorToast?: boolean;
+};
+
+/** Server-side copy when possible; binary /file upload as fallback for older backends. */
+export const copyQuestionnaireBetweenPersonIds = async (
+  fromExternalId: string,
+  toExternalId: string,
+  options: CopyQuestionnaireOptions = {},
+): Promise<boolean> => {
+  const fromId = fromExternalId.trim();
+  const toId = toExternalId.trim();
+  if (!fromId || !toId || fromId === toId) return false;
+
+  const toastOptions = {
+    suppressErrorToast: options.suppressErrorToast ?? true,
+  };
+
+  try {
+    await api.copyPersonQuestionnaire(toId, fromId, toastOptions);
+    return true;
+  } catch (error) {
+    const status = (error as { status?: number }).status;
+    if (status === 404) return false;
+  }
+
+  try {
+    const blob = await api.fetchPersonQuestionnaireFile(fromId);
+    const fileName =
+      options.fileName?.trim() ||
+      sanitizeFileName(buildQuestionnaireExportFileName(fromId));
+    const file = new File([blob], fileName, {
+      type: blob.type || "application/pdf",
+    });
+    await api.upsertPersonQuestionnaireFile(toId, file, toastOptions);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
 const migrateTargetedPersonAttachments = async (
   pairs: PersonAttachmentMigrationPair[],
   includeDocuments: boolean,
 ) => {
+  const questionnaireIds = new Set(
+    (await api.listPersonQuestionnaires().catch(() => []))
+      .map((item) => item.personExternalId?.trim())
+      .filter((item): item is string => Boolean(item)),
+  );
   let migrated = 0;
   for (const pair of pairs) {
     try {
@@ -1069,19 +1116,23 @@ const migrateTargetedPersonAttachments = async (
         migrated += 1;
       }
 
-      const [oldQuestionnaire, newQuestionnaire] = await Promise.all([
-        api.getPersonQuestionnaire(pair.fromExternalId).catch(() => null),
-        api.getPersonQuestionnaire(pair.toExternalId).catch(() => null),
-      ]);
-      if (oldQuestionnaire?.fileData && !newQuestionnaire?.fileData) {
-        await api.upsertPersonQuestionnaire(pair.toExternalId, {
-          fileData: oldQuestionnaire.fileData,
-          fileName:
-            oldQuestionnaire.fileName?.trim() ||
-            sanitizeFileName(buildQuestionnaireExportFileName(pair.name)),
-          mimeType: oldQuestionnaire.mimeType ?? "application/pdf",
-        });
-        migrated += 1;
+      if (
+        questionnaireIds.has(pair.fromExternalId) &&
+        !questionnaireIds.has(pair.toExternalId)
+      ) {
+        const copied = await copyQuestionnaireBetweenPersonIds(
+          pair.fromExternalId,
+          pair.toExternalId,
+          {
+            fileName: sanitizeFileName(
+              buildQuestionnaireExportFileName(pair.name),
+            ),
+          },
+        );
+        if (copied) {
+          questionnaireIds.add(pair.toExternalId);
+          migrated += 1;
+        }
       }
 
       if (!includeDocuments) continue;
@@ -1199,17 +1250,16 @@ export const migratePersonAttachmentsBetweenIds = async (
         questionnaireIds.has(pair.fromExternalId) &&
         !questionnaireIds.has(pair.toExternalId)
       ) {
-        const oldQuestionnaire = await api.getPersonQuestionnaire(
+        const copied = await copyQuestionnaireBetweenPersonIds(
           pair.fromExternalId,
+          pair.toExternalId,
+          {
+            fileName: sanitizeFileName(
+              buildQuestionnaireExportFileName(pair.name),
+            ),
+          },
         );
-        if (oldQuestionnaire?.fileData) {
-          await api.upsertPersonQuestionnaire(pair.toExternalId, {
-            fileData: oldQuestionnaire.fileData,
-            fileName:
-              oldQuestionnaire.fileName?.trim() ||
-              sanitizeFileName(buildQuestionnaireExportFileName(pair.name)),
-            mimeType: oldQuestionnaire.mimeType ?? "application/pdf",
-          });
+        if (copied) {
           questionnaireIds.add(pair.toExternalId);
           migrated += 1;
         }

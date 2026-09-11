@@ -4,6 +4,7 @@ import * as idbDataCache from "../../data/idbDataCache";
 import type { EjournalPreviewRow } from "../ejournal/ejournalTypes";
 import {
   buildOrphanAttachmentMigrationPairs,
+  copyQuestionnaireBetweenPersonIds,
   buildQuestionnairePresenceMap,
   collectPersonAttachmentLookupIds,
   loadPersonDocumentsForRow,
@@ -141,6 +142,24 @@ describe("loadPersonDocumentsForRow", () => {
       "legacy-doc",
     ]);
     expect(listAllSpy).not.toHaveBeenCalled();
+    vi.restoreAllMocks();
+  });
+});
+
+describe("copyQuestionnaireBetweenPersonIds", () => {
+  it("uses server-side copy without downloading PDF bytes", async () => {
+    const copySpy = vi
+      .spyOn(api, "copyPersonQuestionnaire")
+      .mockResolvedValue({ personExternalId: "new-id" } as never);
+    const getSpy = vi.spyOn(api, "getPersonQuestionnaire");
+
+    await expect(
+      copyQuestionnaireBetweenPersonIds("old-id", "new-id"),
+    ).resolves.toBe(true);
+    expect(copySpy).toHaveBeenCalledWith("new-id", "old-id", {
+      suppressErrorToast: true,
+    });
+    expect(getSpy).not.toHaveBeenCalled();
     vi.restoreAllMocks();
   });
 });

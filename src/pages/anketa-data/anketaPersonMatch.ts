@@ -16,7 +16,10 @@ import {
   loadAllEjournalSheetRows,
   normalizePersonBirthKey,
 } from "../personnel/personnelUtils";
-import { mergeRosterRowsIntoPreview } from "../personnel/personnelRosterMerge";
+import {
+  isPersonnelInStaffRoster,
+  mergeRosterRowsIntoPreview,
+} from "../personnel/personnelRosterMerge";
 import { mapRosterLatestToPreviewRows, readRosterColumnValue } from "../excel-fill/rosterSourceSnapshot";
 import type { AnketaRow } from "./anketaSheet";
 
@@ -454,6 +457,38 @@ export const matchAnketaRowToPersonnel = (
   anketaRow: AnketaRow | null | undefined,
   index: PersonnelIndex | null,
 ): AnketaPersonnelMatch | null => matchAnketaRowToPersonnelDetailed(anketaRow, index).match;
+
+/** Рядки анкет, зіставлені з поточною «Штаткою» (не архів / не лише ЕЖООС). */
+export const buildAnketaInStaffRowIdSet = (
+  rows: AnketaRow[],
+  index: AnketaPersonnelIndex | null,
+): Set<string> => {
+  const set = new Set<string>();
+  if (!index) return set;
+  for (const row of rows) {
+    const match = matchAnketaRowToPersonnel(row, index);
+    if (match && isPersonnelInStaffRoster(match.row)) {
+      set.add(row.__rowId);
+    }
+  }
+  return set;
+};
+
+/** Авто-пошук пропусків: спочатку «у штаті», потім решта (порядок аркуша в групі). */
+export const orderAnketaRowsForGapSearch = (
+  rows: AnketaRow[],
+  inStaffRowIds: ReadonlySet<string>,
+): AnketaRow[] => {
+  if (!inStaffRowIds.size) return rows;
+  const inStaff: AnketaRow[] = [];
+  const rest: AnketaRow[] = [];
+  for (const row of rows) {
+    if (inStaffRowIds.has(row.__rowId)) inStaff.push(row);
+    else rest.push(row);
+  }
+  if (!inStaff.length || !rest.length) return rows;
+  return [...inStaff, ...rest];
+};
 
 export const matchLabel = (matchBy: AnketaPersonnelMatch["matchBy"]) => {
   switch (matchBy) {
