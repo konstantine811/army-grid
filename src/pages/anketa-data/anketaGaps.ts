@@ -38,6 +38,24 @@ export type AnketaEmptyCell = {
 /** Позначка: в особи немає анкети — порожні вибрані колонки заповнюємо цим текстом. */
 export const ANKETA_ABSENT_QUESTIONNAIRE_VALUE = "дані відсутні";
 
+/** Шаблон для порожньої колонки «Дані про родичів». */
+export const ANKETA_RELATIVES_EMPTY_TEMPLATE = `Сімейний стан: 
+Мати: 
+Батько: 
+Довірена особа: 
+Дитина:`;
+
+export const initialAnketaCellEditorDraft = (
+  columnKey: AnketaColumnKey,
+  value: string,
+  isEmpty: boolean,
+) => {
+  if (columnKey === "relatives" && isEmpty) {
+    return ANKETA_RELATIVES_EMPTY_TEMPLATE;
+  }
+  return value;
+};
+
 /** Константи для комірок без реальних даних — комірка вважається заповненою. */
 export const ANKETA_MISSING_VALUE_PRESETS = [
   ANKETA_ABSENT_QUESTIONNAIRE_VALUE,

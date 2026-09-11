@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { type ReactNode } from "react";
 import { Box, IconButton, Stack, Typography } from "@/components/sci/SciPrimitives";
 import { AnalyticsOutlinedIcon } from "@/components/sci/icons";
 import { ArticleOutlinedIcon } from "@/components/sci/icons";
@@ -16,8 +16,6 @@ import { SyncAltOutlinedIcon } from "@/components/sci/icons";
 import { TableChartOutlinedIcon } from "@/components/sci/icons";
 import { useAuth } from "../../auth/AuthProvider";
 import { isUserAllowedPage, type AppPage } from "../navigation";
-
-const SIDEBAR_COLLAPSED_KEY = "army-grid.sidebar-collapsed";
 
 const navItems: Array<{ label: string; page?: AppPage; icon: ReactNode; adminOnly?: boolean }> = [
   { label: "Огляд", page: "overview", icon: <DashboardOutlinedIcon /> },
@@ -63,30 +61,19 @@ export const APP_PAGE_LABELS: Record<AppPage, string> = Object.fromEntries(
 export function Sidebar({
   activePage,
   onPageChange,
+  collapsed,
+  onCollapsedChange,
   mobileOpen = false,
   onMobileClose,
 }: {
   activePage: AppPage;
   onPageChange: (page: AppPage) => void;
+  collapsed: boolean;
+  onCollapsedChange: (collapsed: boolean) => void;
   mobileOpen?: boolean;
   onMobileClose?: () => void;
 }) {
   const { user, isAdmin, canEdit, logout } = useAuth();
-  const [collapsed, setCollapsed] = useState(() => {
-    try {
-      return window.localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1";
-    } catch {
-      return false;
-    }
-  });
-
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(SIDEBAR_COLLAPSED_KEY, collapsed ? "1" : "0");
-    } catch {
-      // Ignore storage write failures (private mode, etc.).
-    }
-  }, [collapsed]);
 
   const selectPage = (page: AppPage) => {
     onPageChange(page);
@@ -134,7 +121,7 @@ export function Sidebar({
             aria-expanded={!collapsed}
             className="sidebar-toggle sidebar-toggle-desktop"
             size="small"
-            onClick={() => setCollapsed((value) => !value)}
+            onClick={() => onCollapsedChange(!collapsed)}
           >
             {collapsed ? (
               <MenuOutlinedIcon fontSize="small" />

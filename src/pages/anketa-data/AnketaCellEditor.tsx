@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { initialAnketaCellEditorDraft } from "./anketaGaps";
 import type { AnketaColumnKey } from "./anketaSheet";
 import { AnketaMissingPresets } from "./AnketaMissingPresets";
 
@@ -28,7 +29,9 @@ export function AnketaCellEditor({
   onSave,
   onCancel,
 }: AnketaCellEditorProps) {
-  const [draft, setDraft] = useState(value);
+  const [draft, setDraft] = useState(() =>
+    initialAnketaCellEditorDraft(columnKey, value, isEmpty),
+  );
   const isMultiline = MULTILINE_COLUMNS.has(columnKey);
   const isDirty = draft !== value;
 
@@ -106,7 +109,7 @@ export function AnketaCellEditor({
           {advanceOnSave ? " і далі" : ""}
         </p>
       ) : null}
-      {isEmpty ? (
+      {isEmpty && columnKey !== "relatives" ? (
         <AnketaMissingPresets
           onPick={(preset) => {
             onSave(preset, advanceOnSave);

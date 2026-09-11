@@ -19,6 +19,10 @@ import {
 import type { PersonnelFocusTarget } from "./pages/personnel/personnelFocus";
 import { Sidebar, APP_PAGE_LABELS } from "./app/layout/Sidebar";
 import {
+  readSidebarCollapsed,
+  writeSidebarCollapsed,
+} from "./app/layout/sidebarPrefs";
+import {
   LazyAnalyticsPage,
   LazyAnketaDataPage,
   LazyBchsPage,
@@ -85,6 +89,11 @@ function App() {
   );
   const [routeKey, setRouteKey] = useState(getCurrentRouteKey);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(readSidebarCollapsed);
+
+  useEffect(() => {
+    writeSidebarCollapsed(sidebarCollapsed);
+  }, [sidebarCollapsed]);
 
   useEffect(() => {
     setMountedPages((previous) => {
@@ -248,7 +257,7 @@ function App() {
   return (
     <>
     <div
-      className={`app-shell${mobileNavOpen ? " mobile-nav-open" : ""}${pageReadonly ? " app-shell--readonly" : ""}`}
+      className={`app-shell${sidebarCollapsed ? " sidebar-collapsed" : ""}${mobileNavOpen ? " mobile-nav-open" : ""}${pageReadonly ? " app-shell--readonly" : ""}`}
     >
       <SciScrollbars />
       <header className="mobile-topbar">
@@ -282,6 +291,8 @@ function App() {
       <Sidebar
         activePage={activePage}
         onPageChange={changePage}
+        collapsed={sidebarCollapsed}
+        onCollapsedChange={setSidebarCollapsed}
         mobileOpen={mobileNavOpen}
         onMobileClose={() => setMobileNavOpen(false)}
       />

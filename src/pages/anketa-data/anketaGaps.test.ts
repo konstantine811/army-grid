@@ -5,7 +5,9 @@ import {
 } from "./anketaPersonMatch";
 import {
   ANKETA_ABSENT_QUESTIONNAIRE_VALUE,
+  ANKETA_RELATIVES_EMPTY_TEMPLATE,
   applyAbsentQuestionnaireClearsToRows,
+  initialAnketaCellEditorDraft,
   applyAbsentQuestionnaireFillsToRows,
   buildAbsentQuestionnaireAnketaRows,
   collectAbsentQuestionnaireCellClears,
@@ -22,6 +24,24 @@ const person = (name: string, extra: Record<string, string> = {}) => {
   const row = createEmptyAnketaRow(2);
   return { ...row, fullName: name, ...extra };
 };
+
+describe("initialAnketaCellEditorDraft", () => {
+  it("prefills an empty relatives cell with the default template", () => {
+    expect(initialAnketaCellEditorDraft("relatives", "", true)).toBe(
+      ANKETA_RELATIVES_EMPTY_TEMPLATE,
+    );
+    expect(initialAnketaCellEditorDraft("relatives", "  ", true)).toBe(
+      ANKETA_RELATIVES_EMPTY_TEMPLATE,
+    );
+  });
+
+  it("keeps existing relatives text and other columns unchanged", () => {
+    expect(initialAnketaCellEditorDraft("relatives", "Мати: Іванова", false)).toBe(
+      "Мати: Іванова",
+    );
+    expect(initialAnketaCellEditorDraft("education", "", true)).toBe("");
+  });
+});
 
 describe("collectAbsentQuestionnaireCellFills", () => {
   it("fills only empty selected columns for people without a questionnaire", () => {

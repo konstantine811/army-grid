@@ -119,6 +119,7 @@
   min-height: 0;
 }
 
+.app-shell.sidebar-collapsed,
 .app-shell:has(.sidebar.collapsed) {
   grid-template-columns: 72px minmax(0, 1fr);
 }
@@ -8923,6 +8924,7 @@ body.combat-fs-open {
 
 @media (max-width: 980px) {
   .app-shell,
+  .app-shell.sidebar-collapsed,
   .app-shell:has(.sidebar.collapsed) {
     display: flex;
     flex-direction: column;
