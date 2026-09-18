@@ -1155,8 +1155,7 @@
   height: 100vh;
   height: 100dvh;
   min-height: 0;
-  overflow-x: hidden;
-  overflow-y: auto;
+  overflow: hidden;
 }
 
 .overview-screen {
@@ -1173,6 +1172,55 @@
 .main-panel.overview-page .topbar {
   flex: 0 0 auto;
   margin-bottom: 0;
+}
+
+.overview-staff-count strong {
+  color: #f2eee1;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.overview-table-panel .overview-bchs-baseline-bar {
+  flex: 0 0 auto;
+  min-width: 0;
+  padding: 4px 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(12, 12, 10, 0.72);
+}
+
+.overview-bchs-baseline-bar .overview-bchs-baseline-control {
+  min-width: 0;
+}
+
+.overview-bchs-baseline-bar .overview-bchs-baseline-control.is-compact {
+  gap: 6px;
+}
+
+.overview-bchs-baseline-upload {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  padding: 0 8px;
+  font-size: 0.68rem;
+}
+
+.overview-bchs-baseline-upload svg {
+  width: 14px;
+  height: 14px;
+}
+
+.overview-bchs-baseline-bar .MuiChip-root {
+  max-width: min(100%, 560px);
+  height: 22px;
+}
+
+.overview-bchs-baseline-bar .MuiChip-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.68rem;
+  padding-inline: 8px;
 }
 
 .overview-metrics {
@@ -1341,9 +1389,9 @@
   position: relative;
   display: flex;
   flex-direction: column;
-  flex: 1 1 auto;
+  flex: 1 1 0;
   min-width: 0;
-  min-height: min(360px, calc(100dvh - 240px));
+  min-height: 0;
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 5px;
   background: rgba(18, 18, 16, 0.92);
@@ -11158,6 +11206,26 @@ select:focus,
   overflow: hidden;
 }
 
+.anketa-table-heading {
+  gap: 12px;
+  padding-right: 14px;
+}
+
+.anketa-source-tabs {
+  width: auto;
+  min-height: 44px;
+  border-bottom: 0;
+}
+
+.anketa-source-tabs button {
+  gap: 8px;
+}
+
+.anketa-source-tab-count {
+  opacity: 0.72;
+  font-variant-numeric: tabular-nums;
+}
+
 .anketa-workspace {
   position: relative;
   display: grid;
@@ -11301,6 +11369,115 @@ select:focus,
 .anketa-person-side-actions-top {
   margin-top: 0;
   margin-bottom: 12px;
+}
+
+.anketa-ocr-floating .floating-window-footer {
+  justify-content: flex-end;
+}
+
+.anketa-ocr-floating .anketa-ocr-open-questionnaire {
+  margin-right: auto;
+}
+
+.anketa-ocr-floating-body {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.anketa-ocr-review-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.anketa-ocr-review-count {
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  margin-left: auto;
+}
+
+.anketa-ocr-review-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.anketa-ocr-review-row {
+  display: grid;
+  grid-template-columns: minmax(140px, 180px) 1fr auto;
+  gap: 8px 10px;
+  align-items: start;
+  border: 1px solid var(--border-soft, rgba(255, 255, 255, 0.12));
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.anketa-ocr-review-row-focused {
+  border-color: var(--accent, #6ea8fe);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent, #6ea8fe) 35%, transparent);
+  background: color-mix(in srgb, var(--accent, #6ea8fe) 8%, transparent);
+}
+
+.anketa-ocr-review-row-multiline {
+  grid-template-columns: minmax(140px, 180px) 1fr auto;
+  align-items: start;
+}
+
+.anketa-ocr-review-row-relatives .anketa-ocr-review-textarea textarea,
+.anketa-ocr-review-row-relatives .anketa-ocr-review-textarea .MuiInputBase-input {
+  min-height: 168px;
+  line-height: 1.4;
+  resize: vertical;
+  white-space: pre-wrap;
+}
+
+.anketa-ocr-review-textarea textarea,
+.anketa-ocr-review-textarea .MuiInputBase-input {
+  resize: vertical;
+  white-space: pre-wrap;
+  line-height: 1.35;
+}
+
+.anketa-ocr-review-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+}
+
+.anketa-ocr-source {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.anketa-ocr-confidence {
+  font-size: 0.75rem;
+  padding: 2px 6px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.anketa-ocr-confidence-high {
+  background: rgba(124, 255, 178, 0.14);
+  color: #9dffc8;
+}
+
+.anketa-ocr-confidence-medium {
+  background: rgba(255, 214, 102, 0.14);
+  color: #ffd666;
+}
+
+.anketa-ocr-confidence-low {
+  background: rgba(255, 120, 120, 0.14);
+  color: #ff9f9f;
 }
 
 .anketa-person-similar-list {
@@ -11697,6 +11874,10 @@ select:focus,
   word-break: break-word;
   overflow-wrap: anywhere;
   line-height: 1.35;
+}
+
+.anketa-cell-textarea.is-relatives {
+  min-height: 168px;
 }
 
 .anketa-cell-editor {

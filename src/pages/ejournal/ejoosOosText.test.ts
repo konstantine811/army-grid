@@ -10,6 +10,9 @@ import {
   isOosSectionHeaderText,
   oosIdentityFromOp,
   oosPersonIdText,
+  readOosColumnText,
+  readOosPersonIdCell,
+  cellValueToOosText,
 } from "./ejoosOosText";
 import type { ExcelSheetSnapshot } from "../../excelRoundTrip";
 
@@ -154,8 +157,17 @@ describe("createOosRowResolver identity aliases", () => {
     expect(allocated).toBe(0);
   });
 
-  it("matches numeric ID 24867 without treating it as an Excel date", () => {
+  it("does not turn numeric IDs or birth-date serials into dd.mm.yyyy text", () => {
     expect(oosPersonIdText(24867)).toBe("24867");
+    expect(readOosPersonIdCell(24867)).toBe("24867");
+    expect(readOosColumnText(3, 24867)).toBe("24867");
+    expect(cellValueToOosText(21557)).toMatch(/1959|13\.01/);
+    expect(readOosColumnText(3, 21557)).toBe("21557");
+    expect(readOosPersonIdCell("13.01.1959")).toBe("");
+    expect(readOosPersonIdCell(new Date("1959-01-13"))).toBe("");
+  });
+
+  it("matches numeric ID 24867 without treating it as an Excel date", () => {
     expect(oosPersonIdText("24867")).toBe("24867");
     let allocated = 0;
     const resolver = createOosRowResolver({

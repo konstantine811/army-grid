@@ -1,13 +1,16 @@
 import JSZip from "jszip";
+import { fixOosPersonIdCells } from "./ejoosDateFormat";
 import {
+  EJOOS_GENERAL_NUM_FMT_ID,
   EJOOS_TEXT_NUM_FMT_ID,
-  isEjoosStaffIndexColumn,
+  isEjoosForceTextColumn,
+  isEjoosRnokppColumn,
 } from "./ejoosStaffIndexFormat";
 import { resolveSheetPath } from "./ejoosZipCellWrites";
 
 /** Final download pass: only style definitions and style references may change. */
 export async function styleEjoosExport(file: Blob): Promise<Blob> {
-  const zip = await JSZip.loadAsync(await file.arrayBuffer());
+  const zip = await JSZip.loadAsync(await (await fixOosPersonIdCells(file)).arrayBuffer());
   let styles = await zip.file("xl/styles.xml")?.async("string");
   const workbook = await zip.file("xl/workbook.xml")?.async("string");
   if (!styles || !workbook) throw new Error("Не знайдено стилі або структуру книги ЕЖООС");
@@ -46,10 +49,13 @@ export async function styleEjoosExport(file: Blob): Promise<Blob> {
     const cache = new Map<string, string>();
     const restyle = (sourceId: string, column = 0, row = 0) => {
       const forceTextFormat =
-        compact &&
         column > 0 &&
-        isEjoosStaffIndexColumn(name, column, row);
-      const cacheKey = `${sourceId}:${forceTextFormat ? "t" : "n"}`;
+        isEjoosForceTextColumn(name, column, row);
+      const forceGeneralFormat =
+        column > 0 &&
+        !forceTextFormat &&
+        isEjoosRnokppColumn(name, column, row);
+      const cacheKey = `${sourceId}:${forceTextFormat ? "t" : forceGeneralFormat ? "g" : "n"}`;
       const cached = cache.get(cacheKey);
       if (cached != null) return cached;
       const source = originalXfs[Number(sourceId)] || originalXfs[0];
@@ -65,6 +71,12 @@ export async function styleEjoosExport(file: Blob): Promise<Blob> {
       if (forceTextFormat) {
         open = set(
           set(open, "numFmtId", EJOOS_TEXT_NUM_FMT_ID),
+          "applyNumberFormat",
+          "1",
+        );
+      } else if (forceGeneralFormat) {
+        open = set(
+          set(open, "numFmtId", EJOOS_GENERAL_NUM_FMT_ID),
           "applyNumberFormat",
           "1",
         );

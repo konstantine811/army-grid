@@ -87,12 +87,13 @@ export const hydrateManualEjoosOperation = (input: {
     input.currentVersionId &&
       input.draft.baseVersionId !== input.currentVersionId,
   );
+  // Version drift is not a conflict by itself: the op is rebuilt against the
+  // current workbook. Only keep a review note when that rebuild is not ready.
+  const needsVersionReview = stale && op.class !== "ready";
   return {
     ...op,
     id: input.draft.id,
-    class: stale ? ("needs_input" as const) : op.class,
-    checkedDefault: stale ? false : op.checkedDefault,
-    why: stale
+    why: needsVersionReview
       ? `${op.why}. Чернетку створено для попередньої версії ЕЖООС; відкрийте редагування і збережіть її повторно`
       : op.why,
     payload: {

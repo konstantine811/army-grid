@@ -34,6 +34,11 @@ import {
   formatExcludedPositionDates,
 } from "./ejoosExcludedColumns";
 import {
+  EJOOS_OOS_MILITARY_ID_COLUMN,
+  EJOOS_OOS_RNOKPP_COLUMN,
+  EJOOS_OOS_RNOKPP_REFUSE_COLUMN,
+} from "./ejoosStaffIndexFormat";
+import {
   applyInlineStringWritesToWorkbook,
 } from "./ejoosZipCellWrites";
 
@@ -74,8 +79,12 @@ const SHEET_FILL_FIELDS: FillField[] = [
   { anketaKey: "birthDate", headerParts: ["дата", "народж"] },
   { anketaKey: "birthPlace", headerParts: ["місце", "народж"] },
   { anketaKey: "sex", headerParts: ["стать"] },
-  { anketaKey: "rnokpp", headerParts: ["рнокпп"] },
   { anketaKey: "rnokppRefuse", headerParts: ["відмова", "рнокпп"] },
+  {
+    anketaKey: "rnokpp",
+    headerParts: ["рнокпп"],
+    excludeParts: ["відмова"],
+  },
   {
     anketaKey: "idDocumentName",
     headerParts: ["назва", "документ"],
@@ -83,8 +92,13 @@ const SHEET_FILL_FIELDS: FillField[] = [
   {
     anketaKey: "idDocumentNumber",
     headerParts: ["серія", "номер"],
+    excludeParts: ["квитк", "військов"],
   },
-  { anketaKey: "militaryId", headerParts: ["квитк"] },
+  {
+    anketaKey: "militaryId",
+    headerParts: ["військов", "квитк"],
+    excludeParts: ["документ"],
+  },
   { anketaKey: "serviceType", headerParts: ["вид", "служб"] },
   { anketaKey: "location", headerParts: ["місце", "дислок"] },
   { anketaKey: "arrivedFrom", headerParts: ["звідки", "прибув"] },
@@ -539,7 +553,7 @@ const normalizeFillValue = (anketaKey: AnketaColumnKey, raw: string) => {
 type PlannedWrite = {
   excelRow: number;
   column: number;
-  value: string | number;
+  value: string | number | null;
   field: string;
 };
 
@@ -673,6 +687,65 @@ const rawIndexForExcelCol = (
   return excel0 - first;
 };
 
+/** Колонки ООС для «Анкета → ЄЖООС»: заголовки + резерв Z для військового квитка. */
+export const buildOosAnketaFieldColumns = (
+  headerRow: CellValue[],
+  targetSheet: ExcelSheetSnapshot,
+  options?: { gapKeys?: Set<AnketaColumnKey> },
+): Map<AnketaColumnKey, number> => {
+  const fieldColumns = new Map<AnketaColumnKey, number>();
+  for (const field of SHEET_FILL_FIELDS) {
+    if (isAnketaColumnReadonly(field.anketaKey)) continue;
+    const index = columnIndex(
+      headerRow,
+      field.headerParts,
+      field.excludeParts ?? [],
+    );
+    if (index >= 0) fieldColumns.set(field.anketaKey, index);
+  }
+  // Канонічне ООС: Z — військовий квиток. Не покладаємося на текст
+  // об'єднаного заголовка, який раніше помилково приводив до колонки W.
+  const militaryCol = rawIndexForExcelCol(
+    targetSheet,
+    EJOOS_OOS_MILITARY_ID_COLUMN,
+  );
+  if (militaryCol >= 0) fieldColumns.set("militaryId", militaryCol);
+  if (options?.gapKeys) {
+    for (const key of [...fieldColumns.keys()]) {
+      if (!options.gapKeys.has(key)) fieldColumns.delete(key);
+    }
+  }
+  return fieldColumns;
+};
+
+export const shouldReplaceOosCellFromAnketa = (
+  mode: EjoosAnketaFillMode,
+  anketaKey: AnketaColumnKey,
+  current: CellValue | undefined,
+  incoming: string,
+  gapKeySet: Set<AnketaColumnKey>,
+) => {
+  const value = incoming.trim();
+  if (!value) return false;
+  const currentNorm = comparableAnketaValue(cellText(current), anketaKey);
+  const incomingNorm = comparableAnketaValue(value, anketaKey);
+  if (mode === "merge" && gapKeySet.has(anketaKey)) {
+    return currentNorm !== incomingNorm;
+  }
+  if (anketaKey === "militaryId") {
+    return needsFill(current) || currentNorm !== incomingNorm;
+  }
+  return needsFill(current) || currentNorm === incomingNorm;
+};
+
+/**
+ * Одноразове виправлення помилкового масового запису в W.
+ * Непорожню клітинку очищаємо; вже порожню надалі не записуємо повторно.
+ */
+export const resolveOosRnokppRefuseCleanup = (
+  current: CellValue | undefined,
+): null | undefined => (cellText(current).trim() ? null : undefined);
+
 /**
  * Доповнює порожні / #N/A клітинки з анкет (ООС і Виключені).
  * Мердж — лише колонки пропусків, порожнє або повніше з анкети.
@@ -744,29 +817,22 @@ export async function fillEjoosSheetFromAnketa(input: {
   const rnokppCol =
     input.target === "excluded"
       ? rawIndexForExcelCol(targetSheet, 17)
-      : columnIndex(headerRow, ["рнокпп"]);
+      : columnIndex(headerRow, ["рнокпп"], ["відмова"]) >= 0
+        ? columnIndex(headerRow, ["рнокпп"], ["відмова"])
+        : rawIndexForExcelCol(targetSheet, EJOOS_OOS_RNOKPP_COLUMN);
 
   if (nameCol < 0 && idCol < 0) {
     throw new Error(`Не знайдено колонки ПІБ / ID на аркуші «${label}».`);
   }
 
-  const fieldColumns = new Map<AnketaColumnKey, number>();
-  if (input.target === "oos") {
-    for (const field of SHEET_FILL_FIELDS) {
-      if (isAnketaColumnReadonly(field.anketaKey)) continue;
-      const index = columnIndex(
-        headerRow,
-        field.headerParts,
-        field.excludeParts ?? [],
-      );
-      if (index >= 0) fieldColumns.set(field.anketaKey, index);
-    }
-    if (mode === "merge") {
-      for (const key of [...fieldColumns.keys()]) {
-        if (!gapKeySet.has(key)) fieldColumns.delete(key);
-      }
-    }
-  }
+  const fieldColumns =
+    input.target === "oos"
+      ? buildOosAnketaFieldColumns(
+          headerRow,
+          targetSheet,
+          mode === "merge" ? { gapKeys: gapKeySet } : undefined,
+        )
+      : new Map<AnketaColumnKey, number>();
 
   const anketaLookup = buildAnketaLookup(anketaRows);
   const personnelIndex =
@@ -900,6 +966,32 @@ export async function fillEjoosSheetFromAnketa(input: {
       if (!id && persId) id = persId;
     }
 
+    if (input.target === "oos") {
+      const refuseColumn = rawIndexForExcelCol(
+        targetSheet,
+        EJOOS_OOS_RNOKPP_REFUSE_COLUMN,
+      );
+      const cleanup =
+        refuseColumn >= 0
+          ? resolveOosRnokppRefuseCleanup(row[refuseColumn])
+          : undefined;
+      if (refuseColumn >= 0 && cleanup !== undefined) {
+        if (
+          addWrite({
+            excelRow,
+            column: EJOOS_OOS_RNOKPP_REFUSE_COLUMN,
+            value: cleanup,
+            field: "rnokppRefuse",
+          })
+        ) {
+          row[refuseColumn] = cleanup;
+          rowWrites += 1;
+          report.richerWrites += 1;
+          matchedAny = true;
+        }
+      }
+    }
+
     if (anketa) {
       if (input.target === "excluded") {
         for (const write of planAnketaWritesForExcludedRow(
@@ -925,12 +1017,13 @@ export async function fillEjoosSheetFromAnketa(input: {
           if (!raw) continue;
           const value = normalizeFillValue(anketaKey, raw);
           if (!value) continue;
-          const replace =
-            mode === "merge"
-              ? isRicherAnketaValue(current, String(value), anketaKey)
-              : needsFill(current) ||
-                comparableAnketaValue(cellText(current), anketaKey) ===
-                  comparableAnketaValue(String(value), anketaKey);
+          const replace = shouldReplaceOosCellFromAnketa(
+            mode,
+            anketaKey,
+            current,
+            String(value),
+            gapKeySet,
+          );
           if (!replace) continue;
           const wasEmpty = needsFill(current);
           if (

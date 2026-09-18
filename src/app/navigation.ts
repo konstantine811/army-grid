@@ -10,6 +10,7 @@ export type AppPage =
   | "bchs"
   | "excelFill"
   | "anketaData"
+  | "preAnketa"
   | "socPassport"
   | "personnel"
   | "documents"
@@ -25,6 +26,7 @@ export const USER_ALLOWED_PAGES: readonly AppPage[] = [
   "personnel",
   "bchs",
   "anketaData",
+  "preAnketa",
   "documents",
   "profile",
   "workTasks",
@@ -43,6 +45,7 @@ export const writeAreaForPage = (
     case "bchs":
       return "bchs";
     case "anketaData":
+    case "preAnketa":
       return "anketaData";
     case "documents":
       return "documents";
@@ -58,6 +61,7 @@ export const pagePaths: Record<AppPage, string> = {
   bchs: "/bchs",
   excelFill: "/excel-fill",
   anketaData: "/anketa-data",
+  preAnketa: "/pre-anketa",
   socPassport: "/soc-passport",
   personnel: "/personnel",
   documents: "/documents",

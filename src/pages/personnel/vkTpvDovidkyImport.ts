@@ -54,20 +54,20 @@ const cellText = (value: unknown): string => {
   return String(value).replace(/\s+/g, " ").trim();
 };
 
-const MILITARY_ID_PREFIXES = "АГ|УН|АВ|МО|ГГ|НК|СО|AB";
+const MILITARY_ID_PREFIXES = "АГ|АТ|УН|АВ|МО|ГГ|НК|СО|AB|AT";
 
 export const extractMilitaryIdFromText = (value: string): string => {
   const text = String(value ?? "").replace(/\s+/g, " ").trim();
   if (!text) return "";
 
-  const tpvMatch = text.match(/ТПВ\s*№?\s*(\d[\d\s]*)/iu);
-  if (tpvMatch?.[1]) {
-    const digits = tpvMatch[1].replace(/\s+/g, "");
-    if (digits) return `ТПВ №${digits}`;
+  const tpvMatch = text.match(/(ТПВ|ТВП)\s*№?\s*(\d[\d\s]*)/iu);
+  if (tpvMatch?.[2]) {
+    const digits = tpvMatch[2].replace(/\s+/g, "");
+    if (digits) return `${tpvMatch[1]!.toUpperCase()} №${digits}`;
   }
 
   const match = text.match(
-    new RegExp(`(${MILITARY_ID_PREFIXES})\\s*(\\d[\\d\\s]*)`, "iu"),
+    new RegExp(`(${MILITARY_ID_PREFIXES})\\s*[№#]?\\s*(\\d[\\d\\s]*)`, "iu"),
   );
   if (!match?.[2]) return "";
   const digits = match[2].replace(/\s+/g, "");
@@ -145,6 +145,24 @@ const findVkColumnIndex = (headerRow: unknown[]) => {
   return -1;
 };
 
+const findTpvNumberColumnIndex = (headerRow: unknown[]) => {
+  const exactNumberColumns: number[] = [];
+  for (let index = 0; index < headerRow.length; index += 1) {
+    const header = normalizeHeader(headerRow[index]);
+    if (/^№\s*тпв$/iu.test(header)) return index;
+    if (header === "№") exactNumberColumns.push(index);
+  }
+  // У поточному макеті перший «№» — порядковий номер рядка, другий — номер ТПВ.
+  return exactNumberColumns.length >= 2 ? exactNumberColumns.at(-1)! : -1;
+};
+
+const normalizeTpvNumber = (value: unknown) => {
+  const text = cellText(value);
+  if (!text || !/^\d+(?:\.0+)?$/u.test(text)) return "";
+  const digits = text.replace(/\.0+$/u, "");
+  return digits ? `ТПВ №${digits}` : "";
+};
+
 const parseStandardSheet = (
   sheetName: string,
   rows: unknown[][],
@@ -159,6 +177,12 @@ const parseStandardSheet = (
   const cinkaCol = findColumnIndex(headerRow, ["№цинка", "цинка new"]);
   const vkCol = findVkColumnIndex(headerRow);
   const innCol = findInnColumnIndex(headerRow);
+  const isTpvSheet = sheetName.toLocaleLowerCase("uk-UA") === "тпв";
+  const isCertificateSheet =
+    sheetName.toLocaleLowerCase("uk-UA") === "довідки";
+  const tpvNumberCol = isTpvSheet
+    ? findTpvNumberColumnIndex(headerRow)
+    : -1;
   if (nameCol < 0) return [];
 
   const records: VkTpvDovidkyRecord[] = [];
@@ -172,6 +196,8 @@ const parseStandardSheet = (
     const fromCinka = cinkaCol >= 0 ? cellText(row[cinkaCol]) : "";
     const fromRow = extractFromCells(row);
     const militaryId =
+      (isCertificateSheet ? "довідка" : "") ||
+      (tpvNumberCol >= 0 ? normalizeTpvNumber(row[tpvNumberCol]) : "") ||
       extractMilitaryIdFromText(fromVkCol) ||
       extractMilitaryIdFromText(fromCinka) ||
       fromRow.militaryId;
@@ -223,6 +249,12 @@ export type VkTpvDovidkyNameEntry = {
   militaryId: string;
   rnokpp: string;
   sourceSheet: string;
+  /** ПІБ присутній на аркуші «ВІДСУТНІ», незалежно від інших аркушів. */
+  isAbsent?: boolean;
+  /** ПІБ присутній на аркуші «ТПВ»; його номер має пріоритет над старим ВК. */
+  isTpv?: boolean;
+  /** ПІБ присутній на аркуші «ДОВІДКИ». */
+  isCertificate?: boolean;
 };
 
 export const buildVkTpvDovidkyNameIndex = (
@@ -262,13 +294,32 @@ export const buildVkTpvDovidkyNameIndex = (
           militaryId: record.militaryId,
           rnokpp: record.rnokpp,
           sourceSheet: record.sourceSheet,
+          isAbsent:
+            record.sourceSheet.toLocaleLowerCase("uk-UA") === "відсутні",
+          isTpv: record.sourceSheet.toLocaleLowerCase("uk-UA") === "тпв",
+          isCertificate:
+            record.sourceSheet.toLocaleLowerCase("uk-UA") === "довідки",
         });
         continue;
       }
       merged.set(record.nameKey, {
         ...existing,
-        militaryId: existing.militaryId || record.militaryId,
+        militaryId:
+          (record.sourceSheet.toLocaleLowerCase("uk-UA") === "тпв" ||
+            record.sourceSheet.toLocaleLowerCase("uk-UA") === "довідки") &&
+          record.militaryId
+            ? record.militaryId
+            : existing.militaryId || record.militaryId,
         rnokpp: existing.rnokpp || record.rnokpp,
+        isAbsent:
+          existing.isAbsent ||
+          record.sourceSheet.toLocaleLowerCase("uk-UA") === "відсутні",
+        isTpv:
+          existing.isTpv ||
+          record.sourceSheet.toLocaleLowerCase("uk-UA") === "тпв",
+        isCertificate:
+          existing.isCertificate ||
+          record.sourceSheet.toLocaleLowerCase("uk-UA") === "довідки",
       });
     }
   }
@@ -310,7 +361,12 @@ export const parseVkTpvDovidkyWorkbook = (
       }
       merged.set(record.nameKey, {
         ...existing,
-        militaryId: existing.militaryId || record.militaryId,
+        militaryId:
+          (record.sourceSheet.toLocaleLowerCase("uk-UA") === "тпв" ||
+            record.sourceSheet.toLocaleLowerCase("uk-UA") === "довідки") &&
+          record.militaryId
+            ? record.militaryId
+            : existing.militaryId || record.militaryId,
         rnokpp: existing.rnokpp || record.rnokpp,
         sourceSheet: existing.sourceSheet,
       });

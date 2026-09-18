@@ -7,6 +7,7 @@ import {
   buildBchsMorningSections,
   buildRotaBchsMorningExportFileName,
   computeBchsMorningSummaryFieldCounts,
+  isMorningAwolPerson,
   resolveBchsMorningSheetName,
   resolveBchsMorningStaffUnit,
   resolveReportStatus,
@@ -379,12 +380,12 @@ describe("overviewRotaBchsMorningExport", () => {
     expect(names).toHaveLength(1);
     expect(names[0][1]).toContain('name="_xlnm.Print_Area"');
     expect(names[0][1]).toContain('localSheetId="0"');
-    expect(names[0][2]).toBe(`'${resolveBchsMorningSheetName(unitLabel)}'!$A$1:$AA$38`);
+    expect(names[0][2]).toBe(`'${resolveBchsMorningSheetName(unitLabel)}'!$A$1:$AA$42`);
     expect(xml).not.toContain('localSheetId="-1"');
     expect(xml).not.toContain("2 ЗП");
     expect(xml).not.toContain("_FilterDatabase");
     const reloaded = await XlsxPopulate.fromDataAsync(await wb.outputAsync());
-    expect(reloaded.sheet(0).definedName("_xlnm.Print_Area").address()).toBe("A1:AA38");
+    expect(reloaded.sheet(0).definedName("_xlnm.Print_Area").address()).toBe("A1:AA42");
   });
 
   it("matches the reference table order, seven columns and split subtotals using current people", async () => {
@@ -403,7 +404,12 @@ describe("overviewRotaBchsMorningExport", () => {
     writeRotaBchsMorningWorkbook(wb, { unitLabel: "3 піхотна рота", rows, staffCount: 113 });
     const sheet = wb.sheet(0);
     const sections = buildBchsMorningSections(rows, "3 піхотна рота");
-    expect(sections.filter(section => section.side === "left").map(section => section.id)).toEqual(["management", "platoon1", "newcomers", "awol"]);
+    expect(sections.filter(section => section.side === "left").map(section => section.id)).toEqual(["management", "platoon1", "newcomers"]);
+    expect(sections.find((section) => section.id === "awol")).toMatchObject({
+      side: "extra",
+      title: "СЗЧ",
+    });
+    expect(sections.find((section) => section.id === "awol")?.people).toHaveLength(1);
     const splitCounts: Record<string, number[]> = { hospital: [1, 1, 2], medPoint: [1, 1, 2], leave: [2, 1, 3], detached: [1, 1, 2], training: [1, 1, 2] };
     for (const side of ["right", "extra"] as const) {
       let start = side === "right" ? 2 : 34;
@@ -435,6 +441,31 @@ describe("overviewRotaBchsMorningExport", () => {
     expect(sheet.cell("V6").value()).toBe(113);
   });
 
+  it("keeps the СЗЧ table visible in the extra block even when empty", () => {
+    const sections = buildBchsMorningSections(
+      [row()],
+      "3 піхотна рота",
+    );
+    expect(sections.find((section) => section.id === "awol")).toMatchObject({
+      side: "extra",
+      title: "СЗЧ",
+      people: [],
+    });
+  });
+
+  it("detects СЗЧ from staff status even without AWOL enum", () => {
+    const awolRow = row({
+      status: "ON_DUTY",
+      staffSheetColumns: {
+        ...row().staffSheetColumns,
+        staff_21: "Не в строю - СЗЧ",
+      },
+    });
+    expect(isMorningAwolPerson(awolRow)).toBe(true);
+    const sections = buildBchsMorningSections([awolRow], "3 піхотна рота");
+    expect(sections.find((section) => section.id === "awol")?.people).toHaveLength(1);
+  });
+
   it("uses location for missions and the dedicated readiness column for BG, without an out section", async () => {
     const make = (status: string, location: string, readiness: string, extra: Record<string, string> = {}) => row({
       staffSheetColumns: { ...row().staffSheetColumns, staff_21: status, staff_31: location, staff_23: readiness, ...extra },
@@ -453,6 +484,7 @@ describe("overviewRotaBchsMorningExport", () => {
     ];
     const sections = buildBchsMorningSections(rows, "3 піхотна рота");
     expect(sections.find(section => section.id === "mission")?.people).toHaveLength(2);
+    expect(sections.find(section => section.id === "awol")?.people).toHaveLength(1);
     expect(sections.find(section => section.id === "platoon1")?.people.map(person => person.name)).toEqual(
       expect.arrayContaining([rows[0].name, rows[1].name]),
     );

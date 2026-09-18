@@ -6,6 +6,7 @@ import type {
 } from "../../excelRoundTrip";
 import {
   collectEjoosOosAndExcludedPeople,
+  filterAnketaRowsByEjoosSource,
   reconcileAnketaRowsWithEjoos,
   type EjoosAnketaCandidate,
 } from "./anketaEjoosPeople";
@@ -101,6 +102,35 @@ describe("collectEjoosOosAndExcludedPeople", () => {
       }),
     ]);
   });
+
+  it("does not merge different OOS people that share the same ID", () => {
+    const headerRows = Array.from({ length: 5 }, () => [] as CellValue[]);
+    const oos = sheet(0, "2. ООС", [
+      ...headerRows,
+      ["солдат", "ІВАНЕНКО Іван Іванович", "789", "2103001"],
+      ["солдат", "ДМИТРІЄВ Андрій Сергійович", "789", "2103002"],
+    ]);
+    const workbook = {
+      file: new File([], "ejoos.xlsx"),
+      fileName: "ejoos.xlsx",
+      sheetName: oos.sheetName,
+      headerRows: [],
+      rows: [],
+      columnCount: 32,
+      columnIndexes: [],
+      dataStartRow: 6,
+      sheets: [oos],
+    } satisfies ExcelWorkbookSnapshot;
+
+    const people = collectEjoosOosAndExcludedPeople(workbook);
+
+    expect(people).toHaveLength(2);
+    expect(people.map((person) => person.fullName)).toEqual([
+      "ІВАНЕНКО Іван Іванович",
+      "ДМИТРІЄВ Андрій Сергійович",
+    ]);
+    expect(people.every((person) => person.source === "oos")).toBe(true);
+  });
 });
 
 describe("reconcileAnketaRowsWithEjoos", () => {
@@ -144,6 +174,7 @@ describe("reconcileAnketaRowsWithEjoos", () => {
       rnokpp: "1234567890",
       rank: "сержант",
       positionIndex: "анкета-індекс",
+      __ejoosSource: "oos",
     });
     expect(result.rows[1]).toMatchObject({
       __rowNumber: 21,
@@ -151,6 +182,7 @@ describe("reconcileAnketaRowsWithEjoos", () => {
       fullName: "ПЕТРЕНКО Петро Петрович",
       rank: "солдат",
       positionIndex: "2103002",
+      __ejoosSource: "excluded",
     });
     expect(result.report).toMatchObject({
       ejoosPeople: 2,
@@ -208,7 +240,7 @@ describe("reconcileAnketaRowsWithEjoos", () => {
     expect(result.report.removed).toBe(1);
   });
 
-  it("reports an ID/name conflict without merging fields", () => {
+  it("reports an ID/name conflict and still adds the OOS person", () => {
     const current = anketaRow(8, {
       externalId: "45867",
       fullName: "ОРЛОВ Дмитро Олександрович",
@@ -225,7 +257,40 @@ describe("reconcileAnketaRowsWithEjoos", () => {
       ],
     );
     expect(result.report.conflicts).toHaveLength(1);
-    expect(result.rows[0]).toEqual({ ...current, sex: "Ч" });
+    expect(result.report.added).toBe(1);
+    expect(result.rows).toHaveLength(1);
+    expect(result.rows[0]).toMatchObject({
+      fullName: "БОЛЮБАХА Кирило Олександрович",
+      externalId: "45867",
+      rank: "солдат",
+    });
+  });
+
+  it("treats ЗАКАЛЮЖНИЙ / ЗАКАЛЮЖНІЙ as the same person", () => {
+    const current = anketaRow(12, {
+      externalId: "771",
+      fullName: "ЗАКАЛЮЖНІЙ Іван Олегович",
+      education: "середня",
+    });
+    const result = reconcileAnketaRowsWithEjoos(
+      [current],
+      [
+        candidate({
+          personId: "771",
+          fullName: "ЗАКАЛЮЖНИЙ Іван Олегович",
+          rank: "солдат",
+        }),
+      ],
+    );
+    expect(result.report.conflicts).toHaveLength(0);
+    expect(result.report.added).toBe(0);
+    expect(result.rows).toHaveLength(1);
+    expect(result.rows[0]).toMatchObject({
+      __rowNumber: 12,
+      fullName: "ЗАКАЛЮЖНІЙ Іван Олегович",
+      education: "середня",
+      rank: "солдат",
+    });
   });
 
   it("always restores sex from the patronymic during reconcile", () => {
@@ -255,5 +320,27 @@ describe("reconcileAnketaRowsWithEjoos", () => {
     );
 
     expect(result.rows.map((row) => row.sex)).toEqual(["Ж", "Ч"]);
+  });
+});
+
+describe("filterAnketaRowsByEjoosSource", () => {
+  it("puts unclassified rows into OOS and keeps excluded separate", () => {
+    const oos = anketaRow(2, { fullName: "ООС", __ejoosSource: "oos" });
+    const excluded = anketaRow(3, {
+      fullName: "ВИКЛ",
+      __ejoosSource: "excluded",
+    });
+    const unknown = anketaRow(4, { fullName: "ЩЕ НЕ ЗВІРЕНО" });
+
+    expect(
+      filterAnketaRowsByEjoosSource([oos, excluded, unknown], "oos").map(
+        (row) => row.fullName,
+      ),
+    ).toEqual(["ООС", "ЩЕ НЕ ЗВІРЕНО"]);
+    expect(
+      filterAnketaRowsByEjoosSource([oos, excluded, unknown], "excluded").map(
+        (row) => row.fullName,
+      ),
+    ).toEqual(["ВИКЛ"]);
   });
 });

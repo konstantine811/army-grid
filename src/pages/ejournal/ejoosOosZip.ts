@@ -8,6 +8,8 @@ import { EXCLUDED_TO_OOS_BASE } from "./ejoosExcludedColumns";
 import {
   cellValueToOosText,
   createOosRowResolver,
+  readOosColumnText,
+  readOosPersonIdCell,
   findNextEmptyOosDataRow,
   OOS_NO_EMPTY_ROW_MESSAGE,
   findOosStyleSourceRow,
@@ -47,15 +49,9 @@ const cellAt = (
 const excludedColumnForOos = (oosColumn: number) =>
   EXCLUDED_TO_OOS_BASE.find(([, toCol]) => toCol === oosColumn)?.[0];
 
-const oosIdentityNumber = (column: number, value: string | null) =>
-  (column === 3 || column === 15) && value && /^\d+$/.test(value.trim())
-    ? Number(value)
-    : null;
-
 const oosCellValue = (column: number, value: string | null) => {
   if (!value) return null;
-  const asNumber = oosIdentityNumber(column, value);
-  if (asNumber != null) return asNumber;
+  if (column === 3) return readOosPersonIdCell(value) || null;
   if (column === OOS_RELATIVES_COLUMN) return value;
   if (isOosWrapColumn(column)) return splitOosHistoryLines(value).join("\n");
   return value;
@@ -235,7 +231,9 @@ export async function applyOosHistoryPresentation(input: {
     if (!row) continue;
     const rank = op.payload.nextRank || op.rank;
     const fullName = op.payload.nextName || op.fullName;
-    const personId = op.payload.nextPersonId || op.personId;
+    const personId = readOosPersonIdCell(
+      op.payload.nextPersonId || op.personId || "",
+    );
     const nextIndex = filterOosStaffHistoryIndexes(
       op.payload.nextIndex || op.positionIndex,
     );
@@ -252,7 +250,7 @@ export async function applyOosHistoryPresentation(input: {
     if (fromExcludedCard && excluded) {
       for (const [fromCol, toCol] of EXCLUDED_TO_OOS_BASE) {
         const raw = cellAt(excluded, excludedSourceRow, fromCol);
-        const text = cellValueToOosText(raw);
+        const text = readOosColumnText(toCol, raw);
         if (!text) continue;
         const value =
           toCol === OOS_RELATIVES_COLUMN
@@ -263,7 +261,10 @@ export async function applyOosHistoryPresentation(input: {
     }
 
     const valueFor = (column: number): string | null => {
-      const current = cellValueToOosText(sourceValue(op, row, column));
+      const current = readOosColumnText(
+        column,
+        sourceValue(op, row, column),
+      );
       if (column === 1) {
         return rank || current || null;
       }
@@ -277,7 +278,7 @@ export async function applyOosHistoryPresentation(input: {
         return fullName || current || null;
       }
       if (column === 3) {
-        return personId || current || null;
+        return personId || readOosPersonIdCell(current) || null;
       }
       if (column === 4) {
         return mergeOosHistoryValue(

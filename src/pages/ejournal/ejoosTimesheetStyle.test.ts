@@ -2,9 +2,10 @@ import JSZip from "jszip";
 import { describe, expect, it } from "vitest";
 import { expandSharedFormulas } from "./ejoosWorkbookSanitize";
 import { copyTimesheetRowStylesWithZip } from "./ejoosExcludeTransferZip";
-import { EJOOS_TEXT_NUM_FMT_ID } from "./ejoosStaffIndexFormat";
+import { EJOOS_GENERAL_NUM_FMT_ID, EJOOS_TEXT_NUM_FMT_ID } from "./ejoosStaffIndexFormat";
 import {
   applyInlineStringWritesToWorkbook,
+  restyleOosDataRows,
   shiftSheetRowsDown,
   type ZipCellWrite,
 } from "./ejoosZipCellWrites";
@@ -604,5 +605,66 @@ describe("timesheet occupied styles", () => {
     expect(xf).toMatch(new RegExp(`numFmtId="${EJOOS_TEXT_NUM_FMT_ID}"`, "i"));
     expect(xf).toMatch(/applyNumberFormat="1"/i);
     await module.default.fromDataAsync(await next.arrayBuffer());
+  });
+});
+
+describe("OOS РНОКПП number format", () => {
+  const xfForCell = (stylesXml: string, styleId: string | undefined) => {
+    const cellXfsBody =
+      stylesXml.match(/<cellXfs\b[^>]*>([\s\S]*?)<\/cellXfs>/i)?.[1] ?? "";
+    return (
+      [...cellXfsBody.matchAll(/<xf\b[^>]*(?:\/>|>[\s\S]*?<\/xf>)/gi)].map(
+        (match) => match[0],
+      )[Number(styleId)] ?? ""
+    );
+  };
+
+  it("writes РНОКПП as General even if the neighbor style is Custom @", async () => {
+    const module = await import(
+      "xlsx-populate/browser/xlsx-populate-no-encryption"
+    );
+    const workbook = await module.default.fromBlankAsync();
+    const sheet = workbook.sheet(0);
+    sheet.name("2. ООС");
+    sheet.cell(7, 3).value("21643").style({
+      numberFormat: "@",
+      horizontalAlignment: "center",
+      verticalAlignment: "center",
+    });
+    sheet.cell(7, 22).value("3142223156").style({
+      numberFormat: "@",
+      horizontalAlignment: "center",
+      verticalAlignment: "center",
+    });
+    const blob = (await workbook.outputAsync("blob")) as Blob;
+
+    const written = await applyInlineStringWritesToWorkbook(blob, /оос/i, [
+      {
+        row: 8,
+        column: 22,
+        value: 1234567890,
+        copyNeighborStyle: true,
+        styleSourceRow: 7,
+        wrapText: true,
+      },
+    ]);
+    const restyled = await restyleOosDataRows(written, [7, 8]);
+    const zip = await JSZip.loadAsync(await restyled.arrayBuffer());
+    const sheetXml = await zip.file("xl/worksheets/sheet1.xml")?.async("string");
+    const stylesXml = await zip.file("xl/styles.xml")?.async("string");
+    expect(sheetXml && stylesXml).toBeTruthy();
+    const rnokppXf = xfForCell(stylesXml || "", cellStyleId(sheetXml || "", "V8"));
+    expect(rnokppXf).toMatch(
+      new RegExp(`numFmtId="${EJOOS_GENERAL_NUM_FMT_ID}"`, "i"),
+    );
+    expect(rnokppXf).toMatch(/applyNumberFormat="1"/i);
+    const restyledV7 = xfForCell(
+      stylesXml || "",
+      cellStyleId(sheetXml || "", "V7"),
+    );
+    expect(restyledV7).toMatch(
+      new RegExp(`numFmtId="${EJOOS_GENERAL_NUM_FMT_ID}"`, "i"),
+    );
+    await module.default.fromDataAsync(await restyled.arrayBuffer());
   });
 });

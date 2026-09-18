@@ -22,15 +22,19 @@ import {
 } from "../personnel/personnelRosterMerge";
 import { mapRosterLatestToPreviewRows, readRosterColumnValue } from "../excel-fill/rosterSourceSnapshot";
 import type { AnketaRow } from "./anketaSheet";
+import { normalizePersonSearchKeyboard } from "../personnel/personnelSearch";
 
 export const normalizeAnketaNameKey = (value: unknown) =>
-  String(value ?? "")
-    .replace(/[ʼ’']/g, "")
-    .replace(/\([^)]*\)/g, " ")
-    .replace(/[.,;:№#"/\\|()[\]{}]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .toLocaleLowerCase("uk-UA");
+  normalizePersonSearchKeyboard(
+    String(value ?? "")
+      .replace(/[ʼ’']/g, "")
+      .replace(/\([^)]*\)/g, " ")
+      .replace(/[.,;:№#"/\\|()[\]{}]+/g, " ")
+      .replace(/ё/gi, "е")
+      .replace(/\s+/g, " ")
+      .trim()
+      .toLocaleLowerCase("uk-UA"),
+  );
 
 /** Повний ключ і «прізвище + імʼя», щоб ловити списки без по батькові. */
 export const anketaNameKeyVariants = (value: unknown) => {

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { CellValue, ExcelSheetSnapshot } from "../../excelRoundTrip";
 import {
   buildEjoosDataTableModel,
+  displayEjoosCell,
   findEjoosHeaderRowIndex,
 } from "./ejoosSheetDataTable";
 
@@ -17,6 +18,13 @@ const sheet = (
   columnCount: 40,
   columnIndexes: Array.from({ length: 40 }, (_, index) => index),
   dataStartRow: 6,
+});
+
+describe("displayEjoosCell", () => {
+  it("shows Excel serial dates as uk-UA text, not raw serial", () => {
+    expect(displayEjoosCell(46193)).toBe("20.06.2026");
+    expect(displayEjoosCell("46193")).toBe("20.06.2026");
+  });
 });
 
 describe("buildEjoosDataTableModel", () => {

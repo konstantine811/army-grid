@@ -190,6 +190,17 @@ export const DEFAULT_STATUS_RULES: EjoosStatusRule[] = [
     reason: "ВЛК → окремий період відсутності; у Табелі код «ВЛК»",
   },
   {
+    id: "wounding",
+    enabled: true,
+    priority: 49.5,
+    label: "Поранення",
+    matchAny: ["поран"],
+    timesheetCode: "ЛП",
+    absenceGround: "лікування після поранення",
+    confidence: "high",
+    reason: "Поранення / госпіталь → код «ЛП»",
+  },
+  {
     id: "med_wounded",
     enabled: true,
     priority: 50,

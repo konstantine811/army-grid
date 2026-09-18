@@ -33,9 +33,7 @@ import {
   loadVisiblePersonnelRows,
   selectAnketaRowsMissingFromPersonnel,
 } from "./anketaPersonnelRosterCreate";
-import {
-  ANKETA_MISSING_VALUE_PRESETS,
-} from "./anketaGaps";
+import { isReplaceableAnketaMissingValue } from "./anketaGaps";
 import {
   ANKETA_COLUMNS,
   isAnketaColumnReadonly,
@@ -124,26 +122,7 @@ export type AnketaPersonnelMergePreview = {
   labels: string[];
 };
 
-const normalizeMissingMarker = (value: unknown) =>
-  String(value ?? "")
-    .trim()
-    .toLocaleLowerCase("uk-UA")
-    .replace(/[’ʼ`]/g, "'")
-    .replace(/\s+/g, " ");
-
-const ANKETA_MISSING_MARKERS = new Set([
-  ...ANKETA_MISSING_VALUE_PRESETS.map(normalizeMissingMarker),
-  "немає",
-  "відсутні",
-  "відсутня",
-  "відсутнє",
-  "даних немає",
-]);
-
-export const isReplaceableAnketaMissingValue = (value: unknown) => {
-  const normalized = normalizeMissingMarker(value);
-  return !normalized || ANKETA_MISSING_MARKERS.has(normalized);
-};
+export { isReplaceableAnketaMissingValue } from "./anketaGaps";
 
 export type PersonnelToAnketaMergePreview = {
   fieldUpdates: Partial<Record<AnketaColumnKey, string>>;

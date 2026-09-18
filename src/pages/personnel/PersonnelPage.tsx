@@ -1,6 +1,5 @@
 import {
   useCallback,
-  useDeferredValue,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -109,6 +108,7 @@ import {
   pickFullPositionFromPersonRow,
   resolvePersonIdentityKey,
   resolvePersonBirthDate,
+  resolvePersonDisplayNameFromRoster,
   formatPersonBirthDateWithAge,
   computeFullYearsFromBirthDate,
   isPositionIndexField,
@@ -136,10 +136,12 @@ import {
   clearAvailablePersonPhotoIdsCache,
   collectPersonAttachmentLookupIds,
   collectPersonnelListPhotoUpdates,
+  isPersonPhotoDisplayOverride,
   loadAvailablePersonPhotoIds,
   loadPersonDocumentsForRow,
   loadPersonQuestionnaireForRow,
   peekAvailablePersonPhotoIds,
+  personPhotoCacheBustFromUrl,
   personPhotoFullUrlForRow,
   pruneStalePersonPhotos,
   questionnaireFileMatchesPerson,
@@ -165,7 +167,10 @@ import {
   compressPhotoDataUrl,
   createPhotoThumbnailDataUrl,
 } from "./photoCompression";
-import { personnelSearchMatchesQuery } from "./personnelSearch";
+import {
+  personnelSearchEmptyHint,
+  personnelSearchMatchesQuery,
+} from "./personnelSearch";
 import {
   buildPersonnelListIndex,
   type PersonnelListIndex,
@@ -336,15 +341,23 @@ export function PersonnelPage({
     void personnelDataEpoch;
     return personnelListIndexRef.current.records;
   }, [personnelDataEpoch]);
-  const deferredQuery = useDeferredValue(query);
   const filteredPersonnel = useMemo(() => {
-    const normalizedQuery = normalizePersonnelSearchText(deferredQuery);
+    const normalizedQuery = normalizePersonnelSearchText(query);
 
     return personnelRows.filter((record) => {
       if (staffFilter === "in" && !record.inStaff) return false;
       if (staffFilter === "archive" && !record.inArchive) return false;
       if (!normalizedQuery) return true;
 
+      const primaryText = normalizePersonnelSearchText(
+        [
+          record.summary.name,
+          resolvePersonDisplayNameFromRoster(record.row),
+          getRosterPersonName(record.row),
+        ]
+          .filter(Boolean)
+          .join(" "),
+      );
       const searchableText = normalizePersonnelSearchText(
         [
           record.searchBase,
@@ -354,9 +367,12 @@ export function PersonnelPage({
           .join(" "),
       );
 
-      return personnelSearchMatchesQuery(searchableText, normalizedQuery);
+      return personnelSearchMatchesQuery(searchableText, normalizedQuery, {
+        primaryText,
+        callSignText: normalizePersonnelSearchText(record.summary.callSign),
+      });
     });
-  }, [personnelRows, phonesByExternalId, deferredQuery, staffFilter]);
+  }, [personnelRows, phonesByExternalId, query, staffFilter]);
 
   useEffect(() => {
     const next = new Map<string, EjournalPreviewRow>();
@@ -396,16 +412,60 @@ export function PersonnelPage({
     () => buildPersonSummary(selectedRow),
     [selectedRow],
   );
+  const selectedPhotoLocalUrl = useMemo(() => {
+    const externalId = selectedSummary.externalId;
+    return externalId ? photoByExternalId[externalId] || "" : "";
+  }, [photoByExternalId, selectedSummary.externalId]);
+  const selectedPhotoCacheBust = useMemo(
+    () => personPhotoCacheBustFromUrl(selectedPhotoLocalUrl),
+    [selectedPhotoLocalUrl],
+  );
+  const selectedPhotoFullUrl = useMemo(
+    () =>
+      selectedRow
+        ? personPhotoFullUrlForRow(
+            selectedRow,
+            undefined,
+            undefined,
+            selectedPhotoCacheBust,
+          )
+        : "",
+    [photoIndexReady, selectedRow, selectedPhotoCacheBust],
+  );
+  const selectedPhotoThumb = useMemo(() => {
+    const externalId = selectedSummary.externalId;
+    if (!externalId) return "";
+    const url = photoByExternalId[externalId];
+    if (!url || !/[?&]thumbnail=1(?:&|$)/.test(url)) return "";
+    return url;
+  }, [photoByExternalId, selectedSummary.externalId]);
+  const [selectedPhotoReady, setSelectedPhotoReady] = useState("");
+  useEffect(() => {
+    setSelectedPhotoReady("");
+    if (!selectedPhotoFullUrl) return;
+    const image = new Image();
+    image.decoding = "async";
+    image.onload = () => setSelectedPhotoReady(selectedPhotoFullUrl);
+    image.onerror = () => setSelectedPhotoReady("");
+    image.src = selectedPhotoFullUrl;
+    return () => {
+      image.onload = null;
+      image.onerror = null;
+    };
+  }, [selectedPhotoFullUrl]);
   const selectedPhoto = useMemo(() => {
     const externalId = selectedSummary.externalId;
     if (!externalId) return "";
-    const fromState = photoByExternalId[externalId];
-    if (fromState) return fromState;
-    return selectedRow ? personPhotoFullUrlForRow(selectedRow) : "";
+    const local = photoByExternalId[externalId] || "";
+    if (local && isPersonPhotoDisplayOverride(local)) return local;
+    if (selectedPhotoReady) return selectedPhotoReady;
+    if (selectedPhotoFullUrl) return selectedPhotoThumb || selectedPhotoFullUrl;
+    return local;
   }, [
     photoByExternalId,
-    photoIndexReady,
-    selectedRow,
+    selectedPhotoFullUrl,
+    selectedPhotoReady,
+    selectedPhotoThumb,
     selectedSummary.externalId,
   ]);
   const selectedCallSign = useMemo(
@@ -1597,6 +1657,8 @@ export function PersonnelPage({
       ]),
     ].filter(Boolean);
 
+    setSelectedPhotoReady("");
+
     // Show immediately even if API is slow/unavailable.
     setPhotoByExternalId((photos) => {
       const next = { ...photos };
@@ -2233,7 +2295,7 @@ export function PersonnelPage({
             <input
               value={query}
               onChange={(event) => setQuery(event.target.value)}
-              placeholder="ПІБ, позивний, звання, посада"
+              placeholder="ПІБ… А* (на «А»), к?с (Word-маски), Кос"
             />
           </label>
           <div
@@ -2281,6 +2343,7 @@ export function PersonnelPage({
               items={filteredPersonnel}
               selectedRowId={selectedRowId}
               photoByExternalId={photoByExternalId}
+              selectedPhotoFullUrl={selectedPhotoFullUrl}
               onNeedPhotos={loadVisiblePersonnelPhotos}
               onSelect={(rowId) => {
                 setSelectedRowId(rowId);
@@ -2298,11 +2361,12 @@ export function PersonnelPage({
           )}
           {filteredPersonnel.length === 0 && query.trim() ? (
             <p className="personnel-empty-hint">
-              {staffFilter === "in"
-                ? "Нічого у «У штаті». Спробуйте «Усі» або «Імпорт Штатки в БД»."
-                : staffFilter === "archive"
-                  ? "Нічого в «Архіві». Імпортуйте Штатку з аркушем «Архів»."
-                  : "Нічого не знайдено. Спробуйте «Імпорт Штатки в БД»."}
+              {personnelSearchEmptyHint(query) ||
+                (staffFilter === "in"
+                  ? "Нічого у «У штаті». Спробуйте «Усі» або «Імпорт Штатки в БД»."
+                  : staffFilter === "archive"
+                    ? "Нічого в «Архіві». Імпортуйте Штатку з аркушем «Архів»."
+                    : "Нічого не знайдено. Спробуйте «Імпорт Штатки в БД».")}
             </p>
           ) : null}
         </aside>

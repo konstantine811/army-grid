@@ -49,6 +49,9 @@ export const oosIdentityAliasKeys = (identity: OosIdentity) => {
 
 /** ID колонки C: число 24867 — це ID, не Excel-дата. */
 export const oosPersonIdText = (value: unknown) => {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return "";
+  }
   if (typeof value === "number" && Number.isFinite(value)) {
     return String(Math.trunc(value));
   }
@@ -56,9 +59,20 @@ export const oosPersonIdText = (value: unknown) => {
     .replace(/\s+/g, " ")
     .trim();
   if (!text || text === "[object Object]") return "";
+  if (/^\d{1,2}[./-]\d{1,2}[./-]\d{2,4}$/.test(text)) return "";
   if (/^\d+$/.test(text)) return text;
-  return text;
+  return "";
 };
+
+/** Читання ID з клітинки ООС / Виключені — без перетворення числа на dd.mm.yyyy. */
+export const readOosPersonIdCell = (value: unknown) => {
+  const id = oosPersonIdText(value);
+  if (!id || !/^\d{1,7}$/.test(id)) return "";
+  return id;
+};
+
+export const readOosColumnText = (column: number, value: unknown) =>
+  column === 3 ? readOosPersonIdCell(value) : cellValueToOosText(value);
 
 export const OOS_NO_EMPTY_ROW_MESSAGE =
   "Немає вільного рядка в основному блоці 2. ООС";

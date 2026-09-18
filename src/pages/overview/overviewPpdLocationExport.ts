@@ -16,12 +16,12 @@ import {
 } from "./overviewRotaGudzExport";
 
 const EXPORT_COLUMNS = [
+  { id: "index", label: "№", width: 6 },
   { id: "name", label: "ПІБ", width: 32 },
   { id: "callsign", label: "Позивний", width: 14 },
   { id: "status", label: "Статус", width: 16 },
   { id: "bg", label: "БГ", width: 12 },
   { id: "notes", label: "Примітки", width: 28 },
-  { id: "location", label: "Місце перебування", width: 24 },
 ] as const;
 
 type PpdLocationExportCell = (typeof EXPORT_COLUMNS)[number]["id"];
@@ -128,15 +128,6 @@ export const isOverviewPolygonLocation = (
 ) => {
   const { base, detail } = resolveOverviewPpdLocationParts(row, rosterRow);
   return isOverviewPpdVyshneveBase(base) && isOverviewPolygonDetailValue(detail);
-};
-
-export const overviewRowLocationDisplay = (
-  row: BackendPersonnelOverviewRow,
-  rosterRow?: EjournalPreviewRow | null,
-) => {
-  const { base, detail } = resolveOverviewPpdLocationParts(row, rosterRow);
-  if (!detail) return base;
-  return `${base} — ${detail}`;
 };
 
 const resolveExportPersonName = (row: BackendPersonnelOverviewRow) =>
@@ -251,25 +242,46 @@ export const resolveOverviewPpdLocationExportRows = (
 const resolveExportStatus = (row: BackendPersonnelOverviewRow) =>
   staffValue(row, 21) || overviewStatusFilterLabel(row) || "";
 
-const resolveExportBg = (row: BackendPersonnelOverviewRow) =>
-  staffValue(row, 23) || staffValue(row, 42) || "";
+const DUTY_STATUS_PREFIX_RE = /^\s*в\s*строю\s*/i;
+
+const resolveExportBg = (row: BackendPersonnelOverviewRow) => {
+  const fromStatusBg = (value: string) =>
+    value.replace(DUTY_STATUS_PREFIX_RE, "").replace(/\s+/g, " ").trim();
+  return fromStatusBg(staffValue(row, 23)) || fromStatusBg(staffValue(row, 42));
+};
 
 const buildPpdLocationExportRow = (
   row: BackendPersonnelOverviewRow,
-  rosterLookup?: OverviewPpdLocationRosterLookup,
+  index: number,
 ): Record<PpdLocationExportCell, string> => ({
+  index: String(index),
   name: resolveExportPersonName(row),
   callsign: resolveRotaGudzCallsign(row),
   status: resolveExportStatus(row),
   bg: resolveExportBg(row),
   notes: staffValue(row, 32),
-  location: overviewRowLocationDisplay(row, rosterLookup?.(row)),
 });
 
+const buildPpdLocationTitleRow = (title: string): SheetData[number] => [
+  {
+    value: title,
+    fontWeight: "bold" as const,
+    fontSize: 16,
+    align: "center" as const,
+    alignVertical: "center" as const,
+    height: 32,
+    backgroundColor: "#EAF1EE",
+    textColor: "#1F3D34",
+    columnSpan: EXPORT_COLUMNS.length,
+  },
+  ...Array.from({ length: EXPORT_COLUMNS.length - 1 }, () => null),
+];
+
 const buildPpdLocationSheetData = (
+  title: string,
   rows: BackendPersonnelOverviewRow[],
-  rosterLookup?: OverviewPpdLocationRosterLookup,
 ): SheetData => [
+  buildPpdLocationTitleRow(title),
   EXPORT_COLUMNS.map((column) => ({
     value: column.label,
     fontWeight: "bold" as const,
@@ -284,7 +296,7 @@ const buildPpdLocationSheetData = (
     borderStyle: "thin" as const,
   })),
   ...rows.map((row, rowIndex) => {
-    const values = buildPpdLocationExportRow(row, rosterLookup);
+    const values = buildPpdLocationExportRow(row, rowIndex + 1);
     return EXPORT_COLUMNS.map((column) => ({
       value: values[column.id],
       fontSize: 10,
@@ -309,7 +321,7 @@ export const buildOverviewPpdLocationExportSheets = (
   const rosterLookup = buildOverviewPpdLocationRosterLookup(rosterRows);
   const sheetOptions = {
     columns: EXPORT_COLUMNS.map((column) => ({ width: column.width })),
-    stickyRowsCount: 1,
+    stickyRowsCount: 2,
     showGridLines: true,
     orientation: "landscape" as const,
   };
@@ -319,16 +331,16 @@ export const buildOverviewPpdLocationExportSheets = (
       ...sheetOptions,
       sheet: "ППД Вишневе",
       data: buildPpdLocationSheetData(
+        "ППД Вишневе",
         filterOverviewPpdVyshneveRows(rows, rosterLookup),
-        rosterLookup,
       ),
     },
     {
       ...sheetOptions,
-      sheet: "ПОЛІГОН",
+      sheet: "Полігон",
       data: buildPpdLocationSheetData(
+        "Полігон",
         filterOverviewPolygonRows(rows, rosterLookup),
-        rosterLookup,
       ),
     },
   ];

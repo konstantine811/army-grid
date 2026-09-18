@@ -575,6 +575,22 @@ export const personPhotoFullUrlForRow = (
     : "";
 };
 
+/** Свіжезбережене / повнорозмірне фото — не підміняти кешованим preload. */
+export const isPersonPhotoDisplayOverride = (url: string): boolean => {
+  const value = String(url || "").trim();
+  if (!value) return false;
+  if (value.startsWith("data:")) return true;
+  if (/[?&]v=/.test(value)) return true;
+  return !/[?&]thumbnail=1(?:&|$)/.test(value);
+};
+
+export const personPhotoCacheBustFromUrl = (
+  url: string,
+): number | string | undefined => {
+  const match = String(url || "").match(/[?&]v=([^&]+)/);
+  return match?.[1];
+};
+
 /** Lightweight list/card preview: request the 96×128 thumbnail directly. */
 export const loadPersonPhotoThumbnailForRow = async (
   row: EjournalPreviewRow | null,
@@ -612,6 +628,113 @@ const readWarmDocumentsCatalog = async (): Promise<BackendPersonDocument[]> => {
   return Array.isArray(persisted) ? persisted : [];
 };
 
+const readDocumentFieldText = (
+  fields: Record<string, unknown> | null | undefined,
+  key: string,
+) => {
+  const value = fields?.[key];
+  return typeof value === "string" ? value.trim() : "";
+};
+
+/** ПІБ з метаданих / полів документа — без fallback на «ID …». */
+export const resolvePersonDocumentOwnerName = (
+  document: Pick<BackendPersonDocument, "personName" | "fields">,
+) => {
+  const metadataName = String(document.personName ?? "").trim();
+  if (metadataName) return metadataName;
+  const fields = (document.fields || {}) as Record<string, unknown>;
+  return (
+    readDocumentFieldText(fields, "fullName") ||
+    readDocumentFieldText(fields, "pib") ||
+    readDocumentFieldText(fields, "ПІБ") ||
+    readDocumentFieldText(fields, "ФИО") ||
+    [
+      readDocumentFieldText(fields, "lastName"),
+      readDocumentFieldText(fields, "firstName"),
+      readDocumentFieldText(fields, "patronymic"),
+    ]
+      .filter(Boolean)
+      .join(" ")
+  );
+};
+
+const normalizeExpectedPersonNames = (expectedNames: readonly string[]) =>
+  expectedNames
+    .map((name) => normalizeAttachmentNameKey(name))
+    .filter((name) => name && name !== "особа не вибрана");
+
+export const personDocumentNameConflictsWith = (
+  documentName: string,
+  expectedNames: readonly string[],
+) => {
+  const metadataName = normalizeAttachmentNameKey(documentName);
+  if (!metadataName || metadataName === "особа не вибрана") return false;
+  const expected = normalizeExpectedPersonNames(expectedNames);
+  if (!expected.length) return false;
+  if (expected.includes(metadataName)) return false;
+  if (
+    expected.some((name) => personNameMatchesOrphanNameKey(name, metadataName))
+  ) {
+    return false;
+  }
+  if (
+    expected.some((name) => personNameMatchesOrphanNameKey(metadataName, name))
+  ) {
+    return false;
+  }
+  return metadataName.split(" ").filter(Boolean).length >= 2;
+};
+
+export const personDocumentBelongsToRow = (
+  document: Pick<BackendPersonDocument, "personExternalId" | "personName" | "fields">,
+  lookupIds: ReadonlySet<string>,
+  expectedNames: readonly string[],
+  options?: { nameIsAmbiguous?: boolean },
+) => {
+  const ownerName = resolvePersonDocumentOwnerName(document);
+  if (personDocumentNameConflictsWith(ownerName, expectedNames)) return false;
+  if (lookupIds.has(document.personExternalId)) return true;
+  if (options?.nameIsAmbiguous) return false;
+  const metadataName = normalizeAttachmentNameKey(ownerName);
+  const expected = normalizeExpectedPersonNames(expectedNames);
+  if (metadataName && expected.includes(metadataName)) return true;
+  if (
+    metadataName &&
+    expected.some((name) => personNameMatchesOrphanNameKey(name, metadataName))
+  ) {
+    return true;
+  }
+  const parsed = parseOrphanAttachmentIdentityId(document.personExternalId);
+  return Boolean(
+    parsed &&
+      expected.some((name) =>
+        personNameMatchesOrphanNameKey(name, parsed.nameKey),
+      ),
+  );
+};
+
+/** ID, під якими лежать документи саме цієї людини (включно з legacy-ключами). */
+export const collectPersonDocumentAliasIds = (
+  documents: Array<
+    Pick<BackendPersonDocument, "personExternalId" | "personName" | "fields">
+  >,
+  lookupIds: ReadonlySet<string>,
+  expectedNames: readonly string[],
+  options?: { nameIsAmbiguous?: boolean },
+) => {
+  const ids = new Set(
+    [...lookupIds].map((id) => String(id || "").trim()).filter(Boolean),
+  );
+  for (const document of documents) {
+    if (!personDocumentBelongsToRow(document, ids, expectedNames, options)) {
+      continue;
+    }
+    const id = String(document.personExternalId || "").trim();
+    if (id) ids.add(id);
+  }
+  return [...ids];
+};
+
 export const loadPersonDocumentsForRow = async (
   row: EjournalPreviewRow | null,
   hints?: PersonAttachmentLookupHints,
@@ -624,28 +747,19 @@ export const loadPersonDocumentsForRow = async (
   const expectedNames = [
     getPersonDisplayName(row),
     String(hints?.anketaFullName ?? "").trim(),
-  ]
-    .map(normalizeAttachmentNameKey)
-    .filter(Boolean);
+  ].filter(Boolean);
   const direct = fallback
     ? await api.listPersonDocuments(fallback).catch(() => [])
     : ([] as BackendPersonDocument[]);
   const all = await readWarmDocumentsCatalog();
-  const related = all.filter((document) => {
-    if (lookupSet.has(document.personExternalId)) return true;
-    if (options?.nameIsAmbiguous) return false;
-    const metadataName = normalizeAttachmentNameKey(document.personName || "");
-    if (metadataName && expectedNames.includes(metadataName)) return true;
-    const parsed = parseOrphanAttachmentIdentityId(document.personExternalId);
-    return Boolean(
-      parsed &&
-        expectedNames.some((name) =>
-          personNameMatchesOrphanNameKey(name, parsed.nameKey),
-        ),
-    );
-  });
+  const related = all.filter((document) =>
+    personDocumentBelongsToRow(document, lookupSet, expectedNames, options),
+  );
   const unique = new Map<string, BackendPersonDocument>();
   for (const document of [...direct, ...related]) {
+    if (!personDocumentBelongsToRow(document, lookupSet, expectedNames, options)) {
+      continue;
+    }
     unique.set(document.id, document);
   }
   return [...unique.values()].sort(

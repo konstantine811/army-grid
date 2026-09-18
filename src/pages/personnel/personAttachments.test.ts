@@ -7,9 +7,11 @@ import {
   copyQuestionnaireBetweenPersonIds,
   buildQuestionnairePresenceMap,
   collectPersonAttachmentLookupIds,
+  collectPersonDocumentAliasIds,
   loadPersonDocumentsForRow,
   matchOrphanIdToPersonnelRow,
   parseOrphanAttachmentIdentityId,
+  personDocumentBelongsToRow,
   personNameMatchesOrphanNameKey,
   personPhotoThumbnailUrlForRow,
   questionnaireFileMatchesPerson,
@@ -143,6 +145,68 @@ describe("loadPersonDocumentsForRow", () => {
     ]);
     expect(listAllSpy).not.toHaveBeenCalled();
     vi.restoreAllMocks();
+  });
+
+  it("does not mix in another person's documents even if a lookup id collides", async () => {
+    const row = personRow("МІТРОФАНОВ Володимир Миколайович", {
+      id: "2101111",
+      birthDate: "12.04.1978",
+    });
+    vi.spyOn(api, "listPersonDocuments").mockResolvedValue([
+      document("mitro-doc", "2101111", "МІТРОФАНОВ Володимир Миколайович"),
+    ]);
+    vi.spyOn(idbDataCache, "peekDataCache").mockReturnValue([
+      document("mitro-doc", "2101111", "МІТРОФАНОВ Володимир Миколайович"),
+      document("furman-shared", "2101111", "ФУРМАН Олександр Вячеславович"),
+      document("furman-own", "2102222", "ФУРМАН Олександр Вячеславович"),
+    ]);
+
+    const result = await loadPersonDocumentsForRow(row, {
+      anketaFullName: "МІТРОФАНОВ Володимир Миколайович",
+    });
+
+    expect(result.map((item) => item.id)).toEqual(["mitro-doc"]);
+    vi.restoreAllMocks();
+  });
+});
+
+describe("collectPersonDocumentAliasIds", () => {
+  it("does not expand to another person's document id", () => {
+    const lookup = new Set(["2101111"]);
+    const names = ["МІТРОФАНОВ Володимир Миколайович"];
+    const aliases = collectPersonDocumentAliasIds(
+      [
+        document("mitro", "2101111", "МІТРОФАНОВ Володимир Миколайович"),
+        document("legacy", "p:мітрофанов володимир миколайович:1978-04-12", "МІТРОФАНОВ Володимир Миколайович"),
+        document("furman", "2102222", "ФУРМАН Олександр Вячеславович"),
+      ],
+      lookup,
+      names,
+    );
+
+    expect(aliases).toContain("2101111");
+    expect(aliases).toContain("p:мітрофанов володимир миколайович:1978-04-12");
+    expect(aliases).not.toContain("2102222");
+  });
+});
+
+describe("personDocumentBelongsToRow", () => {
+  it("rejects a named document that belongs to someone else", () => {
+    const lookup = new Set(["2101111"]);
+    expect(
+      personDocumentBelongsToRow(
+        document("furman", "2101111", "ФУРМАН Олександр Вячеславович"),
+        lookup,
+        ["МІТРОФАНОВ Володимир Миколайович"],
+      ),
+    ).toBe(false);
+    expect(
+      personDocumentBelongsToRow(
+        document("mitro", "2101111", "МІТРОФАНОВ Володимир Миколайович"),
+        lookup,
+        ["МІТРОФАНОВ Володимир Миколайович"],
+      ),
+    ).toBe(true);
   });
 });
 
@@ -393,6 +457,30 @@ describe("questionnaireFileMatchesPerson", () => {
         toExternalId: "2103825",
       }),
     ]);
+  });
+});
+
+describe("person photo display override", () => {
+  it("treats data urls, cache bust and full-size urls as overrides", async () => {
+    const { isPersonPhotoDisplayOverride, personPhotoCacheBustFromUrl } =
+      await import("./personAttachments");
+
+    expect(isPersonPhotoDisplayOverride("data:image/jpeg;base64,abc")).toBe(
+      true,
+    );
+    expect(
+      isPersonPhotoDisplayOverride(
+        "http://test/photo?access_token=x&v=1234567890",
+      ),
+    ).toBe(true);
+    expect(
+      isPersonPhotoDisplayOverride("http://test/photo?thumbnail=1"),
+    ).toBe(false);
+    expect(
+      personPhotoCacheBustFromUrl(
+        "http://test/photo?access_token=x&v=1234567890",
+      ),
+    ).toBe("1234567890");
   });
 });
 

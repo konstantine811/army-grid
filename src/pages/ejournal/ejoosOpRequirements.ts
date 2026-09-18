@@ -24,6 +24,26 @@ const personKey = (op: EjoosSyncOp) =>
     .trim()
     .toLocaleLowerCase("uk-UA");
 
+const isIntegratedPersonMovement = (op: EjoosSyncOp) =>
+  op.kind === "exclude_transfer" || op.kind === "move_to_disposition";
+
+/**
+ * Як у apply: комплексний ПЕРЕВ / РОЗПОРЯДЖ уже пише всі аркуші особи.
+ * Archive / Табель тієї ж людини не мають блокувати кнопку.
+ */
+export function opsConsideredForWorkbookApply(ops: EjoosSyncOp[]) {
+  const integratedPersons = new Set(
+    ops.filter(isIntegratedPersonMovement).map(personKey).filter(Boolean),
+  );
+  return ops.filter(
+    (op) =>
+      isIntegratedPersonMovement(op) ||
+      op.kind === "rank_change" ||
+      isReturnThenDispositionPlacement(op, ops) ||
+      !integratedPersons.has(personKey(op)),
+  );
+}
+
 /** ПОСАДА з розпорядження + РОЗПОРЯДЖ у тій же картці (СЗЧ лишається відкритим). */
 export const isReturnThenDispositionPlacement = (
   op: EjoosSyncOp,
@@ -124,10 +144,11 @@ export function contradictoryStatusOpsBlockApply(ops: EjoosSyncOp[]) {
 }
 
 export function personApplyBlockReason(ops: EjoosSyncOp[]): string | null {
-  if (ops.some((op) => op.class === "conflict")) {
+  const considered = opsConsideredForWorkbookApply(ops);
+  if (considered.some((op) => op.class === "conflict")) {
     return "Конфлікт — спочатку розберіть вручну.";
   }
-  const candidates = applyCandidateOps(ops);
+  const candidates = applyCandidateOps(considered);
   if (candidates.some(excludeTransferOpBlocksApply)) {
     const blocked = candidates.find(excludeTransferOpBlocksApply);
     if (!excludeTransferDestination(blocked?.payload ?? {})) {

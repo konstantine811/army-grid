@@ -1,4 +1,5 @@
 import type { CellValue, ExcelSheetSnapshot, ExcelWorkbookSnapshot } from "../../excelRoundTrip";
+import { formatUkDate, tryParseExcelSerialDate } from "../../shared/format";
 import { canonicalName, isJournalPersonId, normId, normKey, usablePersonId } from "./ejoosIdentity";
 import {
   resolveMovementDestination,
@@ -8,10 +9,10 @@ import { isTimesheetDepartureMark } from "./ejoosTimesheetText";
 
 export const norm = (value: CellValue | unknown): string => {
   if (value instanceof Date && !Number.isNaN(value.getTime())) {
-    const day = String(value.getDate()).padStart(2, "0");
-    const month = String(value.getMonth() + 1).padStart(2, "0");
-    return `${day}.${month}.${value.getFullYear()}`;
+    return formatUkDate(value);
   }
+  const parsedSerial = tryParseExcelSerialDate(value);
+  if (parsedSerial) return formatUkDate(parsedSerial);
   if (typeof value === "number" && Number.isFinite(value) && value > 20000 && value < 80000) {
     const utc = Date.UTC(1899, 11, 30) + Math.floor(value) * 86400000;
     const date = new Date(utc);

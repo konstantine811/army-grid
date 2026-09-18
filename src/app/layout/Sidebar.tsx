@@ -25,6 +25,7 @@ const navItems: Array<{ label: string; page?: AppPage; icon: ReactNode; adminOnl
   { label: "БЧС", page: "bchs", icon: <ShieldOutlinedIcon /> },
   { label: "Аналітика", page: "analytics", icon: <AnalyticsOutlinedIcon /> },
   { label: "Анкетні дані", page: "anketaData", icon: <TableChartOutlinedIcon /> },
+  { label: "Анкета", page: "preAnketa", icon: <ArticleOutlinedIcon /> },
   { label: "Соц. паспорт", page: "socPassport", icon: <TableChartOutlinedIcon /> },
   { label: "Документи", page: "documents", icon: <ArticleOutlinedIcon /> },
   {

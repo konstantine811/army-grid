@@ -91,6 +91,7 @@ import {
   isContractMovementType,
   isSzchCancellation,
   isTransferCancellation,
+  motivationContractOverlapsWindow,
   parseContractDatesFromChangeText,
   parsePbArchive,
   parsePbMovements,
@@ -175,6 +176,7 @@ export {
   createMovementKey,
   findEjoosSheet,
   isContractMovementType,
+  motivationContractOverlapsWindow,
   parseContractDatesFromChangeText,
   parsePbArchive,
   parsePbMovements,
@@ -2296,13 +2298,28 @@ export const buildEjoosSyncPlan = (
 
   const pendingRankByPerson = new Map<string, EjoosSyncOp>();
   let latestRankEventByPerson = new Map<string, PbMovement>();
+  const personTraceableForContract = (personId: string, fullName: string) =>
+    personStillInEjoos(personId, fullName) ||
+    personStillInSh(personId, fullName) ||
+    timesheetPeople.some((row) => isSamePerson({ personId, fullName }, row));
+  const contractEventInLeadWindow = (event: PbMovement) =>
+    eventInLeadWindow(event) ||
+    (isContractMovementType(event.type) &&
+      motivationContractOverlapsWindow(
+        event,
+        leadWindowStart || 0,
+        leadWindowEnd || 0,
+      ));
+
   const rankAndContract = planRankAndContractOps({
     activeMovementsAll,
     ejoosDays,
     eventInLeadWindow,
+    contractEventInLeadWindow,
     movementPersonKey,
     movementEventTime,
     personStillInEjoos,
+    personTraceableForContract,
     isSamePerson,
     byPersonName,
     shpoPersonById,
@@ -2535,7 +2552,7 @@ export const buildEjoosSyncPlan = (
       timesheetClosedFor,
       timesheetRowInExpectedUnitSection,
       timesheetRowsOf,
-      timesheetSheet,
+            timesheetSheet,
       transferCancelOf,
       unitCodeFromMovement,
       wasMovementProcessed,
@@ -2594,14 +2611,14 @@ export const buildEjoosSyncPlan = (
       shpoByIndex,
       shpoPersonById,
       shpoPersonByName,
-      shpoSheet,
+        shpoSheet,
       staffAppointmentDateFor,
       staffIndexTimesheetForPerson,
       timesheetEpisodeStartFor,
       timesheetNeedsTransferCancelSplit,
       timesheetPeople,
       timesheetRowsOf,
-      timesheetSheet,
+        timesheetSheet,
       transferCancelOf,
       wasMovementProcessed,
     });

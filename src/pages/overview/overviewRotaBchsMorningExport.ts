@@ -1,3 +1,4 @@
+import { morningUnitMatches } from "./overviewMorningUnit";
 import type { SciDataTableExportContext } from "@/components/sci/SciDataTable";
 import type { BackendPersonnelOverviewRow } from "../../api";
 import { exportTemplateWorkbookWithMutations } from "../../excelRoundTrip";
@@ -9,10 +10,7 @@ import {
 import { readRosterColumnValue } from "../excel-fill/rosterSourceSnapshot";
 import type { EjournalPreviewRow } from "../ejournal/ejournalTypes";
 import { normalizeRosterMatchText } from "../personnel/fighterStatusImport";
-import {
-  buildOverviewPpdLocationRosterLookup,
-  matchesOverviewRotaUnitFilter,
-} from "./overviewPpdLocationExport";
+import { buildOverviewPpdLocationRosterLookup } from "./overviewPpdLocationExport";
 import {
   cleanPersonDisplayName,
   looksLikePersonnelName,
@@ -261,7 +259,6 @@ const LEFT_SECTION_SPECS = [
   { id: "support", title: "Забезпечення" },
   { id: "platoonLeaders", title: "Взводні" },
   { id: "newcomers", title: "Новоприбулі" },
-  { id: "awol", title: "Самовільне залишення частини СЗЧ" },
 ] as const;
 
 const RIGHT_SECTION_SPECS = [
@@ -508,11 +505,26 @@ const resolveOverviewPersonName = (row: BackendPersonnelOverviewRow) => {
   return "";
 };
 
-const isOverviewPersonRow = (row: BackendPersonnelOverviewRow) => {
+export const isBchsMorningListedPersonRow = (
+  row: BackendPersonnelOverviewRow,
+) => {
   const name = resolveOverviewPersonName(row);
   if (!name || name === "Без ПІБ") return false;
   return looksLikePersonnelName(name);
 };
+
+/** Ті самі рядки, що потрапляють у таблиці БЧС: обраний підрозділ + ПІБ у списку. */
+export const filterBchsMorningUnitRows = (
+  rows: BackendPersonnelOverviewRow[],
+  unitLabel: string,
+) =>
+  rows.filter(
+    (row) =>
+      morningUnitMatches(row.unit?.trim() || "", unitLabel) &&
+      isBchsMorningListedPersonRow(row),
+  );
+
+const isOverviewPersonRow = isBchsMorningListedPersonRow;
 
 export const resolveReportStatus = (row: BackendPersonnelOverviewRow) => {
   const raw =
@@ -610,14 +622,26 @@ export const resolveMorningPlatoonLabel = (
   return raw;
 };
 
+/** СЗЧ — окрема таблиця, не взвод і не «На виконанні». */
+export const isMorningAwolPerson = (
+  row: BackendPersonnelOverviewRow,
+  readColumn: MorningStaffColumnLookup = staffValue,
+) => {
+  const staffStatus = normalizeText(readColumn(row, 21));
+  const reportStatus = normalizeText(resolveReportStatus(row));
+  return (
+    row.status === "AWOL" ||
+    staffStatus.includes("сзч") ||
+    staffStatus.includes("самовіл") ||
+    reportStatus.includes("сзч")
+  );
+};
+
 const classifyLeftSectionId = (
   row: BackendPersonnelOverviewRow,
   readColumn: MorningStaffColumnLookup = staffValue,
 ) => {
   if (isNewcomer(row)) return "newcomers";
-  if (row.status === "AWOL" || normalizeText(resolveReportStatus(row)).includes("сзч")) {
-    return "awol";
-  }
   if (isMorningManagementPlatoon(readColumn(row, 3))) return "management";
   if (isMorningSupportRoleType(readColumn(row, 22))) return "support";
   const platoonLabel = resolveMorningPlatoonLabel(readColumn(row, 3));
@@ -655,9 +679,70 @@ const classifyRightSectionId = (
 
 const EXTRA_SECTION_SPECS = [
   { id: "mission", title: "На виконанні" },
+  { id: "awol", title: "СЗЧ" },
+  { id: "statusChanges", title: "Зміна статусу" },
   { id: "training", title: "Навчання/відрядження" },
   { id: "dead", title: "Загиблі 200" },
 ];
+
+const STATUS_CHANGE_HEADERS = [
+  "№",
+  "Звання",
+  "ПІБ",
+  "Позивний",
+  "Посада",
+  "Було",
+  "Стало",
+  "Зміна",
+] as const;
+
+/** Було / Стало / Зміна — довгі описи статусів і місць. */
+const STATUS_CHANGE_NOTE_COLUMN_WIDTHS = [16, 20, 26] as const;
+
+const estimateWrappedLineCount = (value: unknown, columnWidth: number) => {
+  const text = String(value ?? "").trim();
+  if (!text) return 1;
+  const byNewline = text.split(/\n/).length;
+  const wrapped = Math.ceil(text.length / Math.max(10, columnWidth));
+  return Math.max(byNewline, wrapped);
+};
+
+const applyStatusChangeRowLayout = (
+  sheet: any,
+  rowNumber: number,
+  startColumn: number,
+  person: BchsMorningPersonRow,
+) => {
+  const noteColumns = STATUS_CHANGE_NOTE_COLUMN_WIDTHS.map(
+    (width, index) => ({ column: startColumn + 4 + index, width }),
+  );
+  for (const { column, width } of noteColumns) {
+    sheet.column(column).width(width);
+    sheet.cell(rowNumber, column).style({
+      wrapText: true,
+      shrinkToFit: false,
+      verticalAlignment: "top",
+    });
+  }
+  sheet.cell(rowNumber, startColumn + 3).style({
+    wrapText: true,
+    shrinkToFit: false,
+    verticalAlignment: "top",
+  });
+  const lineCount = Math.max(
+    estimateWrappedLineCount(person.position, 24),
+    ...noteColumns.map(({ width }, index) => {
+      const value =
+        index === 0
+          ? person.status
+          : index === 1
+            ? person.location
+            : person.staffUnit;
+      return estimateWrappedLineCount(value, width);
+    }),
+  );
+  sheet.row(rowNumber).height(Math.min(144, Math.max(22, lineCount * 15)));
+};
 
 const classifyExtraSectionId = (status: string) => {
   const text = normalizeText(status);
@@ -685,6 +770,10 @@ export const buildBchsMorningSections = (
   rows.forEach((sourceRow, index) => {
     if (!isOverviewPersonRow(sourceRow)) return;
     const reportPerson = buildBchsMorningPersonRow(sourceRow, index, staffUnit, readColumn);
+    if (isMorningAwolPerson(sourceRow, readColumn)) {
+      extraBuckets.get("awol")?.push(reportPerson);
+      return;
+    }
     const extraSection = classifyExtraSectionId(reportPerson.status);
     const isPlatoonLeader = isMorningPlatoonLeaderPosition(reportPerson.position);
     const assignCommanderToPlatoon = () => {
@@ -723,7 +812,7 @@ export const buildBchsMorningSections = (
     // Mission assignment comes from «Місце перебування», not «Статус» or notes.
     // Absences retain their own section even when an old location is still set.
     // Exclusive left tables: Управління ⊃ Забезпечення ⊃ взвод.
-    if (leftSection !== "awol" && isMorningMissionLocation(readColumn(sourceRow, 31))) {
+    if (isMorningMissionLocation(readColumn(sourceRow, 31))) {
       extraBuckets.get("mission")?.push(reportPerson);
       if (leftSection === "support") {
         leftBuckets.get("support")?.push(reportPerson);
@@ -768,11 +857,32 @@ export const buildBchsMorningSections = (
   }
 
   for (const spec of EXTRA_SECTION_SPECS) {
+    if (spec.id === "statusChanges") continue;
     const people = extraBuckets.get(spec.id) ?? [];
-    // Keep the requested mission table visible even when its current count is zero.
-    if (people.length || spec.id === "mission") sections.push({ ...spec, side: "extra", people });
+    // Keep mission and СЗЧ visible even when the current count is zero.
+    if (people.length || spec.id === "mission" || spec.id === "awol") {
+      sections.push({ ...spec, side: "extra", people });
+    }
   }
   return sections;
+};
+
+export const appendBchsMorningStatusChangeSection = (
+  sections: BchsMorningSection[],
+  statusChangeSection: BchsMorningSection,
+) => {
+  const withoutStatusChanges = sections.filter(
+    (section) => section.id !== "statusChanges",
+  );
+  const missionIndex = withoutStatusChanges.findIndex(
+    (section) => section.id === "awol",
+  );
+  const insertAt = missionIndex >= 0 ? missionIndex + 1 : withoutStatusChanges.length;
+  return [
+    ...withoutStatusChanges.slice(0, insertAt),
+    statusChangeSection,
+    ...withoutStatusChanges.slice(insertAt),
+  ];
 };
 
 const NUMBER_COLUMN_WIDTH = 6;
@@ -792,6 +902,7 @@ const writePersonCells = (
   startColumn: number,
   person: BchsMorningPersonRow,
   index: number,
+  options?: { statusChangeLayout?: boolean },
 ) => {
   sheet.cell(rowNumber, startColumn - 1).value(index);
   styleNumberCell(sheet, rowNumber, startColumn - 1);
@@ -802,6 +913,9 @@ const writePersonCells = (
   sheet.cell(rowNumber, startColumn + 4).value(cellText(person.status));
   sheet.cell(rowNumber, startColumn + 5).value(cellText(person.location));
   sheet.cell(rowNumber, startColumn + 6).value(cellText(person.staffUnit));
+  if (options?.statusChangeLayout) {
+    applyStatusChangeRowLayout(sheet, rowNumber, startColumn, person);
+  }
 };
 
 const writeSectionHeader = (
@@ -830,10 +944,19 @@ const writeColumnHeaderRow = (
   sheet: any,
   rowNumber: number,
   side: "left" | "right" | "extra",
+  headers: readonly string[] = [
+    "№",
+    "Звання",
+    "ПІБ",
+    "Позивний",
+    "Посада",
+    "Статус",
+    "Місце перебування",
+    "ШТАТ",
+  ],
 ) => {
   const block = blockForSide(side);
   copyRowStyle(sheet, styleRow("columnHeader"), rowNumber, block.number, block.end);
-  const headers = ["№", "Звання", "ПІБ", "Позивний", "Посада", "Статус", "Місце перебування", "ШТАТ"];
   headers.forEach((header, index) => {
     sheet.cell(rowNumber, block.number + index).value(header);
   });
@@ -885,12 +1008,19 @@ const writeSideSections = (
   const sideSections = sections.filter((entry) => entry.side === side);
 
 
-  const writePersonRows = (people: BchsMorningPersonRow[], startIndex: number) => {
+  const writePersonRows = (
+    people: BchsMorningPersonRow[],
+    startIndex: number,
+    sectionId?: string,
+  ) => {
     const block = blockForSide(side);
+    const statusChangeLayout = sectionId === "statusChanges";
     for (const [index, person] of people.entries()) {
       clearBlockValues(sheet, rowNumber, rowNumber, block.number, block.end);
       copyRowStyle(sheet, styleRow("person"), rowNumber, block.number, block.end);
-      writePersonCells(sheet, rowNumber, block.start, person, startIndex + index + 1);
+      writePersonCells(sheet, rowNumber, block.start, person, startIndex + index + 1, {
+        statusChangeLayout,
+      });
       rowNumber += 1;
     }
     return people.length;
@@ -899,19 +1029,24 @@ const writeSideSections = (
   for (const section of sideSections) {
     writeSectionHeader(sheet, rowNumber, side, section.title);
     rowNumber += 1;
-    writeColumnHeaderRow(sheet, rowNumber, side);
+    writeColumnHeaderRow(
+      sheet,
+      rowNumber,
+      side,
+      section.id === "statusChanges" ? STATUS_CHANGE_HEADERS : undefined,
+    );
     rowNumber += 1;
     if (isPlatoonSectionId(section.id)) {
       const groups = splitPlatoonTablePeople(section.people);
       writeSectionHeader(sheet, rowNumber, side, "Командир взводу");
       rowNumber += 1;
-      let nextNumber = writePersonRows(groups.commanders, 0);
+      let nextNumber = writePersonRows(groups.commanders, 0, section.id);
       writeSectionHeader(sheet, rowNumber, side, "Командир відділення");
       rowNumber += 1;
-      nextNumber += writePersonRows(groups.sectionCommanders, nextNumber);
-      writePersonRows(groups.rest, nextNumber);
+      nextNumber += writePersonRows(groups.sectionCommanders, nextNumber, section.id);
+      writePersonRows(groups.rest, nextNumber, section.id);
     } else {
-      writePersonRows(section.people, 0);
+      writePersonRows(section.people, 0, section.id);
     }
     writeTotalRow(sheet, rowNumber, section);
     rowNumber += 2;
@@ -947,14 +1082,14 @@ export const computeBchsMorningSummaryFromSections = (
     count("dead");
   const awayOrders = new Set(
     sections
-      .filter((section) => section.side !== "left" || section.id === "awol")
+      .filter((section) => section.side !== "left")
       .flatMap((section) => section.people.map((person) => person.sourceOrder)),
   );
   const remaining = sections
     .filter(
       (section) =>
         section.side === "left" &&
-        !["management", "support", "platoonLeaders", "awol"].includes(section.id),
+        !["management", "support", "platoonLeaders"].includes(section.id),
     )
     .flatMap((section) => section.people)
     .filter((person) => !awayOrders.has(person.sourceOrder));
@@ -1026,6 +1161,7 @@ export const writeRotaBchsMorningWorkbook = (
     rows: BackendPersonnelOverviewRow[];
     staffCount: number;
     rosterRows?: EjournalPreviewRow[] | null;
+    sections?: BchsMorningSection[];
   },
 ) => {
   const sheetName = resolveBchsMorningSheetName(options.unitLabel);
@@ -1047,11 +1183,13 @@ export const writeRotaBchsMorningWorkbook = (
   sheet.name(sheetName);
   sheet.autoFilter(null);
 
-  const sections = buildBchsMorningSections(
-    options.rows,
-    options.unitLabel,
-    options.rosterRows,
-  );
+  const sections =
+    options.sections ??
+    buildBchsMorningSections(
+      options.rows,
+      options.unitLabel,
+      options.rosterRows,
+    );
   if (!sections.some(section => section.people.length)) throw new Error("Немає жодної особи з ПІБ для заповнення БЧС.");
   const extent = Math.max(sheet.usedRange()?.endCell().rowNumber() ?? 248, options.rows.length + 100);
   const summaryStyles = Array.from({ length: 23 }, (_, index) =>
@@ -1098,6 +1236,9 @@ export const exportOverviewRotaBchsMorningReport = async (
   context: SciDataTableExportContext<BackendPersonnelOverviewRow>,
   staffCount: number,
   rosterRows?: EjournalPreviewRow[] | null,
+  options?: {
+    comparisonSnapshot?: import("./overviewRotaBchsMorningSnapshot").BchsMorningDailySnapshot | null;
+  },
 ) => {
   const unitLabel = resolveSelectedOverviewUnit(context.filters);
   if (!unitLabel) {
@@ -1106,12 +1247,35 @@ export const exportOverviewRotaBchsMorningReport = async (
     );
   }
 
-  const rows = (context.allRows ?? context.rows).filter((row) =>
-    matchesOverviewRotaUnitFilter(row.unit, unitLabel),
+  const rows = filterBchsMorningUnitRows(
+    context.allRows ?? context.rows,
+    unitLabel,
   );
   if (!rows.length) {
     throw new Error(`Немає осіб для роти «${unitLabel}».`);
   }
+
+  const reportDate = new Date();
+  const [
+    { buildBchsMorningStatusChangeSection, buildBchsMorningDailySnapshot },
+    { readBchsMorningComparisonSnapshot, saveBchsMorningDailySnapshot },
+  ] = await Promise.all([
+    import("./overviewRotaBchsMorningStatusChanges"),
+    import("./overviewRotaBchsMorningSnapshot"),
+  ]);
+  const previousSnapshot =
+    options?.comparisonSnapshot ??
+    (await readBchsMorningComparisonSnapshot(unitLabel, reportDate));
+  const baseSections = buildBchsMorningSections(rows, unitLabel, rosterRows);
+  const sections = appendBchsMorningStatusChangeSection(
+    baseSections,
+    buildBchsMorningStatusChangeSection(
+      rows,
+      previousSnapshot,
+      unitLabel,
+      rosterRows,
+    ),
+  );
 
   await exportTemplateWorkbookWithMutations(
     PB_ROTA_BCHS_MORNING_TEMPLATE_URL,
@@ -1121,8 +1285,13 @@ export const exportOverviewRotaBchsMorningReport = async (
         rows,
         staffCount,
         rosterRows,
+        sections,
       });
     },
-    buildRotaBchsMorningExportFileName(unitLabel),
+    buildRotaBchsMorningExportFileName(unitLabel, reportDate),
+  );
+
+  await saveBchsMorningDailySnapshot(
+    buildBchsMorningDailySnapshot(rows, unitLabel, rosterRows, reportDate),
   );
 };

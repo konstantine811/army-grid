@@ -8,7 +8,11 @@ import {
   type AnketaRow,
 } from "./anketaSheet";
 import { AnketaCellEditor } from "./AnketaCellEditor";
-import { anketaCellA1, type AnketaEmptyCell } from "./anketaGaps";
+import {
+  anketaCellA1,
+  isAnketaGapCellTrulyEmpty,
+  type AnketaEmptyCell,
+} from "./anketaGaps";
 
 type BuildAnketaTableColumnsOptions = {
   focusedEmpty: AnketaEmptyCell | null;
@@ -62,7 +66,7 @@ export function buildAnketaTableColumns({
         const isFocused =
           focusedEmpty?.rowId === rowId &&
           focusedEmpty?.columnId === column.key;
-        const isEmpty = !value.trim();
+        const isEmpty = isAnketaGapCellTrulyEmpty(row.original, column.key);
         const isReadonly = Boolean(column.readonly);
 
         if (isReadonly) {
@@ -153,7 +157,7 @@ export function buildAnketaTdProps(
       return { className: "anketa-td-row-number" };
     }
     const key = columnId as AnketaColumnKey;
-    const empty = !String(row[key] ?? "").trim();
+    const empty = isAnketaGapCellTrulyEmpty(row, key);
     const inGapScope = gapKeySet.has(key);
     const focused =
       focusedEmpty?.rowId === rowId && focusedEmpty?.columnId === columnId;

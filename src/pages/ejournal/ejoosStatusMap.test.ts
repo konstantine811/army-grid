@@ -43,4 +43,25 @@ describe("mapPbStatusToEjoosWithRules", () => {
     expect(mapped.ruleId).toBe("med");
     expect(mapped.timesheetCode).toBe("лік");
   });
+
+  it("maps ПОРАНЕННЯ to ЛП", () => {
+    const mapped = mapPbStatusToEjoosWithRules(
+      "ПОРАНЕННЯ",
+      DEFAULT_STATUS_RULES,
+    );
+
+    expect(mapped.ruleId).toBe("wounding");
+    expect(mapped.timesheetCode).toBe("ЛП");
+    expect(mapped.absenceGround).toBe("лікування після поранення");
+  });
+
+  it("still maps leave after wounding to ВП", () => {
+    const mapped = mapPbStatusToEjoosWithRules(
+      "ВІДПУСТКА ДЛЯ ЛІКУВАННЯ ПІСЛЯ ПОРАНЕННЯ",
+      DEFAULT_STATUS_RULES,
+    );
+
+    expect(mapped.ruleId).toBe("leave_wounded");
+    expect(mapped.timesheetCode).toBe("ВП");
+  });
 });

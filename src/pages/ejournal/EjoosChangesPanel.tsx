@@ -828,9 +828,11 @@ export function EjoosChangesPanel() {
                 </Typography>
                 {selectedPerson.ops.some(
                   (op) =>
+                    op.payload.manualOperation === "1" &&
                     op.payload.manualBaseVersionId &&
                     live?.current?.id &&
-                    op.payload.manualBaseVersionId !== live.current.id,
+                    op.payload.manualBaseVersionId !== live.current.id &&
+                    op.class !== "ready",
                 ) ? (
                   <Typography variant="caption" color="warning.main">
                     Чернетку створено на попередній версії ЕЖООС. Перевірте

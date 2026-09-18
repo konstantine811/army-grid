@@ -62,4 +62,28 @@ describe("EJOOS export formatting", () => {
     const repeated = await JSZip.loadAsync(await (await styleEjoosExport(styled)).arrayBuffer());
     expect(await repeated.file("xl/styles.xml")!.async("string")).toBe(await after.file("xl/styles.xml")!.async("string"));
   });
+
+  it("forces ООС РНОКПП to General instead of Custom @", async () => {
+    const module = await import("xlsx-populate/browser/xlsx-populate-no-encryption");
+    const wb: any = await module.default.fromBlankAsync();
+    const sheet = wb.sheet(0).name("2. ООС");
+    sheet.cell("V7").value(3142223156).style({
+      numberFormat: "@",
+      horizontalAlignment: "center",
+      verticalAlignment: "center",
+      wrapText: true,
+    });
+    sheet.cell("C7").value("21643").style({
+      numberFormat: "@",
+      horizontalAlignment: "center",
+      verticalAlignment: "center",
+    });
+    const original = await wb.outputAsync("blob") as Blob;
+    const styled = await styleEjoosExport(original);
+    const loaded: any = await module.default.fromDataAsync(await styled.arrayBuffer());
+    const oos = loaded.sheet("2. ООС");
+    const rnokppFormat = String(oos.cell("V7").style("numberFormat") ?? "");
+    expect(rnokppFormat === "General" || rnokppFormat === "0" || rnokppFormat === "").toBe(true);
+    expect(oos.cell("C7").style("numberFormat")).toBe("@");
+  });
 });

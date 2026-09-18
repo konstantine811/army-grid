@@ -54,6 +54,7 @@ export const timesheetPreviewContextForOps = (
 import { excludeWritePlan, positionCloseWritesExcluded } from "./ejoosExcludePolicy";
 import {
   isReviewOnlyMismatchOp,
+  opsConsideredForWorkbookApply,
   personOpsBlockApply,
 } from "./ejoosOpRequirements";
 import { excludeTransferDestination } from "./ejoosExcludePolicy";
@@ -266,7 +267,7 @@ const categoryForOps = (allOps: EjoosSyncOp[]): PersonChangeCategory => {
 };
 
 const severityForOps = (allOps: EjoosSyncOp[]): EjoosOpClass => {
-  const ops = actionableOps(allOps).filter(
+  const ops = actionableOps(opsConsideredForWorkbookApply(allOps)).filter(
     (op) => !isSupersededPriorMonthDispositionOp(op, allOps),
   );
   if (ops.some((op) => op.class === "conflict")) return "conflict";
@@ -1300,6 +1301,12 @@ export const buildTimesheetPreview = (
     .reverse()
     .find((op) => op.kind === "exclude_transfer");
   const timesheetMonthStartMs = journalMonthStartMsFromLabel(timesheetDayLabel);
+  const absentCloseOp = ops.find(
+    (op) =>
+      op.kind === "absent_close" &&
+      op.payload.timesheetAbsenceSpans?.trim() &&
+      op.payload.returnDate,
+  );
   const spanOp = [...ops].reverse().find((op) => {
     if (!op.payload.timesheetAbsenceSpans?.trim()) return false;
     if (op.kind !== "move_to_disposition") return true;
@@ -1312,11 +1319,26 @@ export const buildTimesheetPreview = (
       orderMs < timesheetMonthStartMs
     );
   });
+  const placementOp = [...ops]
+    .reverse()
+    .find(
+      (op) =>
+        op.kind === "position_change" &&
+        op.payload.returningFromDisposition === "1",
+    );
   const spans = parseTimesheetAbsenceSpans(
-    spanOp?.payload.timesheetAbsenceSpans ||
+    absentCloseOp?.payload.timesheetAbsenceSpans ||
+      spanOp?.payload.timesheetAbsenceSpans ||
       excludeOp?.payload.timesheetAbsenceSpans ||
       "",
   );
+  const beforeEpisodeSpans = parseTimesheetAbsenceSpans(
+    placementOp?.payload.historyTimesheetAbsenceSpans || "",
+  );
+  const previewSpans =
+    beforeEpisodeSpans.length > 0
+      ? [...beforeEpisodeSpans, ...spans]
+      : spans;
   const departDay = dayFromOrderLabel(
     excludeOp?.payload.excludeDate || excludeOp?.payload.orderDate || "",
   );
@@ -1344,6 +1366,12 @@ export const buildTimesheetPreview = (
         op.kind === "position_change" &&
         op.payload.returningFromDisposition === "1",
     );
+  const archiveCloseReturnDay = absentCloseOp
+    ? journalDayFromDateMs(
+        parseDateLabelMs(absentCloseOp.payload.returnDate || ""),
+        timesheetMonthStartMs,
+      ) || dayFromOrderLabel(absentCloseOp.payload.returnDate || "")
+    : 0;
   const returnActiveFromDay = (() => {
     if (!returnFromDisposition) return 0;
     const orderDay =
@@ -1355,6 +1383,10 @@ export const buildTimesheetPreview = (
     const activeDay =
       journalDayFromDateMs(parseDateLabelMs(activeLabel), timesheetMonthStartMs) ||
       dayFromOrderLabel(activeLabel);
+    if (archiveCloseReturnDay > 0) {
+      if (!orderDay) return archiveCloseReturnDay;
+      if (archiveCloseReturnDay <= orderDay) return archiveCloseReturnDay;
+    }
     if (!orderDay && !activeDay) return 0;
     if (!activeDay) return orderDay;
     if (!orderDay) return activeDay;
@@ -1431,15 +1463,15 @@ export const buildTimesheetPreview = (
         dispositionOp.payload.orderDate || "",
       )
     : "";
-  const previewSpans =
+  const resolvedPreviewSpans =
     dispositionOp &&
     dispositionOrderDay > 1 &&
     dispositionOp.payload.keepOpenSzchTimesheet === "1" &&
-    spans.length
-      ? absenceSpansBeforeEpisode(spans, dispositionOrderDay)
-      : spans;
+    previewSpans.length
+      ? absenceSpansBeforeEpisode(previewSpans, dispositionOrderDay)
+      : previewSpans;
   const rankOnly =
-    !spans.length &&
+    !resolvedPreviewSpans.length &&
     !dayOps.length &&
     !openDispositionMark &&
     !dispositionOp &&
@@ -1552,11 +1584,11 @@ export const buildTimesheetPreview = (
       if (beforeOpenDisposition) {
         const openAbsenceActiveFrom =
           returnActiveFromDay > dispositionOrderDay ? 1 : activeFrom;
-        if (previewSpans.length || openAbsenceActiveFrom > 1) {
+        if (resolvedPreviewSpans.length || openAbsenceActiveFrom > 1) {
           return timesheetMarkFromArchive(day, {
             activeFromDay: openAbsenceActiveFrom,
             lastDay,
-            spans: previewSpans,
+            spans: resolvedPreviewSpans,
             fillBeforeActive: openAbsenceActiveFrom > 1,
           });
         }
@@ -1570,11 +1602,11 @@ export const buildTimesheetPreview = (
           fillBeforeActive: false,
         });
       }
-      if (!previewSpans.length && activeFrom <= 1) return null;
+      if (!resolvedPreviewSpans.length && activeFrom <= 1) return null;
       return timesheetMarkFromArchive(day, {
         activeFromDay: activeFrom,
         lastDay,
-        spans: previewSpans,
+        spans: resolvedPreviewSpans,
         fillBeforeActive: activeFrom > 1,
       });
     })();
@@ -2108,10 +2140,14 @@ export const personHasWorkbookApplyOps = (ops: EjoosSyncOp[]) =>
 export const personIsInformationalOnly = (ops: EjoosSyncOp[]) =>
   ops.length > 0 && writableOps(ops).length === 0;
 
-export const personCanEnterApplyQueue = (person: PersonChange) =>
-  person.severity === "ready" &&
-  personHasWorkbookApplyOps(person.ops) &&
-  !personOpsBlockApply(person.ops);
+export const personCanEnterApplyQueue = (person: PersonChange) => {
+  const considered = opsConsideredForWorkbookApply(person.ops);
+  return (
+    considered.filter(isWorkbookApplyOp).every((op) => op.class === "ready") &&
+    personHasWorkbookApplyOps(considered) &&
+    !personOpsBlockApply(person.ops)
+  );
+};
 
 export const acceptAllReady = (session: EjoosDiffSession): EjoosDiffSession => ({
   ...session,

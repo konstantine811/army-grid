@@ -10,9 +10,11 @@ export type RankAndContractPlanInput = {
   activeMovementsAll: PbMovement[];
   ejoosDays: EjoosTimesheetRow[];
   eventInLeadWindow: (event: PbMovement) => boolean;
+  contractEventInLeadWindow?: (event: PbMovement) => boolean;
   movementPersonKey: (event: PbMovement) => string;
   movementEventTime: (event: PbMovement) => number;
   personStillInEjoos: (personId: string, fullName: string) => boolean;
+  personTraceableForContract?: (personId: string, fullName: string) => boolean;
   isSamePerson: (
     left: { personId?: string; fullName?: string },
     right: { personId?: string; fullName?: string },
@@ -135,9 +137,14 @@ export const planRankAndContractOps = (
     if (event.personId) pendingRankByPerson.set(`id:${event.personId}`, rankOp);
   }
 
+  const contractInLeadWindow =
+    input.contractEventInLeadWindow ?? input.eventInLeadWindow;
+  const traceableForContract =
+    input.personTraceableForContract ?? input.personStillInEjoos;
+
   const latestContractEventByPerson = new Map<string, PbMovement>();
   for (const event of input.activeMovementsAll) {
-    if (!input.isContractMovementType(event.type) || !input.eventInLeadWindow(event)) {
+    if (!input.isContractMovementType(event.type) || !contractInLeadWindow(event)) {
       continue;
     }
     const key = input.movementPersonKey(event);
@@ -153,13 +160,26 @@ export const planRankAndContractOps = (
     }
   }
   for (const event of latestContractEventByPerson.values()) {
-    if (!input.personStillInEjoos(event.personId, event.fullName)) continue;
+    if (!traceableForContract(event.personId, event.fullName)) continue;
+    const timesheetPerson =
+      (event.personId && input.dayById.get(event.personId)) ||
+      input.ejoosDays.find((row) => input.isSamePerson(event, row)) ||
+      null;
     const oos =
       (event.personId && input.oosPersonById.get(event.personId)) ||
       input.byPersonName(input.oosPersonByName, event.personId, event.fullName) ||
+      (timesheetPerson?.personId &&
+        input.oosPersonById.get(timesheetPerson.personId)) ||
+      (timesheetPerson
+        ? input.byPersonName(
+            input.oosPersonByName,
+            timesheetPerson.personId,
+            timesheetPerson.fullName,
+          )
+        : null) ||
       null;
     const parsedDates = parseContractDatesFromChangeText(event.changeText);
-    const isMotivationContract = /МОТИВАЦ.*КОНТР/iu.test(event.type);
+    const isMotivationContract = /^МОТИВАЦ/iu.test(event.type);
     const contractFrom =
       parsedDates.contractFrom || event.basisDate || event.orderDate;
     const contractTo =
@@ -172,7 +192,6 @@ export const planRankAndContractOps = (
         dateMs(oos.contractFrom) === dateMs(contractFrom) &&
         normKey(oos.contractTo) === normKey(contractTo),
     );
-    if (alreadyApplied) continue;
     const canApply = Boolean(oos && contractFrom && contractTo);
     ops.push({
       id: opId([
@@ -181,7 +200,7 @@ export const planRankAndContractOps = (
         event.orderNumber || String(event.excelRow),
       ]),
       kind: "contract_update",
-      class: canApply ? "ready" : "needs_input",
+      class: canApply && !alreadyApplied ? "ready" : "needs_input",
       sheet: "2. ООС",
       personId: oos?.personId || event.personId,
       fullName: oos?.fullName || event.fullName,
@@ -193,10 +212,12 @@ export const planRankAndContractOps = (
         : "рядок ООС не знайдено",
       after: `${serviceType} · ${contractFrom} · ${contractTo}`,
       sourceRef: `Рух!R${event.excelRow} №${event.movementNumber} · КОНТРАКТ`,
-      why: canApply
-        ? "Подія КОНТРАКТ заповнює вид служби та строки контракту в колонках 17–19 аркуша ООС"
-        : "Для події КОНТРАКТ не знайдено рядок ООС або дату/строк контракту",
-      confidence: canApply ? "high" : "manual",
+      why: alreadyApplied
+        ? "Контракт у ООС уже збігається з рухом — повторне застосування не потрібне"
+        : canApply
+          ? "Подія КОНТРАКТ заповнює вид служби та строки контракту в колонках 17–19 аркуша ООС"
+          : "Для події КОНТРАКТ не знайдено рядок ООС або дату/строк контракту",
+      confidence: canApply && !alreadyApplied ? "high" : "manual",
       payload: {
         oosExcelRow: oos ? String(oos.excelRow) : "",
         serviceType,
@@ -208,7 +229,7 @@ export const planRankAndContractOps = (
         basisDate: event.basisDate,
       },
       movementKey: createMovementKey(event),
-      checkedDefault: canApply,
+      checkedDefault: canApply && !alreadyApplied,
     });
   }
 

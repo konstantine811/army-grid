@@ -313,7 +313,7 @@ describe("manual EJOOS operation builder", () => {
     });
   });
 
-  it("requires re-saving a draft anchored to an older workbook version", () => {
+  it("keeps a ready draft when the newer workbook still supports it", () => {
     const op = hydrateManualEjoosOperation({
       ejoos: workbook(),
       timesheetDay: 5,
@@ -334,8 +334,40 @@ describe("manual EJOOS operation builder", () => {
       },
     });
 
-    expect(op?.class).toBe("needs_input");
+    expect(op?.class).toBe("ready");
+    expect(op?.checkedDefault).toBe(true);
+    expect(op?.why).not.toMatch(/попередньої версії/i);
+    expect(
+      personCanEnterApplyQueue(personChangesFromOps([op!], 5)[0]),
+    ).toBe(true);
+  });
+
+  it("asks to re-save a draft only when the newer workbook no longer supports it", () => {
+    const op = hydrateManualEjoosOperation({
+      ejoos: workbook({ withoutTimesheetPerson: true }),
+      timesheetDay: 5,
+      currentVersionId: "version-11",
+      draft: {
+        id: "stale-blocked-draft",
+        unitLabel: "1ПБ",
+        status: "draft",
+        decision: "accepted",
+        input: {
+          ...baseValues,
+          type: "exclude_transfer",
+          destination: "НА_ЩИТІ",
+        },
+        baseVersionId: "version-10",
+        createdAt: "2026-09-05T10:00:00.000Z",
+        updatedAt: "2026-09-05T10:05:00.000Z",
+      },
+    });
+
+    expect(op?.class).toBe("conflict");
     expect(op?.checkedDefault).toBe(false);
     expect(op?.why).toMatch(/попередньої версії/i);
+    expect(
+      personCanEnterApplyQueue(personChangesFromOps([op!], 5)[0]),
+    ).toBe(false);
   });
 });

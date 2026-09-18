@@ -1,5 +1,12 @@
 import type { CSSProperties, ReactNode } from "react";
-import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useDeferredValue,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   PushPinOutlinedIcon,
@@ -12,6 +19,10 @@ import {
   SelectContent,
   SelectTrigger,
 } from "@/components/ui/select/select";
+import {
+  normalizePersonSearchKeyboard,
+  personnelSearchMatchesQuery,
+} from "../../pages/personnel/personnelSearch";
 
 export type SciDataTablePin = "left" | "right";
 
@@ -120,6 +131,7 @@ type SciTableOptions<TData> = {
   emptyMessage?: string;
   getRowId?: (row: TData, index: number) => string;
   onColumnVisibilityChange?: (visibility: Record<string, boolean>) => void;
+  onColumnFiltersChange?: (columnFilters: Record<string, string[]>) => void;
   /** Called when virtualized visible rows change (scroll / data / filters). */
   onVisibleRowsChange?: (rows: TData[]) => void;
   /** Extra props/class for body cells (editing highlight, data attrs). */
@@ -195,6 +207,9 @@ export function MaterialReactTable<TData>({
   useEffect(() => {
     table.onColumnVisibilityChange?.(columnVisibility);
   }, [columnVisibility, table.onColumnVisibilityChange]);
+  useEffect(() => {
+    table.onColumnFiltersChange?.(columnFilters);
+  }, [columnFilters, table.onColumnFiltersChange]);
   const [pinOverrides, setPinOverrides] = useState<
     Record<string, SciDataTablePin | "off">
   >({});
@@ -323,6 +338,12 @@ export function MaterialReactTable<TData>({
   });
   const rowVirtualizerRef = useRef(rowVirtualizer);
   rowVirtualizerRef.current = rowVirtualizer;
+  const measureVirtualRow = useCallback((node: Element | null) => {
+    if (!node) return;
+    requestAnimationFrame(() => {
+      rowVirtualizerRef.current.measureElement(node);
+    });
+  }, []);
 
   useEffect(() => {
     if (!table.onVisibleRowsChange) return;
@@ -1001,7 +1022,7 @@ export function MaterialReactTable<TData>({
                         <tr
                           key={rowId}
                           data-index={rowIndex}
-                          ref={rowVirtualizer.measureElement}
+                          ref={measureVirtualRow}
                           style={{ height: virtualRow.size }}
                         >
                           {visibleColumns.map((column) => {
@@ -1476,13 +1497,24 @@ function rowMatchesFilters<TData>(
   columnRangeFilters: ColumnRangeFilters,
   ignoredColumnId?: string,
 ) {
-  const global = normalizeFilter(globalFilter);
+  const global = globalFilter.trim();
   if (global) {
     const rowText = columns
       .filter((column) => column.enableGlobalFilter !== false)
-      .map((column) => normalizeFilter(getPlainCellValue(column, row)))
+      .map((column) =>
+        String(getPlainCellValue(column, row) ?? "").toLocaleLowerCase(
+          "uk-UA",
+        ),
+      )
       .join(" ");
-    if (!rowText.includes(global)) return false;
+    if (
+      !personnelSearchMatchesQuery(
+        rowText,
+        global.toLocaleLowerCase("uk-UA"),
+      )
+    ) {
+      return false;
+    }
   }
 
   const matchesFacets = Object.entries(columnFilters).every(
@@ -1630,10 +1662,12 @@ function labelText(value: ReactNode) {
 }
 
 function normalizeFilter(value: unknown) {
-  return String(value ?? "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .toLocaleLowerCase("uk-UA");
+  return normalizePersonSearchKeyboard(
+    String(value ?? "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .toLocaleLowerCase("uk-UA"),
+  );
 }
 
 function parseSortDate(value: string) {

@@ -1,3 +1,4 @@
+import { waitForDocumentSaves } from "../../data/documentSaveQueue";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
@@ -60,8 +61,11 @@ import {
 import { FloatingQuestionnairePreview } from "../personnel/FloatingQuestionnairePreview";
 import { compressPhotoFile } from "../personnel/photoCompression";
 import {
+  collectPersonAttachmentLookupIds,
+  collectPersonDocumentAliasIds,
   loadPersonDocumentsForRow,
   loadPersonQuestionnaireForRow,
+  personDocumentBelongsToRow,
 } from "../personnel/personAttachments";
 import {
   PERSON_PHONES_DOCUMENT_TYPE,
@@ -230,6 +234,19 @@ import {
 
 dayjs.locale("uk");
 
+const SELECTED_PERSON_STORAGE_KEY = "army-grid:selected-person";
+
+const readStoredSelectedPersonRow = (): EjournalPreviewRow | null => {
+  try {
+    const raw = window.localStorage.getItem(SELECTED_PERSON_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as EjournalPreviewRow;
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+};
+
 type DocumentMode =
   | "default"
   | "salaryPowerAttorney"
@@ -282,6 +299,8 @@ type UbdReportFields = {
   basis: string;
   basisNumber: string;
   basisDate: string;
+  /** № БР введено вручну (не з довідника). */
+  basisManual: boolean;
   /** БР ще не підходить (немає точної дати / чекаємо список) — рапорт неповний. */
   basisNotReady: boolean;
   battalionCommander: string;
@@ -789,6 +808,23 @@ const parseUbdBasisParts = (value: string) => {
   };
 };
 
+const buildUbdFolderName = (fullName: string) => {
+  const name = fullName.trim();
+  return name ? `УБД рапорт - ${name}` : "УБД рапорт";
+};
+
+const resolveUbdFolderName = (fullName: string, currentFolder?: string) => {
+  const current = String(currentFolder ?? "").trim();
+  const name = fullName.trim();
+  if (!current) return buildUbdFolderName(name);
+  if (/^УБД\s+рапорт\s*$/i.test(current)) return buildUbdFolderName(name);
+  if (/^УБД\s+рапорт\s*-\s*$/i.test(current)) return buildUbdFolderName(name);
+  if (/^УБД\s+рапорт\b/i.test(current) && name && !current.includes(name)) {
+    return buildUbdFolderName(name);
+  }
+  return current;
+};
+
 const createUbdFields = (
   row: EjournalPreviewRow | null,
   summary: ReturnType<typeof buildPersonSummary>,
@@ -820,6 +856,7 @@ const createUbdFields = (
     basisNumber: basis.number,
     basisDate: basis.date,
     basis: formatUbdBasisText(basis.number, basis.date),
+    basisManual: false,
     basisNotReady: !ubdBasisDateMatchesTaskPeriod(
       taskPeriod,
       basis.date,
@@ -831,7 +868,7 @@ const createUbdFields = (
       "Тимчасово виконуючий обов’язки\nкомандира військової частини A4862\nкапітан",
     signatories,
     date: dayjs().format("DD.MM.YYYY"),
-    folderName: fullName ? `УБД рапорт - ${fullName}` : "УБД рапорт",
+    folderName: buildUbdFolderName(fullName),
     statusNote: "",
   };
 };
@@ -984,6 +1021,13 @@ const mergeUbdFields = (
     String(personnel ?? "").trim() || String(document ?? "").trim();
   const taskPeriod = pick(defaults.taskPeriod, merged.taskPeriod);
   const taskPlace = pick(defaults.taskPlace, merged.taskPlace);
+  const savedBasisKnown = allBasisOrderOptions().some(
+    (item) => item.number === savedBasisNumber && item.date === savedBasisDate,
+  );
+  const basisManual =
+    saved.basisManual === true ||
+    String(saved.basisManual) === "true" ||
+    (Boolean(savedBasisNumber) && !savedBasisKnown);
   const resolved = resolveUbdBasisForTask(taskPeriod, taskPlace);
   const picked = resolved
     ? { number: resolved.number, date: resolved.date }
@@ -993,37 +1037,41 @@ const mergeUbdFields = (
   // Збережений вручну номер лишаємо, якщо він серед відповідних.
   let basisNumber = savedBasisNumber;
   let basisDate = savedBasisDate;
-  if (resolved?.matches.length) {
-    const savedIsMatch =
-      Boolean(savedBasisNumber) &&
-      (resolved.number === savedBasisNumber ||
-        resolved.matches.some((item) => item.number === savedBasisNumber));
-    if (savedIsMatch) {
-      basisNumber = savedBasisNumber;
-      basisDate = savedBasisDate || resolved.date;
-    } else {
-      basisNumber = resolved.number;
-      basisDate = resolved.date;
-    }
-  } else if (picked) {
-    const savedMatchesPickedDate =
-      savedBasisDate.replaceAll("/", ".").replaceAll("-", ".") === picked.date;
-    const savedIsKnownForDate = allBasisOrderOptions().some(
-      (item) =>
-        item.date === picked.date && item.number === savedBasisNumber,
-    );
-    if (savedMatchesPickedDate && savedIsKnownForDate) {
-      basisNumber = savedBasisNumber;
-      basisDate = picked.date;
-    } else {
-      basisNumber = picked.number;
-      basisDate = picked.date;
+  if (!basisManual) {
+    if (resolved?.matches.length) {
+      const savedIsMatch =
+        Boolean(savedBasisNumber) &&
+        (resolved.number === savedBasisNumber ||
+          resolved.matches.some((item) => item.number === savedBasisNumber));
+      if (savedIsMatch) {
+        basisNumber = savedBasisNumber;
+        basisDate = savedBasisDate || resolved.date;
+      } else {
+        basisNumber = resolved.number;
+        basisDate = resolved.date;
+      }
+    } else if (picked) {
+      const savedMatchesPickedDate =
+        savedBasisDate.replaceAll("/", ".").replaceAll("-", ".") ===
+        picked.date;
+      const savedIsKnownForDate = allBasisOrderOptions().some(
+        (item) =>
+          item.date === picked.date && item.number === savedBasisNumber,
+      );
+      if (savedMatchesPickedDate && savedIsKnownForDate) {
+        basisNumber = savedBasisNumber;
+        basisDate = picked.date;
+      } else {
+        basisNumber = picked.number;
+        basisDate = picked.date;
+      }
     }
   }
 
+  const fullName = pick(defaults.fullName, merged.fullName);
   return {
     ...merged,
-    fullName: pick(defaults.fullName, merged.fullName),
+    fullName,
     rank: pick(defaults.rank, merged.rank),
     staffPosition: capitalizeReportPosition(
       pick(defaults.staffPosition, merged.staffPosition),
@@ -1033,6 +1081,7 @@ const mergeUbdFields = (
     basisNumber,
     basisDate,
     basis: formatUbdBasisText(basisNumber, basisDate),
+    basisManual,
     basisNotReady:
       !isBlankDocumentInput(basisNumber) && !isBlankDocumentInput(basisDate)
         ? false
@@ -1045,6 +1094,10 @@ const mergeUbdFields = (
     // Always prefer fresh personnel/roster values when document field is empty.
     taskPeriod,
     taskPlace,
+    folderName: resolveUbdFolderName(
+      fullName,
+      String(merged.folderName ?? defaults.folderName ?? ""),
+    ),
     signatories:
       Array.isArray(saved.signatories) && saved.signatories.length
         ? saved.signatories
@@ -3177,7 +3230,7 @@ export function DocumentsPage(_props: {
   }, [questionnairePreviewUrl]);
 
   useEffect(() => {
-    const rawPerson = window.localStorage.getItem("army-grid:selected-person");
+    const person = readStoredSelectedPersonRow();
     const savedMode =
       window.localStorage.getItem("army-grid:selected-document-mode") ||
       (requestedDocumentType === "salary-power-attorney"
@@ -3222,10 +3275,9 @@ export function DocumentsPage(_props: {
                         : "default",
     );
 
-    if (!rawPerson || !isPersonDocumentMode) return;
+    if (!person || !isPersonDocumentMode) return;
 
     try {
-      const person = JSON.parse(rawPerson) as EjournalPreviewRow;
       const nextSummary = buildPersonSummary(person);
       const nextPersonId = String(
         nextSummary.externalId ||
@@ -3475,7 +3527,7 @@ export function DocumentsPage(_props: {
           if (!current.taskPeriod.trim() && enriched.taskPeriod.trim()) {
             next.taskPeriod = enriched.taskPeriod;
             const picked = pickUbdBasisOrderForTaskPeriod(enriched.taskPeriod);
-            if (picked) {
+            if (picked && !current.basisManual) {
               next.basisNumber = picked.number;
               next.basisDate = picked.date;
               next.basis = formatUbdBasisText(picked.number, picked.date);
@@ -3499,6 +3551,22 @@ export function DocumentsPage(_props: {
           }
           if (!current.rnokpp.trim() && enriched.rnokpp.trim()) {
             next.rnokpp = enriched.rnokpp;
+            changed = true;
+          }
+          if (!current.fullName.trim() && enriched.fullName.trim()) {
+            next.fullName = enriched.fullName;
+            next.folderName = resolveUbdFolderName(
+              enriched.fullName,
+              current.folderName,
+            );
+            changed = true;
+          }
+          if (!current.rank.trim() && enriched.rank.trim()) {
+            next.rank = enriched.rank;
+            changed = true;
+          }
+          if (!current.birthDate.trim() && enriched.birthDate.trim()) {
+            next.birthDate = enriched.birthDate;
             changed = true;
           }
           return changed ? next : current;
@@ -3564,7 +3632,10 @@ export function DocumentsPage(_props: {
       return;
 
     let cancelled = false;
-    const salaryDefaults = createSalaryFields(selectedPerson, summary);
+    const loadOpenSeq = documentOpenSeqRef.current;
+    const personRow = selectedPerson ?? readStoredSelectedPersonRow();
+    const personSummary = buildPersonSummary(personRow);
+    const salaryDefaults = createSalaryFields(personRow, personSummary);
 
     const loadDocuments = async () => {
       setDocumentMessage("Завантажую документи службовця...");
@@ -3578,17 +3649,17 @@ export function DocumentsPage(_props: {
         return "";
       });
       try {
-        if (selectedPerson && summary.externalId) {
-          const pairs = collectPersonExternalIdCandidates(selectedPerson)
+        if (personRow && personSummary.externalId) {
+          const pairs = collectPersonExternalIdCandidates(personRow)
             .filter(
               (fromExternalId) =>
-                fromExternalId !== summary.externalId &&
+                fromExternalId !== personSummary.externalId &&
                 isUnstablePersonExternalId(fromExternalId),
             )
             .map((fromExternalId) => ({
-              name: summary.name,
+              name: personSummary.name,
               fromExternalId,
-              toExternalId: summary.externalId,
+              toExternalId: personSummary.externalId,
             }));
           if (pairs.length) {
             migrateStoredPersonSignatures(pairs);
@@ -3597,24 +3668,49 @@ export function DocumentsPage(_props: {
             });
           }
         }
-        const relatedDocumentMetadata = selectedPerson
-          ? await loadPersonDocumentsForRow(selectedPerson, {
-              anketaFullName: summary.name,
+        const relatedDocumentMetadata = personRow
+          ? await loadPersonDocumentsForRow(personRow, {
+              anketaFullName: personSummary.name,
             })
           : [];
-        const relatedDocumentIds = new Set([
-          personExternalId,
-          ...relatedDocumentMetadata.map(
-            (document) => document.personExternalId,
+        const personLookupIds = new Set(
+          personRow
+            ? collectPersonAttachmentLookupIds(personRow, {
+                anketaFullName: personSummary.name,
+              })
+            : [],
+        );
+        if (personExternalId) personLookupIds.add(personExternalId);
+        const expectedPersonNames = [
+          getPersonDisplayName(personRow),
+          personSummary.name,
+        ].filter(Boolean);
+        const relatedDocumentIds = new Set(
+          collectPersonDocumentAliasIds(
+            relatedDocumentMetadata,
+            personLookupIds,
+            expectedPersonNames,
           ),
-        ]);
+        );
+        if (personExternalId) relatedDocumentIds.add(personExternalId);
         const documentsPromise = Promise.all(
           [...relatedDocumentIds].map((id) =>
             api.listPersonDocuments(id, { full: true }).catch(() => []),
           ),
         ).then((groups) => {
           const unique = new Map<string, BackendPersonDocument>();
-          for (const document of groups.flat()) unique.set(document.id, document);
+          for (const document of groups.flat()) {
+            if (
+              !personDocumentBelongsToRow(
+                document,
+                relatedDocumentIds,
+                expectedPersonNames,
+              )
+            ) {
+              continue;
+            }
+            unique.set(document.id, document);
+          }
           return [...unique.values()].sort(
             (left, right) =>
               new Date(right.updatedAt).getTime() -
@@ -3646,11 +3742,10 @@ export function DocumentsPage(_props: {
           questionnaires.find(
             (item) => item.personExternalId === personExternalId,
           ) ?? null;
-        if (!questionnaire && selectedPerson) {
-          const resolved = await loadPersonQuestionnaireForRow(
-            selectedPerson,
-            { anketaFullName: summary.name },
-          );
+        if (!questionnaire && personRow) {
+          const resolved = await loadPersonQuestionnaireForRow(personRow, {
+            anketaFullName: personSummary.name,
+          });
           questionnaire = resolved.questionnaire
             ? {
                 personExternalId: resolved.resolvedExternalId,
@@ -3660,52 +3755,52 @@ export function DocumentsPage(_props: {
         }
         const configured = snapshotSignatories(configuredRecords);
         const ubdDefaults = createUbdFields(
-          selectedPerson,
-          summary,
+          personRow,
+          personSummary,
           configured.length ? configured : legacyUbdSignatories(),
         );
         const ticketDefaults = createTemporaryMilitaryIdFields(
-          summary,
+          personSummary,
           personPhoto?.photoData || "",
         );
         const lostMilitaryIdDefaults = createLostMilitaryIdFields(
-          selectedPerson,
-          summary,
+          personRow,
+          personSummary,
           toLostMilitaryIdSignatories(
             configured.length ? configured : legacyUbdSignatories(),
           ),
         );
         const form6Defaults = createForm6Fields(
-          selectedPerson,
-          summary,
+          personRow,
+          personSummary,
           toForm6Signatories(
             configured.length ? configured : legacyUbdSignatories(),
           ),
         );
         const form12Defaults = createForm12Fields(
-          selectedPerson,
-          summary,
+          personRow,
+          personSummary,
           toForm12Signatories(
             configured.length ? configured : legacyUbdSignatories(),
           ),
         );
         const serviceCharacteristicDefaults = createServiceCharacteristicFields(
-          selectedPerson,
-          summary,
+          personRow,
+          personSummary,
           toServiceCharacteristicSignatories(
             configured.length ? configured : legacyUbdSignatories(),
           ),
         );
         const zhbdCertificateDefaults = createZhbdCertificateFields(
-          selectedPerson,
-          summary,
+          personRow,
+          personSummary,
           toZhbdCertificateSignatories(
             configured.length ? configured : legacyUbdSignatories(),
           ),
         );
         const restoreDefaults = createUbdRestoreFields(
-          selectedPerson,
-          summary,
+          personRow,
+          personSummary,
           toUbdRestoreSignatories(
             configured.length ? configured : legacyUbdSignatories(),
           ),
@@ -3720,7 +3815,7 @@ export function DocumentsPage(_props: {
           ) ??
           null;
 
-        if (cancelled) return;
+        if (cancelled || documentOpenSeqRef.current !== loadOpenSeq) return;
         setPersonDocuments(nextDocuments);
         setPersonQuestionnaire(questionnaire);
         if (!active) {
@@ -3729,7 +3824,7 @@ export function DocumentsPage(_props: {
             const latest = await api.listPersonDocuments(personExternalId, {
               full: true,
             });
-            if (cancelled) return;
+            if (cancelled || documentOpenSeqRef.current !== loadOpenSeq) return;
             nextDocuments = latest;
             active =
               latest.find((document) => document.id === requestedDocumentId) ??
@@ -3741,7 +3836,7 @@ export function DocumentsPage(_props: {
         if (!active) {
           const autoCreateKey = `${personExternalId}:${targetDocumentType}`;
           const draft = buildPersonDocumentDraft(targetDocumentType, {
-            personStatus: createPersonStatusSnapshot(selectedPerson, summary)
+            personStatus: createPersonStatusSnapshot(personRow, personSummary)
               .label,
             salaryFields: salaryDefaults,
             ubdFields: ubdDefaults,
@@ -3780,7 +3875,7 @@ export function DocumentsPage(_props: {
               personExternalId,
               draft,
             );
-            if (cancelled) return;
+            if (cancelled || documentOpenSeqRef.current !== loadOpenSeq) return;
             nextDocuments = [
               created,
               ...nextDocuments.filter((document) => document.id !== created.id),
@@ -3792,7 +3887,7 @@ export function DocumentsPage(_props: {
               ...current.filter((document) => document.id !== created.id),
             ]);
           } catch (error) {
-            if (cancelled) return;
+            if (cancelled || documentOpenSeqRef.current !== loadOpenSeq) return;
             setSelectedDocumentId("");
             setSalaryFields(salaryDefaults);
             setUbdFields(ubdDefaults);
@@ -3866,7 +3961,7 @@ export function DocumentsPage(_props: {
             ...merged,
             actualFullPosition:
               merged.actualFullPosition.trim() ||
-              getPersonFullPositionTitle(selectedPerson) ||
+              getPersonFullPositionTitle(personRow) ||
               readStoredSelectedPersonFullPosition(),
             signatories: zhbdCertificateDefaults.signatories,
           };
@@ -3898,7 +3993,7 @@ export function DocumentsPage(_props: {
           `Відкрито документ: ${active.title} · ${new Date(active.updatedAt).toLocaleString("uk-UA")}`,
         );
       } catch (error) {
-        if (cancelled) return;
+        if (cancelled || documentOpenSeqRef.current !== loadOpenSeq) return;
         setPersonQuestionnaire(null);
         setDocumentMessage(
           error instanceof Error
@@ -3913,12 +4008,11 @@ export function DocumentsPage(_props: {
     return () => {
       cancelled = true;
     };
+  // Reload only on document identity changes. Profile enrichment must not reset edits.
   }, [
     isPersonDocumentMode,
     personExternalId,
     requestedDocumentId,
-    selectedPerson,
-    summary,
     targetDocumentType,
   ]);
 
@@ -4042,27 +4136,18 @@ export function DocumentsPage(_props: {
   const openPersonDocument = async (documentSummary: BackendPersonDocument) => {
     const openSeq = ++documentOpenSeqRef.current;
     const isCurrentOpen = () => documentOpenSeqRef.current === openSeq;
-    setSelectedDocumentId(documentSummary.id);
-    if (documentSummary.type === "ubdReport") {
-      setMode("ubdReport");
-      const documentName = getDocumentPersonName(documentSummary);
-      const immediateSummary = {
-        ...buildPersonSummary(null),
-        name: documentName || "Особа не вибрана",
-        externalId: documentSummary.personExternalId || "",
-      };
-      const immediateDefaults = createUbdFields(
-        null,
-        immediateSummary,
-        legacyUbdSignatories(),
-      );
-      setUbdFields(
-        mergeUbdFields(immediateDefaults, documentSummary.fields),
-      );
-      setDocumentFiles(mergeDocumentFiles(documentSummary.files));
+    flushDocumentFieldSave();
+    setSelectedDocumentId("");
+    try {
+      await waitForDocumentSaves(documentSummary.id);
+    } catch (error) {
+      if (!isCurrentOpen()) return;
+      setDocumentMessage(`Не вдалося зберегти документ: ${error instanceof Error ? error.message : error}`);
+      return;
     }
+    if (!isCurrentOpen()) return;
     let document = documentSummary;
-    if (!Object.prototype.hasOwnProperty.call(documentSummary, "files")) {
+    {
       setDocumentMessage("Завантажую повні дані документа…");
       try {
         const fullDocuments = await api.listPersonDocuments(
@@ -4189,7 +4274,6 @@ export function DocumentsPage(_props: {
       });
     }
 
-    setSelectedDocumentId(document.id);
     setPersonDocuments((current) =>
       current.some((item) => item.id === document.id)
         ? current
@@ -4390,6 +4474,7 @@ export function DocumentsPage(_props: {
     }
 
     if (!isCurrentOpen()) return;
+    setSelectedDocumentId(document.id);
     setWorkflow(mergeSalaryWorkflow(document.workflow));
     setDocumentMessage(
       `Відкрито документ: ${document.title} · ${new Date(document.updatedAt).toLocaleString("uk-UA")}`,
@@ -4443,14 +4528,16 @@ export function DocumentsPage(_props: {
     setIsSavingDocument(true);
     setDocumentMessage("Створюю УБД рапорт...");
     try {
-      let personForFields = selectedPerson;
+      let personForFields =
+        selectedPerson ?? readStoredSelectedPersonRow();
       try {
         const dataset = await loadPersonnelDataset();
         const rows = rosterRowsFromDataset(dataset);
-        const match = findRosterRowByPersonName(rows, summary.name);
+        const lookupSummary = buildPersonSummary(personForFields);
+        const match = findRosterRowByPersonName(rows, lookupSummary.name);
         if (match) {
           personForFields = applyRosterFieldsToPerson(
-            selectedPerson ?? match,
+            personForFields ?? match,
             match,
           );
           setSelectedPerson(personForFields);
@@ -5254,6 +5341,7 @@ export function DocumentsPage(_props: {
     nextFields: SalaryDocumentFields,
     nextWorkflow: SalaryWorkflowState,
   ) => {
+    flushDocumentFieldSave();
     if (!documentSavePersonId || !selectedDocumentId) {
       saveWorkflowForPerson(workflowKey, nextWorkflow);
       return;
@@ -5318,11 +5406,25 @@ export function DocumentsPage(_props: {
     nextFiles = documentFiles,
     nextWorkflow = workflow,
   ) => {
+    flushDocumentFieldSave();
     if (!documentSavePersonId || !selectedDocumentId) return;
 
     setIsSavingDocument(true);
     try {
-      const fieldPayload = withPersistedDocumentFlags(nextFields);
+      const fieldsToSave = {
+        ...nextFields,
+        folderName: resolveUbdFolderName(
+          nextFields.fullName,
+          nextFields.folderName,
+        ),
+      };
+      if (fieldsToSave.folderName !== nextFields.folderName) {
+        setUbdFields((current) => ({
+          ...current,
+          folderName: fieldsToSave.folderName,
+        }));
+      }
+      const fieldPayload = withPersistedDocumentFlags(fieldsToSave);
       const updated = await api.updatePersonDocument(
         documentSavePersonId,
         selectedDocumentId,
@@ -5379,6 +5481,7 @@ export function DocumentsPage(_props: {
     nextFiles = documentFiles,
     nextWorkflow = workflow,
   ) => {
+    flushDocumentFieldSave();
     if (!documentSavePersonId || !selectedDocumentId) return;
 
     setIsSavingDocument(true);
@@ -5457,6 +5560,7 @@ export function DocumentsPage(_props: {
     nextFiles = documentFiles,
     nextWorkflow = workflow,
   ) => {
+    flushDocumentFieldSave();
     if (!documentSavePersonId || !selectedDocumentId) return;
 
     setIsSavingDocument(true);
@@ -5493,6 +5597,7 @@ export function DocumentsPage(_props: {
     nextFiles = documentFiles,
     nextWorkflow = workflow,
   ) => {
+    flushDocumentFieldSave();
     if (!documentSavePersonId || !selectedDocumentId) return;
 
     setIsSavingDocument(true);
@@ -5529,6 +5634,7 @@ export function DocumentsPage(_props: {
     nextFiles = documentFiles,
     nextWorkflow = workflow,
   ) => {
+    flushDocumentFieldSave();
     if (!documentSavePersonId || !selectedDocumentId) return;
 
     setIsSavingDocument(true);
@@ -5568,6 +5674,7 @@ export function DocumentsPage(_props: {
     nextFiles = documentFiles,
     nextWorkflow = workflow,
   ) => {
+    flushDocumentFieldSave();
     if (!documentSavePersonId || !selectedDocumentId) return;
 
     setIsSavingDocument(true);
@@ -5604,6 +5711,7 @@ export function DocumentsPage(_props: {
     nextFiles = documentFiles,
     nextWorkflow = workflow,
   ) => {
+    flushDocumentFieldSave();
     if (!documentSavePersonId || !selectedDocumentId) return;
 
     setIsSavingDocument(true);
@@ -5640,6 +5748,7 @@ export function DocumentsPage(_props: {
     nextFiles = documentFiles,
     nextWorkflow = workflow,
   ) => {
+    flushDocumentFieldSave();
     if (!documentSavePersonId || !selectedDocumentId) return;
 
     setIsSavingDocument(true);
@@ -5704,8 +5813,50 @@ export function DocumentsPage(_props: {
         ...current,
         [key]: key === "staffPosition" ? capitalizeReportPosition(value) : value,
       } as UbdReportFields;
-      if (key === "taskPeriod" || key === "taskPlace") {
+      if (
+        (key === "taskPeriod" || key === "taskPlace") &&
+        !current.basisManual
+      ) {
         const resolved = resolveUbdBasisForTask(next.taskPeriod, next.taskPlace);
+        if (resolved) {
+          next.basisNumber = resolved.number;
+          next.basisDate = resolved.date;
+          next.basis = formatUbdBasisText(resolved.number, resolved.date);
+        }
+        next.basisNotReady = !ubdBasisDateMatchesTaskPeriod(
+          next.taskPeriod,
+          next.basisDate,
+          next.taskPlace,
+        );
+      } else if (
+        (key === "basisNumber" || key === "basisDate") &&
+        current.basisManual
+      ) {
+        next.basis = formatUbdBasisText(next.basisNumber, next.basisDate);
+        next.basisNotReady = !ubdBasisDateMatchesTaskPeriod(
+          next.taskPeriod,
+          next.basisDate,
+          next.taskPlace,
+        );
+      }
+      if (key === "fullName") {
+        next.folderName = resolveUbdFolderName(value, current.folderName);
+      }
+      scheduleDocumentFieldSave(() => {
+        void saveUbdDocument(next);
+      });
+      return next;
+    });
+  };
+
+  const updateUbdBasisManual = (manual: boolean) => {
+    setUbdFields((current) => {
+      const next = { ...current, basisManual: manual };
+      if (!manual) {
+        const resolved = resolveUbdBasisForTask(
+          current.taskPeriod,
+          current.taskPlace,
+        );
         if (resolved) {
           next.basisNumber = resolved.number;
           next.basisDate = resolved.date;
@@ -5733,6 +5884,7 @@ export function DocumentsPage(_props: {
         basisNumber: option.number,
         basisDate: option.date,
         basis: formatUbdBasisText(option.number, option.date),
+        basisManual: false,
         // Користувач явно обрав БР — не блокуємо рапорт через розбіжність дат.
         basisNotReady: false,
       };
@@ -7195,6 +7347,15 @@ export function DocumentsPage(_props: {
                     </label>
                   );
                 })}
+                <div className="wide ubd-basis-not-ready">
+                  <Checkbox
+                    checked={ubdFields.basisManual}
+                    onCheckedChange={(checked) =>
+                      updateUbdBasisManual(checked === true)
+                    }
+                    label="Ввести БР вручну"
+                  />
+                </div>
                 <label
                   className={documentBasisFieldHighlightClass(
                     "ubdReport",
@@ -7203,45 +7364,58 @@ export function DocumentsPage(_props: {
                   )}
                 >
                   <code>№ розпорядження</code>
-                  <TextField
-                    select
-                    size="small"
-                    fullWidth
-                    value={ubdBasisOrderOptionKey({
-                      number: ubdFields.basisNumber || FALLBACK_UBD_BASIS.number,
-                      date: ubdFields.basisDate || FALLBACK_UBD_BASIS.date,
-                    })}
-                    onChange={(event) =>
-                      updateUbdBasisOrder(event.target.value)
-                    }
-                  >
-                    {!allBasisOrderOptions().some(
-                      (item) =>
-                        item.number === ubdFields.basisNumber &&
-                        item.date === ubdFields.basisDate,
-                    ) && ubdFields.basisNumber ? (
-                      <MenuItem
-                        value={ubdBasisOrderOptionKey({
-                          number: ubdFields.basisNumber,
-                          date: ubdFields.basisDate,
-                        })}
-                      >
-                        {formatUbdBasisOrderLabel({
-                          number: ubdFields.basisNumber,
-                          date: ubdFields.basisDate,
-                        })}{" "}
-                        · збережене
-                      </MenuItem>
-                    ) : null}
-                    {allBasisOrderOptions().map((option) => (
-                      <MenuItem
-                        key={ubdBasisOrderOptionKey(option)}
-                        value={ubdBasisOrderOptionKey(option)}
-                      >
-                        {formatUbdBasisOrderLabel(option)}
-                      </MenuItem>
-                    ))}
-                  </TextField>
+                  {ubdFields.basisManual ? (
+                    <TextField
+                      size="small"
+                      fullWidth
+                      value={ubdFields.basisNumber}
+                      onChange={(event) =>
+                        updateUbdField("basisNumber", event.target.value)
+                      }
+                      placeholder="4862/ОКП/…/дск"
+                    />
+                  ) : (
+                    <TextField
+                      select
+                      size="small"
+                      fullWidth
+                      value={ubdBasisOrderOptionKey({
+                        number:
+                          ubdFields.basisNumber || FALLBACK_UBD_BASIS.number,
+                        date: ubdFields.basisDate || FALLBACK_UBD_BASIS.date,
+                      })}
+                      onChange={(event) =>
+                        updateUbdBasisOrder(event.target.value)
+                      }
+                    >
+                      {!allBasisOrderOptions().some(
+                        (item) =>
+                          item.number === ubdFields.basisNumber &&
+                          item.date === ubdFields.basisDate,
+                      ) && ubdFields.basisNumber ? (
+                        <MenuItem
+                          value={ubdBasisOrderOptionKey({
+                            number: ubdFields.basisNumber,
+                            date: ubdFields.basisDate,
+                          })}
+                        >
+                          {formatUbdBasisOrderLabel({
+                            number: ubdFields.basisNumber,
+                            date: ubdFields.basisDate,
+                          })}{" "}
+                          · збережене
+                        </MenuItem>
+                      ) : null}
+                      {allBasisOrderOptions().map((option) => (
+                        <MenuItem
+                          key={ubdBasisOrderOptionKey(option)}
+                          value={ubdBasisOrderOptionKey(option)}
+                        >
+                          {formatUbdBasisOrderLabel(option)}
+                        </MenuItem>
+                      ))}
+                    </TextField>
+                  )}
                 </label>
                 <label
                   className={documentBasisFieldHighlightClass(
@@ -7255,7 +7429,14 @@ export function DocumentsPage(_props: {
                     size="small"
                     fullWidth
                     value={ubdFields.basisDate}
-                    readOnly
+                    readOnly={!ubdFields.basisManual}
+                    onChange={
+                      ubdFields.basisManual
+                        ? (event) =>
+                            updateUbdField("basisDate", event.target.value)
+                        : undefined
+                    }
+                    placeholder="дд.мм.рррр"
                   />
                 </label>
                 <div className="wide ubd-basis-not-ready">

@@ -31,6 +31,11 @@ export const LazyAnketaDataPage = lazy(() =>
     default: m.AnketaDataPage,
   })),
 );
+export const LazyPreAnketaPage = lazy(() =>
+  import("../pages/pre-anketa/PreAnketaPage").then((m) => ({
+    default: m.PreAnketaPage,
+  })),
+);
 export const LazySocPassportPage = lazy(() =>
   import("../pages/soc-passport/SocPassportPage").then((m) => ({
     default: m.SocPassportPage,

@@ -607,6 +607,48 @@ export const timesheetTransferMarkForDay = (input: {
   return null;
 };
 
+export const isMedicalLeaveAbsenceGround = (ground: string) => {
+  const text = String(ground || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLocaleLowerCase("uk-UA");
+  if (!text) return false;
+  if (/сзч|безвіст|розпоряд|зб\b|самовіл/.test(text)) return false;
+  return /лік|відпуст|мед|хвор|лк\b|рota/.test(text);
+};
+
+/** Повернення з archive для «+» на штатному рядку, а не дата наказу ПОСАДА. */
+export const shouldUseArchiveReturnForStaffEpisode = (input: {
+  archiveReturnDate: string;
+  monthStartMs: number;
+  openAbsenceGround?: string;
+  monthSpans: TimesheetAbsenceSpan[];
+  hasReturn: (returnDate: string) => boolean;
+}) => {
+  const archiveReturnDate = String(input.archiveReturnDate || "").trim();
+  if (!archiveReturnDate || !input.hasReturn(archiveReturnDate)) return false;
+  const returnDay = journalDayFromDateMs(
+    parseDateLabelMs(archiveReturnDate),
+    input.monthStartMs,
+  );
+  if (returnDay <= 0) return false;
+  if (
+    input.openAbsenceGround &&
+    isMedicalLeaveAbsenceGround(input.openAbsenceGround)
+  ) {
+    return true;
+  }
+  return input.monthSpans.some(
+    (span) =>
+      span.toDay < returnDay &&
+      span.fromDay <= span.toDay &&
+      Boolean(span.code) &&
+      span.code !== "+" &&
+      span.code !== "-" &&
+      span.code !== "СЗЧ",
+  );
+};
+
 export type ArchiveAbsencePeriodInput = {
   departDate: string;
   returnDate: string;
@@ -781,10 +823,10 @@ export const timesheetMarkFromArchive = (
   } = options;
   if (day < 1 || day > lastDay) return null;
   const absence = timesheetCodeOnDay(day, spans);
+  if (absence) return absence;
   if (activeFromDay > 1 && day < activeFromDay) {
     return fillBeforeActive ? "-" : null;
   }
-  if (absence) return absence;
   if (day >= Math.max(1, activeFromDay || 1)) return "+";
   return null;
 };

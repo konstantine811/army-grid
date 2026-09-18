@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { openPersonnelPerson } from "../../app/navigation";
 import {
   buildPersonnelFocusTargetFromRow,
@@ -12,13 +12,17 @@ import {
 import {
   PersonSearchOutlinedIcon,
   PictureAsPdfOutlinedIcon,
+  VisibilityOutlinedIcon,
 } from "@/components/sci/icons";
 import { FloatingQuestionnairePreview } from "../personnel/FloatingQuestionnairePreview";
+import { AnketaOcrReviewDialog } from "./components/AnketaOcrReviewDialog";
+import { useAnketaQuestionnaireOcr } from "./hooks/useAnketaQuestionnaireOcr";
 import { matchLabel, anketaPersonnelNamesMatch } from "./anketaPersonMatch";
 import type { AnketaColumnKey, AnketaRow } from "./anketaSheet";
 import type { AnketaEmptyCell } from "./anketaGaps";
 import {
   ANKETA_MISSING_VALUE_PRESETS,
+  isAnketaGapCellTrulyEmpty,
   listAnketaEmptyCells,
 } from "./anketaGaps";
 import { useAnketaPersonPanel } from "./hooks/useAnketaPersonPanel";
@@ -31,6 +35,10 @@ type AnketaPersonSidePanelProps = {
   onFillMissing?: (value: string) => void;
   onMessage?: (message: string) => void;
   onOpenPersonnel?: (target: PersonnelFocusTarget) => void;
+  emptySearchActive?: boolean;
+  onApplyOcrCells?: (
+    items: Array<{ columnId: AnketaColumnKey; value: string }>,
+  ) => Promise<void>;
 };
 
 const FIELD_ROWS: Array<{ key: AnketaColumnKey; label: string }> = [
@@ -43,6 +51,7 @@ const FIELD_ROWS: Array<{ key: AnketaColumnKey; label: string }> = [
   { key: "sex", label: "Стать" },
   { key: "rnokpp", label: "РНОКПП" },
   { key: "idDocumentNumber", label: "Документ" },
+  { key: "idDocumentName", label: "Назва документа" },
   { key: "location", label: "Дислокація" },
   { key: "arrivedFrom", label: "Звідки прибув" },
   { key: "contractFrom", label: "Контракт з" },
@@ -61,8 +70,13 @@ export function AnketaPersonSidePanel({
   onFillMissing,
   onMessage,
   onOpenPersonnel,
+  emptySearchActive = false,
+  onApplyOcrCells,
 }: AnketaPersonSidePanelProps) {
   const panel = useAnketaPersonPanel(anketaRow, onMessage);
+  const ocr = useAnketaQuestionnaireOcr(onMessage);
+  const [isApplyingOcr, setIsApplyingOcr] = useState(false);
+  const ocrAttemptRef = useRef("");
   const nameMismatch = Boolean(
     anketaRow &&
       panel.match &&
@@ -74,6 +88,58 @@ export function AnketaPersonSidePanel({
     if (!anketaRow) return [];
     return listAnketaEmptyCells([anketaRow], gapColumnKeys);
   }, [anketaRow, gapColumnKeys]);
+
+  useEffect(() => {
+    ocrAttemptRef.current = "";
+  }, [focusedEmpty?.rowId, focusedEmpty?.columnId]);
+
+  const ocrReviewWasOpenRef = useRef(false);
+  useEffect(() => {
+    const justOpened = ocr.reviewOpen && !ocrReviewWasOpenRef.current;
+    ocrReviewWasOpenRef.current = ocr.reviewOpen;
+    if (!justOpened || nameMismatch || !panel.questionnaire) return;
+    void panel.openQuestionnairePreview();
+  }, [ocr.reviewOpen, nameMismatch, panel.questionnaire, panel.openQuestionnairePreview]);
+
+  useEffect(() => {
+    if (!emptySearchActive || !onApplyOcrCells || !focusedEmpty) return;
+    if (panel.matchStatus !== "ready") return;
+    if (nameMismatch || panel.isLoadingAttachments || !panel.questionnaire) return;
+    if (ocr.isRunning || ocr.reviewOpen || isApplyingOcr) return;
+
+    const attemptKey = `${focusedEmpty.rowId}:${focusedEmpty.columnId}`;
+    if (ocrAttemptRef.current === attemptKey) return;
+    ocrAttemptRef.current = attemptKey;
+
+    const timer = window.setTimeout(() => {
+      void ocr.runOcr({
+        questionnaire: panel.questionnaire,
+        personnelExternalId: panel.personnelExternalId,
+        exportFileName: panel.exportFileName,
+        anketaRow,
+        gapColumnKeys,
+        focusedColumnId: focusedEmpty.columnId,
+      });
+    }, 120);
+
+    return () => window.clearTimeout(timer);
+  }, [
+    anketaRow,
+    emptySearchActive,
+    focusedEmpty,
+    gapColumnKeys,
+    isApplyingOcr,
+    nameMismatch,
+    ocr.isRunning,
+    ocr.reviewOpen,
+    ocr.runOcr,
+    onApplyOcrCells,
+    panel.exportFileName,
+    panel.isLoadingAttachments,
+    panel.matchStatus,
+    panel.personnelExternalId,
+    panel.questionnaire,
+  ]);
 
   const openPersonnelTarget = (target: PersonnelFocusTarget) => {
     if (onOpenPersonnel) {
@@ -243,6 +309,36 @@ export function AnketaPersonSidePanel({
                     ? "Анкета не додана"
                     : "Анкета недоступна"}
             </Button>
+            {emptySearchActive && onApplyOcrCells ? (
+              <Button
+                variant="outlined"
+                size="small"
+                startIcon={<VisibilityOutlinedIcon />}
+                disabled={
+                  ocr.isRunning ||
+                  isApplyingOcr ||
+                  panel.isLoadingAttachments ||
+                  nameMismatch ||
+                  !panel.questionnaire
+                }
+                onClick={() => {
+                  ocrAttemptRef.current = "";
+                  void ocr.runOcr({
+                    questionnaire: panel.questionnaire,
+                    personnelExternalId: panel.personnelExternalId,
+                    exportFileName: panel.exportFileName,
+                    anketaRow,
+                    gapColumnKeys,
+                    focusedColumnId: focusedEmpty?.columnId,
+                    forceRefresh: true,
+                  });
+                }}
+              >
+                {ocr.isRunning
+                  ? ocr.progress || "Розпізнаю Gemini…"
+                  : "Повторити Gemini"}
+              </Button>
+            ) : null}
             <Button
               variant="contained"
               size="small"
@@ -271,7 +367,9 @@ export function AnketaPersonSidePanel({
           <div className="person-action-fields">
             {FIELD_ROWS.map((field) => {
               const value = String(anketaRow[field.key] ?? "").trim();
-              const isGap = gapColumnKeys.includes(field.key) && !value;
+              const isGap =
+                gapColumnKeys.includes(field.key) &&
+                isAnketaGapCellTrulyEmpty(anketaRow, field.key);
               return (
                 <span
                   key={field.key}
@@ -335,6 +433,37 @@ export function AnketaPersonSidePanel({
         </div>
       </aside>
 
+      <AnketaOcrReviewDialog
+        open={ocr.reviewOpen}
+        proposals={ocr.proposals}
+        focusedColumnId={ocr.focusedColumnId}
+        isApplying={isApplyingOcr}
+        canOpenQuestionnaire={Boolean(panel.questionnaire) && !nameMismatch}
+        questionnaireOpen={panel.previewOpen}
+        onOpenQuestionnaire={() => void panel.openQuestionnairePreview()}
+        onClose={() => {
+          ocrAttemptRef.current = "";
+          ocr.closeReview();
+        }}
+        onToggle={ocr.toggleProposal}
+        onValueChange={ocr.updateProposalValue}
+        onSelectAll={ocr.selectAllProposals}
+        onConfirm={() => {
+          if (!onApplyOcrCells) return;
+          const selected = ocr.proposals
+            .filter((item) => item.selected && item.value.trim())
+            .map((item) => ({
+              columnId: item.columnId,
+              value: item.value.trim(),
+            }));
+          if (!selected.length) return;
+          setIsApplyingOcr(true);
+          void onApplyOcrCells(selected)
+            .then(() => ocr.closeReview())
+            .finally(() => setIsApplyingOcr(false));
+        }}
+      />
+
       <FloatingQuestionnairePreview
         open={panel.previewOpen}
         title={panel.previewTitle}
@@ -342,11 +471,13 @@ export function AnketaPersonSidePanel({
         pendingFile={false}
         isUploading={false}
         placement="left"
-        defaultWidth={720}
-        defaultHeight={920}
+        defaultWidth={ocr.reviewOpen ? 640 : 720}
+        defaultHeight={ocr.reviewOpen ? 860 : 920}
         minWidth={480}
         minHeight={420}
-        className="floating-questionnaire-preview is-anketa-edge"
+        className={["floating-questionnaire-preview", "is-anketa-edge"]
+          .filter(Boolean)
+          .join(" ")}
         shareFileName={panel.exportFileName}
         sharePersonName={panel.displayName}
         shareSource={panel.shareSource}

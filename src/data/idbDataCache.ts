@@ -123,8 +123,15 @@ export const CacheKeys = {
   overviewAssetsPrefix: "personnel:overview-assets:v1:",
   overviewMergePrefix: "personnel:overview-merge:v1:",
   overviewStaffPrefix: "personnel:overview-staff:v1:",
+  bchsMorningSnapshotPrefix: "personnel:bchs-morning-snapshot:v1:",
   personnelPhotoIndex: "personnel:photo-index:v1",
 } as const;
+
+export const bchsMorningSnapshotCacheKey = (unitLabel: string) =>
+  `${CacheKeys.bchsMorningSnapshotPrefix}${unitLabel
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "-")}`;
 
 export const overviewStaffCacheKey = (datasetFingerprint: string) =>
   `${CacheKeys.overviewStaffPrefix}${datasetFingerprint}`;
@@ -196,6 +203,7 @@ const isKnownCacheKey = (key: string) =>
   key.startsWith(CacheKeys.overviewAssetsPrefix) ||
   key.startsWith(CacheKeys.overviewMergePrefix) ||
   key.startsWith(CacheKeys.overviewStaffPrefix) ||
+  key.startsWith(CacheKeys.bchsMorningSnapshotPrefix) ||
   key === CacheKeys.personnelPhotoIndex;
 
 export const planDataCacheCleanup = (

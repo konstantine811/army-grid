@@ -27,6 +27,7 @@ import {
 import { buildSheetRowPreviews } from "./ejoosSheetRowPreview";
 import {
   isReviewOnlyMismatchOp,
+  opsConsideredForWorkbookApply,
   personApplyBlockReason,
   timesheetOpNeedsManualCode,
 } from "./ejoosOpRequirements";
@@ -276,7 +277,8 @@ export function PersonChangeCard({
         !excludeOp.payload.orderNumber?.trim() ||
         !excludeOp.payload.orderDate?.trim()),
   );
-  const timesheetOps = person.ops.filter(
+  const consideredOps = opsConsideredForWorkbookApply(person.ops);
+  const timesheetOps = consideredOps.filter(
     (op) =>
       op.kind === "timesheet_day" && op.payload.clearStalePerson !== "1",
   );
@@ -285,7 +287,7 @@ export function PersonChangeCard({
   const reviewMismatchOps = person.ops.filter(isReviewOnlyMismatchOp);
   const applyBlockReason = personApplyBlockReason(person.ops);
   const reviewOnly = personIsInformationalOnly(person.ops);
-  const hasWorkbookApply = personHasWorkbookApplyOps(person.ops);
+  const hasWorkbookApply = personHasWorkbookApplyOps(consideredOps);
   const bySheet = useMemo(() => {
     const map = new Map<string, typeof person.sheetActions>();
     person.sheetActions.forEach((action) => {
@@ -884,7 +886,6 @@ export function PersonChangeCard({
             disabled={
               Boolean(isLoading) ||
               Boolean(applyBlocked) ||
-              person.severity === "conflict" ||
               needsDestination ||
               needsExclusionDetails ||
               needsTimesheetCode ||
@@ -905,7 +906,6 @@ export function PersonChangeCard({
               Boolean(isLoading) ||
               (person.decision !== "accepted" &&
                 (canQueue === false ||
-                  person.severity === "conflict" ||
                   needsDestination ||
                   needsExclusionDetails ||
                   needsTimesheetCode ||

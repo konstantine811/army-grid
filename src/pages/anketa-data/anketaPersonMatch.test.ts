@@ -5,6 +5,7 @@ import { ROSTER_FIELD_PREFIX } from "../personnel/personnelRosterMerge";
 import {
   buildAnketaInStaffRowIdSet,
   matchAnketaRowToPersonnelDetailed,
+  normalizeAnketaNameKey,
   orderAnketaRowsForGapSearch,
   type AnketaPersonnelMatch,
 } from "./anketaPersonMatch";
@@ -46,7 +47,7 @@ const buildIndex = (rows: EjournalPreviewRow[]) => {
       },
       matchBy: "name" as const,
     };
-    const nameKey = match.summary.name.toLocaleLowerCase("uk-UA");
+    const nameKey = normalizeAnketaNameKey(match.summary.name);
     const list = byName.get(nameKey) ?? [];
     list.push(match);
     byName.set(nameKey, list);
@@ -71,6 +72,17 @@ const buildIndex = (rows: EjournalPreviewRow[]) => {
 
   return { byExternalId, byRnokpp, byNameBirth, byName, byShortName };
 };
+
+describe("normalizeAnketaNameKey", () => {
+  it("treats Ukrainian и / і and Latin lookalikes as the same person", () => {
+    expect(normalizeAnketaNameKey("ЗАКАЛЮЖНИЙ Іван Олегович")).toBe(
+      normalizeAnketaNameKey("ЗАКАЛЮЖНІЙ Іван Олегович"),
+    );
+    expect(normalizeAnketaNameKey("ЗАКАЛЮЖНИЙ Іван Олегович")).toBe(
+      normalizeAnketaNameKey("ЗАКАЛЮЖНИЙ Iван Олегович"),
+    );
+  });
+});
 
 describe("matchAnketaRowToPersonnelDetailed", () => {
   it("suggests similar people when patronymic differs", () => {
@@ -290,3 +302,4 @@ describe("buildAnketaInStaffRowIdSet", () => {
     expect([...buildAnketaInStaffRowIdSet(rows, index)]).toEqual(["a1"]);
   });
 });
+

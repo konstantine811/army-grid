@@ -1,5 +1,8 @@
 import { useState } from "react";
-import { initialAnketaCellEditorDraft } from "./anketaGaps";
+import {
+  ANKETA_TEXTAREA_EMPTY_TEMPLATES,
+  initialAnketaCellEditorDraft,
+} from "./anketaGaps";
 import type { AnketaColumnKey } from "./anketaSheet";
 import { AnketaMissingPresets } from "./AnketaMissingPresets";
 
@@ -79,8 +82,15 @@ export function AnketaCellEditor({
       {isMultiline ? (
         <textarea
           {...sharedProps}
-          className="anketa-cell-input anketa-cell-textarea is-active"
-          rows={4}
+          className={[
+            "anketa-cell-input",
+            "anketa-cell-textarea",
+            "is-active",
+            columnKey === "relatives" ? "is-relatives" : "",
+          ]
+            .filter(Boolean)
+            .join(" ")}
+          rows={columnKey === "relatives" ? 8 : 4}
         />
       ) : (
         <input {...sharedProps} />
@@ -109,7 +119,7 @@ export function AnketaCellEditor({
           {advanceOnSave ? " і далі" : ""}
         </p>
       ) : null}
-      {isEmpty && columnKey !== "relatives" ? (
+      {isEmpty && !ANKETA_TEXTAREA_EMPTY_TEMPLATES[columnKey] ? (
         <AnketaMissingPresets
           onPick={(preset) => {
             onSave(preset, advanceOnSave);

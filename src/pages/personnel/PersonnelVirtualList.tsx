@@ -1,12 +1,14 @@
-import { useEffect, useLayoutEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { PersonSearchOutlinedIcon } from "@/components/sci/icons";
 import { useVirtualizer } from "@tanstack/react-virtual";
+import { isPersonPhotoDisplayOverride } from "./personAttachments";
 import type { PersonnelRecord } from "./personnelUtils";
 
 export function PersonnelVirtualList({
   items,
   selectedRowId,
   photoByExternalId,
+  selectedPhotoFullUrl = "",
   onNeedPhotos,
   onSelect,
   onPhotoLoadError,
@@ -15,6 +17,7 @@ export function PersonnelVirtualList({
   items: PersonnelRecord[];
   selectedRowId: string;
   photoByExternalId: Record<string, string>;
+  selectedPhotoFullUrl?: string;
   onNeedPhotos?: (externalIds: string[]) => void;
   onSelect: (rowId: string) => void;
   onPhotoLoadError?: (externalId: string) => void;
@@ -36,14 +39,23 @@ export function PersonnelVirtualList({
   });
   const rowVirtualizerRef = useRef(rowVirtualizer);
   rowVirtualizerRef.current = rowVirtualizer;
+  const measureVirtualRow = useCallback((node: Element | null) => {
+    if (!node) return;
+    requestAnimationFrame(() => {
+      rowVirtualizerRef.current.measureElement(node);
+    });
+  }, []);
   const virtualItems = rowVirtualizer.getVirtualItems();
 
-  useLayoutEffect(() => {
+  useEffect(() => {
     const parent = parentRef.current;
     if (!parent) return;
     parent.scrollTop = 0;
     lastScrolledIdRef.current = "";
-    rowVirtualizerRef.current.measure();
+    const frame = window.requestAnimationFrame(() => {
+      rowVirtualizerRef.current.measure();
+    });
+    return () => window.cancelAnimationFrame(frame);
   }, [itemsKey]);
   const visiblePhotoIds = virtualItems
     .map((item) => items[item.index]?.summary.externalId ?? "")
@@ -135,9 +147,17 @@ export function PersonnelVirtualList({
           const record = items[virtualRow.index];
           if (!record) return null;
 
-          const photo =
+          const isSelected = record.row.__dbRowId === selectedRowId;
+          const localPhoto =
             (record.summary.externalId &&
               photoByExternalId[record.summary.externalId]) ||
+            "";
+          const photo =
+            (isSelected &&
+              (localPhoto && isPersonPhotoDisplayOverride(localPhoto)
+                ? localPhoto
+                : selectedPhotoFullUrl)) ||
+            localPhoto ||
             "";
 
           return (
@@ -147,7 +167,7 @@ export function PersonnelVirtualList({
               }
               data-index={virtualRow.index}
               key={virtualRow.key}
-              ref={rowVirtualizer.measureElement}
+              ref={measureVirtualRow}
               type="button"
               style={{ transform: `translateY(${virtualRow.start}px)` }}
               onClick={() => onSelect(record.row.__dbRowId ?? "")}
@@ -157,9 +177,12 @@ export function PersonnelVirtualList({
                   <img
                     alt=""
                     decoding="async"
+                    loading="lazy"
                     src={photo}
                     onLoad={() => {
-                      rowVirtualizerRef.current.measure();
+                      window.requestAnimationFrame(() => {
+                        rowVirtualizerRef.current.measure();
+                      });
                     }}
                     onError={() => {
                       const externalId = record.summary.externalId;

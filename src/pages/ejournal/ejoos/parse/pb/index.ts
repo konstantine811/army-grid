@@ -4,6 +4,7 @@ export {
   createMovementKey,
   isCancelledMovementRecord,
   isContractMovementType,
+  motivationContractOverlapsWindow,
   parseContractDatesFromChangeText,
   parsePbMovements,
   parseRankPromotion,

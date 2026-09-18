@@ -65,6 +65,7 @@ const overviewExportColumnWidth = (columnId: string) => {
 };
 
 const IMPORTANT_OVERVIEW_COLUMNS = [
+  { id: "index", label: "№", width: 10 },
   { id: "staff_5", label: "Посада", width: 28 },
   { id: "staff_8", label: "ШПК факт", width: 14 },
   { id: "person", label: "ПІБ", width: 30 },
@@ -81,14 +82,17 @@ const IMPORTANT_OVERVIEW_COLUMNS = [
 const importantOverviewValue = (
   row: BackendPersonnelOverviewRow,
   columnId: (typeof IMPORTANT_OVERVIEW_COLUMNS)[number]["id"],
-) =>
-  columnId === "person"
-    ? row.name
-    : row.staffSheetColumns?.[columnId]?.trim() || "";
+  rowIndex: number,
+) => {
+  if (columnId === "index") return rowIndex;
+  if (columnId === "person") return row.name;
+  return row.staffSheetColumns?.[columnId]?.trim() || "";
+};
 
 const importantHeaderColor = (index: number) => {
-  if (index <= 3) return "#F4C20D";
-  if (index <= 5) return "#70AD47";
+  if (index === 0) return "#D9D9D9";
+  if (index <= 4) return "#F4C20D";
+  if (index <= 6) return "#70AD47";
   return "#8EA9DB";
 };
 
@@ -139,8 +143,9 @@ export const buildImportantOverviewExportSheetData = (
   })),
   ...rows.map((row, rowIndex) =>
     IMPORTANT_OVERVIEW_COLUMNS.map((column) => ({
-      value: importantOverviewValue(row, column.id),
+      value: importantOverviewValue(row, column.id, rowIndex + 1),
       fontSize: 10,
+      fontWeight: column.id === "index" ? ("bold" as const) : undefined,
       textColor: EXPORT_COLORS.text,
       align: "center" as const,
       alignVertical: "center" as const,
@@ -158,7 +163,7 @@ export const buildImportantOverviewExportSheetOptions = () => ({
     width: column.width,
   })),
   stickyRowsCount: 2,
-  stickyColumnsCount: 3,
+  stickyColumnsCount: 4,
   showGridLines: false,
   orientation: "landscape" as const,
 });

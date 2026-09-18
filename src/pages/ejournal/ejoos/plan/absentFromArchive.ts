@@ -112,6 +112,32 @@ export const planAbsentArchiveOps = (input: AbsentArchivePlanInput): EjoosSyncOp
     ]
       .filter(Boolean)
       .join(" · ");
+    const shPersonForPaint =
+      (period.personId && input.shPersonById.get(period.personId)) ||
+      input.byPersonName(
+        input.shPersonByName,
+        period.personId,
+        period.fullName,
+      ) ||
+      null;
+    const activeTimesheetForPaint = input.activeTimesheetRowOf(
+      period.personId,
+      period.fullName,
+      shPersonForPaint?.positionIndex || "",
+    );
+    const episodePaintForRefresh = activeTimesheetForPaint?.excelRow
+      ? input.staffEpisodePaintPayload(
+          period.personId,
+          period.fullName,
+          shPersonForPaint?.positionIndex || "",
+          activeTimesheetForPaint.excelRow,
+        )
+      : null;
+    const needsTimesheetRefresh = Boolean(
+      activeTimesheetForPaint?.excelRow &&
+        (episodePaintForRefresh?.timesheetAbsenceSpans ||
+          input.mapStatus(period.absenceType).timesheetCode),
+    );
     const needsClose =
       hasActualReturn(period.returnDate) &&
       Boolean(reuseAbsent) &&
@@ -209,7 +235,7 @@ export const planAbsentArchiveOps = (input: AbsentArchivePlanInput): EjoosSyncOp
           checkedDefault: true,
         });
       }
-      return;
+      if (!needsTimesheetRefresh) return;
     }
     if (
       reuseAbsent &&
@@ -224,16 +250,15 @@ export const planAbsentArchiveOps = (input: AbsentArchivePlanInput): EjoosSyncOp
     ) {
       return;
     }
-    if (open && before === after) return;
-    if (recorded && !hasActualReturn(period.returnDate)) return;
-    const shPerson =
-      (period.personId && input.shPersonById.get(period.personId)) ||
-      input.byPersonName(
-        input.shPersonByName,
-        period.personId,
-        period.fullName,
-      ) ||
-      null;
+    if (open && before === after && !needsTimesheetRefresh) return;
+    if (
+      recorded &&
+      !hasActualReturn(period.returnDate) &&
+      !needsTimesheetRefresh
+    ) {
+      return;
+    }
+    const shPerson = shPersonForPaint;
     const archiveReturnVsSh = archiveReturnContradictsCurrentSh(
       shPerson ? input.mapStatus(shPerson.status).timesheetCode : "",
       input.mapStatus(period.absenceType).timesheetCode,
@@ -271,17 +296,15 @@ export const planAbsentArchiveOps = (input: AbsentArchivePlanInput): EjoosSyncOp
       });
       return;
     }
-    const activeTs = input.activeTimesheetRowOf(
-      period.personId,
-      period.fullName,
-      shPerson?.positionIndex || "",
-    );
-    const episodePaint = input.staffEpisodePaintPayload(
-      period.personId,
-      period.fullName,
-      shPerson?.positionIndex || "",
-      activeTs?.excelRow || 0,
-    );
+    const activeTs = activeTimesheetForPaint;
+    const episodePaint =
+      episodePaintForRefresh ??
+      input.staffEpisodePaintPayload(
+        period.personId,
+        period.fullName,
+        shPerson?.positionIndex || "",
+        activeTs?.excelRow || 0,
+      );
     const returnOrderNo = period.returnOrderNumber
       ? `№${period.returnOrderNumber.replace(/^№/i, "")}`
       : "";
@@ -305,7 +328,9 @@ export const planAbsentArchiveOps = (input: AbsentArchivePlanInput): EjoosSyncOp
       why: complete
         ? period.returnDate
           ? `Закрити період ${period.absenceType || "відсутності"} фактичним поверненням ${period.returnDate}${returnOrderNo ? ` ${returnOrderNo}` : ""}. Коди відсутності — у «Тимч. відсутні»${episodePaint.historyTimesheetExcelRow ? " і на історичному рядку Табеля" : ""}, не на новому штатному епізоді.`
-          : "Відкритий період цього місяця з archive — внести у «Тимч. відсутні»"
+          : needsTimesheetRefresh && before === after
+            ? `«Тимч. відсутні» вже збігається з archive — оновити коди в Табелі (${episodePaint.timesheetAbsenceSpans || input.mapStatus(period.absenceType).timesheetCode || "відсутність"})`
+            : "Відкритий період цього місяця з archive — внести у «Тимч. відсутні»"
         : "В archive неповні поля (дата/підстава) — дозаповніть перед застосуванням",
       confidence: complete ? "high" : "manual",
       payload: {
@@ -334,7 +359,9 @@ export const planAbsentArchiveOps = (input: AbsentArchivePlanInput): EjoosSyncOp
             : input.mapStatus(period.absenceType).timesheetCode || "",
         existingExcelRow: reuseAbsent ? String(reuseAbsent.excelRow) : "",
       },
-      checkedDefault: complete && (!reuseAbsent || needsClose),
+      checkedDefault:
+        complete &&
+        (!reuseAbsent || needsClose || needsTimesheetRefresh),
     });
   });
 

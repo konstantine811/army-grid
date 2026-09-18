@@ -5,6 +5,7 @@ import {
   encodeTimesheetAbsenceSpans,
   extractTimesheetDestinationFromPosition,
   journalDayFromDateMs,
+  shouldUseArchiveReturnForStaffEpisode,
 } from "../../../ejoosTimesheetText";
 import { isOwnUnitStaffMove } from "../../../ejoosMovementRules";
 import { positionCloseWritesExcluded } from "../../../ejoosExcludePolicy";
@@ -340,9 +341,25 @@ export const planPositionChangeMovementOps = (
     const carryAbsenceFromMonthStart =
       !returningFromDisposition &&
       monthSpans.some((span) => span.fromDay === 1);
+    const archiveReturnDate =
+      latestArchiveReturn?.returnDate &&
+      hasActualReturn(latestArchiveReturn.returnDate)
+        ? latestArchiveReturn.returnDate
+        : "";
+    const useArchiveReturnForEpisode =
+      returningFromDisposition &&
+      archiveReturnDate &&
+      shouldUseArchiveReturnForStaffEpisode({
+        archiveReturnDate,
+        monthStartMs: input.leadWindowStart,
+        openAbsenceGround: openAbsence?.ground || "",
+        monthSpans,
+        hasReturn: hasActualReturn,
+      });
     const timesheetActiveFrom = returningFromDisposition
-      ? event.orderDate ||
-        latestArchiveReturn?.returnDate ||
+      ? (useArchiveReturnForEpisode ? archiveReturnDate : "") ||
+        event.orderDate ||
+        archiveReturnDate ||
         (openAbsence?.actualReturn &&
         hasActualReturn(openAbsence.actualReturn)
           ? openAbsence.actualReturn

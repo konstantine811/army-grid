@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Alert,
   Box,
@@ -31,15 +31,41 @@ import { useAnketaGapSearch } from "./hooks/useAnketaGapSearch";
 import { useAnketaSheetLoader } from "./hooks/useAnketaSheetLoader";
 import { useAuth } from "../../auth/AuthProvider";
 import { loadPersonnelIndexForAnketa } from "./anketaPersonMatch";
+import {
+  ANKETA_EJOOS_TAB_STORAGE_KEY,
+  filterAnketaRowsByEjoosSource,
+  readStoredAnketaEjoosTab,
+  type AnketaEjoosSourceTab,
+} from "./anketaEjoosPeople";
+import {
+  Tabs,
+  TabsList,
+  TabsTrigger,
+} from "@/components/ui/tabs/tabs";
 
 export function AnketaDataPage() {
   const { canEditArea } = useAuth();
   const canEdit = canEditArea("anketaData");
+  const [sourceTab, setSourceTab] = useState<AnketaEjoosSourceTab>(
+    readStoredAnketaEjoosTab,
+  );
 
   const sheet = useAnketaSheetLoader();
+  const visibleRows = useMemo(
+    () => filterAnketaRowsByEjoosSource(sheet.rows, sourceTab),
+    [sheet.rows, sourceTab],
+  );
+  const oosCount = useMemo(
+    () => filterAnketaRowsByEjoosSource(sheet.rows, "oos").length,
+    [sheet.rows],
+  );
+  const excludedCount = useMemo(
+    () => filterAnketaRowsByEjoosSource(sheet.rows, "excluded").length,
+    [sheet.rows],
+  );
   const gapColumns = useAnketaGapColumnsMenu();
   const gap = useAnketaGapSearch({
-    rows: sheet.rows,
+    rows: visibleRows,
     gapColumnKeys: gapColumns.gapColumnKeys,
     missingQuestionnaireNames: sheet.missingQuestionnaireNames,
     setMissingQuestionnaireNames: sheet.setMissingQuestionnaireNames,
@@ -58,6 +84,20 @@ export function AnketaDataPage() {
       /* прогрів кешу для картки / пошуку порожніх */
     });
   }, []);
+
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(ANKETA_EJOOS_TAB_STORAGE_KEY, sourceTab);
+    } catch {
+      /* private mode */
+    }
+  }, [sourceTab]);
+
+  const selectSourceTab = (next: AnketaEjoosSourceTab) => {
+    if (next === sourceTab) return;
+    gap.stopEmptySearch();
+    setSourceTab(next);
+  };
 
   const exportTable = async (
     context: SciDataTableExportContext<AnketaRow>,
@@ -101,10 +141,12 @@ export function AnketaDataPage() {
 
   const table = useMaterialReactTable({
     columns,
-    data: sheet.rows,
+    data: visibleRows,
     emptyMessage: sheet.isLoading
       ? "Завантаження…"
-      : "Немає анкетних даних. Оновіть з Google або імпортуйте CSV.",
+      : sourceTab === "excluded"
+        ? "Немає виключених у поточному ЕЖООС."
+        : "Немає анкетних даних ООС. Оновіть з Google або імпортуйте CSV.",
     exportLabel: "Експорт Excel",
     globalFilterPlaceholder: "Пошук: ПІБ, ID, звання, РНОКПП…",
     getRowId: (row) => row.__rowId,
@@ -153,10 +195,10 @@ export function AnketaDataPage() {
             <Button
               variant="outlined"
               startIcon={<SkipNextOutlinedIcon />}
-              disabled={sheet.isLoading || !sheet.rows.length}
+              disabled={sheet.isLoading || !visibleRows.length}
               onMouseDown={(event) => event.preventDefault()}
-              onClick={() => gap.goToEmptyCell("first")}
-              title="Перша порожня"
+              onClick={() => void gap.goToEmptyCell("first")}
+              title="Перша порожня в цьому списку (спочатку Штатка, потім решта)"
             >
               <span className="anketa-label-full">Перша порожня</span>
               <span className="anketa-label-short" aria-hidden="true">
@@ -166,10 +208,10 @@ export function AnketaDataPage() {
             <Button
               variant="outlined"
               startIcon={<ArrowRightOutlinedIcon />}
-              disabled={sheet.isLoading || !sheet.rows.length}
+              disabled={sheet.isLoading || !visibleRows.length}
               onMouseDown={(event) => event.preventDefault()}
-              onClick={() => gap.goToEmptyCell("next")}
-              title="Наступна порожня"
+              onClick={() => void gap.goToEmptyCell("next")}
+              title="Наступна порожня в цьому списку (спочатку Штатка, потім решта)"
             >
               <span className="anketa-label-full">Наступна порожня</span>
               <span className="anketa-label-short" aria-hidden="true">
@@ -179,16 +221,39 @@ export function AnketaDataPage() {
             <Button
               variant="outlined"
               startIcon={<SkipNextOutlinedIcon />}
-              disabled={sheet.isLoading || !sheet.rows.length}
+              disabled={sheet.isLoading || !visibleRows.length}
               onMouseDown={(event) => event.preventDefault()}
-              onClick={() => gap.goToEmptyCell("nextPerson")}
-              title="Пропустити поточного службовця і перейти до наступного з пропусками"
+              onClick={() => void gap.goToEmptyCell("nextPerson")}
+              title="Наступний службовець з пропусками в цьому списку"
             >
               <span className="anketa-label-full">Наступний службовець</span>
               <span className="anketa-label-short" aria-hidden="true">
                 Наст. особа
               </span>
             </Button>
+            <Button
+              variant="outlined"
+              disabled={!gap.emptySearchActive || !gap.focusedAnketaRow}
+              onClick={gap.markCurrentGapPersonReviewed}
+              title="Запам’ятати поточного службовця як пройденого (не показувати знову, поки не зміняться дані чи анкета)"
+            >
+              <span className="anketa-label-full">Пройдено</span>
+              <span className="anketa-label-short" aria-hidden="true">
+                ✓
+              </span>
+            </Button>
+            {gap.gapReviewedCount > 0 ? (
+              <Button
+                variant="outlined"
+                onClick={gap.clearGapReviewProgress}
+                title="Скинути список пройдених службовців і знову показувати їх у пошуку"
+              >
+                <span className="anketa-label-full">Скинути пройдених</span>
+                <span className="anketa-label-short" aria-hidden="true">
+                  ↺
+                </span>
+              </Button>
+            ) : null}
             <Button
               variant="outlined"
               disabled={!gap.emptySearchActive}
@@ -203,10 +268,11 @@ export function AnketaDataPage() {
                 !canEdit ||
                 sheet.isLoading ||
                 gap.isFillingAbsent ||
-                !sheet.rows.length
+                !sheet.rows.length ||
+                !visibleRows.length
               }
               onClick={() => void gap.fillAbsentQuestionnaireCells()}
-              title="Для осіб без анкет записати «дані відсутні» у порожні вибрані колонки. Якщо анкета вже з’явилась — зняти «дані відсутні», щоб пошук міг заповнити."
+              title="Для осіб без анкет у цьому списку записати «дані відсутні» у порожні вибрані колонки."
             >
               <span className="anketa-label-full">
                 {gap.isFillingAbsent
@@ -314,6 +380,11 @@ export function AnketaDataPage() {
                   відкл. {gap.deferredGapKeys.length}
                 </span>
               ) : null}
+              {gap.gapReviewedCount ? (
+                <span title="Пройдені службовці (запам’ятано на цьому комп’ютері)">
+                  пройдено {gap.gapReviewedCount}
+                </span>
+              ) : null}
               {sheet.dirtyCount ? (
                 <span title="Несинхронізовані в сесії">
                   сесія {sheet.dirtyCount}
@@ -338,12 +409,29 @@ export function AnketaDataPage() {
           .join(" ")}
       >
         <section className="analytics-panel anketa-data-table-panel">
-          <div className="panel-heading">
-            Анкети
-            {sheet.snapshot ? (
+          <div className="panel-heading anketa-table-heading">
+            <Tabs
+              value={sourceTab}
+              onValueChange={(value) =>
+                selectSourceTab(value as AnketaEjoosSourceTab)
+              }
+            >
+              <TabsList className="anketa-source-tabs" aria-label="Список анкет">
+                <TabsTrigger value="oos">
+                  ООС
+                  <span className="anketa-source-tab-count">{oosCount}</span>
+                </TabsTrigger>
+                <TabsTrigger value="excluded">
+                  Виключені
+                  <span className="anketa-source-tab-count">
+                    {excludedCount}
+                  </span>
+                </TabsTrigger>
+              </TabsList>
+            </Tabs>
+            {gap.focusedEmpty ? (
               <span className="personnel-list-questionnaire-count">
-                · {sheet.snapshot.rows.length}
-                {gap.focusedEmpty ? ` · фокус ${gap.focusedEmpty.a1}` : ""}
+                фокус {gap.focusedEmpty.a1}
               </span>
             ) : null}
           </div>
@@ -379,6 +467,15 @@ export function AnketaDataPage() {
                   : undefined
               }
               onMessage={sheet.setMessage}
+              emptySearchActive={gap.emptySearchActive}
+              onApplyOcrCells={
+                gap.focusedAnketaRow && gap.emptySearchActive
+                  ? (items) =>
+                      gap.patchCells(gap.focusedAnketaRow!.__rowId, items, {
+                        advance: true,
+                      })
+                  : undefined
+              }
             />
           </>
         ) : null}

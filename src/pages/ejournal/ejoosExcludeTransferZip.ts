@@ -3,6 +3,7 @@ import type {
   ExcelSheetSnapshot,
   ExcelWorkbookSnapshot,
 } from "../../excelRoundTrip";
+import { formatUkDateForExcelWrite } from "../../shared/format";
 import {
   EJOOS_PERSON_DATA_START_ROW,
   collectExcludedPositionDateWrites,
@@ -762,14 +763,14 @@ export async function applyExcludeTransfersWithZip(input: {
         arrivalWrites.push({
           row: arrivalRow,
           column: arrivalCloseColumns.departDateCol,
-          value: departDate || null,
+          value: formatUkDateForExcelWrite(departDate),
         });
       }
       if (arrivalCloseColumns.orderDateCol) {
         arrivalWrites.push({
           row: arrivalRow,
           column: arrivalCloseColumns.orderDateCol,
-          value: orderDate || null,
+          value: formatUkDateForExcelWrite(orderDate),
         });
       }
       if (arrivalCloseColumns.orderNumberCol) {
@@ -780,10 +781,11 @@ export async function applyExcludeTransfersWithZip(input: {
         });
       }
       if (arrivalCloseColumns.orderCombinedCol) {
+        const orderDateLabel = formatUkDateForExcelWrite(orderDate) || orderDate;
         arrivalWrites.push({
           row: arrivalRow,
           column: arrivalCloseColumns.orderCombinedCol,
-          value: [orderNumber ? `№${orderNumber}` : "", orderDate ? `від ${orderDate}` : ""]
+          value: [orderNumber ? `№${orderNumber}` : "", orderDateLabel ? `від ${orderDateLabel}` : ""]
             .filter(Boolean)
             .join(" "),
         });

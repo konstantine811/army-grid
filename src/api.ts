@@ -1,3 +1,4 @@
+import { enqueueDocumentSave } from "./data/documentSaveQueue"
 import {
   CacheKeys,
   invalidateDataCache,
@@ -414,6 +415,13 @@ export type AiQuestionnaireOcrField = {
   label: string
   value: string
   confidence: 'high' | 'medium' | 'low' | string
+}
+
+export type AnketaGapColumnDescriptor = {
+  key: string
+  header: string
+  /** Поточне значення в таблиці (напр. «забув»), якщо комірка не зовсім порожня. */
+  currentValue?: string
 }
 
 export type AiQuestionnaireOcrResult = {
@@ -875,13 +883,19 @@ export const api = {
   },
 
   aiQuestionnaireOcr(payload: {
-    imageData: string
+    imageData?: string
+    pdfData?: string
+    pageImages?: string[]
     fileName?: string
     pageNumber?: string
+    personName?: string
+    selectedColumns?: AnketaGapColumnDescriptor[]
+    emptyColumns?: AnketaGapColumnDescriptor[]
   }) {
     return request<AiQuestionnaireOcrResult>('/ejournals/questionnaire-ai-ocr', {
       method: 'POST',
       body: JSON.stringify(payload),
+      suppressErrorToast: true,
     })
   },
 
@@ -1240,7 +1254,7 @@ export const api = {
     },
     options?: { suppressErrorToast?: boolean },
   ) {
-    return request<BackendPersonDocument>(
+    return enqueueDocumentSave(documentId, () => request<BackendPersonDocument>(
       `/ejournals/personnel/${encodeURIComponent(personExternalId)}/documents/${encodeURIComponent(documentId)}`,
       {
         method: 'PATCH',
@@ -1250,7 +1264,7 @@ export const api = {
     ).then(async (result) => {
       await invalidateDataCache(CacheKeys.documentsAll, CacheKeys.overview)
       return result
-    })
+    }))
   },
 
   deletePersonDocument(personExternalId: string, documentId: string) {

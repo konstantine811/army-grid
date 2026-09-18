@@ -161,6 +161,7 @@ describe("overviewExport", () => {
       status: "На виконанні",
     })).toBe("2 піхотна рота — На виконанні");
     expect(sheet[1]?.map((cell) => cell && "value" in cell && cell.value)).toEqual([
+      "№",
       "Посада",
       "ШПК факт",
       "ПІБ",
@@ -173,19 +174,23 @@ describe("overviewExport", () => {
       "Примітки",
       "Напрямок",
     ]);
-    expect(sheet[1]?.[0]).toMatchObject({
+    expect(sheet[1]?.[1]).toMatchObject({
       textColor: "#17231E",
       backgroundColor: "#F4C20D",
     });
     expect(sheet[2]?.[0]).toMatchObject({
+      value: 1,
+      textColor: "#17231E",
+    });
+    expect(sheet[2]?.[1]).toMatchObject({
       value: "Кулеметник",
       textColor: "#17231E",
     });
-    expect(sheet[2]?.[2]).toMatchObject({ value: "Іванов Іван" });
-    expect(sheet[2]?.[8]).toMatchObject({ value: "На виконанні" });
+    expect(sheet[2]?.[3]).toMatchObject({ value: "Іванов Іван" });
+    expect(sheet[2]?.[9]).toMatchObject({ value: "На виконанні" });
     expect(buildImportantOverviewExportSheetOptions()).toMatchObject({
       stickyRowsCount: 2,
-      stickyColumnsCount: 3,
+      stickyColumnsCount: 4,
       orientation: "landscape",
     });
   });
@@ -260,8 +265,8 @@ describe("overviewExport", () => {
     expect(sheets[0]?.data[0]?.[0]).toMatchObject({
       value: "Підрозділ: 2 рота · Статус: Лікування",
     });
-    expect(sheets[1]?.data[2]?.[2]).toMatchObject({ value: "Петренко" });
-    expect(sheets[2]?.data[2]?.[2]).toMatchObject({ value: "Сидоренко" });
+    expect(sheets[1]?.data[2]?.[3]).toMatchObject({ value: "Петренко" });
+    expect(sheets[2]?.data[2]?.[3]).toMatchObject({ value: "Сидоренко" });
     expect(sheets[2]?.data).toHaveLength(3);
     expect(sheets[2]?.data[0]?.[0]).toMatchObject({
       value: "Підрозділ: 2 рота · Місце перебування: На виконанні",
@@ -308,7 +313,7 @@ describe("overviewExport", () => {
     const peopleSheet = sheets.find((sheet) => sheet.sheet === "Усі");
     const names = peopleSheet?.data
       .slice(2)
-      .map((row) => row[2] && "value" in row[2] && row[2].value);
+      .map((row) => row[3] && "value" in row[3] && row[3].value);
 
     expect(names).toEqual(["Стрілець 2 роти"]);
     expect(names).not.toContain("Командир батальйону");

@@ -1,4 +1,8 @@
 import type { CellValue, ExcelSheetSnapshot } from "../../excelRoundTrip";
+import {
+  formatUkDate,
+  tryParseExcelSerialDate,
+} from "../../shared/format";
 
 const MAX_DISPLAY_COLUMNS = 40;
 
@@ -18,15 +22,12 @@ export const displayEjoosCell = (
     return value.toLocaleDateString("uk-UA");
   }
   if (typeof value === "number" && Number.isFinite(value)) {
-    if (value >= 40_000 && value < 60_000) {
-      const epoch = Date.UTC(1899, 11, 30);
-      const date = new Date(epoch + value * 86_400_000);
-      if (!Number.isNaN(date.getTime())) {
-        return date.toLocaleDateString("uk-UA");
-      }
-    }
+    const parsedSerial = tryParseExcelSerialDate(value);
+    if (parsedSerial) return formatUkDate(parsedSerial);
     return splitPackedStaffIndexes(String(value));
   }
+  const parsedSerial = tryParseExcelSerialDate(value);
+  if (parsedSerial) return formatUkDate(parsedSerial);
   const text = String(value)
     .replace(/\r\n/g, "\n")
     .replace(/\r/g, "\n");

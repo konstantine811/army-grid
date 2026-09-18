@@ -11,6 +11,7 @@ import {
   parseEjoosOos,
 } from "../ejournal/ejoosParsers";
 import { base64ToFile } from "../ejournal/ejoosSyncApply";
+import { padAnketaIdDocumentNumbersInRows } from "./anketaIdDocumentNumber";
 import {
   normalizeAnketaExternalIdKey,
   normalizeAnketaNameKey,
@@ -30,6 +31,30 @@ export type EjoosAnketaCandidate = {
   positionIndex: string;
   source: "oos" | "excluded";
   anketaFields?: Partial<Record<AnketaColumnKey, string>>;
+};
+
+export type AnketaEjoosSourceTab = EjoosAnketaCandidate["source"];
+
+export const ANKETA_EJOOS_TAB_STORAGE_KEY = "army-grid:anketa-ejoos-tab";
+
+export const anketaRowEjoosSource = (
+  row: Pick<AnketaRow, "__ejoosSource">,
+): AnketaEjoosSourceTab =>
+  row.__ejoosSource === "excluded" ? "excluded" : "oos";
+
+export const filterAnketaRowsByEjoosSource = (
+  rows: AnketaRow[],
+  source: AnketaEjoosSourceTab,
+) => rows.filter((row) => anketaRowEjoosSource(row) === source);
+
+export const readStoredAnketaEjoosTab = (): AnketaEjoosSourceTab => {
+  try {
+    const stored = sessionStorage.getItem(ANKETA_EJOOS_TAB_STORAGE_KEY);
+    if (stored === "excluded" || stored === "oos") return stored;
+  } catch {
+    /* private mode */
+  }
+  return "oos";
 };
 
 export type ReconcileAnketaWithEjoosReport = {
@@ -76,7 +101,11 @@ export const collectEjoosOosAndExcludedPeople = (
     const existing = people.find((person) => {
       const existingId = normalizeAnketaExternalIdKey(person.personId);
       const existingName = normalizeAnketaNameKey(person.fullName);
-      if (id && existingId) return id === existingId;
+      // Пошкоджений/повторно використаний ID не повинен склеювати двох
+      // різних людей і прибирати один ПІБ з «Анкетних даних».
+      if (id && existingId) {
+        return id === existingId && name === existingName;
+      }
       return Boolean(name && existingName && name === existingName);
     });
     if (!existing) {
@@ -87,6 +116,9 @@ export const collectEjoosOosAndExcludedPeople = (
     existing.fullName ||= candidate.fullName;
     existing.rank ||= candidate.rank;
     existing.positionIndex ||= candidate.positionIndex;
+    if (existing.source === "oos" || candidate.source === "oos") {
+      existing.source = "oos";
+    }
     existing.anketaFields = {
       ...candidate.anketaFields,
       ...existing.anketaFields,
@@ -188,6 +220,11 @@ const mergeCandidateIntoAnketa = (
       changed = true;
     }
   }
+  const source: AnketaEjoosSourceTab =
+    next.__ejoosSource === "oos" || person.source === "oos"
+      ? "oos"
+      : "excluded";
+  next.__ejoosSource = source;
   return { row: next, changed };
 };
 
@@ -237,6 +274,16 @@ export const reconcileAnketaRowsWithEjoos = (
       });
       matched = idMatches[0] ?? null;
     }
+    if (matched) {
+      const matchedName = normalizeAnketaNameKey(matched.fullName);
+      if (matchedName && matchedName !== personName) {
+        report.conflicts.push({
+          name: person.fullName,
+          message: `ID ${person.personId} належить іншому ПІБ в анкеті: ${matched.fullName}`,
+        });
+        matched = null;
+      }
+    }
     if (!matched && nameMatches.length === 1) {
       const byName = nameMatches[0]!;
       const rowId = normalizeAnketaExternalIdKey(byName.externalId);
@@ -256,17 +303,6 @@ export const reconcileAnketaRowsWithEjoos = (
     }
 
     if (matched) {
-      const matchedName = normalizeAnketaNameKey(matched.fullName);
-      if (matchedName && matchedName !== personName) {
-        report.conflicts.push({
-          name: person.fullName,
-          message: `ID ${person.personId} належить іншому ПІБ в анкеті: ${matched.fullName}`,
-        });
-        usedRows.add(matched);
-        reconciled.push(matched);
-        report.kept += 1;
-        continue;
-      }
       usedRows.add(matched);
       const merged = mergeCandidateIntoAnketa(matched, person);
       reconciled.push(merged.row);
@@ -277,6 +313,7 @@ export const reconcileAnketaRowsWithEjoos = (
 
     const created = createEmptyAnketaRow(nextRowNumber);
     Object.assign(created, candidateFields(person));
+    created.__ejoosSource = person.source === "excluded" ? "excluded" : "oos";
     created.__rowId = `anketa-${nextRowNumber}-${created.externalId || created.fullName}`;
     reconciled.push(created);
     nextRowNumber += 1;
@@ -302,7 +339,7 @@ export const reconcileAnketaSnapshotWithEjoos = (
     snapshot: {
       ...snapshot,
       columns: ANKETA_COLUMNS,
-      rows: result.rows,
+      rows: padAnketaIdDocumentNumbersInRows(result.rows),
       sourceLabel: `${snapshot.sourceLabel.replace(/\s*·\s*ЕЖООС v\d+$/u, "")} · ЕЖООС v${authority.version}`,
       ejoosVersionId: authority.versionId,
       reconciledAt: new Date().toISOString(),

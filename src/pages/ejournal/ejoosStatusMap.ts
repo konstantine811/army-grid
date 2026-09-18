@@ -114,6 +114,9 @@ export const readOperatorSettings = (): EjoosOperatorSettings => {
     const medicalBoardRule = defaults.statusRules.find(
       (rule) => rule.id === "medical_board",
     );
+    const woundingRule = defaults.statusRules.find(
+      (rule) => rule.id === "wounding",
+    );
     const statusRules = parsed.statusRules.length
       ? [...parsed.statusRules]
       : defaults.statusRules;
@@ -128,6 +131,9 @@ export const readOperatorSettings = (): EjoosOperatorSettings => {
         // a dedicated Табель code.
         statusRules[medicalBoardIndex] = medicalBoardRule;
       }
+    }
+    if (woundingRule && !statusRules.some((rule) => rule.id === "wounding")) {
+      statusRules.push(woundingRule);
     }
     const medicalIndex = statusRules.findIndex((rule) => rule.id === "med");
     if (

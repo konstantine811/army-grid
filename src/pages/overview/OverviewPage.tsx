@@ -1,3 +1,5 @@
+import { mergeMorningRosterRefresh } from "./overviewMorningRosterRefresh";
+import { morningUnitMatches } from "./overviewMorningUnit";
 import {
   startTransition,
   useCallback,
@@ -14,19 +16,13 @@ import {
   Alert,
   Box,
   Button,
-  Chip,
   LinearProgress,
   MenuItem,
   Stack,
   TextField,
   Typography,
 } from "@/components/sci/SciPrimitives";
-import { BusinessCenterOutlinedIcon } from "@/components/sci/icons";
-import { LocalHospitalOutlinedIcon } from "@/components/sci/icons";
-import { BeachAccessOutlinedIcon } from "@/components/sci/icons";
-import { PersonOutlinedIcon } from "@/components/sci/icons";
 import { SearchOutlinedIcon } from "@/components/sci/icons";
-import { ShieldOutlinedIcon } from "@/components/sci/icons";
 import {
   api,
   type BackendPersonQuestionnaireMeta,
@@ -73,6 +69,11 @@ import {
   directQuestionnairePresence,
   fetchOverviewPersonnelAssets,
 } from "./overviewAssetsLoad";
+import { BchsMorningBaselineControl } from "./BchsMorningBaselineControl";
+import {
+  readManualBchsMorningBaseline,
+  type BchsMorningManualBaseline,
+} from "./overviewRotaBchsMorningSnapshot";
 import { fetchMergedOverviewSnapshot, fetchOverviewStaffSnapshot } from "./overviewServerSnapshots";
 import {
   canSkipOverviewDatasetReload,
@@ -83,9 +84,10 @@ import {
 import { OVERVIEW_DEFERRED_ASSET_COLUMN_IDS } from "./overviewStaffSheetColumns";
 import { normalizeRosterMatchText } from "../personnel/fighterStatusImport";
 import {
-  overviewNameMatchesQuery,
-  parseOverviewNameQueries,
   buildOverviewRowSearchText,
+  overviewNameMatchesQuery,
+  overviewNameQueryTokenCount,
+  parseOverviewNameQueries,
 } from "./overviewNameSearch";
 import { overviewMergeCacheKey, overviewMergeFingerprint } from "./overviewMergeCache";
 import {
@@ -95,14 +97,13 @@ import {
 } from "./OverviewVirtualTable";
 import { loadPersonnelOverviewInBatches } from "./overviewBatchLoad";
 import {
-  buildOverviewMetrics,
   buildPersonnelStaffOverview,
   buildRosterOnlyOverview,
   buildStaffOverviewRowsFromPersonnel,
   buildStaffOverviewRowsFromRoster,
   fillDownRosterUnitRows,
-  summarizeStaffFromRoster,
   summarizeNovaStaffForUnits,
+  summarizeStaffFromRoster,
 } from "./overviewRosterMerge";
 import {
   buildImportantOverviewExportFileName,
@@ -111,7 +112,6 @@ import {
   buildOverviewExportSheetOptions,
 } from "./overviewExport";
 import { runHeavyJob } from "../../workers/runHeavyJob";
-import { buildOverviewSideStats } from "./overviewSideStats";
 import { pullStaffSheetRosterImportPayload } from "../excel-fill/staffSheet";
 import { loadPbWorkbookFromDb } from "../ejournal/loadEjournalWorkbooksFromDb";
 import { parsePbArchive } from "../ejournal/ejoosParsers";
@@ -223,6 +223,8 @@ export function OverviewPage({ active = true }: { active?: boolean }) {
   const [rosterUpdatedAt, setRosterUpdatedAt] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [message, setMessage] = useState(`API: ${api.baseUrl}`);
+  const [bchsUnitLabel, setBchsUnitLabel] = useState<string>();
+  const bchsManualBaselineRef = useRef<BchsMorningManualBaseline | null>(null);
   const ejoosLoadedRef = useRef(false);
   const datasetFingerprintRef = useRef("");
   const personnelOverviewRowsCacheRef = useRef<{
@@ -927,10 +929,12 @@ export function OverviewPage({ active = true }: { active?: boolean }) {
   const rowSearchTextCacheRef = useRef(new Map<string, string>());
   const documentsByExternalIdRef = useRef(documentsByExternalId);
   documentsByExternalIdRef.current = documentsByExternalId;
+  const callSignByExternalIdRef = useRef(callSignByExternalId);
+  callSignByExternalIdRef.current = callSignByExternalId;
 
   useEffect(() => {
     rowSearchTextCacheRef.current.clear();
-  }, [documentsByExternalId, nameSearchRows]);
+  }, [callSignByExternalId, documentsByExternalId, nameSearchRows]);
 
   const getRowSearchText = useCallback((row: BackendPersonnelOverviewRow) => {
     const cached = rowSearchTextCacheRef.current.get(row.id);
@@ -939,7 +943,13 @@ export function OverviewPage({ active = true }: { active?: boolean }) {
       row.externalId && documentsByExternalIdRef.current[row.externalId]
         ? documentsByExternalIdRef.current[row.externalId].labels.join(" ")
         : "";
-    const text = buildOverviewRowSearchText(row, documentLabels);
+    const callSign = row.externalId
+      ? callSignByExternalIdRef.current[row.externalId] ?? ""
+      : "";
+    const text = buildOverviewRowSearchText(
+      { ...row, callSign },
+      documentLabels,
+    );
     rowSearchTextCacheRef.current.set(row.id, text);
     return text;
   }, []);
@@ -954,10 +964,12 @@ export function OverviewPage({ active = true }: { active?: boolean }) {
         );
       }
 
-      const normalizedQuery = normalizeRosterText(nameQueries[0] ?? "");
-      if (!normalizedQuery) return true;
-      if (overviewNameMatchesQuery(row.name, nameQueries[0] ?? "")) return true;
+      const nameQuery = nameQueries[0] ?? "";
+      if (overviewNameMatchesQuery(row.name, nameQuery)) return true;
+      if (overviewNameQueryTokenCount(nameQuery) >= 2) return false;
 
+      const normalizedQuery = normalizeRosterText(nameQuery);
+      if (!normalizedQuery) return true;
       return getRowSearchText(row).includes(normalizedQuery);
     });
   }, [
@@ -967,19 +979,6 @@ export function OverviewPage({ active = true }: { active?: boolean }) {
     nameQueries,
     nameSearchRows,
   ]);
-
-  const metrics = useMemo(() => {
-    const metricRows =
-      source === "staff"
-        ? filteredRows.filter((row) => row.inStaff)
-        : filteredRows;
-    return buildOverviewMetrics(metricRows);
-  }, [filteredRows, source]);
-
-  const sideStats = useMemo(
-    () => buildOverviewSideStats(filteredRows, data),
-    [data, filteredRows],
-  );
 
   const nameListMatchStats = useMemo(() => {
     if (!isNameListSearch || !data) return null;
@@ -1338,6 +1337,13 @@ export function OverviewPage({ active = true }: { active?: boolean }) {
   const exportRotaBchsMorningReport = async (
     context: SciDataTableExportContext<BackendPersonnelOverviewRow>,
   ) => {
+    const selectedUnit =
+      context.filters?.find((filter) => filter.id === "unit")?.values[0]?.trim();
+    const unitValues = context.filters?.find((filter) => filter.id === "unit")?.values ?? [];
+    if (unitValues.length !== 1 || !selectedUnit) {
+      setMessage("Оберіть один підрозділ у фільтрі «Підрозділ» перед експортом БЧС.");
+      return;
+    }
     let exportRows = context.allRows ?? context.rows;
     let exportRosterRows = rosterRowsRef.current;
     const selectedUnits = context.filters?.find((filter) => filter.id === "unit")?.values ?? [];
@@ -1358,6 +1364,7 @@ export function OverviewPage({ active = true }: { active?: boolean }) {
             ...row.values,
           })),
         );
+        exportRosterRows = mergeMorningRosterRefresh(exportRosterRows, rosterRowsRef.current);
         const rosterLabels = Object.fromEntries(
           sourceSheet.columns.map((column) => [column.key, column.label]),
         );
@@ -1381,10 +1388,26 @@ export function OverviewPage({ active = true }: { active?: boolean }) {
     }
 
     try {
-      await exportOverviewRotaBchsMorningReport({
-        ...context,
-        allRows: exportRows,
-      }, staffCount, exportRosterRows);
+      let comparisonSnapshot = bchsManualBaselineRef.current?.snapshot ?? null;
+      if (
+        selectedUnit &&
+        (!comparisonSnapshot ||
+          !morningUnitMatches(comparisonSnapshot.unitLabel, selectedUnit))
+      ) {
+        comparisonSnapshot =
+          (await readManualBchsMorningBaseline(selectedUnit))?.snapshot ??
+          null;
+      }
+
+      await exportOverviewRotaBchsMorningReport(
+        {
+          ...context,
+          allRows: exportRows,
+        },
+        staffCount,
+        exportRosterRows,
+        { comparisonSnapshot },
+      );
       const unit =
         context.filters?.find((filter) => filter.id === "unit")?.values[0] ??
         "рота";
@@ -1406,9 +1429,39 @@ export function OverviewPage({ active = true }: { active?: boolean }) {
           <Typography component="h1" variant="h4">
             Огляд
           </Typography>
-          <Typography variant="body2" color="text.secondary">
-            {message}
-          </Typography>
+          {staffSummary.people > 0 ? (
+            <Typography
+              variant="body2"
+              color="text.secondary"
+              className="overview-staff-count"
+            >
+              У штаті{" "}
+              <strong>{staffSummary.people}</strong>
+              {staffSummary.positions > 0 ? (
+                <>
+                  {" "}
+                  · посад {staffSummary.positions}
+                </>
+              ) : null}
+              {staffSummary.vacant > 0 ? (
+                <>
+                  {" "}
+                  · вакант {staffSummary.vacant}
+                </>
+              ) : null}
+              {nameQueries.length ? (
+                <>
+                  {" "}
+                  · показано {filteredRows.length}
+                </>
+              ) : null}
+            </Typography>
+          ) : null}
+          {message ? (
+            <Typography variant="body2" color="text.secondary">
+              {message}
+            </Typography>
+          ) : null}
         </Box>
         <Stack direction="row" spacing={1}>
           <Button variant="outlined" onClick={() => startLoad(true, { refreshStaffServer: true })}>
@@ -1418,48 +1471,6 @@ export function OverviewPage({ active = true }: { active?: boolean }) {
       </header>
 
       {isLoading && data ? <LinearProgress color="primary" /> : null}
-
-      <section className="overview-metrics">
-        <article className="overview-metric-card">
-          <span>
-            <PersonOutlinedIcon fontSize="small" />
-            {source === "staff" ? "У штаті" : "Усього"}
-          </span>
-          <strong>{metrics?.total ?? "—"}</strong>
-          {source === "staff" && staffSummary.positions > 0 ? (
-            <em className="overview-metric-note">
-              штат {staffSummary.positions}
-              {staffSummary.vacant > 0
-                ? ` · вакант ${staffSummary.vacant}`
-                : ""}
-            </em>
-          ) : null}
-        </article>
-        <article className="overview-metric-card tone-ok">
-          <span>
-            <ShieldOutlinedIcon fontSize="small" /> На службі
-          </span>
-          <strong>{metrics?.onDuty ?? "—"}</strong>
-        </article>
-        <article className="overview-metric-card tone-trip">
-          <span>
-            <BusinessCenterOutlinedIcon fontSize="small" /> Відрядження
-          </span>
-          <strong>{metrics?.businessTrip ?? "—"}</strong>
-        </article>
-        <article className="overview-metric-card tone-leave">
-          <span>
-            <BeachAccessOutlinedIcon fontSize="small" /> Відпустка
-          </span>
-          <strong>{metrics?.leave ?? "—"}</strong>
-        </article>
-        <article className="overview-metric-card tone-medical">
-          <span>
-            <LocalHospitalOutlinedIcon fontSize="small" /> Лікування
-          </span>
-          <strong>{metrics?.medical ?? "—"}</strong>
-        </article>
-      </section>
 
       <section className="overview-toolbar">
         <label
@@ -1541,6 +1552,11 @@ export function OverviewPage({ active = true }: { active?: boolean }) {
           questionnairePresenceStatus={questionnairePresenceStatus}
           documentsByExternalId={documentsByExternalId}
           onColumnVisibilityChange={handleColumnVisibilityChange}
+          onColumnFiltersChange={(columnFilters) => {
+            setBchsUnitLabel(
+              columnFilters.unit?.length === 1 ? columnFilters.unit[0] : undefined,
+            );
+          }}
           onOpenQuestionnaire={openQuestionnaire}
           emptyMessage="Немає записів за поточними фільтрами."
           onExport={(context) => void exportOverviewTable(context)}
@@ -1561,73 +1577,18 @@ export function OverviewPage({ active = true }: { active?: boolean }) {
           rotaCopyTextBuilder={buildOverviewRotaCopyText}
           locationCopyTextBuilder={buildOverviewLocationCountCopyText}
         />
-        <footer className="overview-table-footer">
-          <span>
-            Показано всі {filteredRows.length} з {sourceRows.length}
-          </span>
-        </footer>
+        <section className="overview-bchs-baseline-bar">
+          <BchsMorningBaselineControl
+            compact
+            unitLabel={bchsUnitLabel}
+            onMessage={setMessage}
+            onBaselineChange={(baseline) => {
+              bchsManualBaselineRef.current = baseline;
+            }}
+          />
+        </section>
       </div>
       </div>
-
-      <aside className="overview-side">
-        <section className="overview-side-card overview-critical-card">
-          <div className="panel-heading">Критичні терміни</div>
-          <ul className="overview-critical-list">
-            {sideStats.critical.map((item) => {
-              const splitAt = item.text.indexOf(":");
-              const name =
-                splitAt >= 0 ? item.text.slice(0, splitAt).trim() : item.text;
-              const meta = splitAt >= 0 ? item.text.slice(splitAt + 1).trim() : "";
-              return (
-                <li key={item.id} className={`tone-${item.severity}`}>
-                  <span className="overview-critical-name">{name}</span>
-                  {meta ? (
-                    <span className="overview-critical-meta">{meta}</span>
-                  ) : null}
-                </li>
-              );
-            })}
-            {sideStats.critical.length === 0 && (
-              <li className="tone-info">Критичних термінів немає</li>
-            )}
-          </ul>
-        </section>
-
-        <section className="overview-side-card">
-          <div className="panel-heading">Зміни сьогодні</div>
-          <div className="overview-today-changes">
-            <Chip
-              className="overview-status-chip tone-ok"
-              label={`+${sideStats.todayChanges.onDuty}`}
-              size="small"
-            />
-            <Chip
-              className="overview-status-chip tone-trip"
-              label={`+${sideStats.todayChanges.businessTrip}`}
-              size="small"
-            />
-            <Chip
-              className="overview-status-chip tone-leave"
-              label={`+${sideStats.todayChanges.leave}`}
-              size="small"
-            />
-            <Chip
-              className="overview-status-chip tone-medical"
-              label={`+${sideStats.todayChanges.medical}`}
-              size="small"
-            />
-          </div>
-          <Typography variant="body2" color="text.secondary">
-            Усього змін: {sideStats.todayChanges.total}
-          </Typography>
-        </section>
-
-        <section className="overview-side-card overview-updates-card">
-          <div className="panel-heading">Оновлення сьогодні</div>
-          <strong>{String(sideStats.todayUpdates).padStart(2, "0")}</strong>
-          <span>записів оновлено</span>
-        </section>
-      </aside>
     </main>
   );
 }

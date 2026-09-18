@@ -82,6 +82,24 @@ export const formatValueForDisplay = (value: unknown): string => {
   return String(value);
 };
 
+/** Запис у Excel як dd.MM.yyyy — не як серійний номер (46193). */
+export const formatUkDateForExcelWrite = (value: unknown): string | null => {
+  if (value === undefined || value === null) return null;
+  const text = String(value).trim();
+  if (!text) return null;
+
+  const parsedSerial = tryParseExcelSerialDate(value);
+  if (parsedSerial) return formatUkDate(parsedSerial);
+
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return formatUkDate(value);
+  }
+
+  if (/^\d{1,2}\.\d{1,2}\.\d{4}$/.test(text)) return text;
+
+  return text;
+};
+
 export const normalizeDatasetKey = (value: string) =>
   value
     .trim()

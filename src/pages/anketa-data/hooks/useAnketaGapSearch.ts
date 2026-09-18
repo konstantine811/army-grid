@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { api } from "../../../api";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { api, type BackendPersonQuestionnaireMeta } from "../../../api";
 import {
   ANKETA_COLUMNS,
   isAnketaColumnReadonly,
@@ -17,14 +17,20 @@ import {
   anketaCellA1,
   anketaGapSkipKey,
   anketaRowHasQuestionnairePdf,
+  buildAnketaRowsWithQuestionnairePdfSet,
   applyAbsentQuestionnaireClearsToRows,
   applyAbsentQuestionnaireFillsToRows,
   buildAbsentQuestionnaireAnketaRows,
   collectAbsentQuestionnaireCellClears,
   collectAbsentQuestionnaireCellFills,
   countAnketaEmptyCells,
+  filterAnketaRowsForGapSearch,
+  gateAnketaGapSearchRowsInStaffFirst,
+  orderAnketaGapSearchRows,
   findNextAnketaEmptyCell,
   findNextAnketaPersonEmptyCell,
+  isAnketaGapCellTrulyEmpty,
+  isAnketaGapPersonWithoutTrulyEmptyCells,
   listAnketaPersonGapSkipKeys,
   removePresentQuestionnairesFromMissingNameKeys,
   type AnketaGapSearchOptions,
@@ -39,13 +45,21 @@ import {
   expandAnketaNameKeySet,
   loadPersonnelIndexForAnketa,
   matchAnketaRowToPersonnel,
-  orderAnketaRowsForGapSearch,
   type AnketaPersonnelIndex,
 } from "../anketaPersonMatch";
 import {
   loadPersonPhotoForRow,
   loadPersonQuestionnaireForRow,
 } from "../../personnel/personAttachments";
+import {
+  buildAnketaGapReviewEntry,
+  countActiveAnketaGapReviews,
+  filterSkippedAnketaGapRows,
+  loadAnketaGapReviewProgress,
+  mergeAnketaGapReviewEntry,
+  saveAnketaGapReviewProgress,
+  type AnketaGapReviewMap,
+} from "../anketaGapProgress";
 
 type UseAnketaGapSearchOptions = {
   rows: AnketaRow[];
@@ -121,6 +135,14 @@ export function useAnketaGapSearch({
   const [personnelIndex, setPersonnelIndex] = useState<AnketaPersonnelIndex | null>(
     null,
   );
+  const [questionnaireMeta, setQuestionnaireMeta] = useState<
+    BackendPersonQuestionnaireMeta[] | null
+  >(null);
+  const [gapReviewProgress, setGapReviewProgress] = useState<AnketaGapReviewMap>(
+    {},
+  );
+  const gapReviewProgressRef = useRef<AnketaGapReviewMap>({});
+  const gapReviewProgressLoadedRef = useRef(false);
   const suppressCellBlurSaveRef = useRef(false);
 
   useEffect(() => {
@@ -137,10 +159,133 @@ export function useAnketaGapSearch({
     };
   }, []);
 
-  const gapSearchRows = useMemo(() => {
-    const inStaffRowIds = buildAnketaInStaffRowIdSet(rows, personnelIndex);
-    return orderAnketaRowsForGapSearch(rows, inStaffRowIds);
-  }, [rows, personnelIndex]);
+  useEffect(() => {
+    let cancelled = false;
+    void api
+      .listPersonQuestionnaires()
+      .then((items) => {
+        if (!cancelled) setQuestionnaireMeta(items);
+      })
+      .catch(() => {
+        if (!cancelled) setQuestionnaireMeta(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void loadAnketaGapReviewProgress()
+      .then((progress) => {
+        if (cancelled) return;
+        gapReviewProgressLoadedRef.current = true;
+        gapReviewProgressRef.current = progress;
+        setGapReviewProgress(progress);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        gapReviewProgressLoadedRef.current = true;
+        gapReviewProgressRef.current = {};
+        setGapReviewProgress({});
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    gapReviewProgressRef.current = gapReviewProgress;
+  }, [gapReviewProgress]);
+
+  const markGapPersonReviewed = useCallback(
+    (row: AnketaRow | null | undefined) => {
+      if (!row || !gapColumnKeys.length) return;
+      const entry = buildAnketaGapReviewEntry(
+        row,
+        gapColumnKeys,
+        questionnaireMeta,
+      );
+      if (!entry) return;
+      setGapReviewProgress((current) => {
+        const next = mergeAnketaGapReviewEntry(current, entry);
+        void saveAnketaGapReviewProgress(next);
+        return next;
+      });
+    },
+    [gapColumnKeys, questionnaireMeta],
+  );
+
+  const ensureGapReviewProgress = useCallback(async () => {
+    if (gapReviewProgressLoadedRef.current) {
+      return gapReviewProgressRef.current;
+    }
+    try {
+      const progress = await loadAnketaGapReviewProgress();
+      gapReviewProgressLoadedRef.current = true;
+      gapReviewProgressRef.current = progress;
+      setGapReviewProgress(progress);
+      return progress;
+    } catch {
+      gapReviewProgressLoadedRef.current = true;
+      gapReviewProgressRef.current = {};
+      setGapReviewProgress({});
+      return {};
+    }
+  }, []);
+
+  const buildOrderedGapSearchRows = useCallback(
+    (
+      sourceRows: AnketaRow[],
+      indexOverride?: AnketaPersonnelIndex | null,
+      progressOverride?: AnketaGapReviewMap,
+    ) => {
+      const index = indexOverride ?? personnelIndex;
+      const progress = progressOverride ?? gapReviewProgress;
+      const inStaffRowIds = buildAnketaInStaffRowIdSet(sourceRows, index);
+      const withPdfRowIds = buildAnketaRowsWithQuestionnairePdfSet(
+        sourceRows,
+        questionnaireMeta,
+      );
+      const ordered = orderAnketaGapSearchRows(
+        sourceRows,
+        inStaffRowIds,
+        gapColumnKeys,
+        withPdfRowIds,
+      );
+      const eligible = filterAnketaRowsForGapSearch(ordered);
+      const afterReview = filterSkippedAnketaGapRows(
+        eligible,
+        gapColumnKeys,
+        questionnaireMeta,
+        progress,
+      );
+      return gateAnketaGapSearchRowsInStaffFirst(
+        afterReview,
+        inStaffRowIds,
+        gapColumnKeys,
+      );
+    },
+    [
+      personnelIndex,
+      questionnaireMeta,
+      gapColumnKeys,
+      gapReviewProgress,
+    ],
+  );
+
+  const ensurePersonnelIndex = useCallback(async () => {
+    if (personnelIndex) return personnelIndex;
+    setMessage("Завантажую Штатку для пошуку порожніх…");
+    const index = await loadPersonnelIndexForAnketa({ force: true });
+    setPersonnelIndex(index);
+    return index;
+  }, [personnelIndex, setMessage]);
+
+  const gapSearchRows = useMemo(
+    () => buildOrderedGapSearchRows(rows),
+    [rows, buildOrderedGapSearchRows],
+  );
 
   const deferredGapKeySet = useMemo(
     () => new Set(deferredGapKeys),
@@ -149,21 +294,38 @@ export function useAnketaGapSearch({
   const gapSearchOptions = useMemo(
     () => ({
       skipKeys: deferredGapKeySet,
-      excludeNameKeys: missingQuestionnaireNames,
     }),
-    [deferredGapKeySet, missingQuestionnaireNames],
+    [deferredGapKeySet],
   );
   const emptyCount = useMemo(
     () => countAnketaEmptyCells(gapSearchRows, gapColumnKeys, gapSearchOptions),
     [gapSearchRows, gapColumnKeys, gapSearchOptions],
   );
   const gapStats = useMemo(
-    () =>
-      summarizeAnketaGaps(gapSearchRows, gapColumnKeys, {
-        excludeNameKeys: missingQuestionnaireNames,
-      }),
-    [gapSearchRows, gapColumnKeys, missingQuestionnaireNames],
+    () => summarizeAnketaGaps(rows, gapColumnKeys),
+    [rows, gapColumnKeys],
   );
+  const gapReviewedCount = useMemo(() => {
+    const ordered = orderAnketaGapSearchRows(
+      rows,
+      buildAnketaInStaffRowIdSet(rows, personnelIndex),
+      gapColumnKeys,
+      buildAnketaRowsWithQuestionnairePdfSet(rows, questionnaireMeta),
+    );
+    const eligible = filterAnketaRowsForGapSearch(ordered);
+    return countActiveAnketaGapReviews(
+      eligible,
+      gapColumnKeys,
+      questionnaireMeta,
+      gapReviewProgress,
+    );
+  }, [
+    rows,
+    personnelIndex,
+    questionnaireMeta,
+    gapColumnKeys,
+    gapReviewProgress,
+  ]);
   const focusedAnketaRow = useMemo(() => {
     if (!focusedEmpty) return null;
     return rows.find((row) => row.__rowId === focusedEmpty.rowId) ?? null;
@@ -191,8 +353,10 @@ export function useAnketaGapSearch({
 
   const activateEmptyCell = (cell: AnketaEmptyCell | null) => {
     if (cell && isAnketaColumnReadonly(cell.columnId)) return;
-    setFocusedEmpty(cell);
-    if (cell) setFocusEpoch((epoch) => epoch + 1);
+    queueMicrotask(() => {
+      setFocusedEmpty(cell);
+      if (cell) setFocusEpoch((epoch) => epoch + 1);
+    });
   };
 
   const cancelCellEdit = () => {
@@ -292,6 +456,14 @@ export function useAnketaGapSearch({
       );
     }
 
+    const savedRow = nextRows.find((item) => item.__rowId === rowId);
+    if (
+      savedRow &&
+      isAnketaGapPersonWithoutTrulyEmptyCells(savedRow, gapColumnKeys)
+    ) {
+      markGapPersonReviewed(savedRow);
+    }
+
     const shouldAdvance = Boolean(options?.advance);
     if (shouldAdvance) {
       const currentGap: AnketaEmptyCell = {
@@ -302,17 +474,13 @@ export function useAnketaGapSearch({
         header: ANKETA_COLUMNS[columnIndex]?.header ?? columnId,
         a1: cellA1 ?? "",
       };
-      const orderedNextRows = orderAnketaRowsForGapSearch(
-        nextRows,
-        buildAnketaInStaffRowIdSet(nextRows, personnelIndex),
-      );
+      const orderedNextRows = buildOrderedGapSearchRows(nextRows);
       const next = findNextAnketaEmptyCell(
         orderedNextRows,
         currentGap,
         gapColumnKeys,
         {
           skipKeys: skipKeysAfterSave,
-          excludeNameKeys: missingQuestionnaireNames,
         },
       );
       setFocusedEmpty(next);
@@ -321,12 +489,10 @@ export function useAnketaGapSearch({
         setMessage(
           `Збережено. Наступна порожня: ${next.a1} · ${next.header}. Залишилось: ${countAnketaEmptyCells(orderedNextRows, gapColumnKeys, {
             skipKeys: skipKeysAfterSave,
-            excludeNameKeys: missingQuestionnaireNames,
           })}.`,
         );
         prefetchNextGapPerson(orderedNextRows, next, gapColumnKeys, {
           skipKeys: skipKeysAfterSave,
-          excludeNameKeys: missingQuestionnaireNames,
         });
       } else if (value.trim()) {
         setMessage("Усі порожні комірки (у вибраних колонках) заповнені.");
@@ -336,7 +502,156 @@ export function useAnketaGapSearch({
     }
   };
 
-  const goToEmptyCell = (direction: "first" | "next" | "nextPerson") => {
+  const patchCells = async (
+    rowId: string,
+    items: Array<{ columnId: AnketaColumnKey; value: string }>,
+    options?: { advance?: boolean },
+  ) => {
+    if (!canEdit) {
+      setMessage("Немає права редагувати анкетні дані.");
+      return;
+    }
+    const writes = items
+      .map((item) => ({
+        columnId: item.columnId,
+        value: String(item.value ?? "").trim(),
+      }))
+      .filter((item) => item.value && !isAnketaColumnReadonly(item.columnId));
+    if (!writes.length) {
+      setMessage("Немає полів для запису.");
+      return;
+    }
+
+    const currentRow = rows.find((item) => item.__rowId === rowId);
+    const rowNumber = currentRow?.__rowNumber ?? focusedEmpty?.rowNumber ?? 0;
+
+    let nextRows: AnketaRow[] = rows;
+    persistSnapshot((current) => {
+      let updatedRows = current.rows;
+      for (const item of writes) {
+        updatedRows = updateAnketaRowCell(
+          updatedRows,
+          rowId,
+          item.columnId,
+          item.value,
+        );
+      }
+      nextRows = updatedRows;
+      return { ...current, rows: updatedRows };
+    });
+
+    let serverSynced = true;
+    let serverError: string | undefined;
+    try {
+      const result = await bulkWriteAnketaCellEdits(
+        writes.map((item) => ({
+          rowNumber,
+          columnId: item.columnId,
+          value: item.value,
+          externalId: currentRow?.externalId,
+          fullName: currentRow?.fullName,
+        })),
+      );
+      setEditsCount(countAnketaEdits(result.edits));
+      serverSynced = result.serverSynced;
+      serverError = result.serverError;
+    } catch {
+      setMessage("Не вдалося записати правки в локальну БД (IndexedDB).");
+      return;
+    }
+
+    const editedGapKeys = new Set(
+      writes.map((item) => `${rowId}:${item.columnId}`),
+    );
+    const skipKeysAfterSave = deferredGapKeys.filter(
+      (key) => !editedGapKeys.has(key),
+    );
+    setDeferredGapKeys(skipKeysAfterSave);
+
+    const saveNote = serverSynced
+      ? "Збережено в серверну БД"
+      : `Локально: ок. Сервер: ${serverError ?? "недоступний"}`;
+
+    if (appsScriptUrl) {
+      setIsSyncing(true);
+      try {
+        const row = nextRows.find((item) => item.__rowId === rowId);
+        let synced = 0;
+        for (const item of writes) {
+          const columnIndex = ANKETA_COLUMNS.findIndex(
+            (column) => column.key === item.columnId,
+          );
+          if (!row || columnIndex < 0) continue;
+          const a1 = anketaCellA1(row.__rowNumber, columnIndex);
+          await pushAnketaCellToGoogle({ a1, value: item.value });
+          synced += 1;
+        }
+        setMessage(`${saveNote} і Google · ${synced} комірок.`);
+      } catch (error) {
+        setMessage(
+          error instanceof Error
+            ? `${saveNote}. Google sync: ${error.message}`
+            : `${saveNote}. Google sync не вдався.`,
+        );
+      } finally {
+        setIsSyncing(false);
+      }
+    } else {
+      setMessage(`${saveNote} · ${writes.length} комірок.`);
+    }
+
+    const savedRow = nextRows.find((item) => item.__rowId === rowId);
+    if (
+      savedRow &&
+      isAnketaGapPersonWithoutTrulyEmptyCells(savedRow, gapColumnKeys)
+    ) {
+      markGapPersonReviewed(savedRow);
+    }
+
+    if (!options?.advance) return;
+
+    const lastWrite = writes[writes.length - 1]!;
+    const lastColumnIndex = ANKETA_COLUMNS.findIndex(
+      (column) => column.key === lastWrite.columnId,
+    );
+    const row = nextRows.find((item) => item.__rowId === rowId);
+    const currentGap: AnketaEmptyCell = {
+      rowId,
+      columnId: lastWrite.columnId,
+      rowNumber: row?.__rowNumber ?? rowNumber,
+      columnIndex: Math.max(lastColumnIndex, 0),
+      header: ANKETA_COLUMNS[lastColumnIndex]?.header ?? lastWrite.columnId,
+      a1:
+        row && lastColumnIndex >= 0
+          ? anketaCellA1(row.__rowNumber, lastColumnIndex)
+          : focusedEmpty?.a1 ?? "",
+    };
+    const orderedNextRows = buildOrderedGapSearchRows(nextRows);
+    const next = findNextAnketaEmptyCell(
+      orderedNextRows,
+      currentGap,
+      gapColumnKeys,
+      {
+        skipKeys: skipKeysAfterSave,
+      },
+    );
+    setFocusedEmpty(next);
+    if (next) {
+      setFocusEpoch((epoch) => epoch + 1);
+      setMessage(
+        `AI збережено. Наступна порожня: ${next.a1} · ${next.header}. Залишилось: ${countAnketaEmptyCells(orderedNextRows, gapColumnKeys, {
+          skipKeys: skipKeysAfterSave,
+        })}.`,
+      );
+      prefetchNextGapPerson(orderedNextRows, next, gapColumnKeys, {
+        skipKeys: skipKeysAfterSave,
+      });
+    } else {
+      setMessage("Усі порожні комірки (у вибраних колонках) заповнені.");
+    }
+  };
+
+  const goToEmptyCell = async (direction: "first" | "next" | "nextPerson") => {
     if (!rows.length) {
       setMessage("Спочатку завантажте анкетні дані.");
       return;
@@ -347,90 +662,122 @@ export function useAnketaGapSearch({
       return;
     }
 
-    let skipKeys = deferredGapKeys;
-    if (direction === "first") {
-      skipKeys = [];
-      setDeferredGapKeys([]);
-    } else if (direction === "nextPerson" && focusedEmpty) {
-      const personKeys = listAnketaPersonGapSkipKeys(
-        rows,
-        focusedEmpty.rowId,
-        gapColumnKeys,
-        gapSearchOptions,
-      );
-      const merged = new Set([...deferredGapKeys, ...personKeys]);
-      skipKeys = [...merged];
-      setDeferredGapKeys(skipKeys);
-    } else if (focusedEmpty) {
-      const stillEmpty = !String(
-        rows.find((row) => row.__rowId === focusedEmpty.rowId)?.[
-          focusedEmpty.columnId
-        ] ?? "",
-      ).trim();
-      if (stillEmpty) {
-        const key = anketaGapSkipKey(focusedEmpty);
-        if (!deferredGapKeySet.has(key)) {
-          skipKeys = [...deferredGapKeys, key];
-          setDeferredGapKeys(skipKeys);
-        }
-      }
+    setMessage("Шукаю порожні комірки…");
+    if (!personnelIndex) {
+      void ensurePersonnelIndex().catch(() => {
+        /* штатка лише для порядку, пошук без неї теж працює */
+      });
     }
 
-    const nextSearchOptions = {
-      skipKeys,
-      excludeNameKeys: missingQuestionnaireNames,
-    };
-    const next =
-      direction === "first"
-        ? findNextAnketaEmptyCell(
-            gapSearchRows,
-            null,
-            gapColumnKeys,
-            nextSearchOptions,
-          )
-        : direction === "nextPerson"
+    try {
+      const progressForSearch = await ensureGapReviewProgress();
+      const searchRows = buildOrderedGapSearchRows(
+        rows,
+        personnelIndex,
+        progressForSearch,
+      );
+      const inStaffCount = buildAnketaInStaffRowIdSet(
+        rows,
+        personnelIndex,
+      ).size;
+
+      let skipKeys = deferredGapKeys;
+      if (direction === "first") {
+        skipKeys = [];
+        setDeferredGapKeys([]);
+      } else if (direction === "nextPerson" && focusedEmpty) {
+        markGapPersonReviewed(
+          rows.find((row) => row.__rowId === focusedEmpty.rowId),
+        );
+        const personKeys = listAnketaPersonGapSkipKeys(
+          rows,
+          focusedEmpty.rowId,
+          gapColumnKeys,
+          gapSearchOptions,
+        );
+        const merged = new Set([...deferredGapKeys, ...personKeys]);
+        skipKeys = [...merged];
+        setDeferredGapKeys(skipKeys);
+      } else if (focusedEmpty) {
+        const focusedRow = rows.find((row) => row.__rowId === focusedEmpty.rowId);
+        const stillEmpty = Boolean(
+          focusedRow &&
+            isAnketaGapCellTrulyEmpty(focusedRow, focusedEmpty.columnId),
+        );
+        if (stillEmpty) {
+          const key = anketaGapSkipKey(focusedEmpty);
+          if (!deferredGapKeySet.has(key)) {
+            skipKeys = [...deferredGapKeys, key];
+            setDeferredGapKeys(skipKeys);
+          }
+        }
+      }
+
+      const nextSearchOptions = {
+        skipKeys,
+      };
+      const next =
+        direction === "nextPerson"
           ? findNextAnketaPersonEmptyCell(
-              gapSearchRows,
+              searchRows,
               focusedEmpty,
               gapColumnKeys,
               nextSearchOptions,
             )
           : findNextAnketaEmptyCell(
-              gapSearchRows,
-              focusedEmpty,
+              searchRows,
+              direction === "first" ? null : focusedEmpty,
               gapColumnKeys,
               nextSearchOptions,
             );
-    if (!next) {
-      setFocusedEmpty(null);
+      if (!next) {
+        setFocusedEmpty(null);
+        const inStaffNote = inStaffCount
+          ? " (спочатку Штатка, потім решта)"
+          : "";
+        setMessage(
+          direction === "nextPerson"
+            ? skipKeys.length
+              ? `Немає іншого службовця з пропусками${inStaffNote} (відкладено: ${skipKeys.length}).`
+              : `Немає іншого службовця з порожніми комірками${inStaffNote}.`
+            : skipKeys.length
+              ? `Немає інших порожніх${inStaffNote} (відкладено: ${skipKeys.length}). «Перша порожня» скине відкладені.`
+              : `Порожніх комірок у вибраних колонках немає${inStaffNote}.`,
+        );
+        return;
+      }
+      activateEmptyCell(next);
+      setEmptySearchActive(true);
+      const personName =
+        rows.find((row) => row.__rowId === next.rowId)?.fullName?.trim() || "";
+      const remaining = countAnketaEmptyCells(
+        searchRows,
+        gapColumnKeys,
+        nextSearchOptions,
+      );
+      const inStaffPrefix = buildAnketaInStaffRowIdSet(
+        rows,
+        personnelIndex,
+      ).has(next.rowId)
+        ? "Штатка · "
+        : inStaffCount
+          ? "Решта · "
+          : "";
       setMessage(
         direction === "nextPerson"
-          ? skipKeys.length
-            ? `Немає іншого службовця з пропусками (відкладено: ${skipKeys.length}).`
-            : "Немає іншого службовця з порожніми комірками."
-          : skipKeys.length
-            ? `Немає інших порожніх (відкладено: ${skipKeys.length}). «Перша порожня» скине відкладені.`
-            : "Порожніх комірок у вибраних колонках немає.",
+          ? `${inStaffPrefix}Наступний службовець · ${personName || `рядок ${next.rowNumber}`} · ${next.a1} · ${next.header}. Залишилось: ${remaining}.`
+          : `${inStaffPrefix}Порожня комірка ${next.a1} · ${next.header} · ${personName || `рядок ${next.rowNumber}`}. Залишилось: ${remaining}${
+              skipKeys.length ? ` · відкладено: ${skipKeys.length}` : ""
+            }.`,
       );
-      return;
+      prefetchNextGapPerson(searchRows, next, gapColumnKeys, nextSearchOptions);
+    } catch (error) {
+      setMessage(
+        error instanceof Error
+          ? `Не вдалося знайти порожню комірку: ${error.message}`
+          : "Не вдалося знайти порожню комірку.",
+      );
     }
-    activateEmptyCell(next);
-    setEmptySearchActive(true);
-    const personName =
-      rows.find((row) => row.__rowId === next.rowId)?.fullName?.trim() || "";
-    const remaining = countAnketaEmptyCells(
-      gapSearchRows,
-      gapColumnKeys,
-      nextSearchOptions,
-    );
-    setMessage(
-      direction === "nextPerson"
-        ? `Наступний службовець · ${personName || `рядок ${next.rowNumber}`} · ${next.a1} · ${next.header}. Залишилось: ${remaining}.`
-        : `Порожня комірка ${next.a1} · ${next.header} · рядок ${next.rowNumber}. Залишилось: ${remaining}${
-            skipKeys.length ? ` · відкладено: ${skipKeys.length}` : ""
-          }.`,
-    );
-    prefetchNextGapPerson(gapSearchRows, next, gapColumnKeys, nextSearchOptions);
   };
 
   const fillAbsentQuestionnaireCells = async () => {
@@ -475,12 +822,9 @@ export function useAnketaGapSearch({
         stillMissingKeys,
         hasPdf,
       );
-      const allWritableColumnKeys = ANKETA_COLUMNS.map(
-        (column) => column.key,
-      ).filter((key) => !isAnketaColumnReadonly(key));
       const clears = collectAbsentQuestionnaireCellClears(
         rows,
-        allWritableColumnKeys,
+        gapColumnKeys,
         hasPdf,
       );
       const newRows = buildAbsentQuestionnaireAnketaRows(
@@ -570,22 +914,44 @@ export function useAnketaGapSearch({
     }
   };
 
+  const clearGapReviewProgress = useCallback(() => {
+    gapReviewProgressRef.current = {};
+    gapReviewProgressLoadedRef.current = true;
+    setGapReviewProgress({});
+    void saveAnketaGapReviewProgress({});
+    setMessage("Список пройдених службовців скинуто.");
+  }, [setMessage]);
+
+  const markCurrentGapPersonReviewed = useCallback(() => {
+    if (!focusedAnketaRow) {
+      setMessage("Немає поточного службовця в пошуку порожніх.");
+      return;
+    }
+    markGapPersonReviewed(focusedAnketaRow);
+    const name = focusedAnketaRow.fullName?.trim() || "службовець";
+    setMessage(`Запам’ятано як пройденого: ${name}.`);
+  }, [focusedAnketaRow, markGapPersonReviewed, setMessage]);
+
   return {
     focusedEmpty,
     focusEpoch,
     emptySearchActive,
     isFillingAbsent,
     deferredGapKeys,
+    gapReviewedCount,
     personPanelOpen,
     setPersonPanelOpen,
     emptyCount,
     gapStats,
     focusedAnketaRow,
     clearGapFocus,
+    clearGapReviewProgress,
+    markCurrentGapPersonReviewed,
     stopEmptySearch,
     activateEmptyCell,
     cancelCellEdit,
     patchCell,
+    patchCells,
     goToEmptyCell,
     fillAbsentQuestionnaireCells,
   };

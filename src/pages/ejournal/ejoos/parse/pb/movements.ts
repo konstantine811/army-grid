@@ -1,7 +1,7 @@
 import type { ExcelWorkbookSnapshot } from "../../../../../excelRoundTrip";
 import { resolveOutboundTransferDestination } from "../../../ejoosMovementRules";
 import type { PbMovement } from "../../types/pb";
-import { norm, normKey } from "../cellText";
+import { dateMs, norm, normKey } from "../cellText";
 import { cell, findCol, findEjoosSheet, headerMap, idCell } from "../sheetLookup";
 import {
   isCancelledMovementRecord,
@@ -71,8 +71,11 @@ export const parseRankPromotion = (event: PbMovement) => {
   };
 };
 
+/** У 1ПБ буває «МОТИВАЦ КОНТР» і скорочено лише «МОТИВАЦ». */
 export const isContractMovementType = (type: string) =>
-  type === "КОНТРАКТ" || /МОТИВАЦ.*КОНТР/iu.test(type);
+  type === "КОНТРАКТ" ||
+  /^МОТИВАЦ(?:\s+КОНТР)?$/iu.test(type.trim()) ||
+  /МОТИВАЦ.*КОНТР/iu.test(type);
 
 const normalizeContractDate = (value: string) => {
   const match = norm(value).match(
@@ -81,6 +84,19 @@ const normalizeContractDate = (value: string) => {
   if (!match) return norm(value);
   const year = match[3].length === 2 ? `20${match[3]}` : match[3];
   return `${match[1].padStart(2, "0")}.${match[2].padStart(2, "0")}.${year}`;
+};
+
+/** МОТИВАЦ: наказ у серпні, а в «даті» часто лишається початок контракту (09.07). */
+export const motivationContractOverlapsWindow = (
+  event: Pick<PbMovement, "changeText" | "basisDate" | "orderDate">,
+  windowStartMs: number,
+  windowEndMs: number,
+) => {
+  const parsed = parseContractDatesFromChangeText(event.changeText);
+  const fromMs = dateMs(parsed.contractFrom || event.basisDate || event.orderDate);
+  const toMs = dateMs(parsed.contractTo);
+  if (!fromMs || !windowStartMs || !windowEndMs) return false;
+  return fromMs <= windowEndMs && (!toMs || toMs >= windowStartMs);
 };
 
 export const parseContractDatesFromChangeText = (value: string) => {

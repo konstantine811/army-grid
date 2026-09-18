@@ -30,7 +30,10 @@ import type { AnketaRow } from "../anketaSheet";
 export function useAnketaPersonPanel(
   anketaRow: AnketaRow | null,
   onMessage?: (message: string) => void,
+  options?: { autoOpenQuestionnairePreview?: boolean },
 ) {
+  const autoOpenQuestionnairePreview =
+    options?.autoOpenQuestionnairePreview ?? true;
   const anketaRowId = anketaRow?.__rowId ?? "";
   const [match, setMatch] = useState<AnketaPersonnelMatch | null>(null);
   const [ambiguousMatches, setAmbiguousMatches] = useState<AnketaPersonnelMatch[]>(
@@ -56,14 +59,14 @@ export function useAnketaPersonPanel(
   const attachmentsEpochRef = useRef(0);
   const previewEpochRef = useRef(0);
   const previewUrlRef = useRef("");
-  const prevAnketaRowIdRef = useRef("");
-  const shouldAutoOpenPreviewRef = useRef(false);
+  const prevAnketaRowIdRef = useRef(anketaRowId);
+  const shouldAutoOpenPreviewRef = useRef(
+    Boolean(anketaRowId) && autoOpenQuestionnairePreview,
+  );
 
-  // Синхронний скид при зміні особи (до effects) — інакше один кадр лишається
-  // match попереднього і авто-PDF відкриває чужу анкету.
-  const [panelRowId, setPanelRowId] = useState(anketaRowId);
-  if (panelRowId !== anketaRowId) {
-    setPanelRowId(anketaRowId);
+  useEffect(() => {
+    if (prevAnketaRowIdRef.current === anketaRowId) return;
+    prevAnketaRowIdRef.current = anketaRowId;
     setMatch(null);
     setAmbiguousMatches([]);
     setSimilarMatches([]);
@@ -82,9 +85,9 @@ export function useAnketaPersonPanel(
     }
     setPreviewUrl("");
     setPreviewTitle("");
-    shouldAutoOpenPreviewRef.current = Boolean(anketaRowId);
-    prevAnketaRowIdRef.current = anketaRowId;
-  }
+    shouldAutoOpenPreviewRef.current =
+      Boolean(anketaRowId) && autoOpenQuestionnairePreview;
+  }, [anketaRowId, autoOpenQuestionnairePreview]);
 
   const reloadAttachments = useCallback(
     async (personMatch: AnketaPersonnelMatch, row: AnketaRow) => {
@@ -293,10 +296,10 @@ export function useAnketaPersonPanel(
 
     // Row-change reset already handled during render; keep auto-open flag for first focus.
     if (prevAnketaRowIdRef.current !== anketaRowId) {
-      shouldAutoOpenPreviewRef.current = true;
+      shouldAutoOpenPreviewRef.current = autoOpenQuestionnairePreview;
       prevAnketaRowIdRef.current = anketaRowId;
     }
-  }, [anketaRow, anketaRowId]);
+  }, [anketaRow, anketaRowId, autoOpenQuestionnairePreview]);
 
   const loadQuestionnaireWithoutPersonnelMatch = useCallback(
     async (row: AnketaRow) => {
@@ -325,13 +328,41 @@ export function useAnketaPersonPanel(
         setPhotoData("");
         setQuestionnaire(questionnaireOk ? questionnaire : null);
         setAttachmentExternalId(questionnaireResult.resolvedExternalId);
+        if (
+          questionnaireOk &&
+          questionnaire &&
+          shouldAutoOpenPreviewRef.current
+        ) {
+          shouldAutoOpenPreviewRef.current = false;
+          const name = anketaName || "Службовець";
+          const fileName =
+            String(questionnaire.fileName ?? "").trim() ||
+            buildQuestionnaireExportFileName(name, "");
+          if (questionnaire.fileData) {
+            const nextUrl = dataUrlToObjectUrl(questionnaire.fileData);
+            setPreviewTitle(`Анкета · ${name} · ${fileName}`);
+            setPreviewUrl((current) => {
+              if (current) revokeQuestionnairePreviewUrl(current);
+              previewUrlRef.current = nextUrl;
+              return nextUrl;
+            });
+            setPreviewOpen(true);
+          } else if (questionnaireResult.resolvedExternalId) {
+            void openPreviewForExternalId(
+              questionnaireResult.resolvedExternalId,
+              name,
+              "",
+              questionnaire.fileName,
+            );
+          }
+        }
       } finally {
         if (epoch === attachmentsEpochRef.current) {
           setIsLoadingAttachments(false);
         }
       }
     },
-    [],
+    [openPreviewForExternalId],
   );
 
   useEffect(() => {

@@ -141,6 +141,33 @@ describe("personCanEnterApplyQueue / acceptAllReady", () => {
     expect(acceptAllReady(session).people[0].decision).toBe("pending");
   });
 
+  it("queues a ready exclude_transfer even if archive still wants review", () => {
+    const exclude = person({
+      severity: "needs_input",
+      ops: [
+        op({
+          kind: "exclude_transfer",
+          payload: {
+            destination: "НА_ЩИТІ",
+            excludeDate: "14.08.2026",
+            orderNumber: "235",
+            orderDate: "14.08.2026",
+          },
+        }),
+        op({
+          kind: "absent_upsert",
+          class: "needs_input",
+          payload: {
+            absenceType: "БЕЗВІСТИ",
+            departDate: "20.07.2026",
+            timesheetCode: "ЗБ",
+          },
+        }),
+      ],
+    });
+    expect(personCanEnterApplyQueue(exclude)).toBe(true);
+  });
+
   it("queues a ready exclude_transfer", () => {
     const exclude = person({
       severity: "ready",

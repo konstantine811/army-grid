@@ -101,8 +101,8 @@ const polyWithRoster = filterOverviewPolygonRows(unitRows, (row) => {
 const sheets = buildOverviewPpdLocationExportSheets(unitRows, rosterRows);
 console.log(
   "export sheet rows",
-  (sheets[0]?.data.length ?? 0) - 1,
-  (sheets[1]?.data.length ?? 0) - 1,
+  (sheets[0]?.data.length ?? 0) - 2,
+  (sheets[1]?.data.length ?? 0) - 2,
 );
 console.log("with roster lookup PPD/POLY", ppdWithRoster.length, polyWithRoster.length);
 console.log("PPD", ppdRows.length, "POLY", polyRows.length);

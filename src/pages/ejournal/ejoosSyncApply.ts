@@ -1,5 +1,10 @@
 import JSZip from "jszip";
 import { type ExcelWorkbookSnapshot } from "../../excelRoundTrip";
+import { formatUkDateForExcelWrite } from "../../shared/format";
+import {
+  fixEjoosSheetExcelSerialDates,
+  fixOosPersonIdCells,
+} from "./ejoosDateFormat";
 import { readEjoosWorkbookSnapshot } from "./ejoosTimesheetPersonRows";
 import type { EjoosSyncOp, EjoosSyncPlan } from "./ejoosSyncPlan";
 import {
@@ -26,7 +31,10 @@ import {
   applyOosHistoryPresentation,
   applyRankLabelsWithZip,
 } from "./ejoosOosZip";
-import { writeStaffIndexToCell } from "./ejoosStaffIndexFormat";
+import {
+  writePersonIdToCell,
+  writeStaffIndexToCell,
+} from "./ejoosStaffIndexFormat";
 import {
   applyInlineStringWritesToWorkbook,
   restyleAbsentDataRows,
@@ -69,6 +77,7 @@ import {
   excludeTransferOpBlocksApply,
   hasReturnThenDispositionChain,
   isReturnThenDispositionPlacement,
+  opsConsideredForWorkbookApply,
   personApplyBlockReason,
 } from "./ejoosOpRequirements";
 import {
@@ -87,8 +96,6 @@ const col = (letter: string) => {
 
 const isSinglePersonMovement = (op: EjoosSyncOp) =>
   op.kind === "exclude_transfer" || op.kind === "move_to_disposition";
-
-const isRankBeforeExclude = (op: EjoosSyncOp) => op.kind === "rank_change";
 
 const applyKindOrder = (op: EjoosSyncOp) => {
   if (op.kind === "rank_change") return 0;
@@ -376,21 +383,10 @@ export async function applyConfirmedEjoosOps(input: {
       "Обрано лише позначки ПІБ / ID / звання. Їх виправляють у джерелах — у ЕЖООС нічого не пишемо.",
     );
   }
-  const integratedPersons = new Set(
-    ops.filter(isSinglePersonMovement).map(personKeyOf).filter(Boolean),
+  const fileName = `ЄЖООС_станом_на_${plan.timesheetDayLabel.replaceAll(".", "-")}.xlsx`;
+  const consideredOps = opsConsideredForWorkbookApply(ops).sort(
+    (left, right) => applyKindOrder(left) - applyKindOrder(right),
   );
-  // Комплексний рух уже включає всі потрібні аркуші. Окремі операції
-  // цієї ж особи не повинні запускати повторний повний rewrite книги.
-  // Звання перед ПЕРЕВ лишаємо: інакше у «Виключені» піде старе звання.
-  const consideredOps = ops
-    .filter(
-      (op) =>
-        isSinglePersonMovement(op) ||
-        isRankBeforeExclude(op) ||
-        isReturnThenDispositionPlacement(op, ops) ||
-        !integratedPersons.has(personKeyOf(op)),
-    )
-    .sort((left, right) => applyKindOrder(left) - applyKindOrder(right));
   const appliedOps = consideredOps.filter(isWorkbookApplyOp);
   if (!appliedOps.length) {
     const unsupported = consideredOps[0] || ops[0];
@@ -420,7 +416,6 @@ export async function applyConfirmedEjoosOps(input: {
     throw new Error(applyBlockReason);
   }
 
-  const fileName = `ЄЖООС_станом_на_${plan.timesheetDayLabel.replaceAll(".", "-")}.xlsx`;
   const batches = partitionSafeApplyBatches(appliedOps);
   let working = ejoos;
   let blob: Blob = ejoos.file;
@@ -615,7 +610,7 @@ async function mutateToBlob(
       const absenceRank = op.payload.nextRank || op.rank;
       if (absenceRank) absent.cell(targetRow, col("A")).value(absenceRank);
       if (op.fullName) absent.cell(targetRow, col("B")).value(op.fullName);
-      if (op.personId) absent.cell(targetRow, col("C")).value(op.personId);
+      writePersonIdToCell(absent.cell(targetRow, col("C")), op.personId);
       if (op.positionIndex) {
         absent.cell(targetRow, col("D")).value(op.positionIndex);
       }
@@ -624,10 +619,14 @@ async function mutateToBlob(
       }
       if (op.payload.place) absent.cell(targetRow, col("F")).value(op.payload.place);
       if (op.payload.departDate) {
-        absent.cell(targetRow, col("G")).value(op.payload.departDate);
+        absent
+          .cell(targetRow, col("G"))
+          .value(formatUkDateForExcelWrite(op.payload.departDate));
       }
       if (op.payload.orderDate) {
-        absent.cell(targetRow, col("H")).value(op.payload.orderDate);
+        absent
+          .cell(targetRow, col("H"))
+          .value(formatUkDateForExcelWrite(op.payload.orderDate));
       }
       if (op.payload.orderNumber) {
         absent.cell(targetRow, col("I")).value(op.payload.orderNumber);
@@ -636,7 +635,9 @@ async function mutateToBlob(
         absent.cell(targetRow, col("J")).value(op.payload.duration);
       }
       if (op.payload.plannedReturn && op.payload.plannedReturn !== "?") {
-        absent.cell(targetRow, col("L")).value(op.payload.plannedReturn);
+        absent
+          .cell(targetRow, col("L"))
+          .value(formatUkDateForExcelWrite(op.payload.plannedReturn));
       }
       if (op.payload.returnDate) {
         writeAbsenceReturn(absent, targetRow, op.payload, "");
@@ -1105,10 +1106,14 @@ function applyPositionChange(input: {
     const orderDate = op.payload.arrivalDepartOrderDate || appointmentDate;
     const closeColumns = findArrivalCloseColumns(arrivals);
     if (closeColumns.departDateCol) {
-      arrivals.cell(arrivalRow, closeColumns.departDateCol).value(departDate || null);
+      arrivals
+        .cell(arrivalRow, closeColumns.departDateCol)
+        .value(formatUkDateForExcelWrite(departDate));
     }
     if (closeColumns.orderDateCol) {
-      arrivals.cell(arrivalRow, closeColumns.orderDateCol).value(orderDate || null);
+      arrivals
+        .cell(arrivalRow, closeColumns.orderDateCol)
+        .value(formatUkDateForExcelWrite(orderDate));
     }
     if (closeColumns.orderNumberCol) {
       arrivals
@@ -1116,8 +1121,9 @@ function applyPositionChange(input: {
         .value(orderNumber ? `№${orderNumber}` : null);
     }
     if (closeColumns.orderCombinedCol) {
+      const orderDateLabel = formatUkDateForExcelWrite(orderDate) || orderDate;
       arrivals.cell(arrivalRow, closeColumns.orderCombinedCol).value(
-        [orderNumber ? `№${orderNumber}` : "", orderDate ? `від ${orderDate}` : ""]
+        [orderNumber ? `№${orderNumber}` : "", orderDateLabel ? `від ${orderDateLabel}` : ""]
           .filter(Boolean)
           .join(" "),
       );
@@ -1128,7 +1134,7 @@ function applyPositionChange(input: {
       col("R"),
       [
         `ЗАРАХОВАНО ДО ШТАТУ ${nextIndex}`,
-        appointmentDate,
+        formatUkDateForExcelWrite(appointmentDate) || appointmentDate,
         op.payload.orderNumber ? `наказ №${op.payload.orderNumber}` : "",
       ]
         .filter(Boolean)
@@ -1279,7 +1285,7 @@ function closeOldPositionRows(input: {
     }
     if (rank) excluded.cell(targetRow, col("A")).value(rank);
     if (fullName) excluded.cell(targetRow, col("B")).value(fullName);
-    if (personId) excluded.cell(targetRow, col("C")).value(personId);
+    writePersonIdToCell(excluded.cell(targetRow, col("C")), personId);
     if (previousIndex) excluded.cell(targetRow, col("D")).value(previousIndex);
     excluded.cell(targetRow, col("AB")).value(excludeDateLabel || null);
     excluded.cell(targetRow, col("AC")).value(op.payload.orderDate || null);
@@ -1685,7 +1691,7 @@ function applyExcludeTransfer(input: {
     } else {
       if (rank) excluded.cell(targetRow, col("A")).value(rank);
       if (fullName) excluded.cell(targetRow, col("B")).value(fullName);
-      if (personId) excluded.cell(targetRow, col("C")).value(personId);
+      writePersonIdToCell(excluded.cell(targetRow, col("C")), personId);
     }
     // D в ООС інколи є формульною/нестандартною клітинкою, яку xlsx-populate
     // повертає не як просте значення. План уже зчитав актуальний індекс із ООС,
@@ -1833,10 +1839,14 @@ function applyExcludeTransfer(input: {
       "";
     const closeColumns = findArrivalCloseColumns(arrivals);
     if (closeColumns.departDateCol) {
-      arrivals.cell(arrivalRow, closeColumns.departDateCol).value(departDate || null);
+      arrivals
+        .cell(arrivalRow, closeColumns.departDateCol)
+        .value(formatUkDateForExcelWrite(departDate));
     }
     if (closeColumns.orderDateCol) {
-      arrivals.cell(arrivalRow, closeColumns.orderDateCol).value(orderDate || null);
+      arrivals
+        .cell(arrivalRow, closeColumns.orderDateCol)
+        .value(formatUkDateForExcelWrite(orderDate));
     }
     if (closeColumns.orderNumberCol) {
       arrivals
@@ -1844,8 +1854,9 @@ function applyExcludeTransfer(input: {
         .value(orderNumber ? `№${orderNumber}` : null);
     }
     if (closeColumns.orderCombinedCol) {
+      const orderDateLabel = formatUkDateForExcelWrite(orderDate) || orderDate;
       arrivals.cell(arrivalRow, closeColumns.orderCombinedCol).value(
-        [orderNumber ? `№${orderNumber}` : "", orderDate ? `від ${orderDate}` : ""]
+        [orderNumber ? `№${orderNumber}` : "", orderDateLabel ? `від ${orderDateLabel}` : ""]
           .filter(Boolean)
           .join(" "),
       );
@@ -1892,6 +1903,10 @@ function fillExcludedBaseValuesFromOos(
   OOS_TO_EXCLUDED_BASE.forEach(([fromCol, toCol]) => {
     const value = oos.cell(oosRow, fromCol).value();
     if (isMeaningfulCellValue(value)) {
+      if (toCol === col("C")) {
+        writePersonIdToCell(excluded.cell(targetRow, toCol), value as string);
+        return;
+      }
       const next =
         toCol === 5 ? formatExcludedPositionDates(value) || value : value;
       excluded.cell(targetRow, toCol).value(next);
@@ -2042,6 +2057,8 @@ async function restyleAllEjoosWrittenRows(
   blob = await restyleExcludedDataRows(blob, collectExcludedRowsToRestyle(ops));
   blob = await restyleAbsentDataRows(blob, collectAbsentRowsToRestyle(ops));
   blob = await restyleArrivalDataRows(blob, collectArrivalRowsToRestyle(ops));
+  blob = await fixEjoosSheetExcelSerialDates(blob);
+  blob = await fixOosPersonIdCells(blob);
   return blob;
 }
 
@@ -2291,10 +2308,18 @@ const paintTimesheetArchiveDays = (
     return;
   }
   const rawSpans = parseTimesheetAbsenceSpans(payload.timesheetAbsenceSpans || "");
+  const beforeEpisodeSpans = parseTimesheetAbsenceSpans(
+    payload.historyTimesheetAbsenceSpans || "",
+  );
   const spans =
     activeFromDay > 1
-      ? clipAbsenceSpansToActiveEpisode(rawSpans, activeFromDay)
-      : rawSpans;
+      ? [
+          ...beforeEpisodeSpans,
+          ...clipAbsenceSpansToActiveEpisode(rawSpans, activeFromDay),
+        ]
+      : rawSpans.length
+        ? rawSpans
+        : beforeEpisodeSpans;
   const fillBeforeActive = activeFromDay > 1;
   const spanEnd = spans.reduce((max, span) => Math.max(max, span.toDay), 0);
   const lastDay = Math.max(plan.timesheetDay, spanEnd);
@@ -2366,11 +2391,19 @@ const writeAbsenceReturn = (
   fallbackDate: string,
 ) => {
   const returnDate = payload.returnDate || fallbackDate;
-  if (returnDate) absent.cell(rowNumber, col("M")).value(returnDate);
+  if (returnDate) {
+    absent
+      .cell(rowNumber, col("M"))
+      .value(formatUkDateForExcelWrite(returnDate));
+  }
   const returnOrderDate = payload.returnOrderDate || "";
   const returnOrderNumber = payload.returnOrderNumber || "";
   absent.cell(rowNumber, col("N")).value(null);
-  if (returnOrderDate) absent.cell(rowNumber, col("O")).value(returnOrderDate);
+  if (returnOrderDate) {
+    absent
+      .cell(rowNumber, col("O"))
+      .value(formatUkDateForExcelWrite(returnOrderDate));
+  }
   if (returnOrderNumber) {
     absent.cell(rowNumber, col("P")).value(returnOrderNumber);
   }

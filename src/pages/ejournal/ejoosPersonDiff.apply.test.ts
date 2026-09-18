@@ -88,6 +88,39 @@ describe("buildTimesheetPreview", () => {
     expect(preview?.departDay).toBeUndefined();
   });
 
+  it("shows ВП until archive return, then plus when closing medical leave and ПОСАДА", () => {
+    const preview = buildTimesheetPreview(
+      [
+        op({
+          kind: "absent_close",
+          class: "ready",
+          payload: {
+            returnDate: "03.08.2026",
+            timesheetAbsenceSpans: "1-2:ВП",
+          },
+        }),
+        op({
+          kind: "position_change",
+          class: "ready",
+          payload: {
+            orderDate: "30.08.2026",
+            timesheetActiveFrom: "03.08.2026",
+            returningFromDisposition: "1",
+            historyTimesheetAbsenceSpans: "1-2:ВП",
+            nextIndex: "2103730",
+          },
+        }),
+      ],
+      31,
+      "31.08.2026",
+    );
+
+    expect(preview?.runs).toEqual([
+      { from: 1, to: 2, mark: "ВП" },
+      { from: 3, to: 31, mark: "+" },
+    ]);
+  });
+
   it("prefers ПОСАДА order date over stale archive return for active-from day", () => {
     const preview = buildTimesheetPreview(
       [

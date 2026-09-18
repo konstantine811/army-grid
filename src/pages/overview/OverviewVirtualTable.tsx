@@ -169,6 +169,7 @@ export function OverviewVirtualTable({
   locationCopyTextBuilder,
   emptyMessage = "Немає записів за поточними фільтрами.",
   onColumnVisibilityChange,
+  onColumnFiltersChange,
 }: {
   rows: BackendPersonnelOverviewRow[];
   photos: Record<string, string>;
@@ -208,6 +209,7 @@ export function OverviewVirtualTable({
   emptyMessage?: string;
   questionnairePresenceStatus?: "idle" | "loading" | "ready";
   onColumnVisibilityChange?: (visibility: Record<string, boolean>) => void;
+  onColumnFiltersChange?: (columnFilters: Record<string, string[]>) => void;
 }) {
   const photosRef = useRef(photos);
   photosRef.current = photos;
@@ -496,6 +498,7 @@ export function OverviewVirtualTable({
     onSenaryExport: onCommandersExport,
     senaryExportLabel: "Командири",
     onColumnVisibilityChange,
+    onColumnFiltersChange,
     onVisibleRowsChange,
     initialState: {
       pagination: {

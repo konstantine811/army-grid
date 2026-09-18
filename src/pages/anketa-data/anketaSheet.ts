@@ -5,6 +5,7 @@ import {
   readDataCache,
   writeDataCache,
 } from "../../data/idbDataCache";
+import { padAnketaIdCardDocumentNumber } from "./anketaIdDocumentNumber";
 
 /** Public Google Sheet «Анкети». */
 export const ANKETA_SHEET_ID = "1aPv0wwKye-N77J7Ourko3JMnk0oOf_mqRLQEm7qcNoQ";
@@ -178,6 +179,8 @@ export const isAnketaColumnReadonly = (key: AnketaColumnKey): boolean =>
 export type AnketaRow = {
   __rowId: string;
   __rowNumber: number;
+  /** Звідки рядок потрапив у анкети з ЕЖООС. Не колонка Google. */
+  __ejoosSource?: "oos" | "excluded";
 } & Record<AnketaColumnKey, string>;
 
 export const createEmptyAnketaRow = (rowNumber: number): AnketaRow => {
@@ -364,7 +367,11 @@ export const parseAnketaCsv = (
     } as AnketaRow;
 
     ANKETA_COLUMNS.forEach((column, columnIndex) => {
-      record[column.key] = values[columnIndex] ?? "";
+      const raw = values[columnIndex] ?? "";
+      record[column.key] =
+        column.key === "idDocumentNumber"
+          ? padAnketaIdCardDocumentNumber(raw)
+          : raw;
     });
     rows.push(record);
   });

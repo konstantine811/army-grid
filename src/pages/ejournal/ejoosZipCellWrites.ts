@@ -1,7 +1,13 @@
 import JSZip from "jszip";
 import {
+  formatUkDateForExcelWrite,
+  tryParseExcelSerialDate,
+} from "../../shared/format";
+import {
+  EJOOS_GENERAL_NUM_FMT_ID,
   EJOOS_TEXT_NUM_FMT_ID,
-  isEjoosStaffIndexColumn,
+  isEjoosForceTextColumn,
+  isEjoosRnokppColumn,
   normalizeStaffIndexValue,
 } from "./ejoosStaffIndexFormat";
 import { EJOOS_WRITE_STYLE } from "./ejoosStyleConfig";
@@ -385,6 +391,18 @@ const buildCellXml = (
   const styleAttr = styleId != null && styleId !== "" ? ` s="${styleId}"` : "";
   if (value === null) return `<c r="${ref}"${styleAttr}/>`;
   if (typeof value === "number" && Number.isFinite(value)) {
+    if (tryParseExcelSerialDate(value)) {
+      const formatted = formatUkDateForExcelWrite(value);
+      if (formatted) {
+        const space =
+          formatted.startsWith(" ") ||
+          formatted.endsWith(" ") ||
+          /[\n\t]/.test(formatted)
+            ? ` xml:space="preserve"`
+            : "";
+        return `<c r="${ref}"${styleAttr} t="inlineStr"><is><t${space}>${escapeXml(formatted)}</t></is></c>`;
+      }
+    }
     return `<c r="${ref}"${styleAttr}><v>${value}</v></c>`;
   }
   if (sharedStringIndex != null) {
@@ -968,15 +986,19 @@ const buildCenterRegularXf = (
   fontId: string,
   wrapText: boolean,
   forceTextFormat = false,
+  forceGeneralFormat = false,
 ) => {
   const numFmtId = forceTextFormat
     ? EJOOS_TEXT_NUM_FMT_ID
-    : xfAttr(sourceXf, "numFmtId", "0");
+    : forceGeneralFormat
+      ? EJOOS_GENERAL_NUM_FMT_ID
+      : xfAttr(sourceXf, "numFmtId", "0");
   const fillId = xfAttr(sourceXf, "fillId", "0");
   const borderId = xfAttr(sourceXf, "borderId", "0");
   const xfId = xfAttr(sourceXf, "xfId", "0");
   const applyNumberFormat =
     forceTextFormat ||
+    forceGeneralFormat ||
     numFmtId !== "0" ||
     /applyNumberFormat="(?:1|true)"/i.test(sourceXf || "")
       ? ` applyNumberFormat="1"`
@@ -999,6 +1021,7 @@ const styleMatchesCenterRegular = (
   wrapText: boolean,
   fontSize = EJOOS_DATA_FONT_SIZE,
   forceTextFormat = false,
+  forceGeneralFormat = false,
 ) => {
   const xf = xfXmlForStyle(stylesXml, styleId);
   if (!xf || !xfAppliesAlignment(xf)) return false;
@@ -1015,6 +1038,11 @@ const styleMatchesCenterRegular = (
     if (numFmtId !== EJOOS_TEXT_NUM_FMT_ID) return false;
     if (!/applyNumberFormat="(?:1|true)"/i.test(xf)) return false;
   }
+  if (forceGeneralFormat) {
+    const numFmtId = xf.match(/\bnumFmtId="(\d+)"/i)?.[1];
+    if (numFmtId !== EJOOS_GENERAL_NUM_FMT_ID) return false;
+    if (!/applyNumberFormat="(?:1|true)"/i.test(xf)) return false;
+  }
   return true;
 };
 
@@ -1027,6 +1055,7 @@ const ensureCenterRegularStyle = (
   sourceStyleId: string | undefined,
   wrapText: boolean,
   forceTextFormat = false,
+  forceGeneralFormat = false,
 ) => {
   const block = cellXfsBlock(stylesXml);
   const xfs = block
@@ -1052,6 +1081,7 @@ const ensureCenterRegularStyle = (
       wrapText,
       targetFontSize,
       forceTextFormat,
+      forceGeneralFormat,
     )
   ) {
     return { xml, styleId: sourceStyleId };
@@ -1065,6 +1095,7 @@ const ensureCenterRegularStyle = (
     fontEnsured.fontId,
     wrapText,
     forceTextFormat,
+    forceGeneralFormat,
   );
   const existing = xfs.findIndex((xf) => xf === built);
   if (existing >= 0) return { xml, styleId: String(existing) };
@@ -1339,7 +1370,7 @@ export async function applyInlineStringWritesToWorkbook(
       row >= 1 &&
       Number.isFinite(column) &&
       column >= 1 &&
-      column <= 256
+      column <= 16_384
     );
   });
   if (!validWrites.length) {
@@ -1393,7 +1424,7 @@ export async function applyInlineStringWritesToWorkbook(
     if (
       write.styleOnly ||
       write.value == null ||
-      !isEjoosStaffIndexColumn(sheetNameOrRe, write.column, write.row)
+      !isEjoosForceTextColumn(sheetNameOrRe, write.column, write.row)
     ) {
       return write;
     }
@@ -1512,13 +1543,16 @@ export async function applyInlineStringWritesToWorkbook(
     const needsWrap = isPlainDataSheet
       ? false
       : write.wrapText ?? isWrapDataSheetTarget(sheetNameOrRe);
-    const forceTextFormat = isEjoosStaffIndexColumn(
+    const forceTextFormat = isEjoosForceTextColumn(
       sheetNameOrRe,
       write.column,
       write.row,
     );
+    const forceGeneralFormat =
+      !forceTextFormat &&
+      isEjoosRnokppColumn(sheetNameOrRe, write.column, write.row);
     if (!stylesXml) return sourceId;
-    const cacheKey = `${sourceId ?? "_none"}:${needsWrap ? "w" : "n"}:${forceTextFormat ? "t" : "n"}`;
+    const cacheKey = `${sourceId ?? "_none"}:${needsWrap ? "w" : "n"}:${forceTextFormat ? "t" : forceGeneralFormat ? "g" : "n"}`;
     if (centerStyleBySource.has(cacheKey)) {
       return centerStyleBySource.get(cacheKey);
     }
@@ -1527,6 +1561,7 @@ export async function applyInlineStringWritesToWorkbook(
       sourceId,
       needsWrap,
       forceTextFormat,
+      forceGeneralFormat,
     );
     stylesXml = ensured.xml;
     centerStyleBySource.set(cacheKey, ensured.styleId);

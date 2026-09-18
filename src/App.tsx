@@ -25,6 +25,7 @@ import {
 import {
   LazyAnalyticsPage,
   LazyAnketaDataPage,
+  LazyPreAnketaPage,
   LazyBchsPage,
   LazyDocumentsPage,
   LazyEjournalPage,
@@ -344,6 +345,15 @@ function App() {
         >
           <LazyPageBoundary>
             <LazyAnketaDataPage />
+          </LazyPageBoundary>
+        </AppPageSlot>
+        <AppPageSlot
+          page="preAnketa"
+          activePage={activePage}
+          mountedPages={mountedPages}
+        >
+          <LazyPageBoundary>
+            <LazyPreAnketaPage />
           </LazyPageBoundary>
         </AppPageSlot>
         <AppPageSlot

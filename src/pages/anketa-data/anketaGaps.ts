@@ -1,11 +1,15 @@
 import type { BackendPersonQuestionnaireMeta } from "../../api";
-import { questionnaireFileMatchesPerson } from "../personnel/personAttachments";
+import {
+  buildQuestionnairePresenceFromPeople,
+  type QuestionnairePresencePerson,
+} from "../personnel/personAttachments";
 import {
   buildPersonIdentityFingerprint,
   cleanPersonDisplayName,
   extractPersonCallSign,
 } from "../personnel/personnelUtils";
 import { isAnketaRowMissingQuestionnaire } from "./anketaMissingList";
+import { padAnketaIdCardDocumentNumber } from "./anketaIdDocumentNumber";
 import {
   anketaNameKeyVariants,
   expandAnketaNameKeySet,
@@ -45,13 +49,25 @@ export const ANKETA_RELATIVES_EMPTY_TEMPLATE = `Сімейний стан:
 Довірена особа: 
 Дитина:`;
 
+/** Шаблон для порожньої колонки «Додаткова інформація». */
+export const ANKETA_ADDITIONAL_INFO_EMPTY_TEMPLATE = `тел: 
+УБД:`;
+
+export const ANKETA_TEXTAREA_EMPTY_TEMPLATES: Partial<
+  Record<AnketaColumnKey, string>
+> = {
+  relatives: ANKETA_RELATIVES_EMPTY_TEMPLATE,
+  additionalInfo: ANKETA_ADDITIONAL_INFO_EMPTY_TEMPLATE,
+};
+
 export const initialAnketaCellEditorDraft = (
   columnKey: AnketaColumnKey,
   value: string,
   isEmpty: boolean,
 ) => {
-  if (columnKey === "relatives" && isEmpty) {
-    return ANKETA_RELATIVES_EMPTY_TEMPLATE;
+  if (isEmpty) {
+    const template = ANKETA_TEXTAREA_EMPTY_TEMPLATES[columnKey];
+    if (template) return template;
   }
   return value;
 };
@@ -76,6 +92,150 @@ export const ANKETA_MISSING_VALUE_PRESETS = [
 export type AnketaMissingValuePreset =
   (typeof ANKETA_MISSING_VALUE_PRESETS)[number];
 
+const normalizeAnketaMissingMarker = (value: unknown) =>
+  String(value ?? "")
+    .trim()
+    .toLocaleLowerCase("uk-UA")
+    .replace(/[’ʼ`]/g, "'")
+    .replace(/\s+/g, " ");
+
+const ANKETA_MISSING_MARKERS = new Set([
+  ...ANKETA_MISSING_VALUE_PRESETS.map(normalizeAnketaMissingMarker),
+  "немає",
+  "відсутні",
+  "відсутня",
+  "відсутнє",
+  "даних немає",
+  "квиток відсутній",
+]);
+
+/** Порожнє або службова позначка («забув», «дані відсутні» тощо) — можна заповнювати. */
+export const isReplaceableAnketaMissingValue = (value: unknown) => {
+  const normalized = normalizeAnketaMissingMarker(value);
+  return !normalized || ANKETA_MISSING_MARKERS.has(normalized);
+};
+
+const collapseAnketaTemplateText = (value: string) =>
+  value.replace(/\s+/g, " ").trim();
+
+const ANKETA_STRUCTURED_LABEL =
+  /^(сімейний стан|мати|батько|довірена особа|дитина|тел|убд)\s*:/i;
+
+const anketaStructuredBlockLines = (value: unknown) => {
+  const text = String(value ?? "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .trim();
+  if (!text || !text.includes(":")) return null;
+  const lines = text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (lines.length < 2) return null;
+  if (!lines.every((line) => line.includes(":"))) return null;
+  if (!lines.some((line) => ANKETA_STRUCTURED_LABEL.test(line))) return null;
+  return lines.map((line) => ({
+    line,
+    body: line.replace(/^[^:]+:\s*/, "").trim(),
+  }));
+};
+
+/** Шаблон родичів / додаткової інформації без жодного значення — як порожня комірка. */
+export const isAnketaBlankStructuredTemplate = (value: unknown) => {
+  const collapsed = collapseAnketaTemplateText(String(value ?? ""));
+  if (
+    collapsed === collapseAnketaTemplateText(ANKETA_RELATIVES_EMPTY_TEMPLATE) ||
+    collapsed ===
+      collapseAnketaTemplateText(ANKETA_ADDITIONAL_INFO_EMPTY_TEMPLATE)
+  ) {
+    return true;
+  }
+  const lines = anketaStructuredBlockLines(value);
+  if (!lines?.length) return false;
+  return lines.every((item) => !item.body);
+};
+
+/** Порожній шаблон родичів / додаткової інформації або лише підписи без значень. */
+export const isAnketaEmptyStructuredBlock = (value: unknown) => {
+  if (isAnketaBlankStructuredTemplate(value)) return true;
+  const lines = anketaStructuredBlockLines(value);
+  if (!lines?.length) return false;
+  return lines.every((item) => isReplaceableAnketaMissingValue(item.body));
+};
+
+const isAnketaRnokppGapEmpty = (value: unknown) => {
+  const trimmed = String(value ?? "").trim();
+  if (!trimmed || isAnketaDashOnlyEmptyValue(trimmed)) return true;
+  const digits = trimmed.replace(/\D/g, "");
+  return digits.length !== 10;
+};
+
+/** Сам дефіс / тире без тексту — комірка ще не заповнена. */
+export const isAnketaDashOnlyEmptyValue = (value: unknown) =>
+  /^[-–—−]+$/.test(
+    String(value ?? "")
+      .replace(/\u00a0/g, " ")
+      .trim(),
+  );
+
+/** Чи комірку можна заповнити з анкети (порожня або службова позначка). */
+export const isAnketaGapCellEmpty = (
+  row: Pick<AnketaRow, AnketaColumnKey> | AnketaRow,
+  columnId: AnketaColumnKey,
+) => {
+  const value = row[columnId];
+  if (columnId === "rnokpp") return isAnketaRnokppGapEmpty(value);
+  if (isAnketaDashOnlyEmptyValue(value)) return true;
+  if (isAnketaBlankStructuredTemplate(value)) return true;
+  return isReplaceableAnketaMissingValue(value);
+};
+
+/** Комірка зовсім порожня (без тексту), на відміну від «забув» / «дані відсутні». */
+export const isAnketaGapCellTrulyEmpty = (
+  row: Pick<AnketaRow, AnketaColumnKey> | AnketaRow,
+  columnId: AnketaColumnKey,
+) => {
+  const value = row[columnId];
+  if (!String(value ?? "").trim()) return true;
+  if (isAnketaDashOnlyEmptyValue(value)) return true;
+  return isAnketaBlankStructuredTemplate(value);
+};
+
+/** У комірці вже є службова позначка, яку можна замінити лише реальними даними з анкети. */
+export const isAnketaGapCellPlaceholder = (
+  row: Pick<AnketaRow, AnketaColumnKey> | AnketaRow,
+  columnId: AnketaColumnKey,
+) =>
+  isAnketaGapCellEmpty(row, columnId) &&
+  !isAnketaGapCellTrulyEmpty(row, columnId);
+
+/** Користувач явно позначив «дані відсутні» — для пошуку пропусків це вже заповнено. */
+export const isAnketaGapCellResolvedForSearch = (
+  row: Pick<AnketaRow, AnketaColumnKey> | AnketaRow,
+  columnId: AnketaColumnKey,
+) => {
+  const value = row[columnId];
+  if (isAnketaAbsentQuestionnaireValue(value)) return true;
+  if (columnId === "rnokpp") return !isAnketaRnokppGapEmpty(value);
+  const trimmed = String(value ?? "").trim();
+  if (!trimmed) return false;
+  return !isReplaceableAnketaMissingValue(value);
+};
+
+export const isAnketaGapCellUnresolvedForSearch = (
+  row: Pick<AnketaRow, AnketaColumnKey> | AnketaRow,
+  columnId: AnketaColumnKey,
+) => !isAnketaGapCellResolvedForSearch(row, columnId);
+
+/** Усі вибрані колонки вже заповнені (дані відсутні, РНОКПП, реальний текст). */
+export const isAnketaGapPersonResolvedForSearch = (
+  row: AnketaRow,
+  gapColumnKeys: readonly AnketaColumnKey[],
+) => {
+  if (!gapColumnKeys.length) return false;
+  return gapColumnKeys.every((key) => isAnketaGapCellResolvedForSearch(row, key));
+};
+
 const APPS_SCRIPT_STORAGE_KEY = "army-grid:anketa-apps-script-url";
 const GAP_COLUMNS_STORAGE_KEY = "army-grid:anketa-gap-columns.v1";
 
@@ -85,6 +245,7 @@ export const DEFAULT_ANKETA_GAP_COLUMNS: AnketaColumnKey[] = [
   "birthPlace",
   "sex",
   "idDocumentNumber",
+  "idDocumentName",
   "arrivedFrom",
   "serviceType",
   "contractFrom",
@@ -95,6 +256,7 @@ export const DEFAULT_ANKETA_GAP_COLUMNS: AnketaColumnKey[] = [
   "conscriptedWhen",
   "conscriptedBy",
   "education",
+  "relatives",
 ];
 
 const sanitizeGapColumns = (value: unknown): AnketaColumnKey[] | null => {
@@ -193,29 +355,180 @@ export type AnketaAbsentQuestionnaireFill = {
   externalId: string;
 };
 
+const buildAnketaQuestionnairePresencePerson = (
+  row: AnketaRow,
+): QuestionnairePresencePerson => {
+  const lookupIds = new Set<string>();
+  const externalId = String(row.externalId ?? "").trim();
+  if (externalId) lookupIds.add(externalId);
+  const normalizedExternalId = normalizeAnketaExternalIdKey(externalId);
+  if (normalizedExternalId) lookupIds.add(normalizedExternalId);
+  const cleanedName = cleanPersonDisplayName(row.fullName)
+    .replace(/\([^)]*\)/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const fingerprint = buildPersonIdentityFingerprint(
+    cleanedName,
+    String(row.birthDate ?? "").trim(),
+    extractPersonCallSign(row.fullName),
+  );
+  if (fingerprint) lookupIds.add(fingerprint);
+  return {
+    currentId: row.__rowId,
+    lookupIds: [...lookupIds],
+    fullName: row.fullName,
+  };
+};
+
+/** Один прохід: Set __rowId рядків, для яких є PDF-анкета в бекенді. */
+export const buildAnketaRowsWithQuestionnairePdfSet = (
+  rows: AnketaRow[],
+  items: BackendPersonQuestionnaireMeta[] | null | undefined,
+): Set<string> => {
+  if (!items?.length || !rows.length) return new Set();
+  const presence = buildQuestionnairePresenceFromPeople(
+    rows.map(buildAnketaQuestionnairePresencePerson),
+    items,
+  );
+  const result = new Set<string>();
+  for (const rowId of Object.keys(presence)) {
+    if (presence[rowId]) result.add(rowId);
+  }
+  return result;
+};
+
 export const anketaRowHasQuestionnairePdf = (
   row: AnketaRow,
   items: BackendPersonQuestionnaireMeta[] | null | undefined,
 ) => {
   if (!items?.length) return false;
-  const spreadsheetId = normalizeAnketaExternalIdKey(row.externalId);
-  const fingerprint = buildPersonIdentityFingerprint(
-    cleanPersonDisplayName(row.fullName).replace(/\([^)]*\)/g, " ").replace(/\s+/g, " ").trim(),
-    String(row.birthDate ?? "").trim(),
-    extractPersonCallSign(row.fullName),
-  );
-  for (const meta of items) {
-    const metaId = String(meta.personExternalId ?? "").trim();
-    if (!metaId) continue;
-    if (spreadsheetId && normalizeAnketaExternalIdKey(metaId) === spreadsheetId) {
-      return true;
-    }
-    if (fingerprint && metaId === fingerprint) return true;
-    if (questionnaireFileMatchesPerson(meta.fileName, [row.fullName])) {
-      return true;
+  return buildAnketaRowsWithQuestionnairePdfSet([row], items).has(row.__rowId);
+};
+
+/** Порожні вибрані колонки лишаються в пошуку — без PDF і список «без анкет» не відсікають. */
+export const filterAnketaRowsForGapSearch = (
+  rows: AnketaRow[],
+  _options?: {
+    excludeNameKeys?: Set<string> | null;
+    questionnaireMeta?: BackendPersonQuestionnaireMeta[] | null;
+  },
+): AnketaRow[] => rows;
+
+/** Усі вибрані колонки без жодного символу (не «дані відсутні» і не шаблони). */
+export const isAnketaRowFullyBlankInGapColumns = (
+  row: Pick<AnketaRow, AnketaColumnKey>,
+  gapColumnKeys: readonly AnketaColumnKey[],
+) => {
+  if (!gapColumnKeys.length) return false;
+  return gapColumnKeys.every((key) => isAnketaGapCellTrulyEmpty(row, key));
+};
+
+const rowHasGapInSelectedColumns = (
+  row: AnketaRow,
+  gapColumnKeys: readonly AnketaColumnKey[],
+) => gapColumnKeys.some((key) => isAnketaGapCellTrulyEmpty(row, key));
+
+/** У особи немає зовсім порожніх вибраних полів (усюди вже є текст). */
+export const isAnketaGapPersonWithoutTrulyEmptyCells = (
+  row: AnketaRow,
+  gapColumnKeys: readonly AnketaColumnKey[],
+) => !rowHasGapInSelectedColumns(row, gapColumnKeys);
+
+/** Усередині групи: спочатку повністю порожні, потім з уже наявним текстом. */
+export const orderAnketaGapRowsBlankFirst = (
+  rows: AnketaRow[],
+  gapColumnKeys: readonly AnketaColumnKey[],
+) => {
+  if (!gapColumnKeys.length) return rows;
+  const fullyBlank: AnketaRow[] = [];
+  const partial: AnketaRow[] = [];
+  for (const row of rows) {
+    if (isAnketaRowFullyBlankInGapColumns(row, gapColumnKeys)) {
+      fullyBlank.push(row);
+    } else {
+      partial.push(row);
     }
   }
-  return false;
+  if (!fullyBlank.length || !partial.length) return rows;
+  return [...fullyBlank, ...partial];
+};
+
+const orderAnketaGapRowsByPdfThenBlank = (
+  rows: AnketaRow[],
+  gapColumnKeys: readonly AnketaColumnKey[],
+  withPdfRowIds?: ReadonlySet<string> | null,
+) => {
+  if (!withPdfRowIds?.size) {
+    return orderAnketaGapRowsBlankFirst(rows, gapColumnKeys);
+  }
+  const withPdf: AnketaRow[] = [];
+  const withoutPdf: AnketaRow[] = [];
+  for (const row of rows) {
+    if (withPdfRowIds.has(row.__rowId)) withPdf.push(row);
+    else withoutPdf.push(row);
+  }
+  if (!withPdf.length || !withoutPdf.length) {
+    return orderAnketaGapRowsBlankFirst(rows, gapColumnKeys);
+  }
+  return [
+    ...orderAnketaGapRowsBlankFirst(withPdf, gapColumnKeys),
+    ...orderAnketaGapRowsBlankFirst(withoutPdf, gapColumnKeys),
+  ];
+};
+
+/** Штатка → решта; у кожній групі — з PDF, потім без; повністю порожні → з текстом. */
+export const orderAnketaGapSearchRows = (
+  rows: AnketaRow[],
+  inStaffRowIds: ReadonlySet<string>,
+  gapColumnKeys: readonly AnketaColumnKey[],
+  withPdfRowIds?: ReadonlySet<string> | null,
+) => {
+  const partition = (list: AnketaRow[]) =>
+    orderAnketaGapRowsByPdfThenBlank(list, gapColumnKeys, withPdfRowIds);
+  if (!inStaffRowIds.size) return partition(rows);
+  const inStaff: AnketaRow[] = [];
+  const rest: AnketaRow[] = [];
+  for (const row of rows) {
+    if (inStaffRowIds.has(row.__rowId)) inStaff.push(row);
+    else rest.push(row);
+  }
+  if (!inStaff.length || !rest.length) return partition(rows);
+  return [...partition(inStaff), ...partition(rest)];
+};
+
+const pickGapSearchGroupWithBlankFirst = (
+  group: AnketaRow[],
+  gapColumnKeys: readonly AnketaColumnKey[],
+) => {
+  const withGaps = group.filter((row) =>
+    rowHasGapInSelectedColumns(row, gapColumnKeys),
+  );
+  if (!withGaps.length) return [];
+  return orderAnketaGapRowsBlankFirst(withGaps, gapColumnKeys);
+};
+
+/**
+ * Черга: штатка з пропусками, потім решта з пропусками.
+ * Нікого з порожніми вибраними колонками не відсікаємо.
+ */
+export const gateAnketaGapSearchRowsInStaffFirst = (
+  rows: AnketaRow[],
+  inStaffRowIds: ReadonlySet<string>,
+  gapColumnKeys: readonly AnketaColumnKey[],
+) => {
+  if (!gapColumnKeys.length) return rows;
+
+  const inStaff = rows.filter((row) => inStaffRowIds.has(row.__rowId));
+  const rest = rows.filter((row) => !inStaffRowIds.has(row.__rowId));
+  const inStaffPick = pickGapSearchGroupWithBlankFirst(inStaff, gapColumnKeys);
+  const restPick = pickGapSearchGroupWithBlankFirst(rest, gapColumnKeys);
+
+  if (inStaffRowIds.size && inStaffPick.length && restPick.length) {
+    return [...inStaffPick, ...restPick];
+  }
+  if (inStaffRowIds.size && inStaffPick.length) return inStaffPick;
+  if (restPick.length) return restPick;
+  return inStaffPick;
 };
 
 /** Після повторної перевірки прибрати з «без анкет» тих, для кого PDF уже з'явився. */
@@ -260,8 +573,7 @@ export const collectAbsentQuestionnaireCellFills = (
       continue;
     }
     for (const columnId of keys) {
-      const value = String(row[columnId] ?? "").trim();
-      if (value) continue;
+      if (!isAnketaGapCellTrulyEmpty(row, columnId)) continue;
       fills.push({
         rowId: row.__rowId,
         rowNumber: row.__rowNumber,
@@ -274,7 +586,21 @@ export const collectAbsentQuestionnaireCellFills = (
   return fills;
 };
 
-/** «дані відсутні» у вибраних колонках, якщо анкета вже є — стерти, щоб пошук міг заповнити. */
+/** Усі вибрані колонки позначені «дані відсутні» (не порожні й не інший текст). */
+export const isAnketaRowFullyMarkedAbsentInColumns = (
+  row: AnketaRow,
+  columnKeys: readonly AnketaColumnKey[],
+) => {
+  if (!columnKeys.length) return false;
+  return columnKeys.every((key) =>
+    isAnketaAbsentQuestionnaireValue(row[key]),
+  );
+};
+
+/**
+ * Якщо зʼявилась анкета і в усіх вибраних колонках було «дані відсутні» —
+ * стерти їх для подальшого заповнення. Часткові позначки не чіпаємо.
+ */
 export const collectAbsentQuestionnaireCellClears = (
   rows: AnketaRow[],
   columnKeys: Iterable<AnketaColumnKey> | null | undefined,
@@ -286,8 +612,8 @@ export const collectAbsentQuestionnaireCellClears = (
   const clears: AnketaAbsentQuestionnaireFill[] = [];
   for (const row of rows) {
     if (!hasQuestionnaire(row)) continue;
+    if (!isAnketaRowFullyMarkedAbsentInColumns(row, keys)) continue;
     for (const columnId of keys) {
-      if (!isAnketaAbsentQuestionnaireValue(row[columnId])) continue;
       clears.push({
         rowId: row.__rowId,
         rowNumber: row.__rowNumber,
@@ -405,13 +731,9 @@ const makeGapWalkContext = (
 };
 
 const rowParticipatesInGapSearch = (
-  row: AnketaRow,
-  ctx: AnketaGapWalkContext,
-) => {
-  if (isAnketaRowMissingQuestionnaire(row, ctx.excludeNameKeys)) return false;
-  if (isAnketaRowMarkedAbsentQuestionnaire(row, ctx.allowed)) return false;
-  return true;
-};
+  _row: AnketaRow,
+  _ctx: AnketaGapWalkContext,
+) => true;
 
 const visitEmptyCellsInRow = (
   row: AnketaRow,
@@ -424,7 +746,7 @@ const visitEmptyCellsInRow = (
     const column = ANKETA_COLUMNS[columnIndex];
     if (!column || isAnketaColumnReadonly(column.key)) continue;
     if (ctx.allowed && !ctx.allowed.has(column.key)) continue;
-    if (String(row[column.key] ?? "").trim()) continue;
+    if (!isAnketaGapCellTrulyEmpty(row, column.key)) continue;
     const key = `${row.__rowId}:${column.key}`;
     if (ctx.skip?.has(key)) continue;
     const stop = onGap({
@@ -514,7 +836,7 @@ export const countAnketaBlankFieldPersons = (
   for (const row of rows) {
     let blanks = 0;
     for (const key of keys) {
-      if (String(row[key] ?? "").trim()) continue;
+      if (!isAnketaGapCellTrulyEmpty(row, key)) continue;
       blanks += 1;
     }
     if (!blanks) continue;
@@ -645,8 +967,12 @@ export const updateAnketaRowCell = (
   value: string,
 ): AnketaRow[] => {
   if (isAnketaColumnReadonly(columnId)) return rows;
+  const nextValue =
+    columnId === "idDocumentNumber"
+      ? padAnketaIdCardDocumentNumber(value)
+      : value;
   return rows.map((row) =>
-    row.__rowId === rowId ? { ...row, [columnId]: value } : row,
+    row.__rowId === rowId ? { ...row, [columnId]: nextValue } : row,
   );
 };
 

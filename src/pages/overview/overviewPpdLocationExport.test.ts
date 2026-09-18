@@ -126,8 +126,8 @@ describe("overviewPpdLocationExport", () => {
       [rosterRow],
     );
 
-    expect((sheets[0]?.data.length ?? 0) - 1).toBe(0);
-    expect((sheets[1]?.data.length ?? 0) - 1).toBe(1);
+    expect((sheets[0]?.data.length ?? 0) - 2).toBe(0);
+    expect((sheets[1]?.data.length ?? 0) - 2).toBe(1);
   });
 
   it("reads staff_35 clarification from roster columns", () => {
@@ -154,15 +154,50 @@ describe("overviewPpdLocationExport", () => {
       }),
     ]);
 
-    expect((sheets[0]?.data.length ?? 0) - 1).toBe(1);
-    expect((sheets[1]?.data.length ?? 0) - 1).toBe(1);
-    expect((sheets[1]?.data[1] as Array<{ value: string }>).map((cell) => cell.value)).toEqual([
+    expect(sheets[0]?.sheet).toBe("ППД Вишневе");
+    expect(sheets[1]?.sheet).toBe("Полігон");
+    expect((sheets[0]?.data[0] as Array<{ value?: string } | null>)[0]?.value).toBe(
+      "ППД Вишневе",
+    );
+    expect((sheets[1]?.data[0] as Array<{ value?: string } | null>)[0]?.value).toBe(
+      "Полігон",
+    );
+    expect(
+      (sheets[0]?.data[1] as Array<{ value: string }>).map((cell) => cell.value),
+    ).toEqual(["№", "ПІБ", "Позивний", "Статус", "БГ", "Примітки"]);
+    expect((sheets[0]?.data.length ?? 0) - 2).toBe(1);
+    expect((sheets[1]?.data.length ?? 0) - 2).toBe(1);
+    expect((sheets[0]?.data[2] as Array<{ value: string }>).map((cell) => cell.value)).toEqual([
+      "1",
+      "ІВАНОВ Іван",
+      "ПОЗ",
+      "В строю",
+      "",
+      "прим.",
+    ]);
+    expect((sheets[1]?.data[2] as Array<{ value: string }>).map((cell) => cell.value)).toEqual([
+      "1",
       "КОВАЛЕНКО Костян",
       "КРОХА",
       "В строю",
       "БГ",
       "прим.",
-      "ППД Вишневе — ПОЛІГОН",
     ]);
+  });
+
+  it("keeps В строю in status and leaves БГ empty unless Status БГ has a value", () => {
+    const sheets = buildOverviewPpdLocationExportSheets([
+      row("БЕЗ БГ", "ППД Вишневе", "ППД", "3 піхотна рота", {
+        staff_23: "В строю",
+      }),
+      row("В СТРОЮ БГ", "ППД Вишневе", "ППД", "3 піхотна рота", {
+        staff_23: "В строю БГ",
+      }),
+    ]);
+
+    expect((sheets[0]?.data[2] as Array<{ value: string }>)[0]?.value).toBe("1");
+    expect((sheets[0]?.data[3] as Array<{ value: string }>)[0]?.value).toBe("2");
+    expect((sheets[0]?.data[2] as Array<{ value: string }>)[4]?.value).toBe("");
+    expect((sheets[0]?.data[3] as Array<{ value: string }>)[4]?.value).toBe("БГ");
   });
 });

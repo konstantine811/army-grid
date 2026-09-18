@@ -178,7 +178,7 @@ export const documentRequiredInputKeys = (
     if (kind === "movement") return [...base, "fromLocation", "toLocation"];
     return [...base, "lossLocation", "customCircumstances"];
   }
-  if (type === "form6Report") {
+  if (type === "form6Report" || type === "ubdReport") {
     const manual =
       fields?.basisManual === true || String(fields?.basisManual) === "true";
     if (manual && !isBlankDocumentInput(fields?.basis)) {
