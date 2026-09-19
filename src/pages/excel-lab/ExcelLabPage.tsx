@@ -8,8 +8,10 @@ import {
 } from "@/components/sci/SciPrimitives";
 import { CloudUploadOutlinedIcon } from "@/components/sci/icons";
 import {
+  countMilitaryServiceCardPeople,
+  parseGenericTestExcelFile,
+  parseMilitaryServiceCardsExcelFile,
   parseStaffSheetExcelFile,
-  parseUploadedExcelFile,
 } from "./parseUploadedExcel";
 
 const isExcelFile = (file: File) =>
@@ -41,11 +43,16 @@ const buildSheetSummary = (debug: {
 export function ExcelLabPage() {
   const [staffFileName, setStaffFileName] = useState("");
   const [staffSummary, setStaffSummary] = useState("");
+  const [militaryCardsFileName, setMilitaryCardsFileName] = useState("");
+  const [militaryCardsSummary, setMilitaryCardsSummary] = useState("");
   const [genericFileName, setGenericFileName] = useState("");
   const [genericSummary, setGenericSummary] = useState("");
   const [error, setError] = useState("");
   const [isStaffRunning, setIsStaffRunning] = useState(false);
+  const [isMilitaryCardsRunning, setIsMilitaryCardsRunning] = useState(false);
   const [isGenericRunning, setIsGenericRunning] = useState(false);
+
+  const isBusy = isStaffRunning || isMilitaryCardsRunning || isGenericRunning;
 
   const parseStaffFile = async (file: File) => {
     setIsStaffRunning(true);
@@ -73,17 +80,43 @@ export function ExcelLabPage() {
     }
   };
 
+  const parseMilitaryCardsFile = async (file: File) => {
+    setIsMilitaryCardsRunning(true);
+    setError("");
+    setMilitaryCardsSummary("");
+    setMilitaryCardsFileName(file.name);
+    try {
+      const result = await parseMilitaryServiceCardsExcelFile(file);
+      const peopleCount = countMilitaryServiceCardPeople(result.cards);
+      setMilitaryCardsSummary(
+        [
+          buildSheetSummary(result.debug),
+          `Особи з картками (ВК/ТПВ/ДОВІДКИ): ${peopleCount}`,
+          "Результат parseExcelLabMilitaryServiceCards — у console.log (F12 → Console).",
+        ].join("\n"),
+      );
+    } catch (cause) {
+      setError(
+        cause instanceof Error
+          ? cause.message
+          : "Не вдалося розібрати файл військових квитків.",
+      );
+    } finally {
+      setIsMilitaryCardsRunning(false);
+    }
+  };
+
   const parseGenericFile = async (file: File) => {
     setIsGenericRunning(true);
     setError("");
     setGenericSummary("");
     setGenericFileName(file.name);
     try {
-      const result = await parseUploadedExcelFile(file);
+      const result = await parseGenericTestExcelFile(file);
       setGenericSummary(
         [
           buildSheetSummary(result.debug),
-          "Деталі — у console.log (F12 → Console).",
+          "Тестовий парс — snapshot і debug у console.log (F12 → Console).",
         ].join("\n"),
       );
     } catch (cause) {
@@ -116,7 +149,8 @@ export function ExcelLabPage() {
         <Box>
           <Typography variant="h5">Excel Lab</Typography>
           <Typography variant="body2" color="text.secondary">
-            Окремо парсер Штатки та довільний перегляд Excel у консолі.
+            Окремі парсери: Штатка, військові квитки та тестовий перегляд
+            Excel у консолі.
           </Typography>
         </Box>
 
@@ -137,7 +171,7 @@ export function ExcelLabPage() {
           <Button
             component="label"
             variant="contained"
-            disabled={isStaffRunning || isGenericRunning}
+            disabled={isBusy}
             startIcon={<CloudUploadOutlinedIcon />}
           >
             {isStaffRunning ? "Парсю Штатку…" : "Завантажити Штатку"}
@@ -168,25 +202,83 @@ export function ExcelLabPage() {
 
         <Box className="panel-card" sx={{ p: 2 }}>
           <Typography variant="subtitle1" sx={{ mb: 1 }}>
-            Довільний Excel
+            Військові квитки
           </Typography>
           <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
-            Будь-який файл → структура в консолі. Handler:{" "}
+            Аркуші ВК, ТПВ, ДОВІДКИ →{" "}
             <Typography
               component="code"
               variant="body2"
               sx={{ fontFamily: "monospace" }}
             >
-              src/pages/excel-lab/parseUploadedExcel.ts
+              handleParsedExcelWorkbook
+            </Typography>{" "}
+            у{" "}
+            <Typography
+              component="code"
+              variant="body2"
+              sx={{ fontFamily: "monospace" }}
+            >
+              parseUploadedExcel.ts
+            </Typography>
+          </Typography>
+          <Button
+            component="label"
+            variant="contained"
+            color="secondary"
+            disabled={isBusy}
+            startIcon={<CloudUploadOutlinedIcon />}
+          >
+            {isMilitaryCardsRunning
+              ? "Парсю квитки…"
+              : "Завантажити військові квитки"}
+            <input
+              hidden
+              type="file"
+              accept=".xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
+              onChange={onFilePick(parseMilitaryCardsFile)}
+            />
+          </Button>
+          {militaryCardsFileName ? (
+            <Typography variant="body2" sx={{ mt: 2 }}>
+              Останній файл: {militaryCardsFileName}
+            </Typography>
+          ) : null}
+          {militaryCardsSummary ? (
+            <Alert severity="info" sx={{ mt: 2 }}>
+              <Typography
+                component="pre"
+                variant="body2"
+                sx={{ m: 0, whiteSpace: "pre-wrap", fontFamily: "inherit" }}
+              >
+                {militaryCardsSummary}
+              </Typography>
+            </Alert>
+          ) : null}
+        </Box>
+
+        <Box className="panel-card" sx={{ p: 2 }}>
+          <Typography variant="subtitle1" sx={{ mb: 1 }}>
+            Тестовий Excel
+          </Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
+            Будь-який файл → snapshot і debug у консолі без парсера квитків.
+            Handler:{" "}
+            <Typography
+              component="code"
+              variant="body2"
+              sx={{ fontFamily: "monospace" }}
+            >
+              parseGenericTestExcelFile
             </Typography>
           </Typography>
           <Button
             component="label"
             variant="outlined"
-            disabled={isStaffRunning || isGenericRunning}
+            disabled={isBusy}
             startIcon={<CloudUploadOutlinedIcon />}
           >
-            {isGenericRunning ? "Читаю…" : "Завантажити Excel"}
+            {isGenericRunning ? "Читаю…" : "Завантажити тестовий Excel"}
             <input
               hidden
               type="file"

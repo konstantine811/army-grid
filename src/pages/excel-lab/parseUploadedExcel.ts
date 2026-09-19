@@ -4,7 +4,11 @@ import {
   type ExcelWorkbookSnapshot,
   type ReadWorkbookOptions,
 } from "../../excelRoundTrip";
-import { parseExcelLabMilitaryServiceCards } from "./ExcelLabMilitaryServiceCards";
+import { parseExcelEJOOSState } from "./ExcelLabEJOOS";
+import {
+  parseExcelLabMilitaryServiceCards,
+  type EntityCardsSheets,
+} from "./ExcelLabMilitaryServiceCards";
 import {
   parseExcelLabState,
   type EntityStateSheets,
@@ -19,31 +23,50 @@ export type ParsedStaffSheetResult = ParsedExcelLabResult & {
   state: EntityStateSheets;
 };
 
+export type ParsedMilitaryServiceCardsResult = ParsedExcelLabResult & {
+  cards: EntityCardsSheets;
+};
+
 /** Опції читання за замовчуванням для лабораторії Excel. */
 export const DEFAULT_EXCEL_LAB_READ_OPTIONS: ReadWorkbookOptions = {
   preserveLeadingColumns: true,
 };
 
-/**
- * Довільний Excel → console.log.
- * Свою логіку додавайте сюди або в окремий handler.
- */
+export const countMilitaryServiceCardPeople = (cards: EntityCardsSheets) =>
+  Object.keys(cards).length;
+
+/** ВК / ТПВ / ДОВІДКИ → parseExcelLabMilitaryServiceCards. */
 export const handleParsedExcelWorkbook = (
   snapshot: ExcelWorkbookSnapshot,
-  debug: ReturnType<typeof createWorkbookDebugPayload>,
+  _debug: ReturnType<typeof createWorkbookDebugPayload>,
 ) => {
   const cards = parseExcelLabMilitaryServiceCards(snapshot.sheets);
+  return cards;
 };
 
-export const parseUploadedExcelFile = async (
+export const parseMilitaryServiceCardsExcelFile = async (
+  file: File,
+  options: ReadWorkbookOptions = DEFAULT_EXCEL_LAB_READ_OPTIONS,
+): Promise<ParsedMilitaryServiceCardsResult> => {
+  const snapshot = await readWorkbookSnapshot(file, options);
+  const debug = createWorkbookDebugPayload(snapshot);
+  const cards = handleParsedExcelWorkbook(snapshot, debug);
+  return { snapshot, debug, cards };
+};
+
+/** Тестовий перегляд довільного Excel — лише snapshot і debug у консолі. */
+export const parseGenericTestExcelFile = async (
   file: File,
   options: ReadWorkbookOptions = DEFAULT_EXCEL_LAB_READ_OPTIONS,
 ): Promise<ParsedExcelLabResult> => {
   const snapshot = await readWorkbookSnapshot(file, options);
   const debug = createWorkbookDebugPayload(snapshot);
-  handleParsedExcelWorkbook(snapshot, debug);
+  const ejoos = parseExcelEJOOSState(snapshot.sheets);
   return { snapshot, debug };
 };
+
+/** @deprecated Використовуй parseGenericTestExcelFile або parseMilitaryServiceCardsExcelFile. */
+export const parseUploadedExcelFile = parseGenericTestExcelFile;
 
 /** Штатка → parseExcelLabState (логіка в ExcelLabStateParser.ts). */
 export const parseStaffSheetExcelFile = async (
