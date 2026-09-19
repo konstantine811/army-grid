@@ -213,7 +213,7 @@ import {
   reporterFooterBlock,
   approvalFooterBlock,
   actApprovalDateLine,
-  buildManualSignatoryDateLine,
+  buildLostMilitaryIdReportDateLine,
   type LostMilitaryIdFields,
   type LostMilitaryIdSignatory,
 } from "./lostMilitaryIdReport";
@@ -8897,7 +8897,9 @@ export function DocumentsPage(_props: {
                           <span>{footer.name || "________________"}</span>
                         </div>
                       </div>
-                      <small>{buildManualSignatoryDateLine()}</small>
+                      <small>
+                        {buildLostMilitaryIdReportDateLine(lostMilitaryIdFields)}
+                      </small>
                     </article>
                   );
                 })}

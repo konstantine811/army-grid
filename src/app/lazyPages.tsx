@@ -26,6 +26,11 @@ export const LazyExcelFillPage = lazy(() =>
     default: m.ExcelFillPage,
   })),
 );
+export const LazyExcelLabPage = lazy(() =>
+  import("../pages/excel-lab/ExcelLabPage").then((m) => ({
+    default: m.ExcelLabPage,
+  })),
+);
 export const LazyAnketaDataPage = lazy(() =>
   import("../pages/anketa-data/AnketaDataPage").then((m) => ({
     default: m.AnketaDataPage,

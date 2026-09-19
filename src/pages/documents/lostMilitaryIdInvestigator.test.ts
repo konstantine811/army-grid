@@ -189,7 +189,7 @@ describe("act document blocks", () => {
     expect(footer.rank).toBe("");
     expect(footer.name).toBe("");
     expect(actApprovalDateLine(fields)).toBe(
-      buildManualSignatoryDateLine(new Date()),
+      buildManualSignatoryDateLine(new Date(2026, 7, 29)),
     );
   });
 
@@ -232,9 +232,9 @@ describe("act document blocks", () => {
     expect(footer.titleLines[0]).toMatch(/Командир 1 піхотного батальйону/i);
   });
 
-  it("uses current month and year with blank day under signatory signature", () => {
+  it("formats signatory date with day, month and year", () => {
     expect(buildManualSignatoryDateLine(new Date(2026, 8, 8))).toBe(
-      "«  »  вересня  2026 року",
+      "«08»  вересня  2026 року",
     );
   });
 
@@ -281,5 +281,77 @@ describe("lost military id event circumstances", () => {
     expect(text).toContain("с. Гришене");
     expect(text).toContain("FPV дрон");
     expect(text).not.toContain("переміщення з ______");
+  });
+
+  it("includes unitLabel in report text after military unit phrase", () => {
+    const fields = mergeLostMilitaryIdFields(eventFields(), {
+      unitLabel: "2 піхотної роти",
+    });
+    const text = buildLostMilitaryIdReportText(fields);
+    expect(text).toContain("військової частини А4862 2 піхотної роти");
+  });
+
+  it("does not wrap evacuation phrase in movement template", () => {
+    const fields = mergeLostMilitaryIdFields(eventFields(), {
+      circumstanceKind: "movement",
+      fromLocation: "під час евакуації військовослужбовця до",
+      toLocation: "до ПГХ 66 Петропавлівка",
+      customCircumstances: "",
+      lossLocation: "",
+    });
+    expect(circumstancesText(fields)).toBe(
+      "під час евакуації військовослужбовця до ПГХ 66 Петропавлівка",
+    );
+    expect(buildLostMilitaryIdReportText(fields)).toContain(
+      "під час евакуації військовослужбовця до ПГХ 66 Петропавлівка",
+    );
+    expect(buildLostMilitaryIdReportText(fields)).not.toContain("переміщення з");
+  });
+
+  it("keeps simple from-to movement template for short place names", () => {
+    const fields = mergeLostMilitaryIdFields(eventFields(), {
+      circumstanceKind: "movement",
+      fromLocation: "с. Гришене",
+      toLocation: "ПГХ 66 Петропавлівка",
+      customCircumstances: "",
+      lossLocation: "",
+    });
+    expect(circumstancesText(fields)).toBe(
+      "під час переміщення з с. Гришене до ПГХ 66 Петропавлівка",
+    );
+  });
+
+  it("uses full search result sentence without однак wrapper or double period", () => {
+    const phrase =
+      "місцезнаходження військового квитка після проведення евакуаційних заходів встановити не вдалося.";
+    const fields = mergeLostMilitaryIdFields(eventFields(), {
+      searchConducted: true,
+      searchResult: phrase,
+    });
+    const text = buildLostMilitaryIdReportText(fields);
+    expect(text).toContain(phrase);
+    expect(text).not.toContain("однак");
+    expect(text).not.toContain("не вдалося..");
+  });
+
+  it("requests military id restoration in report closing paragraph", () => {
+    const text = buildLostMilitaryIdReportText(eventFields());
+    expect(text).toContain(
+      "У зв’язку з вищевикладеним прошу організувати проведення необхідних заходів щодо відновлення (оформлення нового) військового квитка",
+    );
+    expect(text).toContain("замість втраченого.");
+    expect(text).not.toContain(
+      "прошу призначити службове розслідування за фактом втрати",
+    );
+  });
+
+  it("wraps short search result fragment in default template", () => {
+    const fields = mergeLostMilitaryIdFields(eventFields(), {
+      searchConducted: true,
+      searchResult: "військовий квиток не знайдено",
+    });
+    expect(buildLostMilitaryIdReportText(fields)).toContain(
+      "однак військовий квиток не знайдено.",
+    );
   });
 });

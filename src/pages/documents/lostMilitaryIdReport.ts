@@ -17,6 +17,7 @@ import {
   toUkrainianNominativePosition,
 } from "./lostMilitaryIdCases";
 import { toUkrainianDativePosition, looksLikeUaDateToken } from "./form12Report";
+import { normalizeLooseText } from "../soc-passport/socPassportFields";
 import { capitalizeReportPosition } from "./reportPosition";
 import { formatPositionTitleBlock } from "./ubdRestoreReport";
 
@@ -100,6 +101,61 @@ const DEFAULT_ORDER_COMMANDER_RANK = "капітан";
 const DEFAULT_ORDER_COMMANDER_NAME = "Олег АДАМОВ";
 const DEFAULT_SEARCH_RESULT = "військовий квиток не знайдено";
 
+const stripTrailingSentencePunctuation = (text: string) =>
+  text.trim().replace(/[.!?…]+$/u, "").trim();
+
+const ensureSentenceEnding = (text: string) => {
+  const body = stripTrailingSentencePunctuation(text);
+  return body ? `${body}.` : "";
+};
+
+/** Повне речення в «Результат пошуку» — без шаблону «однак …». */
+export const looksLikeFullSearchResultSentence = (text: string) => {
+  const normalized = normalizeLooseText(text);
+  if (!normalized) return false;
+  if (
+    /(встановити\s+не\s+вдалося|не\s+вдалося\s+встановити|результату\s+не\s+дав|неможливо\s+встановити)/iu.test(
+      normalized,
+    )
+  ) {
+    return true;
+  }
+  if (/^місцезнаходження\b/iu.test(text.trim())) return true;
+  return normalized.split(/\s+/).length >= 8;
+};
+
+export const buildLostMilitaryIdSearchParagraph = (
+  fields: LostMilitaryIdFields,
+) => {
+  if (!fields.searchConducted) {
+    return "Пошукові заходи за фактом втрати військового квитка не проводились.";
+  }
+  const result = fields.searchResult.trim();
+  if (looksLikeFullSearchResultSentence(result)) {
+    return ensureSentenceEnding(result);
+  }
+  const fragment = stripTrailingSentencePunctuation(
+    result || DEFAULT_SEARCH_RESULT,
+  );
+  return `Після виявлення факту втрати військового квитка були проведені пошукові заходи, однак ${fragment}.`;
+};
+
+export const buildLostMilitaryIdActSearchSentence = (
+  fields: LostMilitaryIdFields,
+) => {
+  if (!fields.searchConducted) {
+    return "Пошукові заходи не проводились.";
+  }
+  const result = fields.searchResult.trim();
+  if (looksLikeFullSearchResultSentence(result)) {
+    return ensureSentenceEnding(result);
+  }
+  const fragment = stripTrailingSentencePunctuation(
+    result || DEFAULT_SEARCH_RESULT,
+  );
+  return `Пошук військового квитка в районі розташування підрозділу та серед особистих речей результату не дав: ${fragment}.`;
+};
+
 const MONTHS_UK = [
   "січня",
   "лютого",
@@ -120,16 +176,38 @@ export const formatUaDate = (value: Date) => {
   return `${pad(value.getDate())}.${pad(value.getMonth() + 1)}.${value.getFullYear()}`;
 };
 
-export const formatUaLongDate = (value: string) => {
+export const parseUaDateString = (value: string) => {
   const match = value.trim().match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})$/);
-  if (!match) return value.trim();
+  if (!match) return null;
   const day = Number(match[1]);
   const month = Number(match[2]);
-  const year = match[3];
-  const monthName = MONTHS_UK[month - 1];
-  if (!monthName) return value.trim();
-  return `${day} ${monthName} ${year} року`;
+  const year = Number(match[3]);
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+  return new Date(year, month - 1, day);
 };
+
+export const formatUaLongDate = (value: string) => {
+  const parsed = parseUaDateString(value);
+  if (!parsed) return value.trim();
+  const monthName = MONTHS_UK[parsed.getMonth()];
+  if (!monthName) return value.trim();
+  return `${parsed.getDate()} ${monthName} ${parsed.getFullYear()} року`;
+};
+
+/** Дата рапорту: з поля або сьогодні. */
+export const resolveLostMilitaryIdReportDate = (
+  fields: Pick<LostMilitaryIdFields, "reportDate">,
+  at: Date = new Date(),
+) => parseUaDateString(fields.reportDate) ?? at;
+
+/** Дата затвердження акту: approvalDate → reportDate → сьогодні. */
+export const resolveLostMilitaryIdApprovalDate = (
+  fields: Pick<LostMilitaryIdFields, "approvalDate" | "reportDate">,
+  at: Date = new Date(),
+) =>
+  parseUaDateString(fields.approvalDate) ??
+  parseUaDateString(fields.reportDate) ??
+  at;
 
 /** Номер в/ч без префікса «військової частини» (напр. «А4862»). */
 export const militaryUnitLabel = (
@@ -160,6 +238,14 @@ export const buildLostMilitaryIdFolderName = (fullName: string) => {
     : "1ПБ Втрата військового квитка";
 };
 
+/** Підрозділ (рота тощо) одразу після «в/ч» у рапорті та наказі. */
+export const lostMilitaryIdServicemanUnitPhrase = (
+  fields: LostMilitaryIdFields,
+) => {
+  const label = fields.unitLabel.trim();
+  return label ? ` ${label}` : "";
+};
+
 const joinSpaced = (...parts: Array<string | undefined>) =>
   parts
     .map((part) => String(part ?? "").replace(/\s+/g, " ").trim())
@@ -174,9 +260,12 @@ export const declinedPerson = (fields: LostMilitaryIdFields) => {
   return {
     nominative: fields.fullName.trim(),
     instrumental: instrumentalName,
+    dative:
+      toUkrainianDativeFullName(fields.fullName) || fields.fullName.trim(),
     genitive: toUkrainianGenitiveFullName(fields.fullName) || fields.fullName,
     rankInstrumental:
       toUkrainianInstrumentalRank(fields.rank) || fields.rank.trim(),
+    rankDative: toUkrainianDativeRank(fields.rank) || fields.rank.trim(),
     rankGenitive: toUkrainianGenitiveRank(fields.rank) || fields.rank.trim(),
     positionInstrumental:
       toUkrainianInstrumentalPosition(fields.staffPosition) ||
@@ -222,10 +311,47 @@ export const lossDateText = (fields: LostMilitaryIdFields) => {
   return fields.isExactDate ? date : `орієнтовно ${date}`;
 };
 
-/** Чи заповнено сценарій «переміщення з → до». */
-export const usesMovementCircumstances = (fields: LostMilitaryIdFields) =>
-  fields.circumstanceKind === "movement" &&
-  Boolean(fields.fromLocation.trim() || fields.toLocation.trim());
+/** Чи схоже значення на повне речення про обставини, а не на «місце». */
+export const looksLikeFullCircumstanceClause = (text: string) => {
+  const normalized = normalizeLooseText(text);
+  if (!normalized) return false;
+  if (
+    /^(під\s*час|підчас|у\s+зв|в\s+результат|на\s+позиці)/iu.test(normalized)
+  ) {
+    return true;
+  }
+  if (
+    /(евакуац|військовослужбов|перебування\s+на\s+б|в\s+бою|обстріл)/iu.test(
+      normalized,
+    )
+  ) {
+    return true;
+  }
+  return normalized.split(/\s+/).length >= 7;
+};
+
+const looksLikeSimpleMovementPlace = (text: string) => {
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  return !looksLikeFullCircumstanceClause(trimmed);
+};
+
+const normalizeMovementDestination = (value: string) =>
+  value.trim().replace(/^до\s+/iu, "");
+
+const collapseDuplicateDo = (text: string) =>
+  text.replace(/\s+до\s+до\s+/giu, " до ").replace(/\s+/g, " ").trim();
+
+/** Чи заповнено сценарій «переміщення з → до» (короткі назви місць). */
+export const usesMovementCircumstances = (fields: LostMilitaryIdFields) => {
+  if (fields.circumstanceKind !== "movement") return false;
+  const from = fields.fromLocation.trim();
+  const to = fields.toLocation.trim();
+  if (!from || !to) return false;
+  return (
+    looksLikeSimpleMovementPlace(from) && looksLikeSimpleMovementPlace(to)
+  );
+};
 
 export const formatLossLocationPhrase = (location: string) => {
   const text = location.trim();
@@ -251,14 +377,44 @@ export const buildLossEventCircumstancesPhrase = (fields: LostMilitaryIdFields) 
 };
 
 export const buildMovementCircumstancesPhrase = (fields: LostMilitaryIdFields) => {
-  const from = fields.fromLocation.trim() || "______";
-  const to = fields.toLocation.trim() || "______";
-  return `під час переміщення з ${from} до ${to}`;
+  const from = fields.fromLocation.trim();
+  const to = normalizeMovementDestination(fields.toLocation);
+
+  if (looksLikeFullCircumstanceClause(from)) {
+    if (!to) return from;
+    if (/до\s*$/iu.test(from)) {
+      return collapseDuplicateDo(`${from} ${to}`);
+    }
+    if (from.toLocaleLowerCase("uk-UA").includes(to.toLocaleLowerCase("uk-UA"))) {
+      return from;
+    }
+    return collapseDuplicateDo(`${from} до ${to}`);
+  }
+
+  const fromPlace = from || "______";
+  const toPlace = to || "______";
+  return `під час переміщення з ${fromPlace} до ${toPlace}`;
+};
+
+/** Фраза для «відбулася …» в акті (без зайвого «під час» лише для шаблону переміщення). */
+export const circumstancesEventPhrase = (fields: LostMilitaryIdFields) => {
+  const text = circumstancesText(fields);
+  if (usesMovementCircumstances(fields)) {
+    return text.replace(/^під\s*час\s+/iu, "");
+  }
+  return text;
 };
 
 export const circumstancesText = (fields: LostMilitaryIdFields) => {
-  if (usesMovementCircumstances(fields)) {
-    return buildMovementCircumstancesPhrase(fields);
+  if (fields.customCircumstances.trim()) {
+    return buildLossEventCircumstancesPhrase(fields);
+  }
+  if (fields.circumstanceKind === "movement") {
+    const from = fields.fromLocation.trim();
+    const to = fields.toLocation.trim();
+    if (from || to) {
+      return buildMovementCircumstancesPhrase(fields);
+    }
   }
   return buildLossEventCircumstancesPhrase(fields);
 };
@@ -340,15 +496,25 @@ export const splitLostMilitaryIdSignatory = (
   };
 };
 
-/** Дата під підписом: день — вручну, місяць і рік — поточні. */
+/** Дата під підписом у форматі «ДД» місяць РРРР року. */
 export const buildManualSignatoryDateLine = (value: Date = new Date()) => {
   const monthName = MONTHS_UK[value.getMonth()];
   if (!monthName) return "«  »  ____________  20___ року";
-  return `«  »  ${monthName}  ${value.getFullYear()} року`;
+  const day = String(value.getDate()).padStart(2, "0");
+  return `«${day}»  ${monthName}  ${value.getFullYear()} року`;
 };
 
-export const actApprovalDateLine = (_fields?: LostMilitaryIdFields) =>
-  buildManualSignatoryDateLine();
+export const buildLostMilitaryIdReportDateLine = (
+  fields: LostMilitaryIdFields,
+  at: Date = new Date(),
+) => buildManualSignatoryDateLine(resolveLostMilitaryIdReportDate(fields, at));
+
+export const actApprovalDateLine = (fields?: LostMilitaryIdFields) =>
+  buildManualSignatoryDateLine(
+    fields
+      ? resolveLostMilitaryIdApprovalDate(fields)
+      : new Date(),
+  );
 
 const signatoryFooterParts = (signatory: LostMilitaryIdSignatory) => {
   const parts = splitLostMilitaryIdSignatory(signatory);
@@ -630,11 +796,8 @@ export const buildLostMilitaryIdReportText = (fields: LostMilitaryIdFields) => {
   const person = declinedPerson(fields);
   const investigator = declinedInvestigator(fields);
   const unit = normalizeMilitaryUnitPhrase(fields.militaryUnit);
-  const search = fields.searchConducted
-    ? `Після виявлення факту втрати військового квитка були проведені пошукові заходи, однак ${
-        fields.searchResult.trim() || DEFAULT_SEARCH_RESULT
-      }.`
-    : "Пошукові заходи за фактом втрати військового квитка не проводились.";
+  const servicemanUnit = lostMilitaryIdServicemanUnitPhrase(fields);
+  const search = buildLostMilitaryIdSearchParagraph(fields);
   const investigatorLine = investigator.nominative
     ? `Проведення службового розслідування пропоную доручити ${joinSpaced(
         investigator.position,
@@ -644,9 +807,9 @@ export const buildLostMilitaryIdReportText = (fields: LostMilitaryIdFields) => {
     : "Проведення службового розслідування пропоную доручити командиру підрозділу.";
 
   return [
-    `Доповідаю, що військовослужбовцем ${unit} ${person.rankInstrumental} ${person.instrumental}, ${person.positionInstrumental}, ${lossDateText(fields)}, ${circumstancesText(fields)} було втрачено військовий квиток.`,
+    `Доповідаю, що військовослужбовцем ${unit}${servicemanUnit} ${person.rankInstrumental} ${person.instrumental}, ${person.positionInstrumental}, ${lossDateText(fields)}, ${circumstancesText(fields)} було втрачено військовий квиток.`,
     search,
-    `У зв’язку з викладеним прошу призначити службове розслідування за фактом втрати військового квитка ${person.rankInstrumental} ${person.instrumental}.`,
+    `У зв’язку з вищевикладеним прошу організувати проведення необхідних заходів щодо відновлення (оформлення нового) військового квитка ${joinSpaced(person.rankDative, person.dative)} замість втраченого.`,
     investigatorLine,
   ].join("\n\n");
 };
@@ -656,6 +819,7 @@ export const buildLostMilitaryIdOrderText = (fields: LostMilitaryIdFields) => {
   const person = declinedPerson(fields);
   const investigator = declinedInvestigator(fields);
   const unit = normalizeMilitaryUnitPhrase(fields.militaryUnit);
+  const servicemanUnit = lostMilitaryIdServicemanUnitPhrase(fields);
   const assign = investigator.nominative
     ? `Проведення службового розслідування доручити ${joinSpaced(
         investigator.position,
@@ -664,7 +828,7 @@ export const buildLostMilitaryIdOrderText = (fields: LostMilitaryIdFields) => {
       )}.`
     : "Проведення службового розслідування доручити визначеній посадовій особі.";
   return [
-    `Призначити службове розслідування за фактом втрати військового квитка військовослужбовцем ${unit} ${person.rankInstrumental} ${person.instrumental}.`,
+    `Призначити службове розслідування за фактом втрати військового квитка військовослужбовцем ${unit}${servicemanUnit} ${person.rankInstrumental} ${person.instrumental}.`,
     assign,
     "Службове розслідування провести відповідно до вимог статті 85 Статуту внутрішньої служби Збройних Сил України та Порядку проведення службового розслідування у Збройних Силах України, затвердженого наказом Міністерства оборони України від 21.11.2017 № 608 (зі змінами).",
     "Матеріали службового розслідування подати на затвердження у встановлений строк.",
@@ -735,9 +899,7 @@ export const buildLostMilitaryIdActAttachments = (
 export const buildLostMilitaryIdActDutySection = (fields: LostMilitaryIdFields) => {
   const person = declinedPerson(fields);
   const date = fields.lossDate.trim() || "______";
-  const eventPhrase = usesMovementCircumstances(fields)
-    ? buildMovementCircumstancesPhrase(fields).replace(/^під час /iu, "")
-    : buildLossEventCircumstancesPhrase(fields);
+  const eventPhrase = circumstancesEventPhrase(fields);
   const searchClause = fields.searchConducted
     ? documentLikelyDestroyed(fields)
       ? "У поясненні військовослужбовець зазначив, що документ знищено під час події."
@@ -766,11 +928,7 @@ export const buildLostMilitaryIdActCircumstances = (
   return [
     `Службове розслідування проводиться за фактом втрати військового квитка військовослужбовцем ${person.instrumental}.`,
     `${longDate} ${person.rankInstrumental} ${person.nominative} ${circumstancesText(fields)} втратив військовий квиток. Зі слів військовослужбовця, ${lossDocumentFateHint(fields)}.`,
-    fields.searchConducted
-      ? `Пошук військового квитка в районі розташування підрозділу та серед особистих речей результату не дав: ${
-          fields.searchResult.trim() || DEFAULT_SEARCH_RESULT
-        }.`
-      : "Пошукові заходи не проводились.",
+    buildLostMilitaryIdActSearchSentence(fields),
     reporter
       ? `Про втрату документа ${reporter} доповів рапортом${
           fields.reportNumber.trim() ? ` №${fields.reportNumber.trim()}` : ""
@@ -802,10 +960,11 @@ export const buildLostMilitaryIdPersonCard = (fields: LostMilitaryIdFields) => {
           : ""
       }.`
     : "";
+  const unitLabel = lostMilitaryIdServicemanUnitPhrase(fields);
   return [
-    `${person.nominative}, ${fields.rank.trim() || "______"}, ${
-      capitalizeReportPosition(fields.staffPosition) || "______"
-    } ${unit}.`,
+    `${person.nominative}, ${fields.rank.trim() || "______"}${
+      unitLabel ? `,${unitLabel}` : ""
+    }, ${capitalizeReportPosition(fields.staffPosition) || "______"} ${unit}.`,
     enlisted,
     personal,
   ]

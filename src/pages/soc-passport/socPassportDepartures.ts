@@ -985,6 +985,29 @@ export const DISPOSITION_REASON_LABELS: Record<DispositionReason, string> = {
   other: "Інші причини",
 };
 
+const isArchiveDeathRow = (absenceType: string, place = "") => {
+  const text = normalizeLooseText(`${absenceType} ${place}`);
+  return /(смерт|загибл|загинул|убит|\b200\b)/.test(text);
+};
+
+const archivePersonGroupKey = (personId: string, fullName: string) =>
+  personId || normalizeLooseText(fullName);
+
+const buildArchiveDeadPersonKeys = (
+  periods: ReturnType<typeof parsePbArchive>,
+) => {
+  const dead = new Set<string>();
+  for (const period of periods) {
+    if (!isArchiveDeathRow(period.absenceType, period.place)) continue;
+    dead.add(archivePersonGroupKey(period.personId, period.fullName));
+  }
+  return dead;
+};
+
+const archivePeriodEventDate = (
+  period: ReturnType<typeof parsePbArchive>[number],
+) => parseCellDate(period.departDate) || parseCellDate(period.orderDate);
+
 const isDispositionArchiveRow = (absenceType: string, place: string) => {
   const text = normalizeLooseText(`${absenceType} ${place}`);
   if (!text) return false;
@@ -1041,6 +1064,7 @@ export const buildDispositionFromArchive = (
   }
 
   const periods = parsePbArchive(workbook);
+  const deadPersonKeys = buildArchiveDeadPersonKeys(periods);
   const sinceRaw =
     options?.sinceDate === undefined
       ? DEFAULT_DEPARTURES_SINCE
@@ -1052,20 +1076,43 @@ export const buildDispositionFromArchive = (
   let skippedBeforePeriod = 0;
   let skippedNoDate = 0;
   let skippedReturned = 0;
+  let skippedDead = 0;
   const people: DispositionPerson[] = [];
-  const seen = new Set<string>();
+  const periodsByPerson = new Map<
+    string,
+    ReturnType<typeof parsePbArchive>
+  >();
 
   for (const period of periods) {
     if (!isDispositionArchiveRow(period.absenceType, period.place)) {
       skippedNotDisposition += 1;
       continue;
     }
+    const groupKey = archivePersonGroupKey(period.personId, period.fullName);
+    if (deadPersonKeys.has(groupKey)) {
+      skippedDead += 1;
+      continue;
+    }
+    const group = periodsByPerson.get(groupKey) ?? [];
+    group.push(period);
+    periodsByPerson.set(groupKey, group);
+  }
+
+  for (const personPeriods of periodsByPerson.values()) {
+    personPeriods.sort((a, b) => {
+      const aTime = archivePeriodEventDate(a)?.getTime() ?? 0;
+      const bTime = archivePeriodEventDate(b)?.getTime() ?? 0;
+      if (bTime !== aTime) return bTime - aTime;
+      return b.excelRow - a.excelRow;
+    });
+    const period = personPeriods[0];
+    if (!period) continue;
+
     if (openOnly && period.returnDate) {
       skippedReturned += 1;
       continue;
     }
-    const eventDate =
-      parseCellDate(period.departDate) || parseCellDate(period.orderDate);
+    const eventDate = archivePeriodEventDate(period);
     if (since) {
       if (!eventDate) {
         skippedNoDate += 1;
@@ -1076,13 +1123,6 @@ export const buildDispositionFromArchive = (
         continue;
       }
     }
-
-    const dedupeKey =
-      period.personId ||
-      normalizeLooseText(period.fullName) ||
-      String(period.excelRow);
-    if (seen.has(dedupeKey)) continue;
-    seen.add(dedupeKey);
 
     const rankGroup = classifyRankGroup(period.rank);
     const classified = classifyDispositionReason(

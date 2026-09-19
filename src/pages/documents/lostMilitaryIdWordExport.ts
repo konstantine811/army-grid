@@ -22,10 +22,11 @@ import {
   buildLostMilitaryIdPersonExplanation,
   actApprovalDateLine,
   approvalFooterBlock,
-  buildManualSignatoryDateLine,
+  buildLostMilitaryIdReportDateLine,
   declinedPerson,
   investigatorFooterBlock,
   instrumentalInvestigatorLine,
+  lostMilitaryIdServicemanUnitPhrase,
   normalizeMilitaryUnitPhrase,
   orderFooterBlock,
   reporterFooterBlock,
@@ -215,7 +216,7 @@ const buildReportDocument = (fields: LostMilitaryIdFields) => {
             name: footer.name,
             signatureData: footer.signatureData,
           }),
-          para(buildManualSignatoryDateLine(), {
+          para(buildLostMilitaryIdReportDateLine(fields), {
             align: AlignmentType.RIGHT,
             spacingAfter: 0,
           }),
@@ -274,6 +275,7 @@ const buildOrderDocument = (fields: LostMilitaryIdFields) => {
 const buildActDocument = (fields: LostMilitaryIdFields) => {
   const person = declinedPerson(fields);
   const unit = normalizeMilitaryUnitPhrase(fields.militaryUnit);
+  const servicemanUnit = lostMilitaryIdServicemanUnitPhrase(fields);
   const investigatorLine = instrumentalInvestigatorLine(fields);
   const approval = approvalFooterBlock(fields);
   const investigatorFooter = investigatorFooterBlock(fields);
@@ -287,7 +289,7 @@ const buildActDocument = (fields: LostMilitaryIdFields) => {
   const attachments = buildLostMilitaryIdActAttachments(fields);
   const dutySection = buildLostMilitaryIdActDutySection(fields);
   const personExplanation = buildLostMilitaryIdPersonExplanation(fields);
-  const actTitleTail = `службового розслідування за фактом втрати військового квитка військовослужбовцем ${unit} ${person.rankInstrumental} ${person.instrumental}`;
+  const actTitleTail = `службового розслідування за фактом втрати військового квитка військовослужбовцем ${unit}${servicemanUnit} ${person.rankInstrumental} ${person.instrumental}`;
 
   return new Document({
     sections: [
@@ -327,7 +329,7 @@ const buildActDocument = (fields: LostMilitaryIdFields) => {
           para(
             `Відповідно до вимог статті 85 Статуту внутрішньої служби ЗС України, Порядку проведення службового розслідування у ЗС України, затвердженого наказом Міністерства оборони України від 21.11.2017 № 608 (зі змінами) та ${orderLabel}, мною, ${
               investigatorLine || "________________"
-            }, було проведено службове розслідування за фактом втрати військового квитка ${person.positionInstrumental} ${unit} ${person.rankInstrumental} ${person.instrumental}.`,
+            }, було проведено службове розслідування за фактом втрати військового квитка ${person.positionInstrumental} ${unit}${servicemanUnit} ${person.rankInstrumental} ${person.instrumental}.`,
             { indent: true },
           ),
           para("1. Нормативно-правова база:", { bold: true }),

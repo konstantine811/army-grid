@@ -22,6 +22,12 @@ const navItems: Array<{ label: string; page?: AppPage; icon: ReactNode; adminOnl
   { label: "Особовий склад", page: "personnel", icon: <PersonSearchOutlinedIcon /> },
   { label: "ЕЖООС", page: "ejournal", icon: <TableChartOutlinedIcon /> },
   { label: "Заповнення Excel", page: "excelFill", icon: <SyncAltOutlinedIcon /> },
+  {
+    label: "Excel Lab",
+    page: "excelLab",
+    icon: <TableChartOutlinedIcon />,
+    adminOnly: true,
+  },
   { label: "БЧС", page: "bchs", icon: <ShieldOutlinedIcon /> },
   { label: "Аналітика", page: "analytics", icon: <AnalyticsOutlinedIcon /> },
   { label: "Анкетні дані", page: "anketaData", icon: <TableChartOutlinedIcon /> },

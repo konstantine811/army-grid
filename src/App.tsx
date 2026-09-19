@@ -30,6 +30,7 @@ import {
   LazyDocumentsPage,
   LazyEjournalPage,
   LazyExcelFillPage,
+  LazyExcelLabPage,
   LazyOverviewPage,
   LazyPageBoundary,
   LazyPersonnelPage,
@@ -336,6 +337,15 @@ function App() {
         >
           <LazyPageBoundary>
             <LazyExcelFillPage />
+          </LazyPageBoundary>
+        </AppPageSlot>
+        <AppPageSlot
+          page="excelLab"
+          activePage={activePage}
+          mountedPages={mountedPages}
+        >
+          <LazyPageBoundary>
+            <LazyExcelLabPage />
           </LazyPageBoundary>
         </AppPageSlot>
         <AppPageSlot
