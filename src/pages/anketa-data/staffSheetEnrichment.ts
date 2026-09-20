@@ -17,7 +17,13 @@ import {
 } from "../personnel/personnelUtils";
 import type { EjournalPreviewRow } from "../ejournal/ejournalTypes";
 import { readRosterColumnValue } from "../excel-fill/rosterSourceSnapshot";
-import { normalizeAnketaNameKey, loadPersonnelIndexForAnketa, resolvePersonnelRowForStaffRoster, type AnketaPersonnelIndex } from "./anketaPersonMatch";
+import {
+  listAnketaNameLookupKeys,
+  normalizeAnketaNameKey,
+  loadPersonnelIndexForAnketa,
+  resolvePersonnelRowForStaffRoster,
+  type AnketaPersonnelIndex,
+} from "./anketaPersonMatch";
 import type { AnketaRow } from "./anketaSheet";
 import {
   findMergedPersonnelRow,
@@ -110,8 +116,9 @@ export const buildStaffSheetEnrichmentEntries = (options: {
   const anketaIndex = new Map<string, AnketaRow>();
   const anketaByExternalId = new Map<string, AnketaRow>();
   for (const row of options.anketaRows) {
-    const key = normalizeAnketaNameKey(row.fullName);
-    if (key && !anketaIndex.has(key)) anketaIndex.set(key, row);
+    for (const key of listAnketaNameLookupKeys(row.fullName, row.birthDate)) {
+      if (key && !anketaIndex.has(key)) anketaIndex.set(key, row);
+    }
     const externalId = String(row.externalId ?? "").trim();
     if (externalId && !anketaByExternalId.has(externalId)) {
       anketaByExternalId.set(externalId, row);

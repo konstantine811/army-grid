@@ -37,6 +37,17 @@ describe("buildExcelLabProcessedData", () => {
           "ІВАНОВ Іван": { cardNumber: "АГ 123" },
         },
       },
+      ksp: {
+        fileName: "КСП.xlsx",
+        state: {
+          "ІВАНОВ Іван": {
+            cardType: "ВК",
+            soldierStatus: "активний",
+            soldierOperation: "операція",
+            note: "примітка",
+          },
+        },
+      },
     });
 
     expect(processed.staff["ІВАНОВ Іван"]?.alias).toBe("БАЛЯ");
@@ -44,6 +55,7 @@ describe("buildExcelLabProcessedData", () => {
       "АГ 123",
     );
     expect(processed.ejoos["ІВАНОВ Іван"]?.cardNumber).toBe("АГ 123");
-    expect(describeExcelLabProcessedData(processed)).toContain("Завантажено: 3/3");
+    expect(processed.ksp["ІВАНОВ Іван"]?.cardType).toBe("ВК");
+    expect(describeExcelLabProcessedData(processed)).toContain("Завантажено: 4/4");
   });
 });

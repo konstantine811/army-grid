@@ -4,6 +4,7 @@ import {
   type ExcelWorkbookSnapshot,
   type ReadWorkbookOptions,
 } from "../../excelRoundTrip";
+import { parseExcelKSPState, type EntityKSPVKSheets } from "./ExcelKSPVKData";
 import { parseExcelEJOOSState, type EntityEJOOSSheets } from "./ExcelLabEJOOS";
 import {
   parseExcelLabMilitaryServiceCards,
@@ -31,6 +32,10 @@ export type ParsedEJOOSResult = ParsedExcelLabResult & {
   ejoos: EntityEJOOSSheets;
 };
 
+export type ParsedKSPVKResult = ParsedExcelLabResult & {
+  ksp: EntityKSPVKSheets;
+};
+
 export type ExcelLabUploadedSources = {
   staff?: {
     fileName: string;
@@ -44,14 +49,21 @@ export type ExcelLabUploadedSources = {
     fileName: string;
     state: EntityEJOOSSheets;
   };
+  ksp?: {
+    fileName: string;
+    state: EntityKSPVKSheets;
+  };
 };
 
 export type ExcelLabProcessedData = {
   staff: EntityStateSheets;
   militaryCards: EntityCardsSheets;
   ejoos: EntityEJOOSSheets;
+  ksp: EntityKSPVKSheets;
   sources: ExcelLabUploadedSources;
 };
+
+export const EXCEL_LAB_SOURCE_COUNT = 4;
 
 /** Опції читання за замовчуванням для лабораторії Excel. */
 export const DEFAULT_EXCEL_LAB_READ_OPTIONS: ReadWorkbookOptions = {
@@ -64,13 +76,17 @@ export const countMilitaryServiceCardPeople = (cards: EntityCardsSheets) =>
 export const countEJOOSPeople = (ejoos: EntityEJOOSSheets) =>
   Object.keys(ejoos).length;
 
-/** Збирає результати трьох окремих завантажень у один об'єкт. */
+export const countKSPVKPeople = (ksp: EntityKSPVKSheets) =>
+  Object.keys(ksp).length;
+
+/** Збирає результати чотирьох окремих завантажень у один об'єкт. */
 export const buildExcelLabProcessedData = (
   sources: ExcelLabUploadedSources,
 ): ExcelLabProcessedData => ({
   staff: sources.staff?.state ?? {},
   militaryCards: sources.militaryCards?.cards ?? {},
   ejoos: sources.ejoos?.state ?? {},
+  ksp: sources.ksp?.state ?? {},
   sources,
 });
 
@@ -81,14 +97,16 @@ export const describeExcelLabProcessedData = (data: ExcelLabProcessedData) => {
       ? `Квитки: ${data.sources.militaryCards.fileName}`
       : null,
     data.sources.ejoos ? `ЄЖООС: ${data.sources.ejoos.fileName}` : null,
+    data.sources.ksp ? `КСП: ${data.sources.ksp.fileName}` : null,
   ].filter(Boolean);
 
   return [
-    `Завантажено: ${loaded.length}/3`,
+    `Завантажено: ${loaded.length}/${EXCEL_LAB_SOURCE_COUNT}`,
     ...loaded,
     `Особи в штатці: ${Object.keys(data.staff).length}`,
     `Особи з картками: ${Object.keys(data.militaryCards).length}`,
     `Особи в ЄЖООС: ${Object.keys(data.ejoos).length}`,
+    `Особи в КСП: ${Object.keys(data.ksp).length}`,
   ].join("\n");
 };
 
@@ -131,4 +149,15 @@ export const parseStaffSheetExcelFile = async (
   const state = parseExcelLabState(snapshot.sheets);
   console.log("[excel-lab] staff state:", state);
   return { snapshot, debug, state };
+};
+
+/** Військові із КСП → parseExcelKSPState (ExcelKSPVKData.ts). */
+export const parseKSPVKExcelFile = async (
+  file: File,
+  options: ReadWorkbookOptions = DEFAULT_EXCEL_LAB_READ_OPTIONS,
+): Promise<ParsedKSPVKResult> => {
+  const snapshot = await readWorkbookSnapshot(file, options);
+  const debug = createWorkbookDebugPayload(snapshot);
+  const ksp = parseExcelKSPState(snapshot.sheets);
+  return { snapshot, debug, ksp };
 };

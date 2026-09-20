@@ -45,6 +45,22 @@ describe("buildPersonnelRosterValuesFromAnketa", () => {
     );
   });
 
+  it("keeps birth date in ПІБ when it is part of the full name", () => {
+    const values = buildPersonnelRosterValuesFromAnketa(
+      anketa({
+        fullName: "ШЕВЧЕНКО Олександр Володимирович (11.05.1981 р.н.)",
+        birthDate: "11.05.1981",
+      }),
+    );
+
+    expect(values.column_14).toBe(
+      "ШЕВЧЕНКО Олександр Володимирович (11.05.1981 р.н.)",
+    );
+    expect(values.ПІБ).toBe(
+      "ШЕВЧЕНКО Олександр Володимирович (11.05.1981 р.н.)",
+    );
+  });
+
   it("maps named roster columns from the latest Штатка import", () => {
     const values = buildPersonnelRosterValuesFromAnketa(
       anketa({ rank: "сержант", rnokpp: "1234567890" }),

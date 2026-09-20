@@ -6,6 +6,7 @@ import {
 import {
   buildPersonIdentityFingerprint,
   cleanPersonDisplayName,
+  extractBirthDateFromPersonName,
   extractPersonCallSign,
 } from "../personnel/personnelUtils";
 import { isAnketaRowMissingQuestionnaire } from "./anketaMissingList";
@@ -369,7 +370,8 @@ const buildAnketaQuestionnairePresencePerson = (
     .trim();
   const fingerprint = buildPersonIdentityFingerprint(
     cleanedName,
-    String(row.birthDate ?? "").trim(),
+    String(row.birthDate ?? "").trim() ||
+      extractBirthDateFromPersonName(row.fullName),
     extractPersonCallSign(row.fullName),
   );
   if (fingerprint) lookupIds.add(fingerprint);

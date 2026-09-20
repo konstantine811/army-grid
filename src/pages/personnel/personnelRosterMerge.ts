@@ -5,6 +5,7 @@ import type { DbPreviewState, EjournalPreviewRow } from "../ejournal/ejournalTyp
 import { normalizeRosterMatchText } from "./fighterStatusImport";
 import {
   cleanPersonDisplayName,
+  extractBirthDateFromPersonName,
   getPersonDisplayName,
   getPersonExternalId,
   getPersonFieldValue,
@@ -97,15 +98,6 @@ export const isNovaRosterRow = (row: EjournalPreviewRow) => {
     .toLowerCase()
     .replace(/ё/g, "е");
   return battalion === "нова";
-};
-
-export const extractBirthDateFromPersonName = (name: string) => {
-  const text = String(name ?? "");
-  const match = text.match(
-    /(\d{1,2}[.\/-]\d{1,2}[.\/-]\d{2,4})/,
-  );
-  if (!match || !looksLikePersonBirthDate(match[1])) return "";
-  return normalizePersonBirthKey(match[1]);
 };
 
 const compactRnokpp = (value: unknown) => {
@@ -504,3 +496,5 @@ export const buildRosterOnlyPreviewState = (
     limit: rows.length,
   };
 };
+
+export { extractBirthDateFromPersonName } from "./personnelUtils";

@@ -82,6 +82,21 @@ describe("normalizeAnketaNameKey", () => {
       normalizeAnketaNameKey("ЗАКАЛЮЖНИЙ Iван Олегович"),
     );
   });
+
+  it("keeps birth date from parentheses to disambiguate namesakes", () => {
+    const first = normalizeAnketaNameKey(
+      "ШЕВЧЕНКО Олександр Володимирович (11.05.1981 р.н.)",
+    );
+    const second = normalizeAnketaNameKey(
+      "ШЕВЧЕНКО Олександр Володимирович (07.09.1985)",
+    );
+    expect(first).toContain("|1981-05-11");
+    expect(second).toContain("|1985-09-07");
+    expect(first).not.toBe(second);
+    expect(normalizeAnketaNameKey("ШЕВЧЕНКО Олександр Володимирович")).not.toContain(
+      "|",
+    );
+  });
 });
 
 describe("matchAnketaRowToPersonnelDetailed", () => {

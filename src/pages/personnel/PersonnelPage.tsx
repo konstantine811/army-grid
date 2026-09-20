@@ -90,6 +90,8 @@ import {
   downloadQuestionnairePdf,
   extractPersonCallSign,
   extractPhones,
+  formatPersonBirthDateWithAge,
+  formatPersonDisplayName,
   formatPersonFieldValue,
   formatUaPhoneDisplay,
   buildOrphanAttachmentMigrationPairs,
@@ -109,7 +111,6 @@ import {
   resolvePersonIdentityKey,
   resolvePersonBirthDate,
   resolvePersonDisplayNameFromRoster,
-  formatPersonBirthDateWithAge,
   computeFullYearsFromBirthDate,
   isPositionIndexField,
   personActions,
@@ -561,7 +562,7 @@ export function PersonnelPage({
   );
   const rosterFieldRows = useMemo(() => {
     const birthDate = String(selectedSummary.birthDate ?? "").trim();
-    const cardName = cleanPersonDisplayName(selectedSummary.name);
+    const cardName = formatPersonDisplayName(selectedSummary.name);
     return Object.entries(selectedRow ?? {})
       .filter(
         ([key, value]) =>
@@ -588,7 +589,7 @@ export function PersonnelPage({
           key,
           sourceKey,
           label,
-          value: isPibField ? cleanPersonDisplayName(displayed) : displayed,
+          value: isPibField ? formatPersonDisplayName(displayed) : displayed,
           isPibField,
         };
       })
@@ -635,7 +636,7 @@ export function PersonnelPage({
         if (
           field.isPibField &&
           cardName &&
-          cleanPersonDisplayName(field.value) === cardName
+          formatPersonDisplayName(field.value) === cardName
         ) {
           return false;
         }

@@ -10,6 +10,7 @@ import type {
 } from "../ejournal/ejournalTypes";
 import {
   buildPersonSummary,
+  extractBirthDateFromPersonName,
   findEjournalPersonnelSheet,
   getPersonExternalId,
   isLikelyPersonnelRow,
@@ -24,11 +25,12 @@ import { mapRosterLatestToPreviewRows, readRosterColumnValue } from "../excel-fi
 import type { AnketaRow } from "./anketaSheet";
 import { normalizePersonSearchKeyboard } from "../personnel/personnelSearch";
 
-export const normalizeAnketaNameKey = (value: unknown) =>
+const normalizeAnketaNameBase = (value: unknown) =>
   normalizePersonSearchKeyboard(
     String(value ?? "")
       .replace(/[ʼ’']/g, "")
-      .replace(/\([^)]*\)/g, " ")
+      .replace(/\([^)]*(?:р\.?\s*н\.?|народ)[^)]*\)/gi, " ")
+      .replace(/\([^)]*\d{1,2}[.\/-]\d{1,2}[.\/-]\d{2,4}[^)]*\)/g, " ")
       .replace(/[.,;:№#"/\\|()[\]{}]+/g, " ")
       .replace(/ё/gi, "е")
       .replace(/\s+/g, " ")
@@ -36,13 +38,53 @@ export const normalizeAnketaNameKey = (value: unknown) =>
       .toLocaleLowerCase("uk-UA"),
   );
 
+/** Ключ ПІБ для зіставлення; дата з дужок у рядку лишається частиною ключа. */
+export const normalizeAnketaNameKey = (value: unknown) => {
+  const raw = String(value ?? "").trim();
+  const embeddedBirth = extractBirthDateFromPersonName(raw);
+  const base = normalizeAnketaNameBase(raw);
+  if (!base) return "";
+  return embeddedBirth ? `${base}|${embeddedBirth}` : base;
+};
+
+/** Усі ключі для пошуку анкети: з датою в ПІБ і/або з колонки «Дата народження». */
+export const listAnketaNameLookupKeys = (
+  fullName: unknown,
+  birthDate = "",
+) => {
+  const keys = new Set<string>();
+  const primary = normalizeAnketaNameKey(fullName);
+  if (primary) keys.add(primary);
+  if (primary && !primary.includes("|")) {
+    const birthKey = normalizePersonBirthKey(birthDate);
+    if (birthKey) keys.add(`${primary}|${birthKey}`);
+  }
+  return [...keys];
+};
+
+const resolvePersonnelNameLookupKey = (
+  row: EjournalPreviewRow,
+  summary: ReturnType<typeof buildPersonSummary>,
+) => {
+  const rawName = readRosterColumnValue(row, 14) || summary.name;
+  let nameKey = normalizeAnketaNameKey(rawName);
+  if (!nameKey.includes("|")) {
+    const birthKey =
+      normalizePersonBirthKey(summary.birthDate) ||
+      extractBirthDateFromPersonName(String(rawName));
+    if (birthKey) nameKey = `${nameKey}|${birthKey}`;
+  }
+  return nameKey;
+};
+
 /** Повний ключ і «прізвище + імʼя», щоб ловити списки без по батькові. */
 export const anketaNameKeyVariants = (value: unknown) => {
   const key = normalizeAnketaNameKey(value);
   const keys = new Set<string>();
   if (!key) return keys;
   keys.add(key);
-  const parts = key.split(" ").filter(Boolean);
+  const base = key.split("|")[0] ?? key;
+  const parts = base.split(" ").filter(Boolean);
   if (parts.length >= 2) keys.add(`${parts[0]} ${parts[1]}`);
   return keys;
 };
@@ -94,8 +136,9 @@ export const anketaPersonnelNamesMatch = (
 };
 
 const shortNameKeyFromFull = (nameKey: string) => {
-  const parts = nameKey.split(" ").filter(Boolean);
-  return parts.length >= 2 ? `${parts[0]} ${parts[1]}` : nameKey;
+  const base = nameKey.split("|")[0] ?? nameKey;
+  const parts = base.split(" ").filter(Boolean);
+  return parts.length >= 2 ? `${parts[0]} ${parts[1]}` : base;
 };
 
 let cachedIndex: PersonnelIndex | null = null;
@@ -146,16 +189,21 @@ const buildPersonnelIndex = (rows: EjournalPreviewRow[]): PersonnelIndex => {
         byRnokpp.set(rnokppDigits, match);
       }
     }
-    const nameKey = normalizeNameKey(summary.name);
+    const nameKey = resolvePersonnelNameLookupKey(row, summary);
     if (!nameKey || nameKey === "особа не вибрана") continue;
-    const birthKey = normalizePersonBirthKey(summary.birthDate);
+    const [baseNameKey, birthFromNameKey] = nameKey.split("|");
+    const birthKey =
+      birthFromNameKey || normalizePersonBirthKey(summary.birthDate);
     if (birthKey) {
-      byNameBirth.set(`${nameKey}|${birthKey}`, {
+      byNameBirth.set(`${baseNameKey}|${birthKey}`, {
         ...base,
         matchBy: "nameBirth",
       });
     }
     pushNameList(byName, nameKey, { ...base, matchBy: "name" });
+    if (baseNameKey && baseNameKey !== nameKey) {
+      pushNameList(byName, baseNameKey, { ...base, matchBy: "name" });
+    }
     pushNameList(byShortName, shortNameKeyFromFull(nameKey), {
       ...base,
       matchBy: "name",
@@ -272,6 +320,11 @@ export const resolvePersonnelRowForStaffRoster = (
   if (nameKey) {
     const matches = index.byName.get(nameKey);
     if (matches?.length === 1) return matches[0]!.row;
+    const baseNameKey = nameKey.split("|")[0] ?? "";
+    if (baseNameKey && baseNameKey !== nameKey) {
+      const baseMatches = index.byName.get(baseNameKey);
+      if (baseMatches?.length === 1) return baseMatches[0]!.row;
+    }
   }
 
   return rosterRow;
@@ -427,17 +480,25 @@ export const matchAnketaRowToPersonnelDetailed = (
       : [];
 
   if (nameKey) {
-    const byName = index.byName.get(nameKey) ?? [];
-    if (byName.length) {
-      const byNameResult = disambiguateNameMatches(anketaRow, byName);
-      if (byNameResult.match || byNameResult.ambiguous.length) {
-        return byNameResult;
+    for (const lookupKey of listAnketaNameLookupKeys(
+      anketaRow.fullName,
+      String(anketaRow.birthDate ?? ""),
+    )) {
+      const byName = index.byName.get(lookupKey) ?? [];
+      if (byName.length) {
+        const byNameResult = disambiguateNameMatches(anketaRow, byName);
+        if (byNameResult.match || byNameResult.ambiguous.length) {
+          return byNameResult;
+        }
       }
     }
 
-    const birthKey = normalizePersonBirthKey(String(anketaRow.birthDate ?? ""));
+    const baseNameKey = nameKey.split("|")[0] ?? nameKey;
+    const birthKey =
+      (nameKey.includes("|") ? nameKey.split("|")[1] : "") ||
+      normalizePersonBirthKey(String(anketaRow.birthDate ?? ""));
     if (birthKey) {
-      const hit = index.byNameBirth.get(`${nameKey}|${birthKey}`);
+      const hit = index.byNameBirth.get(`${baseNameKey}|${birthKey}`);
       if (hit) {
         return { match: hit, ambiguous: [], similar: [] };
       }

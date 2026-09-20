@@ -82,6 +82,25 @@ describe("resolvePersonBirthDate", () => {
     expect(resolvePersonBirthDate(row)).toBe("25.01.1997");
   });
 
+  it("prefers fresh staff column 16 over stale EJOOS birth date", () => {
+    const row = {
+      дата_народження: "07.09.1985",
+      "roster__column_16": "11.05.1981",
+    } as EjournalPreviewRow;
+    expect(resolvePersonBirthDate(row)).toBe("11.05.1981");
+  });
+
+  it("prefers staff PIB with birth date in parentheses for display", () => {
+    const row = {
+      прізвище: "ШЕВЧЕНКО Олександр Володимирович",
+      "roster__column_14":
+        "ШЕВЧЕНКО Олександр Володимирович (11.05.1981 р.н.)",
+    } as EjournalPreviewRow;
+    expect(getPersonDisplayName(row)).toBe(
+      "ШЕВЧЕНКО Олександр Володимирович (11.05.1981 р.н.)",
+    );
+  });
+
   it("returns empty string when row is null", () => {
     expect(resolvePersonBirthDate(null)).toBe("");
   });

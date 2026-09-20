@@ -416,8 +416,14 @@ export const resolvePersonDisplayNameFromRoster = (
   row: EjournalPreviewRow | null,
 ) => {
   if (!row) return "";
-  const direct = cleanPersonDisplayName(readRosterColumnValue(row, 14));
-  if (direct) return direct;
+  const rawDirect = readRosterColumnValue(row, 14)
+    .replace(/\u00a0/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (rawDirect) {
+    const formatted = formatPersonDisplayName(rawDirect);
+    if (formatted) return formatted;
+  }
 
   for (const [key, value] of Object.entries(row)) {
     if (!key.startsWith(ROSTER_FIELD_PREFIX)) continue;
@@ -429,17 +435,25 @@ export const resolvePersonDisplayNameFromRoster = (
     ) {
       continue;
     }
-    const text = cleanPersonDisplayName(previewValueToDisplay(value));
+    const text = formatPersonDisplayName(previewValueToDisplay(value));
     if (text) return text;
   }
   return "";
 };
 
 export const getPersonDisplayName = (row: EjournalPreviewRow | null) => {
+  const fromRoster = resolvePersonDisplayNameFromRoster(row);
+  const rosterRaw = readRosterColumnValue(row, 14);
+  if (
+    fromRoster &&
+    extractBirthDateFromPersonName(rosterRaw || fromRoster)
+  ) {
+    return fromRoster;
+  }
+
   const fromOos = cleanPersonDisplayName(
     getPersonFieldValue(row, ["прізвище"]) || getPersonFieldValue(row, ["піб"]),
   );
-  const fromRoster = resolvePersonDisplayNameFromRoster(row);
   if (
     fromOos &&
     fromOos.length >= 5 &&
@@ -1040,8 +1054,21 @@ const pickResolvedPersonBirthDate = (raw: unknown) => {
   return formatPersonBirthDateDisplay(text);
 };
 
+const rowHasRosterStaffFields = (row: EjournalPreviewRow) =>
+  Object.keys(row).some((key) => key.startsWith(ROSTER_FIELD_PREFIX));
+
+/** Колонка «Дата народження» з останнього імпорту Штатки (roster__column_16). */
+const resolveStaffSheetBirthDateColumn = (row: EjournalPreviewRow) =>
+  pickResolvedPersonBirthDate(readRosterColumnValue(row, 16));
+
 export const resolvePersonBirthDate = (row: EjournalPreviewRow | null) => {
   if (!row) return "";
+
+  const fromStaffColumn = resolveStaffSheetBirthDateColumn(row);
+  if (fromStaffColumn && rowHasRosterStaffFields(row)) {
+    return fromStaffColumn;
+  }
+
   const fromOos = pickResolvedPersonBirthDate(
     getPersonFieldValue(row, ["дата_народження"]),
   );
@@ -1050,6 +1077,8 @@ export const resolvePersonBirthDate = (row: EjournalPreviewRow | null) => {
   // Інколи дата народження помилково лежить у полі «ID».
   const fromId = pickResolvedPersonBirthDate(getPersonFieldValue(row, ["id"]));
   if (fromId) return fromId;
+
+  if (fromStaffColumn) return fromStaffColumn;
 
   const fromRosterColumn = pickResolvedPersonBirthDate(
     readRosterColumnValue(row, 16),
@@ -1460,6 +1489,14 @@ export const normalizePersonnelSearchText = (value: unknown) =>
     .trim()
     .toLocaleLowerCase("uk-UA");
 
+/** ISO-дата з «11.05.1981 р.н.» у ПІБ або з окремої колонки. */
+export const extractBirthDateFromPersonName = (name: string) => {
+  const text = String(name ?? "");
+  const match = text.match(/(\d{1,2}[.\/-]\d{1,2}[.\/-]\d{2,4})/);
+  if (!match || !looksLikePersonBirthDate(match[1])) return "";
+  return normalizePersonBirthKey(match[1]);
+};
+
 export const normalizePersonBirthKey = (value: string) => {
   const text = formatExcelDateDisplay(value).trim();
   if (!text) return "";
@@ -1699,6 +1736,17 @@ export const cleanPersonDisplayName = (value: string) =>
     .replace(/\([^)]*\d{1,2}[.\/-]\d{1,2}[.\/-]\d{2,4}[^)]*\)/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+
+/** ПІБ для відображення: якщо в рядку є дата народження — лишаємо повністю. */
+export const formatPersonDisplayName = (value: unknown) => {
+  const text = String(value ?? "")
+    .replace(/\u00a0/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!text) return "";
+  if (extractBirthDateFromPersonName(text)) return text;
+  return cleanPersonDisplayName(text);
+};
 
 /** Відсікає рядки-статуси на кшталт «ВИБУВ У РОЗПОРЯДЖЕННЯ КОМАНДИРА…». */
 export const looksLikePersonnelName = (value: string) => {

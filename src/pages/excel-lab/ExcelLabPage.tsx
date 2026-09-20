@@ -12,12 +12,15 @@ import {
   countEJOOSPeople,
   countMilitaryServiceCardPeople,
   describeExcelLabProcessedData,
+  EXCEL_LAB_SOURCE_COUNT,
+  countKSPVKPeople,
   parseEJOOSExcelFile,
+  parseKSPVKExcelFile,
   parseMilitaryServiceCardsExcelFile,
   parseStaffSheetExcelFile,
   type ExcelLabUploadedSources,
 } from "./parseUploadedExcel";
-import { collectVKData } from "./CollectVKData";
+import { collectVKData, describeCollectedVKData } from "./CollectVKData";
 
 const isExcelFile = (file: File) =>
   /\.xlsx?$/i.test(file.name) ||
@@ -51,17 +54,24 @@ export function ExcelLabPage() {
   const [staffSummary, setStaffSummary] = useState("");
   const [militaryCardsSummary, setMilitaryCardsSummary] = useState("");
   const [ejoosSummary, setEjoosSummary] = useState("");
+  const [kspSummary, setKspSummary] = useState("");
   const [mergedSummary, setMergedSummary] = useState("");
   const [error, setError] = useState("");
   const [isStaffRunning, setIsStaffRunning] = useState(false);
   const [isMilitaryCardsRunning, setIsMilitaryCardsRunning] = useState(false);
   const [isEjoosRunning, setIsEjoosRunning] = useState(false);
+  const [isKspRunning, setIsKspRunning] = useState(false);
 
-  const isBusy = isStaffRunning || isMilitaryCardsRunning || isEjoosRunning;
+  const isBusy =
+    isStaffRunning ||
+    isMilitaryCardsRunning ||
+    isEjoosRunning ||
+    isKspRunning;
   const loadedCount = [
     uploadedSources.staff,
     uploadedSources.militaryCards,
     uploadedSources.ejoos,
+    uploadedSources.ksp,
   ].filter(Boolean).length;
 
   const parseStaffFile = async (file: File) => {
@@ -145,10 +155,43 @@ export function ExcelLabPage() {
     }
   };
 
-  const mergeUploadedData = () => {
+  const parseKspFile = async (file: File) => {
+    setIsKspRunning(true);
+    setError("");
+    setKspSummary("");
+    try {
+      const result = await parseKSPVKExcelFile(file);
+      setUploadedSources((current) => ({
+        ...current,
+        ksp: { fileName: file.name, state: result.ksp },
+      }));
+      setKspSummary(
+        [
+          buildSheetSummary(result.debug),
+          `Особи з КСП (ВК): ${countKSPVKPeople(result.ksp)}`,
+        ].join("\n"),
+      );
+    } catch (cause) {
+      setError(
+        cause instanceof Error
+          ? cause.message
+          : "Не вдалося розібрати файл військових із КСП.",
+      );
+    } finally {
+      setIsKspRunning(false);
+    }
+  };
+
+  const processCollectedData = () => {
     const processed = buildExcelLabProcessedData(uploadedSources);
-    collectVKData(processed);
-    setMergedSummary(describeExcelLabProcessedData(processed));
+    const collected = collectVKData(processed);
+    setMergedSummary(
+      [
+        describeExcelLabProcessedData(processed),
+        describeCollectedVKData(collected),
+        "Повний результат — у console.log (F12 → Console).",
+      ].join("\n"),
+    );
   };
 
   const onFilePick =
@@ -170,7 +213,7 @@ export function ExcelLabPage() {
         <Box>
           <Typography variant="h5">Excel Lab</Typography>
           <Typography variant="body2" color="text.secondary">
-            Три окремі завантаження (Штатка, квитки, ЄЖООС) і збір у єдиний
+            Окремі парсери (Штатка, квитки, ЄЖООС, КСП) і збір у єдиний
             об&apos;єкт.
           </Typography>
         </Box>
@@ -297,25 +340,96 @@ export function ExcelLabPage() {
 
         <Box className="panel-card" sx={{ p: 2 }}>
           <Typography variant="subtitle1" sx={{ mb: 1 }}>
-            Збір усіх даних
+            Військові із КСП
           </Typography>
           <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
-            Функція{" "}
+            Handler:{" "}
+            <Typography
+              component="code"
+              variant="body2"
+              sx={{ fontFamily: "monospace" }}
+            >
+              parseExcelKSPState
+            </Typography>{" "}
+            (
+            <Typography
+              component="code"
+              variant="body2"
+              sx={{ fontFamily: "monospace" }}
+            >
+              ExcelKSPVKData.ts
+            </Typography>
+            )
+          </Typography>
+          <Button
+            component="label"
+            variant="contained"
+            disabled={isBusy}
+            startIcon={<CloudUploadOutlinedIcon />}
+          >
+            {isKspRunning ? "Парсю КСП…" : "Завантажити військові із КСП"}
+            <input
+              hidden
+              type="file"
+              accept=".xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
+              onChange={onFilePick(parseKspFile)}
+            />
+          </Button>
+          {uploadedSources.ksp ? (
+            <Typography variant="body2" sx={{ mt: 2 }}>
+              Останній файл: {uploadedSources.ksp.fileName}
+            </Typography>
+          ) : null}
+          {kspSummary ? (
+            <Alert severity="info" sx={{ mt: 2 }}>
+              <Typography
+                component="pre"
+                variant="body2"
+                sx={{ m: 0, whiteSpace: "pre-wrap", fontFamily: "inherit" }}
+              >
+                {kspSummary}
+              </Typography>
+            </Alert>
+          ) : null}
+        </Box>
+
+        <Box className="panel-card" sx={{ p: 2 }}>
+          <Typography variant="subtitle1" sx={{ mb: 1 }}>
+            Обробка даних
+          </Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
+            Після завантаження Штатки, квитків, ЄЖООС і/або КСП. Спочатку{" "}
             <Typography
               component="code"
               variant="body2"
               sx={{ fontFamily: "monospace" }}
             >
               buildExcelLabProcessedData
+            </Typography>
+            , потім твоя логіка в{" "}
+            <Typography
+              component="code"
+              variant="body2"
+              sx={{ fontFamily: "monospace" }}
+            >
+              collectVKData
             </Typography>{" "}
-            — об&apos;єднує результати трьох завантажень.
+            (
+            <Typography
+              component="code"
+              variant="body2"
+              sx={{ fontFamily: "monospace" }}
+            >
+              CollectVKData.ts
+            </Typography>
+            ).
           </Typography>
           <Button
             variant="contained"
             disabled={loadedCount === 0}
-            onClick={mergeUploadedData}
+            onClick={processCollectedData}
           >
-            Зібрати дані ({loadedCount}/3)
+            Обробити дані ({loadedCount}/{EXCEL_LAB_SOURCE_COUNT})
           </Button>
           {mergedSummary ? (
             <Alert severity="success" sx={{ mt: 2 }}>

@@ -25,6 +25,7 @@ import {
 import {
   buildPersonIdentityFingerprint,
   cleanPersonDisplayName,
+  extractBirthDateFromPersonName,
   extractPersonCallSign,
   extractPhones,
   findEjournalPersonnelSheet,
@@ -74,11 +75,17 @@ const compactRnokpp = (value: unknown) => {
   return digits.length >= 8 ? digits : "";
 };
 
-const personnelNameFromAnketa = (value: unknown) =>
-  cleanPersonDisplayName(String(value ?? ""))
+const personnelNameFromAnketa = (value: unknown) => {
+  const text = String(value ?? "")
+    .replace(/\u00a0/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (extractBirthDateFromPersonName(text)) return text;
+  return cleanPersonDisplayName(text)
     .replace(/\([^)]*\)/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+};
 
 export const mapAnketaRowToRosterFields = (
   row: AnketaRow,
