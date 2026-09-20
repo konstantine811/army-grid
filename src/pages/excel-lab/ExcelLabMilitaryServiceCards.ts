@@ -55,18 +55,14 @@ export const parseExcelLabMilitaryServiceCards = (
 ): EntityCardsSheets => {
   const cards: EntityCardsSheets = {};
   for (const sheet of sheets) {
-    switch (sheet.sheetName) {
-      case EXCEL_LAB_CARDS_SHEET.vk:
-        parseCards(sheet, cards);
-        break;
-      case EXCEL_LAB_CARDS_SHEET.tpv:
-        parseTPV(sheet, cards);
-        break;
-      case EXCEL_LAB_CARDS_SHEET.dovidki:
-        parseDovidki(sheet, cards);
-        break;
-      default:
-        break;
+    if (sheet.sheetName === EXCEL_LAB_CARDS_SHEET.vk) {
+      parseCards(sheet, cards);
+    }
+    if (sheet.sheetName === EXCEL_LAB_CARDS_SHEET.tpv) {
+      parseTPV(sheet, cards);
+    }
+    if (sheet.sheetName === EXCEL_LAB_CARDS_SHEET.dovidki) {
+      parseDovidki(sheet, cards);
     }
   }
   return cards;
@@ -89,7 +85,6 @@ const parseTPV = (sheet: ExcelSheetSnapshot, cards: EntityCardsSheets) => {
       whereToGet: String(row.values[31] ?? ""),
     };
   });
-  return cards;
 };
 
 const parseDovidki = (sheet: ExcelSheetSnapshot, cards: EntityCardsSheets) => {
@@ -108,7 +103,6 @@ const parseDovidki = (sheet: ExcelSheetSnapshot, cards: EntityCardsSheets) => {
       whereToGet: String(row.values[31] ?? ""),
     };
   });
-  return cards;
 };
 
 const parseCards = (sheet: ExcelSheetSnapshot, cards: EntityCardsSheets) => {
@@ -127,5 +121,4 @@ const parseCards = (sheet: ExcelSheetSnapshot, cards: EntityCardsSheets) => {
       whereToGet: String(row.values[31] ?? ""),
     };
   });
-  return cards;
 };

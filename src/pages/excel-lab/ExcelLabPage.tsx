@@ -8,11 +8,16 @@ import {
 } from "@/components/sci/SciPrimitives";
 import { CloudUploadOutlinedIcon } from "@/components/sci/icons";
 import {
+  buildExcelLabProcessedData,
+  countEJOOSPeople,
   countMilitaryServiceCardPeople,
-  parseGenericTestExcelFile,
+  describeExcelLabProcessedData,
+  parseEJOOSExcelFile,
   parseMilitaryServiceCardsExcelFile,
   parseStaffSheetExcelFile,
+  type ExcelLabUploadedSources,
 } from "./parseUploadedExcel";
+import { collectVKData } from "./CollectVKData";
 
 const isExcelFile = (file: File) =>
   /\.xlsx?$/i.test(file.name) ||
@@ -41,32 +46,38 @@ const buildSheetSummary = (debug: {
 };
 
 export function ExcelLabPage() {
-  const [staffFileName, setStaffFileName] = useState("");
+  const [uploadedSources, setUploadedSources] =
+    useState<ExcelLabUploadedSources>({});
   const [staffSummary, setStaffSummary] = useState("");
-  const [militaryCardsFileName, setMilitaryCardsFileName] = useState("");
   const [militaryCardsSummary, setMilitaryCardsSummary] = useState("");
-  const [genericFileName, setGenericFileName] = useState("");
-  const [genericSummary, setGenericSummary] = useState("");
+  const [ejoosSummary, setEjoosSummary] = useState("");
+  const [mergedSummary, setMergedSummary] = useState("");
   const [error, setError] = useState("");
   const [isStaffRunning, setIsStaffRunning] = useState(false);
   const [isMilitaryCardsRunning, setIsMilitaryCardsRunning] = useState(false);
-  const [isGenericRunning, setIsGenericRunning] = useState(false);
+  const [isEjoosRunning, setIsEjoosRunning] = useState(false);
 
-  const isBusy = isStaffRunning || isMilitaryCardsRunning || isGenericRunning;
+  const isBusy = isStaffRunning || isMilitaryCardsRunning || isEjoosRunning;
+  const loadedCount = [
+    uploadedSources.staff,
+    uploadedSources.militaryCards,
+    uploadedSources.ejoos,
+  ].filter(Boolean).length;
 
   const parseStaffFile = async (file: File) => {
     setIsStaffRunning(true);
     setError("");
     setStaffSummary("");
-    setStaffFileName(file.name);
     try {
       const result = await parseStaffSheetExcelFile(file);
-      const peopleCount = Object.keys(result.state).length;
+      setUploadedSources((current) => ({
+        ...current,
+        staff: { fileName: file.name, state: result.state },
+      }));
       setStaffSummary(
         [
           buildSheetSummary(result.debug),
-          `Особи в стані: ${peopleCount}`,
-          "Результат parseExcelLabState — у console.log (F12 → Console).",
+          `Особи в стані: ${Object.keys(result.state).length}`,
         ].join("\n"),
       );
     } catch (cause) {
@@ -84,15 +95,16 @@ export function ExcelLabPage() {
     setIsMilitaryCardsRunning(true);
     setError("");
     setMilitaryCardsSummary("");
-    setMilitaryCardsFileName(file.name);
     try {
       const result = await parseMilitaryServiceCardsExcelFile(file);
-      const peopleCount = countMilitaryServiceCardPeople(result.cards);
+      setUploadedSources((current) => ({
+        ...current,
+        militaryCards: { fileName: file.name, cards: result.cards },
+      }));
       setMilitaryCardsSummary(
         [
           buildSheetSummary(result.debug),
-          `Особи з картками (ВК/ТПВ/ДОВІДКИ): ${peopleCount}`,
-          "Результат parseExcelLabMilitaryServiceCards — у console.log (F12 → Console).",
+          `Особи з картками (ВК/ТПВ/ДОВІДКИ): ${countMilitaryServiceCardPeople(result.cards)}`,
         ].join("\n"),
       );
     } catch (cause) {
@@ -106,28 +118,37 @@ export function ExcelLabPage() {
     }
   };
 
-  const parseGenericFile = async (file: File) => {
-    setIsGenericRunning(true);
+  const parseEjoosFile = async (file: File) => {
+    setIsEjoosRunning(true);
     setError("");
-    setGenericSummary("");
-    setGenericFileName(file.name);
+    setEjoosSummary("");
     try {
-      const result = await parseGenericTestExcelFile(file);
-      setGenericSummary(
+      const result = await parseEJOOSExcelFile(file);
+      setUploadedSources((current) => ({
+        ...current,
+        ejoos: { fileName: file.name, state: result.ejoos },
+      }));
+      setEjoosSummary(
         [
           buildSheetSummary(result.debug),
-          "Тестовий парс — snapshot і debug у console.log (F12 → Console).",
+          `Особи в ЄЖООС: ${countEJOOSPeople(result.ejoos)}`,
         ].join("\n"),
       );
     } catch (cause) {
       setError(
         cause instanceof Error
           ? cause.message
-          : "Не вдалося прочитати Excel-файл.",
+          : "Не вдалося розібрати файл ЄЖООС.",
       );
     } finally {
-      setIsGenericRunning(false);
+      setIsEjoosRunning(false);
     }
+  };
+
+  const mergeUploadedData = () => {
+    const processed = buildExcelLabProcessedData(uploadedSources);
+    collectVKData(processed);
+    setMergedSummary(describeExcelLabProcessedData(processed));
   };
 
   const onFilePick =
@@ -149,24 +170,14 @@ export function ExcelLabPage() {
         <Box>
           <Typography variant="h5">Excel Lab</Typography>
           <Typography variant="body2" color="text.secondary">
-            Окремі парсери: Штатка, військові квитки та тестовий перегляд
-            Excel у консолі.
+            Три окремі завантаження (Штатка, квитки, ЄЖООС) і збір у єдиний
+            об&apos;єкт.
           </Typography>
         </Box>
 
         <Box className="panel-card" sx={{ p: 2 }}>
           <Typography variant="subtitle1" sx={{ mb: 1 }}>
             Парсер Штатки
-          </Typography>
-          <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
-            Логіка в{" "}
-            <Typography
-              component="code"
-              variant="body2"
-              sx={{ fontFamily: "monospace" }}
-            >
-              src/pages/excel-lab/ExcelLabStateParser.ts
-            </Typography>
           </Typography>
           <Button
             component="label"
@@ -182,9 +193,9 @@ export function ExcelLabPage() {
               onChange={onFilePick(parseStaffFile)}
             />
           </Button>
-          {staffFileName ? (
+          {uploadedSources.staff ? (
             <Typography variant="body2" sx={{ mt: 2 }}>
-              Останній файл: {staffFileName}
+              Останній файл: {uploadedSources.staff.fileName}
             </Typography>
           ) : null}
           {staffSummary ? (
@@ -204,28 +215,9 @@ export function ExcelLabPage() {
           <Typography variant="subtitle1" sx={{ mb: 1 }}>
             Військові квитки
           </Typography>
-          <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
-            Аркуші ВК, ТПВ, ДОВІДКИ →{" "}
-            <Typography
-              component="code"
-              variant="body2"
-              sx={{ fontFamily: "monospace" }}
-            >
-              handleParsedExcelWorkbook
-            </Typography>{" "}
-            у{" "}
-            <Typography
-              component="code"
-              variant="body2"
-              sx={{ fontFamily: "monospace" }}
-            >
-              parseUploadedExcel.ts
-            </Typography>
-          </Typography>
           <Button
             component="label"
             variant="contained"
-            color="secondary"
             disabled={isBusy}
             startIcon={<CloudUploadOutlinedIcon />}
           >
@@ -239,9 +231,9 @@ export function ExcelLabPage() {
               onChange={onFilePick(parseMilitaryCardsFile)}
             />
           </Button>
-          {militaryCardsFileName ? (
+          {uploadedSources.militaryCards ? (
             <Typography variant="body2" sx={{ mt: 2 }}>
-              Останній файл: {militaryCardsFileName}
+              Останній файл: {uploadedSources.militaryCards.fileName}
             </Typography>
           ) : null}
           {militaryCardsSummary ? (
@@ -259,17 +251,16 @@ export function ExcelLabPage() {
 
         <Box className="panel-card" sx={{ p: 2 }}>
           <Typography variant="subtitle1" sx={{ mb: 1 }}>
-            Тестовий Excel
+            ЄЖООС
           </Typography>
           <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
-            Будь-який файл → snapshot і debug у консолі без парсера квитків.
             Handler:{" "}
             <Typography
               component="code"
               variant="body2"
               sx={{ fontFamily: "monospace" }}
             >
-              parseGenericTestExcelFile
+              parseEJOOSExcelFile
             </Typography>
           </Typography>
           <Button
@@ -278,27 +269,62 @@ export function ExcelLabPage() {
             disabled={isBusy}
             startIcon={<CloudUploadOutlinedIcon />}
           >
-            {isGenericRunning ? "Читаю…" : "Завантажити тестовий Excel"}
+            {isEjoosRunning ? "Парсю ЄЖООС…" : "Завантажити ЄЖООС"}
             <input
               hidden
               type="file"
               accept=".xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
-              onChange={onFilePick(parseGenericFile)}
+              onChange={onFilePick(parseEjoosFile)}
             />
           </Button>
-          {genericFileName ? (
+          {uploadedSources.ejoos ? (
             <Typography variant="body2" sx={{ mt: 2 }}>
-              Останній файл: {genericFileName}
+              Останній файл: {uploadedSources.ejoos.fileName}
             </Typography>
           ) : null}
-          {genericSummary ? (
+          {ejoosSummary ? (
             <Alert severity="info" sx={{ mt: 2 }}>
               <Typography
                 component="pre"
                 variant="body2"
                 sx={{ m: 0, whiteSpace: "pre-wrap", fontFamily: "inherit" }}
               >
-                {genericSummary}
+                {ejoosSummary}
+              </Typography>
+            </Alert>
+          ) : null}
+        </Box>
+
+        <Box className="panel-card" sx={{ p: 2 }}>
+          <Typography variant="subtitle1" sx={{ mb: 1 }}>
+            Збір усіх даних
+          </Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
+            Функція{" "}
+            <Typography
+              component="code"
+              variant="body2"
+              sx={{ fontFamily: "monospace" }}
+            >
+              buildExcelLabProcessedData
+            </Typography>{" "}
+            — об&apos;єднує результати трьох завантажень.
+          </Typography>
+          <Button
+            variant="contained"
+            disabled={loadedCount === 0}
+            onClick={mergeUploadedData}
+          >
+            Зібрати дані ({loadedCount}/3)
+          </Button>
+          {mergedSummary ? (
+            <Alert severity="success" sx={{ mt: 2 }}>
+              <Typography
+                component="pre"
+                variant="body2"
+                sx={{ m: 0, whiteSpace: "pre-wrap", fontFamily: "inherit" }}
+              >
+                {mergedSummary}
               </Typography>
             </Alert>
           ) : null}

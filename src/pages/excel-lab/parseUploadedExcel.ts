@@ -4,7 +4,7 @@ import {
   type ExcelWorkbookSnapshot,
   type ReadWorkbookOptions,
 } from "../../excelRoundTrip";
-import { parseExcelEJOOSState } from "./ExcelLabEJOOS";
+import { parseExcelEJOOSState, type EntityEJOOSSheets } from "./ExcelLabEJOOS";
 import {
   parseExcelLabMilitaryServiceCards,
   type EntityCardsSheets,
@@ -27,6 +27,32 @@ export type ParsedMilitaryServiceCardsResult = ParsedExcelLabResult & {
   cards: EntityCardsSheets;
 };
 
+export type ParsedEJOOSResult = ParsedExcelLabResult & {
+  ejoos: EntityEJOOSSheets;
+};
+
+export type ExcelLabUploadedSources = {
+  staff?: {
+    fileName: string;
+    state: EntityStateSheets;
+  };
+  militaryCards?: {
+    fileName: string;
+    cards: EntityCardsSheets;
+  };
+  ejoos?: {
+    fileName: string;
+    state: EntityEJOOSSheets;
+  };
+};
+
+export type ExcelLabProcessedData = {
+  staff: EntityStateSheets;
+  militaryCards: EntityCardsSheets;
+  ejoos: EntityEJOOSSheets;
+  sources: ExcelLabUploadedSources;
+};
+
 /** Опції читання за замовчуванням для лабораторії Excel. */
 export const DEFAULT_EXCEL_LAB_READ_OPTIONS: ReadWorkbookOptions = {
   preserveLeadingColumns: true,
@@ -35,14 +61,42 @@ export const DEFAULT_EXCEL_LAB_READ_OPTIONS: ReadWorkbookOptions = {
 export const countMilitaryServiceCardPeople = (cards: EntityCardsSheets) =>
   Object.keys(cards).length;
 
+export const countEJOOSPeople = (ejoos: EntityEJOOSSheets) =>
+  Object.keys(ejoos).length;
+
+/** Збирає результати трьох окремих завантажень у один об'єкт. */
+export const buildExcelLabProcessedData = (
+  sources: ExcelLabUploadedSources,
+): ExcelLabProcessedData => ({
+  staff: sources.staff?.state ?? {},
+  militaryCards: sources.militaryCards?.cards ?? {},
+  ejoos: sources.ejoos?.state ?? {},
+  sources,
+});
+
+export const describeExcelLabProcessedData = (data: ExcelLabProcessedData) => {
+  const loaded = [
+    data.sources.staff ? `Штатка: ${data.sources.staff.fileName}` : null,
+    data.sources.militaryCards
+      ? `Квитки: ${data.sources.militaryCards.fileName}`
+      : null,
+    data.sources.ejoos ? `ЄЖООС: ${data.sources.ejoos.fileName}` : null,
+  ].filter(Boolean);
+
+  return [
+    `Завантажено: ${loaded.length}/3`,
+    ...loaded,
+    `Особи в штатці: ${Object.keys(data.staff).length}`,
+    `Особи з картками: ${Object.keys(data.militaryCards).length}`,
+    `Особи в ЄЖООС: ${Object.keys(data.ejoos).length}`,
+  ].join("\n");
+};
+
 /** ВК / ТПВ / ДОВІДКИ → parseExcelLabMilitaryServiceCards. */
 export const handleParsedExcelWorkbook = (
   snapshot: ExcelWorkbookSnapshot,
   _debug: ReturnType<typeof createWorkbookDebugPayload>,
-) => {
-  const cards = parseExcelLabMilitaryServiceCards(snapshot.sheets);
-  return cards;
-};
+) => parseExcelLabMilitaryServiceCards(snapshot.sheets);
 
 export const parseMilitaryServiceCardsExcelFile = async (
   file: File,
@@ -51,24 +105,23 @@ export const parseMilitaryServiceCardsExcelFile = async (
   const snapshot = await readWorkbookSnapshot(file, options);
   const debug = createWorkbookDebugPayload(snapshot);
   const cards = handleParsedExcelWorkbook(snapshot, debug);
+  console.log("[excel-lab] military service cards:", cards);
   return { snapshot, debug, cards };
 };
 
-/** Тестовий перегляд довільного Excel — лише snapshot і debug у консолі. */
-export const parseGenericTestExcelFile = async (
+/** ЄЖООС → parseExcelEJOOSState. */
+export const parseEJOOSExcelFile = async (
   file: File,
   options: ReadWorkbookOptions = DEFAULT_EXCEL_LAB_READ_OPTIONS,
-): Promise<ParsedExcelLabResult> => {
+): Promise<ParsedEJOOSResult> => {
   const snapshot = await readWorkbookSnapshot(file, options);
   const debug = createWorkbookDebugPayload(snapshot);
   const ejoos = parseExcelEJOOSState(snapshot.sheets);
-  return { snapshot, debug };
+  console.log("[excel-lab] ejoos state:", ejoos);
+  return { snapshot, debug, ejoos };
 };
 
-/** @deprecated Використовуй parseGenericTestExcelFile або parseMilitaryServiceCardsExcelFile. */
-export const parseUploadedExcelFile = parseGenericTestExcelFile;
-
-/** Штатка → parseExcelLabState (логіка в ExcelLabStateParser.ts). */
+/** Штатка → parseExcelLabState. */
 export const parseStaffSheetExcelFile = async (
   file: File,
   options: ReadWorkbookOptions = DEFAULT_EXCEL_LAB_READ_OPTIONS,

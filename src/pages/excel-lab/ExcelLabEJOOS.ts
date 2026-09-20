@@ -8,14 +8,14 @@ type ExcelLabEJOOSList = {
   cardNumber: string;
 };
 
-export type EntityStateSheets = {
+export type EntityEJOOSSheets = {
   [key: string]: ExcelLabEJOOSList;
 };
 
 export const parseExcelEJOOSState = (
   sheets: ExcelSheetSnapshot[],
-): EntityStateSheets => {
-  const generalList: EntityStateSheets = {};
+): EntityEJOOSSheets => {
+  const generalList: EntityEJOOSSheets = {};
   sheets.map((sheet) => {
     switch (sheet.sheetName) {
       case EXCEL_LAB_EJOOS_SHEET.oos:
@@ -29,7 +29,7 @@ export const parseExcelEJOOSState = (
 
 const parseOOSList = (
   sheet: ExcelSheetSnapshot,
-  generalList: EntityStateSheets,
+  generalList: EntityEJOOSSheets,
 ) => {
   sheet.rows.forEach((row) => {
     if (row.values[1] !== null && isNaN(row.values[1] as number)) {
