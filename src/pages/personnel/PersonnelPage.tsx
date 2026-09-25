@@ -6,7 +6,6 @@ import {
   useRef,
   useState,
 } from "react";
-import { MagneticTapePreloader } from "@/components/sci/MagneticTapePreloader";
 import {
   Alert,
   Box,
@@ -70,7 +69,10 @@ import type {
 } from "../ejournal/ejournalTypes";
 import { PhotoCropDialog, type CropRect } from "./PhotoCropDialog";
 import { FloatingQuestionnairePreview } from "./FloatingQuestionnairePreview";
-import { PersonnelVirtualList } from "./PersonnelVirtualList";
+import {
+  PersonnelListPanel,
+  type PersonnelListPanelHandle,
+} from "./PersonnelListPanel";
 import {
   clearPersonnelFocusTarget,
   findPersonnelRowByFocusTarget,
@@ -78,13 +80,21 @@ import {
   readPersonnelFocusTarget,
   type PersonnelFocusTarget,
 } from "./personnelFocus";
+import {
+  anketaCardFieldValue,
+  indexPersonnelV2AnketaRows,
+  loadPersonnelV2AnketaRows,
+  matchPersonnelV2AnketaRow,
+  summaryPreferringAnketa,
+  type PersonnelV2AnketaIndex,
+} from "../personnel-v2/personnelV2AnketaFill";
 import { QuestionnaireDiskSearchDialog } from "./QuestionnaireDiskSearchDialog";
+import { QuestionnairePhotoExtractDialog } from "./QuestionnairePhotoExtractDialog";
 import {
   PERSON_CARD_FIELDS,
   PERSON_SECTION_LABELS,
   buildPersonSummary,
   buildQuestionnaireExportFileName,
-  createDefaultActionForm,
   dataUrlToFile,
   dataUrlToObjectUrl,
   downloadQuestionnairePdf,
@@ -105,7 +115,6 @@ import {
   looksLikePersonBirthDate,
   migratePersonAttachmentsBetweenIds,
   normalizePersonBirthKey,
-  normalizePersonnelSearchText,
   normalizeUaPhone,
   pickFullPositionFromPersonRow,
   resolvePersonIdentityKey,
@@ -113,12 +122,9 @@ import {
   resolvePersonDisplayNameFromRoster,
   computeFullYearsFromBirthDate,
   isPositionIndexField,
-  personActions,
   renameQuestionnaireFile,
   revokeQuestionnairePreviewUrl,
   resolvePersonFieldKey,
-  type PersonAction,
-  type PersonActionForm,
   type PersonFieldDef,
 } from "./personnelUtils";
 import { downloadBlob, sanitizeFileName } from "../../shared/browserExport";
@@ -134,6 +140,7 @@ import {
 } from "./personPhonesStore";
 import {
   buildQuestionnairePresencePeople,
+  narrowQuestionnairePresenceForPeople,
   clearAvailablePersonPhotoIdsCache,
   collectPersonAttachmentLookupIds,
   collectPersonnelListPhotoUpdates,
@@ -159,8 +166,13 @@ import {
 } from "./vkTpvDovidkyImport";
 import { runParseVkTpvDovidkyHeavy } from "../anketa-data/runStaffSheetHeavyJobs";
 import { importStaffSheetFromFile } from "../anketa-data/staffSheetImport";
+import { loadSharedRosterLatest } from "../../data/sharedAppData";
+import { rosterRowsFromPersonnelLatest } from "../../data/personnelDataset";
 import {
+  buildStaffScopePreview,
   getRosterPersonName,
+  isPersonnelFromArchive,
+  isPersonnelInStaffRoster,
   ROSTER_FIELD_PREFIX,
 } from "./personnelRosterMerge";
 import { runHeavyJob } from "../../workers/runHeavyJob";
@@ -168,10 +180,6 @@ import {
   compressPhotoDataUrl,
   createPhotoThumbnailDataUrl,
 } from "./photoCompression";
-import {
-  personnelSearchEmptyHint,
-  personnelSearchMatchesQuery,
-} from "./personnelSearch";
 import {
   buildPersonnelListIndex,
   type PersonnelListIndex,
@@ -249,6 +257,8 @@ export function PersonnelPage({
   const { canEditArea } = useAuth();
   const canEdit = canEditArea("personnel");
   const personnelAllRowsRef = useRef<EjournalPreviewRow[]>([]);
+  const personnelScopeRef = useRef({ all: false, archive: false });
+  const personnelSourceRowsRef = useRef<EjournalPreviewRow[]>([]);
   const personnelListIndexRef = useRef<PersonnelListIndex>({
     records: [],
     staffCounts: { all: 0, in: 0, archive: 0 },
@@ -262,10 +272,7 @@ export function PersonnelPage({
   const [mobilePane, setMobilePane] = useState<"list" | "card" | "side">(
     "list",
   );
-  const personnelFocusLockRef = useRef<{
-    rowId: string;
-    externalId: string;
-  } | null>(null);
+  const personnelFocusLockRef = useRef<PersonnelFocusTarget | null>(null);
   const personnelLoadGenerationRef = useRef(0);
   const personnelLoadControllerRef = useRef<AbortController | null>(null);
   const requestedPhotoIdsRef = useRef(new Set<string>());
@@ -274,16 +281,39 @@ export function PersonnelPage({
   );
   const personnelDatasetFingerprintRef = useRef("");
   const holdStatusUntilRef = useRef(0);
-  const [query, setQuery] = useState("");
-  const [editValues, setEditValues] = useState<Record<string, string>>({});
-  const [activePersonAction, setActivePersonAction] =
-    useState<PersonAction | null>(null);
-  const [personActionForm, setPersonActionForm] = useState<PersonActionForm>(
-    () => createDefaultActionForm(),
+  const listPanelRef = useRef<PersonnelListPanelHandle | null>(null);
+  const questionnairePresenceLoadRef = useRef<Promise<
+    Array<{ personExternalId: string; fileName?: string | null }>
+  > | null>(null);
+  const [personnelListInitialSearch] = useState(
+    () => readPersonnelFocusTarget().search,
   );
+  const [isMobilePersonnelLayout, setIsMobilePersonnelLayout] = useState(() =>
+    typeof window !== "undefined"
+      ? window.matchMedia("(max-width: 980px)").matches
+      : false,
+  );
+  const [editValues, setEditValues] = useState<Record<string, string>>({});
   const [photoByExternalId, setPhotoByExternalId] = useState<
     Record<string, string>
   >({});
+  const [anketaIndex, setAnketaIndex] = useState<PersonnelV2AnketaIndex | null>(
+    null,
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    void loadPersonnelV2AnketaRows()
+      .then((rows) => {
+        if (!cancelled) setAnketaIndex(indexPersonnelV2AnketaRows(rows));
+      })
+      .catch(() => {
+        if (!cancelled) setAnketaIndex(indexPersonnelV2AnketaRows([]));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const [phonesByExternalId, setPhonesByExternalId] = useState<
     Record<string, string[]>
   >(() => readStoredPersonPhones());
@@ -330,6 +360,7 @@ export function PersonnelPage({
   const questionnairePreviewLoadSeqRef = useRef(0);
   const [isDiskFloatingCrop, setIsDiskFloatingCrop] = useState(false);
   const [isDiskSearchOpen, setIsDiskSearchOpen] = useState(false);
+  const [isPhotoExtractOpen, setIsPhotoExtractOpen] = useState(false);
   const [isUploadingQuestionnaire, setIsUploadingQuestionnaire] =
     useState(false);
   const [isMergingAnketaData, setIsMergingAnketaData] = useState(false);
@@ -342,73 +373,56 @@ export function PersonnelPage({
     void personnelDataEpoch;
     return personnelListIndexRef.current.records;
   }, [personnelDataEpoch]);
-  const filteredPersonnel = useMemo(() => {
-    const normalizedQuery = normalizePersonnelSearchText(query);
-
-    return personnelRows.filter((record) => {
-      if (staffFilter === "in" && !record.inStaff) return false;
-      if (staffFilter === "archive" && !record.inArchive) return false;
-      if (!normalizedQuery) return true;
-
-      const primaryText = normalizePersonnelSearchText(
-        [
-          record.summary.name,
-          resolvePersonDisplayNameFromRoster(record.row),
-          getRosterPersonName(record.row),
-        ]
-          .filter(Boolean)
-          .join(" "),
-      );
-      const searchableText = normalizePersonnelSearchText(
-        [
-          record.searchBase,
-          ...(phonesByExternalId[record.summary.externalId] ?? []),
-        ]
-          .filter(Boolean)
-          .join(" "),
-      );
-
-      return personnelSearchMatchesQuery(searchableText, normalizedQuery, {
-        primaryText,
-        callSignText: normalizePersonnelSearchText(record.summary.callSign),
-      });
-    });
-  }, [personnelRows, phonesByExternalId, query, staffFilter]);
-
   useEffect(() => {
     const next = new Map<string, EjournalPreviewRow>();
-    for (const record of filteredPersonnel) {
+    for (const record of personnelRows) {
       const externalId = record.summary.externalId;
       if (externalId) next.set(externalId, record.row);
     }
     personnelRowByExternalIdRef.current = next;
-  }, [filteredPersonnel]);
+  }, [personnelRows]);
+
+  useEffect(() => {
+    const media = window.matchMedia("(max-width: 980px)");
+    const sync = () => setIsMobilePersonnelLayout(media.matches);
+    sync();
+    media.addEventListener("change", sync);
+    return () => media.removeEventListener("change", sync);
+  }, []);
+
+  const markQuestionnaireInDb = useCallback((externalId: string) => {
+    if (!externalId) return;
+    setQuestionnaireByExternalId((current) => ({
+      ...current,
+      [externalId]: true,
+    }));
+  }, []);
+
+  const clearQuestionnairePresence = useCallback((externalIds: string[]) => {
+    if (!externalIds.length) return;
+    setQuestionnaireByExternalId((current) => {
+      const next = { ...current };
+      for (const id of externalIds) delete next[id];
+      return next;
+    });
+  }, []);
 
   const staffCounts = useMemo(() => {
     void personnelDataEpoch;
     return personnelListIndexRef.current.staffCounts;
   }, [personnelDataEpoch]);
-  const questionnaireCounts = useMemo(() => {
-    let withQuestionnaire = 0;
-    for (const record of filteredPersonnel) {
-      const externalId = record.summary.externalId;
-      if (externalId && questionnaireByExternalId[externalId]) {
-        withQuestionnaire += 1;
-      }
-    }
-    return {
-      withQuestionnaire,
-      withoutQuestionnaire: filteredPersonnel.length - withQuestionnaire,
-    };
-  }, [filteredPersonnel, questionnaireByExternalId]);
   const selectedRecord = useMemo(
     () =>
       personnelRows.find((record) => record.row.__dbRowId === selectedRowId) ??
-      filteredPersonnel[0] ??
       null,
-    [filteredPersonnel, personnelRows, selectedRowId],
+    [personnelRows, selectedRowId],
   );
   const selectedRow = selectedRecord?.row ?? null;
+  const shouldLoadSelectedPersonDetails = Boolean(
+    selectedRowId &&
+      selectedRow &&
+      (!isMobilePersonnelLayout || mobilePane !== "list"),
+  );
   const selectedSummary = useMemo(
     () => buildPersonSummary(selectedRow),
     [selectedRow],
@@ -433,40 +447,16 @@ export function PersonnelPage({
         : "",
     [photoIndexReady, selectedRow, selectedPhotoCacheBust],
   );
-  const selectedPhotoThumb = useMemo(() => {
-    const externalId = selectedSummary.externalId;
-    if (!externalId) return "";
-    const url = photoByExternalId[externalId];
-    if (!url || !/[?&]thumbnail=1(?:&|$)/.test(url)) return "";
-    return url;
-  }, [photoByExternalId, selectedSummary.externalId]);
-  const [selectedPhotoReady, setSelectedPhotoReady] = useState("");
-  useEffect(() => {
-    setSelectedPhotoReady("");
-    if (!selectedPhotoFullUrl) return;
-    const image = new Image();
-    image.decoding = "async";
-    image.onload = () => setSelectedPhotoReady(selectedPhotoFullUrl);
-    image.onerror = () => setSelectedPhotoReady("");
-    image.src = selectedPhotoFullUrl;
-    return () => {
-      image.onload = null;
-      image.onerror = null;
-    };
-  }, [selectedPhotoFullUrl]);
   const selectedPhoto = useMemo(() => {
     const externalId = selectedSummary.externalId;
     if (!externalId) return "";
     const local = photoByExternalId[externalId] || "";
     if (local && isPersonPhotoDisplayOverride(local)) return local;
-    if (selectedPhotoReady) return selectedPhotoReady;
-    if (selectedPhotoFullUrl) return selectedPhotoThumb || selectedPhotoFullUrl;
+    if (selectedPhotoFullUrl) return selectedPhotoFullUrl;
     return local;
   }, [
     photoByExternalId,
     selectedPhotoFullUrl,
-    selectedPhotoReady,
-    selectedPhotoThumb,
     selectedSummary.externalId,
   ]);
   const selectedCallSign = useMemo(
@@ -556,13 +546,32 @@ export function PersonnelPage({
       .filter((group) => group.fields.length > 0);
   }, [editableFields, selectedRow, selectedSummary.birthDate]);
 
+  const selectedAnketaRow = useMemo(() => {
+    if (!anketaIndex || !selectedRow) return null;
+    return matchPersonnelV2AnketaRow(
+      anketaIndex,
+      selectedSummary.name,
+      resolvePersonBirthDate(selectedRow),
+      selectedSummary.externalId,
+    );
+  }, [
+    anketaIndex,
+    selectedRow,
+    selectedSummary.externalId,
+    selectedSummary.name,
+  ]);
+  const cardSummary = useMemo(
+    () => summaryPreferringAnketa(selectedSummary, selectedAnketaRow) ?? selectedSummary,
+    [selectedAnketaRow, selectedSummary],
+  );
   const birthDateWithAge = useMemo(
-    () => formatPersonBirthDateWithAge(selectedSummary.birthDate),
-    [selectedSummary.birthDate],
+    () => formatPersonBirthDateWithAge(cardSummary.birthDate),
+    [cardSummary.birthDate],
   );
   const rosterFieldRows = useMemo(() => {
     const birthDate = String(selectedSummary.birthDate ?? "").trim();
     const cardName = formatPersonDisplayName(selectedSummary.name);
+    const cardRnokppDigits = String(cardSummary.rnokpp ?? "").replace(/\D/g, "");
     return Object.entries(selectedRow ?? {})
       .filter(
         ([key, value]) =>
@@ -631,6 +640,10 @@ export function PersonnelPage({
         const isRosterStatusField =
           labelNorm === "статус" ||
           /(^|_)(column_21|column_37)(_|$)/i.test(field.sourceKey);
+        const isIpnField =
+          labelNorm === "іпн" ||
+          labelNorm === "рнокпп" ||
+          /(^|_)(column_19)(_|$)/i.test(field.sourceKey);
 
         // ПІБ зі штатки часто має чужу дату в дужках — після очистки це той самий рядок.
         if (
@@ -660,12 +673,21 @@ export function PersonnelPage({
         if (isStayPlaceField || isPositionField || isRosterStatusField) {
           return false;
         }
+        // ІПН зі штатки — той самий номер, що РНОКПП в шапці картки.
+        if (
+          isIpnField &&
+          cardRnokppDigits.length >= 8 &&
+          field.value.replace(/\D/g, "") === cardRnokppDigits
+        ) {
+          return false;
+        }
         if (isRosterNoteFieldLabel(field.label)) {
           return false;
         }
         return true;
       });
   }, [
+    cardSummary.rnokpp,
     rosterLabels,
     selectedRow,
     selectedSummary.birthDate,
@@ -708,32 +730,17 @@ export function PersonnelPage({
     }
     return "";
   }, [rosterLabels, selectedRow]);
-  const additionalInfoKey = useMemo(
-    () => resolvePersonFieldKey(selectedRow, ["додаткова_інформація"]),
-    [selectedRow],
-  );
-  /** Live-parsed from «Додаткова інформація», plus phones saved separately from imports. */
+  /** Номери з «Додаткової інформації» анкети плюс збережені в браузері. */
   const savedPhones =
     (selectedSummary.externalId &&
       phonesByExternalId[selectedSummary.externalId]) ||
     [];
   const parsedPhones = useMemo(() => {
-    const draft =
-      (additionalInfoKey && editValues[additionalInfoKey]) ||
-      selectedSummary.additionalInfo;
     return uniqueNormalizedPhones([
-      ...extractPhones(draft),
-      ...((selectedSummary.externalId &&
-        phonesByExternalId[selectedSummary.externalId]) ||
-        []),
+      ...extractPhones(selectedAnketaRow?.additionalInfo ?? ""),
+      ...savedPhones,
     ]);
-  }, [
-    additionalInfoKey,
-    editValues,
-    phonesByExternalId,
-    selectedSummary.additionalInfo,
-    selectedSummary.externalId,
-  ]);
+  }, [savedPhones, selectedAnketaRow?.additionalInfo]);
 
   useEffect(() => {
     setEditValues(
@@ -756,12 +763,6 @@ export function PersonnelPage({
   }, [editableFields, selectedRow]);
 
   useEffect(() => {
-    if (selectedRecord?.row.__dbRowId && !selectedRowId) {
-      setSelectedRowId(selectedRecord.row.__dbRowId);
-    }
-  }, [selectedRecord, selectedRowId]);
-
-  useEffect(() => {
     setIsPhotoLightboxOpen(false);
   }, [selectedRowId]);
 
@@ -775,6 +776,9 @@ export function PersonnelPage({
   }, [isPhotoLightboxOpen]);
 
   useEffect(() => {
+    if (!shouldLoadSelectedPersonDetails) {
+      return;
+    }
     const externalId = selectedSummary.externalId;
     if (!externalId) {
       setQuestionnaire(null);
@@ -798,7 +802,8 @@ export function PersonnelPage({
           canEdit &&
           next &&
           resolvedExternalId &&
-          resolvedExternalId !== externalId
+          resolvedExternalId !== externalId &&
+          !externalId.startsWith("p:")
         ) {
           try {
             const copied = await api.copyPersonQuestionnaire(
@@ -887,6 +892,7 @@ export function PersonnelPage({
     selectedRow,
     selectedSummary.externalId,
     selectedSummary.name,
+    shouldLoadSelectedPersonDetails,
   ]);
 
   useEffect(() => {
@@ -909,7 +915,7 @@ export function PersonnelPage({
     ) {
       try {
         const blob = await api.fetchPersonQuestionnaireFile(
-          externalId,
+          String(questionnaire.personExternalId || externalId).trim(),
           questionnaireExportFileName,
           true,
         );
@@ -1020,7 +1026,9 @@ export function PersonnelPage({
   }, []);
 
   const handleListPhotoLoadError = useCallback((externalId: string) => {
-    requestedPhotoIdsRef.current.delete(externalId);
+    // Keep the id requested so a broken thumbnail cannot re-enter the list
+    // and restart the visible-photo effect.
+    requestedPhotoIdsRef.current.add(externalId);
     setPhotoByExternalId((photos) => {
       if (!photos[externalId]) return photos;
       const next = { ...photos };
@@ -1044,7 +1052,7 @@ export function PersonnelPage({
       }
 
       void loadAvailablePersonPhotoIds().then((availableIds) => {
-        setPhotoIndexReady((value) => value + 1);
+        setPhotoIndexReady((value) => (value > 0 ? value : 1));
         applyPhotoUrlUpdates(
           collectPersonnelListPhotoUpdates(
             externalIds,
@@ -1058,16 +1066,6 @@ export function PersonnelPage({
     [applyPhotoUrlUpdates],
   );
 
-  useEffect(() => {
-    if (!filteredPersonnel.length) return;
-    loadVisiblePersonnelPhotos(
-      filteredPersonnel
-        .slice(0, 40)
-        .map((record) => record.summary.externalId)
-        .filter(Boolean),
-    );
-  }, [filteredPersonnel, loadVisiblePersonnelPhotos]);
-
   const loadPersonnelQuestionnaireIds = async (
     rows?: EjournalPreviewRow[],
     signal?: AbortSignal,
@@ -1076,43 +1074,70 @@ export function PersonnelPage({
     >,
     options?: { force?: boolean },
   ) => {
-    setQuestionnairePresenceStatus("loading");
-    try {
-      const items =
-        (await prefetchedItems) ??
-        (await api.listPersonQuestionnaires({ signal }));
-      const datasetFingerprint = personnelDatasetFingerprintRef.current;
-      const cacheKey = questionnairePresenceCacheKey(datasetFingerprint, items);
-      if (!options?.force) {
-        const cached = await readDataCache<Record<string, true>>(cacheKey);
-        if (cached) {
-          setQuestionnaireByExternalId(cached);
-          setQuestionnairePresenceStatus("ready");
-          return items;
-        }
-      }
+    if (!options?.force && questionnairePresenceLoadRef.current) {
+      return questionnairePresenceLoadRef.current;
+    }
 
-      const people =
-        questionnairePresencePeopleRef.current.length > 0
-          ? questionnairePresencePeopleRef.current
-          : buildQuestionnairePresencePeople(
-              rows ?? personnelAllRowsRef.current ?? [],
+    const task = (async () => {
+      setQuestionnairePresenceStatus("loading");
+      try {
+        const items =
+          (await prefetchedItems) ??
+          (await api.listPersonQuestionnaires({ signal }));
+        const people =
+          questionnairePresencePeopleRef.current.length > 0
+            ? questionnairePresencePeopleRef.current
+            : buildQuestionnairePresencePeople(
+                rows ?? personnelAllRowsRef.current ?? [],
+              );
+        const datasetFingerprint = personnelDatasetFingerprintRef.current;
+        const cacheKey = questionnairePresenceCacheKey(
+          datasetFingerprint,
+          items,
+        );
+        if (!options?.force) {
+          const cached = await readDataCache<Record<string, true>>(cacheKey);
+          if (cached) {
+            const uiPresence = narrowQuestionnairePresenceForPeople(
+              cached,
+              people,
             );
-      const presence = await runHeavyJob({
-        type: "buildQuestionnairePresence",
-        people,
-        questionnaires: items.map(({ personExternalId, fileName }) => ({
-          personExternalId,
-          fileName,
-        })),
-      });
-      setQuestionnaireByExternalId(presence);
-      setQuestionnairePresenceStatus("ready");
-      void writeDataCache(cacheKey, presence);
-      return items;
-    } catch {
-      setQuestionnairePresenceStatus("error");
-      return [];
+            setQuestionnaireByExternalId(uiPresence);
+            setQuestionnairePresenceStatus("ready");
+            return items;
+          }
+        }
+
+        const presence = await runHeavyJob({
+          type: "buildQuestionnairePresence",
+          people,
+          questionnaires: items.map(({ personExternalId, fileName }) => ({
+            personExternalId,
+            fileName,
+          })),
+        });
+        if (signal?.aborted) return items;
+        const uiPresence = narrowQuestionnairePresenceForPeople(
+          presence,
+          people,
+        );
+        setQuestionnaireByExternalId(uiPresence);
+        setQuestionnairePresenceStatus("ready");
+        void writeDataCache(cacheKey, uiPresence);
+        return items;
+      } catch {
+        setQuestionnairePresenceStatus("error");
+        return [];
+      }
+    })();
+
+    questionnairePresenceLoadRef.current = task;
+    try {
+      return await task;
+    } finally {
+      if (questionnairePresenceLoadRef.current === task) {
+        questionnairePresenceLoadRef.current = null;
+      }
     }
   };
 
@@ -1128,52 +1153,101 @@ export function PersonnelPage({
       ? preview
       : { ...preview, rows: [] };
     if (options?.isCancelled?.()) return safePreview;
-    const fingerprint = options?.datasetFingerprint?.trim() ?? "";
-    if (fingerprint && fingerprint !== personnelDatasetFingerprintRef.current) {
-      resetPersonnelPhotoRequests();
-      personnelDatasetFingerprintRef.current = fingerprint;
-    }
-    const rows = safePreview.rows.filter(isLikelyPersonnelRow);
-    const sheetName = safePreview.sheet?.name ?? "ООС";
-    const storedFocus = readPersonnelFocusTarget();
-    if (storedFocus.rowId || storedFocus.externalId) {
-      personnelFocusLockRef.current = storedFocus;
-    }
-    const focusTarget = personnelFocusLockRef.current ?? {
-      rowId: "",
-      externalId: "",
-    };
-    const focusedRow = findPersonnelRowByFocusTarget(rows, focusTarget);
 
-    personnelAllRowsRef.current = safePreview.rows;
-    personnelListIndexRef.current = buildPersonnelListIndex(safePreview.rows);
-    questionnairePresencePeopleRef.current =
-      buildQuestionnairePresencePeople(rows);
-    setPersonnelDataEpoch((value) => value + 1);
-    setSelectedRowId((current) => {
-      if (focusedRow?.__dbRowId) return focusedRow.__dbRowId;
-      if (current && rows.some((row) => row.__dbRowId === current)) {
-        return current;
+    try {
+      const fingerprint = options?.datasetFingerprint?.trim() ?? "";
+      const rows = safePreview.rows.filter(isLikelyPersonnelRow);
+      const sheetName = safePreview.sheet?.name ?? "ООС";
+      const storedFocus = readPersonnelFocusTarget();
+      if (storedFocus.rowId || storedFocus.externalId || storedFocus.search) {
+        personnelFocusLockRef.current = storedFocus;
       }
-      return rows[0]?.__dbRowId ?? "";
-    });
-    if (focusedRow?.__dbRowId) {
-      setMobilePane("card");
-    }
-    if (focusedRow && !options?.fromCache) {
-      personnelFocusLockRef.current = null;
-      clearPersonnelFocusTarget();
-    }
+      const focusTarget = personnelFocusLockRef.current ?? {
+        rowId: "",
+        externalId: "",
+        search: "",
+      };
 
-    setMessage(
-      focusedRow
-        ? `Відкрито картку: ${getPersonDisplayName(focusedRow) || "особу"}.`
-        : options?.fromCache
-          ? `Кеш: ${rows.length} записів · ${sheetName}. Оновлюю з БД…`
-          : `Завантажено особовий склад з БД: ${rows.length} записів · ${sheetName}.`,
-    );
+      const sameDataset =
+        Boolean(fingerprint) &&
+        fingerprint === personnelDatasetFingerprintRef.current &&
+        personnelListIndexRef.current.records.length > 0;
 
-    return safePreview;
+      if (sameDataset) {
+        const indexedRows = personnelListIndexRef.current.records.map(
+          (record) => record.row,
+        );
+        const focusedRow = findPersonnelRowByFocusTarget(
+          indexedRows,
+          focusTarget,
+        );
+        if (focusedRow?.__dbRowId) {
+          setSelectedRowId(focusedRow.__dbRowId);
+          setMobilePane("card");
+          personnelFocusLockRef.current = null;
+          clearPersonnelFocusTarget();
+        }
+        return safePreview;
+      }
+
+      if (
+        fingerprint &&
+        fingerprint !== personnelDatasetFingerprintRef.current
+      ) {
+        resetPersonnelPhotoRequests();
+        personnelDatasetFingerprintRef.current = fingerprint;
+      }
+      const focusedRow = findPersonnelRowByFocusTarget(rows, focusTarget);
+      personnelSourceRowsRef.current = safePreview.rows;
+      const visibleRows = personnelScopeRef.current.all
+        ? safePreview.rows
+        : safePreview.rows.filter((row) => {
+            if (isPersonnelFromArchive(row)) {
+              return personnelScopeRef.current.archive;
+            }
+            return isPersonnelInStaffRoster(row);
+          });
+      const index = buildPersonnelListIndex(visibleRows);
+      if (!personnelScopeRef.current.all) index.staffCounts.all = -1;
+      if (!personnelScopeRef.current.archive) index.staffCounts.archive = -1;
+      personnelAllRowsRef.current = visibleRows;
+      personnelListIndexRef.current = index;
+      questionnairePresencePeopleRef.current =
+        buildQuestionnairePresencePeople(visibleRows.filter(isLikelyPersonnelRow));
+      setPersonnelDataEpoch((value) => value + 1);
+      setSelectedRowId((current) => {
+        if (focusedRow?.__dbRowId) return focusedRow.__dbRowId;
+        if (current && rows.some((row) => row.__dbRowId === current)) {
+          return current;
+        }
+        return rows[0]?.__dbRowId ?? "";
+      });
+      if (focusedRow?.__dbRowId) {
+        setMobilePane("card");
+      }
+      if (focusedRow) {
+        personnelFocusLockRef.current = null;
+        clearPersonnelFocusTarget();
+      }
+
+      setMessage(
+        focusedRow
+          ? `Відкрито картку: ${getPersonDisplayName(focusedRow) || "особу"}.`
+          : options?.fromCache
+            ? `Кеш: ${rows.length} записів · ${sheetName}. Оновлюю з БД…`
+            : `Завантажено особовий склад з БД: ${rows.length} записів · ${sheetName}.`,
+      );
+
+      return safePreview;
+    } catch (error) {
+      console.error("[PersonnelPage] applyPersonnelPreview failed", error);
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "Не вдалося підготувати список особового складу.",
+      );
+      return safePreview;
+    }
   };
 
   const loadPersonnel = async (
@@ -1269,6 +1343,90 @@ export function PersonnelPage({
       }
     } finally {
       if (!isLoadCancelled()) setIsLoading(false);
+    }
+  };
+
+  const publishOpenPersonnelScope = () => {
+    const source = personnelSourceRowsRef.current;
+    const visibleRows = personnelScopeRef.current.all
+      ? source
+      : source.filter((row) => {
+          if (isPersonnelFromArchive(row)) {
+            return personnelScopeRef.current.archive;
+          }
+          return isPersonnelInStaffRoster(row);
+        });
+    const index = buildPersonnelListIndex(visibleRows);
+    if (!personnelScopeRef.current.all) index.staffCounts.all = -1;
+    if (!personnelScopeRef.current.archive) index.staffCounts.archive = -1;
+    personnelAllRowsRef.current = visibleRows;
+    personnelListIndexRef.current = index;
+    setPersonnelDataEpoch((value) => value + 1);
+  };
+
+  const loadRosterStaff = async (
+    signal?: AbortSignal,
+    options?: { force?: boolean },
+  ) => {
+    const hasPaintedRows = personnelAllRowsRef.current.length > 0;
+    if (!hasPaintedRows) {
+      setIsLoading(true);
+      setMessage("Завантажую Штатку…");
+    }
+    try {
+      const cachedDatasetPromise = (async () => {
+        const peeked = peekDataCache<PersonnelDataset>(
+          CacheKeys.personnelDataset,
+        );
+        if (peeked?.rows?.length) return peeked;
+        return readDataCache<PersonnelDataset>(CacheKeys.personnelDataset);
+      })();
+      const [roster, cachedDataset] = await Promise.all([
+        loadSharedRosterLatest({
+          force: options?.force,
+          signal,
+        }),
+        cachedDatasetPromise,
+        loadAvailablePersonPhotoIds(),
+      ]);
+      if (signal?.aborted) return;
+      const cachedPreview = cachedDataset?.rows?.length
+        ? {
+            rows: cachedDataset.rows,
+            columns: cachedDataset.columns ?? [],
+            sheet: cachedDataset.sheet,
+          }
+        : null;
+      const preview = roster
+        ? buildStaffScopePreview(
+            rosterRowsFromPersonnelLatest(roster),
+            roster.sheet,
+            cachedPreview,
+          )
+        : null;
+      if (!preview?.rows.length) {
+        setMessage("У штатці немає рядків.");
+        return;
+      }
+      await applyPersonnelPreview(preview);
+      setPhotoIndexReady((value) => (value > 0 ? value : 1));
+      void loadPersonnelQuestionnaireIds(
+        preview.rows.filter(
+          (row) =>
+            isPersonnelInStaffRoster(row) && !isPersonnelFromArchive(row),
+        ),
+        signal,
+      );
+    } catch (error) {
+      if (!signal?.aborted) {
+        setMessage(
+          error instanceof Error
+            ? error.message
+            : "Не вдалося завантажити штатку.",
+        );
+      }
+    } finally {
+      if (!signal?.aborted) setIsLoading(false);
     }
   };
 
@@ -1383,6 +1541,22 @@ export function PersonnelPage({
     return people;
   }, [personnelRows, photoByExternalId, questionnaireByExternalId]);
 
+  const questionnairePhotoExtractTargets = useMemo(() => {
+    const targets: Array<{ externalId: string; fullName: string }> = [];
+    for (const record of personnelRows) {
+      if (!record.inStaff) continue;
+      const externalId = record.summary.externalId;
+      if (!externalId) continue;
+      if (!questionnaireByExternalId[externalId]) continue;
+      if (photoByExternalId[externalId]) continue;
+      targets.push({
+        externalId,
+        fullName: record.summary.name,
+      });
+    }
+    return targets;
+  }, [personnelRows, photoByExternalId, questionnaireByExternalId]);
+
   const importVkTpvDovidkyWorkbook = async (file: File | undefined) => {
     if (!file) return;
 
@@ -1475,22 +1649,18 @@ export function PersonnelPage({
     }
   };
 
-  useLayoutEffect(() => {
-    const cached = peekDataCache<PersonnelDataset>(CacheKeys.personnelDataset);
-    const preview = cached ? personnelDatasetToPreview(cached) : null;
-    if (!preview?.rows?.length) return;
-    setRosterLabels(cached!.rosterLabels);
-    void applyPersonnelPreview(preview, {
-      fromCache: true,
-      datasetFingerprint: cached!.fingerprint,
-    });
-  }, []);
-
   useEffect(() => {
     return subscribeDataCache(CacheKeys.personnelDataset, () => {
+      if (!personnelScopeRef.current.all) return;
       const cached = peekDataCache<PersonnelDataset>(CacheKeys.personnelDataset);
       const preview = cached ? personnelDatasetToPreview(cached) : null;
       if (!preview?.rows?.length) return;
+      if (
+        cached!.fingerprint === personnelDatasetFingerprintRef.current &&
+        personnelListIndexRef.current.records.length > 0
+      ) {
+        return;
+      }
       setRosterLabels(cached!.rosterLabels);
       void applyPersonnelPreview(preview, {
         fromCache: true,
@@ -1501,9 +1671,14 @@ export function PersonnelPage({
 
   useEffect(() => {
     let mounted = true;
-    void startPersonnelLoad();
+    void loadRosterStaff();
     const refreshAfterStaffSync = () => {
-      if (mounted) void startPersonnelLoad({ force: true });
+      if (!mounted) return;
+      if (personnelScopeRef.current.all) {
+        void startPersonnelLoad({ force: true });
+        return;
+      }
+      void loadRosterStaff(undefined, { force: true });
     };
     window.addEventListener(STAFF_SHEET_SYNCED_EVENT, refreshAfterStaffSync);
     return () => {
@@ -1522,8 +1697,9 @@ export function PersonnelPage({
       const detail = normalizePersonnelFocusTarget(
         (event as CustomEvent<PersonnelFocusTarget>).detail ?? {},
       );
-      if (!detail.rowId && !detail.externalId) return;
+      if (!detail.rowId && !detail.externalId && !detail.search) return;
       personnelFocusLockRef.current = detail;
+      if (detail.search) listPanelRef.current?.setSearch(detail.search);
       const rows = personnelAllRowsRef.current.filter(isLikelyPersonnelRow);
       if (!rows.length) return;
       const focusedRow = findPersonnelRowByFocusTarget(rows, detail);
@@ -1543,7 +1719,7 @@ export function PersonnelPage({
         "army-grid:open-personnel",
         handleOpenPersonnel,
       );
-  }, [personnelDataEpoch]);
+  }, []);
 
   const saveSelectedPerson = async () => {
     if (!selectedRow?.__dbRowId) return;
@@ -1570,15 +1746,17 @@ export function PersonnelPage({
         selectedRow.__dbRowId,
         values,
       );
-      personnelAllRowsRef.current = personnelAllRowsRef.current.map((row) =>
+      const replaceRow = (row: EjournalPreviewRow) =>
         row.__dbRowId === selectedRow.__dbRowId
           ? {
               ...row,
               ...updatedRow.values,
               __dbRowId: selectedRow.__dbRowId,
             }
-          : row,
-      );
+          : row;
+      personnelSourceRowsRef.current =
+        personnelSourceRowsRef.current.map(replaceRow);
+      personnelAllRowsRef.current = personnelAllRowsRef.current.map(replaceRow);
       personnelListIndexRef.current = buildPersonnelListIndex(
         personnelAllRowsRef.current,
       );
@@ -1595,37 +1773,6 @@ export function PersonnelPage({
     }
   };
 
-  const submitPersonAction = async () => {
-    if (!selectedRow?.__dbRowId || !activePersonAction) return;
-
-    setIsLoading(true);
-    try {
-      await api.createEjournalRowAction(selectedRow.__dbRowId, {
-        actionType: activePersonAction.type,
-        validFrom: personActionForm.validFrom || undefined,
-        validTo: personActionForm.validTo || undefined,
-        reason: personActionForm.reason || undefined,
-        place: personActionForm.place || undefined,
-        note: personActionForm.note || undefined,
-        positionIndex: personActionForm.positionIndex || undefined,
-        positionTitle: personActionForm.positionTitle || undefined,
-        rank: personActionForm.rank || undefined,
-      });
-      setMessage(
-        `Статусну дію збережено: ${activePersonAction.label} · ${selectedSummary.name}.`,
-      );
-      setActivePersonAction(null);
-      setPersonActionForm(createDefaultActionForm());
-    } catch (error) {
-      setMessage(
-        error instanceof Error
-          ? error.message
-          : "Не вдалося зберегти статусну дію.",
-      );
-    } finally {
-      setIsLoading(false);
-    }
-  };
   const openPhotoCrop = (
     file: File | undefined,
     options?: { floating?: boolean },
@@ -1657,8 +1804,6 @@ export function PersonnelPage({
         ...collectPersonAttachmentLookupIds(selectedRow),
       ]),
     ].filter(Boolean);
-
-    setSelectedPhotoReady("");
 
     // Show immediately even if API is slow/unavailable.
     setPhotoByExternalId((photos) => {
@@ -1866,11 +2011,7 @@ export function PersonnelPage({
         ),
       );
       setQuestionnaire(null);
-      setQuestionnaireByExternalId((current) => {
-        const next = { ...current };
-        for (const id of deleteIds) delete next[id];
-        return next;
-      });
+      clearQuestionnairePresence(deleteIds);
       notifyPersonnelAttachmentChanged(externalId, "questionnaire");
       releaseQuestionnairePreviewCache();
       closeQuestionnairePreview();
@@ -1937,7 +2078,9 @@ export function PersonnelPage({
   const openQuestionnairePreview = async (
     fileData = questionnaire?.fileData,
   ) => {
-    const externalId = selectedSummary.externalId;
+    const listId = selectedSummary.externalId;
+    let externalId =
+      String(questionnaire?.personExternalId ?? "").trim() || listId;
     const previewTitle = `Анкета · ${selectedSummary.name}${
       questionnaireExportFileName ? ` · ${questionnaireExportFileName}` : ""
     }`;
@@ -1957,6 +2100,23 @@ export function PersonnelPage({
     }
 
     if (!externalId || pendingQuestionnaireFile || diskPreviewFile) return;
+
+    if (/^p:.+:c:/i.test(externalId)) {
+      const nameIsAmbiguous =
+        personnelRows.filter(
+          (item) =>
+            normalizeRosterText(item.summary.name) ===
+            normalizeRosterText(selectedSummary.name),
+        ).length > 1;
+      const found = await loadPersonQuestionnaireForRow(selectedRow, undefined, {
+        nameIsAmbiguous,
+      });
+      const resolved = String(
+        found.resolvedExternalId || found.questionnaire?.personExternalId || "",
+      ).trim();
+      if (resolved) externalId = resolved;
+      if (found.questionnaire) setQuestionnaire(found.questionnaire);
+    }
 
     const cached = questionnairePreviewCacheRef.current;
     if (cached?.externalId === externalId) {
@@ -2016,7 +2176,9 @@ export function PersonnelPage({
   };
 
   const openQuestionnaireInNewTab = async () => {
-    const externalId = selectedSummary.externalId;
+    let externalId =
+      String(questionnaire?.personExternalId ?? "").trim() ||
+      selectedSummary.externalId;
     if (questionnaire?.fileData) {
       const url = dataUrlToObjectUrl(questionnaire.fileData);
       window.open(url, "_blank", "noopener,noreferrer");
@@ -2024,6 +2186,15 @@ export function PersonnelPage({
     }
     if (externalId && !pendingQuestionnaireFile && !diskPreviewFile) {
       try {
+        if (/^p:.+:c:/i.test(externalId)) {
+          const found = await loadPersonQuestionnaireForRow(selectedRow);
+          const resolved = String(
+            found.resolvedExternalId ||
+              found.questionnaire?.personExternalId ||
+              "",
+          ).trim();
+          if (resolved) externalId = resolved;
+        }
         const url = await api.createPersonQuestionnairePreviewUrl(
           externalId,
           questionnaireExportFileName,
@@ -2095,10 +2266,7 @@ export function PersonnelPage({
         fileToSave,
       );
       setQuestionnaire(saved);
-      setQuestionnaireByExternalId((current) => ({
-        ...current,
-        [externalId]: true,
-      }));
+      markQuestionnaireInDb(externalId);
       notifyPersonnelAttachmentChanged(externalId, "questionnaire");
       releaseQuestionnairePreviewCache();
       setMessage(
@@ -2194,7 +2362,15 @@ export function PersonnelPage({
           </Button>
           <Button
             variant="outlined"
-            disabled={!canEdit || !missingDiskSearchPeople.length}
+            disabled={!questionnairePhotoExtractTargets.length || !canEdit}
+            onClick={() => setIsPhotoExtractOpen(true)}
+            title="Витягнути фото з PDF-анкет у БД для осіб без фото"
+          >
+            Фото з анкет · {questionnairePhotoExtractTargets.length}
+          </Button>
+          <Button
+            variant="outlined"
+            disabled={!missingDiskSearchPeople.length}
             onClick={() => setIsDiskSearchOpen(true)}
           >
             Пошук усіх анкет
@@ -2280,97 +2456,59 @@ export function PersonnelPage({
       </div>
 
       <section className={`personnel-layout mobile-pane-${mobilePane}`}>
-        <aside className="analytics-panel personnel-list-panel">
-          <div className="panel-heading personnel-list-heading">
-            <span>Військовослужбовці · {filteredPersonnel.length}</span>
-            <span className="personnel-questionnaire-summary">
-              {questionnairePresenceStatus === "ready"
-                ? `З анкетами · ${questionnaireCounts.withQuestionnaire}  /  Без анкет · ${questionnaireCounts.withoutQuestionnaire}`
-                : questionnairePresenceStatus === "error"
-                  ? "Анкети · не вдалося завантажити"
-                  : "Анкети · завантаження…"}
-            </span>
-          </div>
-          <label className="personnel-search">
-            <SearchOutlinedIcon fontSize="small" />
-            <input
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="ПІБ… А* (на «А»), к?с (Word-маски), Кос"
-            />
-          </label>
-          <div
-            aria-label="Фільтр за штаткою"
-            className="personnel-questionnaire-filter"
-            role="group"
-          >
-            {(
-              [
-                ["all", "Усі", staffCounts.all],
-                ["in", "У штаті", staffCounts.in],
-                ["archive", "Архів", staffCounts.archive],
-              ] as const
-            ).map(([value, label, count]) => (
-              <button
-                aria-pressed={staffFilter === value}
-                className={staffFilter === value ? "is-active" : undefined}
-                key={value}
-                title={
-                  value === "in"
-                    ? "Лише особи з актуального «Загального списку» Штатки"
-                    : value === "archive"
-                      ? "Лише особи, додані з аркуша «Архів»"
-                      : "Усі особи"
-                }
-                onClick={() => {
-                  setStaffFilter(value);
-                  setSelectedRowId("");
-                }}
-                type="button"
-              >
-                {label} · {count}
-              </button>
-            ))}
-          </div>
-          {isLoading && personnelRows.length === 0 ? (
-            <div className="personnel-list-preloader">
-              <MagneticTapePreloader
-                status="ГОТУЮ СПИСОК У ШТАТІ"
-                hint="Спочатку завантажую Штатку, тому проміжний список ООС не показується."
-              />
-            </div>
-          ) : (
-            <PersonnelVirtualList
-              items={filteredPersonnel}
-              selectedRowId={selectedRowId}
-              photoByExternalId={photoByExternalId}
-              selectedPhotoFullUrl={selectedPhotoFullUrl}
-              onNeedPhotos={loadVisiblePersonnelPhotos}
-              onSelect={(rowId) => {
-                setSelectedRowId(rowId);
-                setMobilePane("card");
-              }}
-              onPhotoLoadError={handleListPhotoLoadError}
-              keyboardEnabled={
-                !isPhotoCropOpen &&
-                !isQuestionnairePreviewOpen &&
-                !isPhotoLightboxOpen &&
-                !isDiskSearchOpen &&
-                !activePersonAction
+        <PersonnelListPanel
+          ref={listPanelRef}
+          initialSearch={personnelListInitialSearch}
+          personnelRows={personnelRows}
+          phonesByExternalId={phonesByExternalId}
+          staffFilter={staffFilter}
+          staffCounts={staffCounts}
+          questionnaireByExternalId={questionnaireByExternalId}
+          questionnairePresenceStatus={questionnairePresenceStatus}
+          isLoading={isLoading}
+          selectedRowId={selectedRowId}
+          photoByExternalId={photoByExternalId}
+          selectedPhotoFullUrl={
+            isMobilePersonnelLayout && mobilePane === "list"
+              ? ""
+              : selectedPhotoFullUrl
+          }
+          onStaffFilterChange={(value) => {
+            setStaffFilter(value);
+            setSelectedRowId("");
+            if (value === "all") {
+              personnelScopeRef.current.all = true;
+              personnelScopeRef.current.archive = true;
+              const hasFullList = personnelSourceRowsRef.current.some(
+                (row) =>
+                  !isPersonnelInStaffRoster(row) && !isPersonnelFromArchive(row),
+              );
+              if (hasFullList) {
+                publishOpenPersonnelScope();
+                return;
               }
-            />
-          )}
-          {filteredPersonnel.length === 0 && query.trim() ? (
-            <p className="personnel-empty-hint">
-              {personnelSearchEmptyHint(query) ||
-                (staffFilter === "in"
-                  ? "Нічого у «У штаті». Спробуйте «Усі» або «Імпорт Штатки в БД»."
-                  : staffFilter === "archive"
-                    ? "Нічого в «Архіві». Імпортуйте Штатку з аркушем «Архів»."
-                    : "Нічого не знайдено. Спробуйте «Імпорт Штатки в БД».")}
-            </p>
-          ) : null}
-        </aside>
+              void startPersonnelLoad();
+              return;
+            }
+            if (value === "archive") {
+              personnelScopeRef.current.archive = true;
+              publishOpenPersonnelScope();
+            }
+          }}
+          onNeedPhotos={loadVisiblePersonnelPhotos}
+          onPhotoLoadError={handleListPhotoLoadError}
+          onSelect={(rowId) => {
+            setSelectedRowId(rowId);
+            setMobilePane("card");
+          }}
+          keyboardEnabled={
+            !isPhotoCropOpen &&
+            !isQuestionnairePreviewOpen &&
+            !isPhotoLightboxOpen &&
+            !isDiskSearchOpen &&
+            !isPhotoExtractOpen
+          }
+        />
 
         <section className="person-card-panel">
           <div className="person-card-hero">
@@ -2460,17 +2598,17 @@ export function PersonnelPage({
               ) : null}
               <PersonCardName name={selectedSummary.name} />
               <div className="person-action-tags">
-                {selectedSummary.rank && (
-                  <Chip label={selectedSummary.rank} size="small" />
+                {cardSummary.rank && (
+                  <Chip label={cardSummary.rank} size="small" />
                 )}
-                {selectedSummary.positionIndex && (
+                {cardSummary.positionIndex && (
                   <Chip
-                    label={`Посада: ${selectedSummary.positionIndex}`}
+                    label={`Посада: ${cardSummary.positionIndex}`}
                     size="small"
                   />
                 )}
-                {selectedSummary.serviceType && (
-                  <Chip label={selectedSummary.serviceType} size="small" />
+                {cardSummary.serviceType && (
+                  <Chip label={cardSummary.serviceType} size="small" />
                 )}
               </div>
             </div>
@@ -2548,7 +2686,7 @@ export function PersonnelPage({
               </span>
               <span>
                 <strong>РНОКПП</strong>
-                {selectedSummary.rnokpp || "—"}
+                {cardSummary.rnokpp || "—"}
               </span>
               <span>
                 <strong>Дата народження</strong>
@@ -2560,7 +2698,7 @@ export function PersonnelPage({
                   Поточне місцеперебування
                 </strong>
                 <span className="person-location-value">
-                  {selectedSummary.location || "Не вказано"}
+                  {cardSummary.location || "Не вказано"}
                 </span>
               </span>
               <div className="person-position-note-row">
@@ -2583,11 +2721,11 @@ export function PersonnelPage({
               </span>
               <span>
                 <strong>Військовий квиток</strong>
-                {selectedSummary.militaryId || "—"}
+                {cardSummary.militaryId || "—"}
               </span>
               <span>
                 <strong>Звідки прибув</strong>
-                {selectedSummary.arrivedFrom || "—"}
+                {cardSummary.arrivedFrom || "—"}
               </span>
             </div>
 
@@ -2651,7 +2789,23 @@ export function PersonnelPage({
               <div className="person-edit-section" key={group.section}>
                 <div className="panel-heading">{group.label}</div>
                 <div className="person-edit-grid">
-                  {group.fields.map((field) => {
+                  {selectedAnketaRow
+                    ? group.fields.map((field) => (
+                        <span
+                          className={
+                            field.kind === "multiline" ||
+                            field.section === "contacts"
+                              ? "wide"
+                              : undefined
+                          }
+                          key={field.label}
+                        >
+                          <strong>{field.label}</strong>
+                          {anketaCardFieldValue(selectedAnketaRow, field.label) ||
+                            "—"}
+                        </span>
+                      ))
+                    : group.fields.map((field) => {
                     const isWide =
                       field.kind === "multiline" ||
                       field.section === "contacts" ||
@@ -2720,34 +2874,6 @@ export function PersonnelPage({
             >
               До списку
             </Button>
-          </div>
-          <div className="analytics-panel">
-            <div className="panel-heading">Зміна статусу</div>
-            <div className="person-action-buttons">
-              {personActions.map((action) => (
-                <Button
-                  key={action.type}
-                  disabled={!selectedRow}
-                  variant={
-                    activePersonAction?.type === action.type
-                      ? "contained"
-                      : "outlined"
-                  }
-                  size="small"
-                  onClick={() => {
-                    setActivePersonAction(action);
-                    setPersonActionForm(createDefaultActionForm());
-                  }}
-                  sx={
-                    activePersonAction?.type === action.type
-                      ? { color: "#1a1a14" }
-                      : undefined
-                  }
-                >
-                  {action.label}
-                </Button>
-              ))}
-            </div>
           </div>
           <div className="analytics-panel">
             <div className="person-documents-header">
@@ -3076,146 +3202,6 @@ export function PersonnelPage({
         </aside>
       </section>
 
-      {activePersonAction && (
-        <section className="person-action-panel">
-          <div className="person-action-form">
-            <div className="panel-heading">{activePersonAction.label}</div>
-            <label>
-              <span>Дата від</span>
-              <input
-                type="date"
-                value={personActionForm.validFrom}
-                onChange={(event) =>
-                  setPersonActionForm((form) => ({
-                    ...form,
-                    validFrom: event.target.value,
-                  }))
-                }
-              />
-            </label>
-            <label>
-              <span>Дата до</span>
-              <input
-                type="date"
-                value={personActionForm.validTo}
-                onChange={(event) =>
-                  setPersonActionForm((form) => ({
-                    ...form,
-                    validTo: event.target.value,
-                  }))
-                }
-              />
-            </label>
-            <label>
-              <span>Причина / статус</span>
-              <input
-                value={personActionForm.reason}
-                onChange={(event) =>
-                  setPersonActionForm((form) => ({
-                    ...form,
-                    reason: event.target.value,
-                  }))
-                }
-                placeholder={activePersonAction.label}
-              />
-            </label>
-            <label>
-              <span>Місце</span>
-              <input
-                value={personActionForm.place}
-                onChange={(event) =>
-                  setPersonActionForm((form) => ({
-                    ...form,
-                    place: event.target.value,
-                  }))
-                }
-                placeholder="Місце / підрозділ / заклад"
-              />
-            </label>
-            {activePersonAction.type === "POSITION_CHANGE" && (
-              <>
-                <label>
-                  <span>Індекс посади</span>
-                  <input
-                    value={personActionForm.positionIndex}
-                    onChange={(event) =>
-                      setPersonActionForm((form) => ({
-                        ...form,
-                        positionIndex: event.target.value,
-                      }))
-                    }
-                    placeholder={selectedSummary.positionIndex || "0600000"}
-                  />
-                </label>
-                <label>
-                  <span>Назва посади</span>
-                  <input
-                    value={personActionForm.positionTitle}
-                    onChange={(event) =>
-                      setPersonActionForm((form) => ({
-                        ...form,
-                        positionTitle: event.target.value,
-                      }))
-                    }
-                    placeholder="Нова посада"
-                  />
-                </label>
-              </>
-            )}
-            {activePersonAction.type === "RANK_CHANGE" && (
-              <label>
-                <span>Нове звання</span>
-                <input
-                  value={personActionForm.rank}
-                  onChange={(event) =>
-                    setPersonActionForm((form) => ({
-                      ...form,
-                      rank: event.target.value,
-                    }))
-                  }
-                  placeholder={selectedSummary.rank || "солдат"}
-                />
-              </label>
-            )}
-            <label className="person-action-full-position">
-              <span>Повна посада</span>
-              <div className="person-action-full-position-value">
-                {selectedFullPosition || "—"}
-              </div>
-            </label>
-            <label className="person-action-note">
-              <span>Примітка</span>
-              <textarea
-                className="sci-message-area"
-                value={personActionForm.note}
-                onChange={(event) =>
-                  setPersonActionForm((form) => ({
-                    ...form,
-                    note: event.target.value,
-                  }))
-                }
-                placeholder="Наказ, уточнення або коментар"
-              />
-            </label>
-            <div className="person-action-submit">
-              <Button
-                variant="outlined"
-                onClick={() => setActivePersonAction(null)}
-              >
-                Скасувати
-              </Button>
-              <Button
-                variant="contained"
-                onClick={() => void submitPersonAction()}
-                sx={{ color: "#1a1a14" }}
-              >
-                Зберегти дію
-              </Button>
-            </div>
-          </div>
-        </section>
-      )}
-
       {isPhotoLightboxOpen && selectedPhoto ? (
         <div
           className="person-photo-lightbox"
@@ -3252,15 +3238,27 @@ export function PersonnelPage({
         onSave={savePersonPhoto}
       />
 
+      <QuestionnairePhotoExtractDialog
+        open={isPhotoExtractOpen}
+        people={questionnairePhotoExtractTargets}
+        onClose={() => setIsPhotoExtractOpen(false)}
+        onPhotoSaved={(externalId, photoData) => {
+          setPhotoByExternalId((current) => ({
+            ...current,
+            [externalId]: photoData,
+          }));
+          notifyPersonnelAttachmentChanged(externalId, "photo");
+          if (Date.now() < holdStatusUntilRef.current) return;
+          setMessage(`Фото з анкети збережено: ${externalId}.`);
+        }}
+      />
+
       <QuestionnaireDiskSearchDialog
         open={isDiskSearchOpen}
         people={missingDiskSearchPeople}
         onClose={() => setIsDiskSearchOpen(false)}
         onConfirmed={(externalId) => {
-          setQuestionnaireByExternalId((current) => ({
-            ...current,
-            [externalId]: true,
-          }));
+          markQuestionnaireInDb(externalId);
           focusPersonByExternalId(externalId);
           notifyPersonnelAttachmentChanged(externalId, "questionnaire");
           void api

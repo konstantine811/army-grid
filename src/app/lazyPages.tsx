@@ -36,6 +36,11 @@ export const LazyAnketaDataPage = lazy(() =>
     default: m.AnketaDataPage,
   })),
 );
+export const LazyStaffListGapsPage = lazy(() =>
+  import("../pages/staff-list-gaps/StaffListGapsPage").then((m) => ({
+    default: m.StaffListGapsPage,
+  })),
+);
 export const LazyPreAnketaPage = lazy(() =>
   import("../pages/pre-anketa/PreAnketaPage").then((m) => ({
     default: m.PreAnketaPage,

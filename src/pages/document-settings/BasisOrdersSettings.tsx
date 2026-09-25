@@ -9,6 +9,7 @@ import {
 import { DeleteOutlineOutlinedIcon, FileUploadOutlinedIcon } from "@/components/sci/icons";
 import {
   createBasisOrderId,
+  ensureImportedBasisOrdersHydrated,
   importBasisOrdersFromParsed,
   loadCustomBasisOrders,
   loadImportedBasisOrders,
@@ -39,6 +40,9 @@ export function BasisOrdersSettings() {
   useEffect(() => {
     setRows(loadCustomBasisOrders());
     setImportedCount(loadImportedBasisOrders().length);
+    void ensureImportedBasisOrdersHydrated().then((rows) => {
+      setImportedCount(rows.length);
+    });
   }, []);
 
   const persist = (next: UbdBasisOrderRecord[]) => {
@@ -148,7 +152,8 @@ export function BasisOrdersSettings() {
       </Stack>
       <Typography variant="caption" color="text.secondary" component="p">
         Формат файлу: один рядок на БР, напр. «№4862/ОКП/2223/дск від
-        01.08.2026». Нові номери додаються до існуючих, дублікати пропускаються.
+        01.08.2026» або «№4862/ОКП/1643/дск. від 01.12.2025». Нові номери
+        додаються до існуючих, дублікати пропускаються.
       </Typography>
 
       <div className="basis-orders-form">

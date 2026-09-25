@@ -172,12 +172,15 @@ const isAnketaRnokppGapEmpty = (value: unknown) => {
 };
 
 /** Сам дефіс / тире без тексту — комірка ще не заповнена. */
-export const isAnketaDashOnlyEmptyValue = (value: unknown) =>
-  /^[-–—−]+$/.test(
-    String(value ?? "")
-      .replace(/\u00a0/g, " ")
-      .trim(),
-  );
+export const isAnketaDashOnlyEmptyValue = (value: unknown) => {
+  const trimmed = String(value ?? "")
+    .replace(/[\u00a0\u200b-\u200d\ufeff]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!trimmed) return false;
+  const compact = trimmed.replace(/\s+/g, "");
+  return /^[-–—−―‒⸺﹘－‐‑]+$/.test(compact);
+};
 
 /** Чи комірку можна заповнити з анкети (порожня або службова позначка). */
 export const isAnketaGapCellEmpty = (

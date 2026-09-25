@@ -13,9 +13,17 @@ export type CollectedVKPerson = {
 
 export type CollectedVKSheets = Record<string, CollectedVKPerson>;
 
+export type CollectedVKData = {
+  all: CollectedVKSheets;
+  notVK: CollectedVKSheets;
+  vkOnMilitaryCards: CollectedVKSheets;
+  vkOnKSP: CollectedVKSheets;
+  vkOnMilitaryCardsAndKSP: CollectedVKSheets;
+};
+
 export const collectVKData = (
   cards: ExcelLabProcessedData,
-): CollectedVKSheets => {
+): CollectedVKData => {
   const data: CollectedVKSheets = {};
   const dataNotVK: CollectedVKSheets = {};
   const dataVKOnKSP: CollectedVKSheets = {};
@@ -23,7 +31,9 @@ export const collectVKData = (
   const dataVKOnMilitaryCards: CollectedVKSheets = {};
   Object.entries(cards.staff).forEach(([key, staff]) => {
     if (
-      (!cards.ejoos[key] || cards.ejoos[key].cardNumber === "дані відсутні") &&
+      (!cards.ejoos[key] ||
+        cards.ejoos[key].cardNumber === "дані відсутні" ||
+        cards.ejoos[key].cardNumber === "відсутній") &&
       !cards.militaryCards[key] &&
       !cards.ksp[key] &&
       staff.status !== "СЗЧ"
@@ -35,7 +45,13 @@ export const collectVKData = (
         ksp: cards.ksp[key],
       };
     }
-    if (cards.ksp[key] && !cards.militaryCards[key]) {
+    if (
+      cards.ksp[key] &&
+      (!cards.militaryCards[key] ||
+        !cards.militaryCards[key]?.ВК?.status ||
+        !cards.militaryCards[key]?.ДОВІДКИ?.status ||
+        !cards.militaryCards[key]?.ТПВ?.status)
+    ) {
       dataVKOnKSP[key] = {
         staff,
         ejoos: cards.ejoos[key],
@@ -80,8 +96,21 @@ export const collectVKData = (
     "[excel-lab] collected vk data on military cards and ksp:",
     dataVKOnMilitaryCardsAndKSP,
   );
-  return data;
+
+  return {
+    all: data,
+    notVK: dataNotVK,
+    vkOnMilitaryCards: dataVKOnMilitaryCards,
+    vkOnKSP: dataVKOnKSP,
+    vkOnMilitaryCardsAndKSP: dataVKOnMilitaryCardsAndKSP,
+  };
 };
 
-export const describeCollectedVKData = (data: CollectedVKSheets) =>
-  `Оброблено осіб: ${Object.keys(data).length}. Редагуй collectVKData у CollectVKData.ts.`;
+export const describeCollectedVKData = (collected: CollectedVKData) =>
+  [
+    `Усі: ${Object.keys(collected.all).length}`,
+    `Без ВК: ${Object.keys(collected.notVK).length}`,
+    `ВК у картках: ${Object.keys(collected.vkOnMilitaryCards).length}`,
+    `ВК на КСП: ${Object.keys(collected.vkOnKSP).length}`,
+    `ВК картки+КСП: ${Object.keys(collected.vkOnMilitaryCardsAndKSP).length}`,
+  ].join("\n");

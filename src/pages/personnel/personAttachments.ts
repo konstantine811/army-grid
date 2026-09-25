@@ -30,6 +30,10 @@ import {
   resolvePersonCallSign,
   resolvePersonIdentityKey,
 } from "./personnelUtils";
+import {
+  isStrictDiskQuestionnaireMatch,
+  pickStrictDiskQuestionnaireMatch,
+} from "./questionnaireDiskMatch";
 
 export type PersonAttachmentLookupHints = {
   anketaExternalId?: string;
@@ -147,6 +151,10 @@ export const attachmentIdsMatch = (left: string, right: string) => {
 const lookupSetMatchesId = (lookupIds: readonly string[], id: string) =>
   lookupIds.some((candidate) => attachmentIdsMatch(candidate, id));
 
+/** `p:ім'я:c:позивний` — не ключ файла, якщо немає дати народження. */
+const isCallSignFingerprintId = (id: string | null | undefined) =>
+  /^p:.+:c:/i.test(String(id ?? "").trim());
+
 /** Чи PDF-анкета належить цій людині (за назвою файлу). */
 export const questionnaireFileMatchesPerson = (
   fileName: string | null | undefined,
@@ -170,6 +178,21 @@ export const shouldAcceptQuestionnaireAttachment = (
   const storedId = String(questionnaire.personExternalId ?? "").trim();
   if (storedId && lookupSetMatchesId(lookupIds, storedId)) return true;
   return questionnaireFileMatchesPerson(questionnaire.fileName, names);
+};
+
+/** Догрузити PDF, якщо з індексу прийшли лише meta без fileData. */
+export const ensureQuestionnaireWithFile = async (
+  questionnaire: BackendPersonQuestionnaire | null | undefined,
+  resolvedExternalId = "",
+): Promise<BackendPersonQuestionnaire | null> => {
+  if (questionnaire?.fileData?.trim()) return questionnaire;
+  const id = String(
+    questionnaire?.personExternalId ?? resolvedExternalId ?? "",
+  ).trim();
+  if (!id) return questionnaire ?? null;
+  const full = await api.getPersonQuestionnaire(id).catch(() => null);
+  if (full?.fileData?.trim()) return full;
+  return full ?? questionnaire ?? null;
 };
 
 /** Чи є PDF-анкета для рядка ООС / штатки (як у картці персоналу). */
@@ -237,11 +260,27 @@ const resolveQuestionnaireViaIndex = async (
 ) => {
   const items = await loadQuestionnaireIndex(forceIndex);
 
-  for (const meta of items) {
+  const lookupHits = items.filter((meta) => {
     const id = meta.personExternalId?.trim();
-    if (!id || !lookupSetMatchesId(lookupIds, id)) continue;
+    return Boolean(id && lookupSetMatchesId(lookupIds, id));
+  });
+  const stableLookupHit =
+    lookupHits.find((meta) => !isCallSignFingerprintId(meta.personExternalId)) ??
+    lookupHits[0];
+  if (stableLookupHit?.personExternalId?.trim() && !allowFileNameFallback) {
+    const id = stableLookupHit.personExternalId.trim();
     return {
-      questionnaire: questionnaireMetaToStub(meta),
+      questionnaire: questionnaireMetaToStub(stableLookupHit),
+      resolvedExternalId: id,
+    };
+  }
+  if (
+    stableLookupHit?.personExternalId?.trim() &&
+    !isCallSignFingerprintId(stableLookupHit.personExternalId)
+  ) {
+    const id = stableLookupHit.personExternalId.trim();
+    return {
+      questionnaire: questionnaireMetaToStub(stableLookupHit),
       resolvedExternalId: id,
     };
   }
@@ -255,7 +294,11 @@ const resolveQuestionnaireViaIndex = async (
 
   const byLookupId = fileHits.find((meta) => {
     const id = meta.personExternalId?.trim();
-    return Boolean(id && lookupSetMatchesId(lookupIds, id));
+    return Boolean(
+      id &&
+        !isCallSignFingerprintId(id) &&
+        lookupSetMatchesId(lookupIds, id),
+    );
   });
   if (byLookupId?.personExternalId?.trim()) {
     const id = byLookupId.personExternalId.trim();
@@ -265,10 +308,15 @@ const resolveQuestionnaireViaIndex = async (
     };
   }
 
-  if (fileHits.length === 1 && fileHits[0]?.personExternalId?.trim()) {
-    const id = fileHits[0].personExternalId.trim();
+  const storedHits = fileHits.filter(
+    (meta) => !isCallSignFingerprintId(meta.personExternalId),
+  );
+  const chosen =
+    storedHits.length === 1 ? storedHits[0] : fileHits.length === 1 ? fileHits[0] : null;
+  if (chosen?.personExternalId?.trim()) {
+    const id = chosen.personExternalId.trim();
     return {
-      questionnaire: questionnaireMetaToStub(fileHits[0]),
+      questionnaire: questionnaireMetaToStub(chosen),
       resolvedExternalId: id,
     };
   }
@@ -800,7 +848,7 @@ export const loadPersonQuestionnaireForRow = async (
     const meta = items.find((item) =>
       lookupSetMatchesId([fallback], item.personExternalId?.trim() ?? ""),
     );
-    if (meta) {
+    if (meta && !isCallSignFingerprintId(meta.personExternalId)) {
       const id = meta.personExternalId?.trim() || fallback;
       return {
         questionnaire: questionnaireMetaToStub(meta),
@@ -817,6 +865,14 @@ export type QuestionnairePresencePerson = {
   currentId: string;
   lookupIds: string[];
   fullName: string;
+  callSign: string;
+};
+
+export type QuestionnaireDiskScanPerson = {
+  externalId: string;
+  fullName: string;
+  callSign?: string;
+  matches: Array<{ fileName: string; relativePath: string }>;
 };
 
 export const buildQuestionnairePresencePeople = (
@@ -830,8 +886,87 @@ export const buildQuestionnairePresencePeople = (
       currentId,
       lookupIds: collectPersonAttachmentLookupIds(row),
       fullName: getPersonDisplayName(row),
+      callSign: resolvePersonCallSign(row),
     }];
   });
+
+/** For list counters only — strict PIB match, never callsign/surname-only guesses. */
+export const hasStrictDiskQuestionnaireMatch = (
+  fullName: string,
+  matches: Array<{ fileName: string }>,
+) =>
+  matches.some((match) =>
+    isStrictDiskQuestionnaireMatch(fullName, match.fileName),
+  );
+
+export const mergeQuestionnaireDiskPresence = (
+  dbPresence: Record<string, true>,
+  diskResults: QuestionnaireDiskScanPerson[],
+  peopleById: Map<string, QuestionnairePresencePerson>,
+): Record<string, true> => {
+  const next = { ...dbPresence };
+  for (const result of diskResults) {
+    const id = String(result.externalId ?? "").trim();
+    if (!id || next[id]) continue;
+    const person = peopleById.get(id);
+    const fullName = person?.fullName ?? result.fullName;
+    if (!hasStrictDiskQuestionnaireMatch(fullName, result.matches)) {
+      continue;
+    }
+    next[id] = true;
+  }
+  return next;
+};
+
+export const pickQuestionnaireDiskImportMatch = (
+  fullName: string,
+  _callSign: string,
+  matches: Array<{ fileName: string; relativePath: string }>,
+) => pickStrictDiskQuestionnaireMatch(fullName, matches);
+
+/** Який personExternalId у БД відповідає анкеті особи (та сама логіка, що лічильник «З анкетами»). */
+export const resolveStoredQuestionnaireExternalId = (
+  person: QuestionnairePresencePerson,
+  items: Array<{ personExternalId?: string | null; fileName?: string | null }>,
+  allPeople: QuestionnairePresencePerson[] = [person],
+): string | null => {
+  const stored = new Set(
+    items
+      .map((item) => String(item.personExternalId ?? "").trim())
+      .filter(Boolean),
+  );
+
+  if (stored.has(person.currentId)) return person.currentId;
+  for (const id of person.lookupIds) {
+    if (stored.has(id)) return id;
+  }
+
+  const unmatched = allPeople.filter((candidate) => {
+    if (stored.has(candidate.currentId)) return false;
+    if (candidate.lookupIds.some((id) => stored.has(id))) return false;
+    return true;
+  });
+  if (!unmatched.some((candidate) => candidate.currentId === person.currentId)) {
+    return null;
+  }
+
+  const shortKey = nameTokensOf(person.fullName).slice(0, 2).join(" ");
+  if (!shortKey) return null;
+
+  for (const item of items) {
+    const fileName = String(item.fileName ?? "").trim();
+    if (!fileName) continue;
+    if (nameTokensOf(fileName).slice(0, 2).join(" ") !== shortKey) continue;
+    const hits = unmatched.filter((candidate) =>
+      questionnaireFileMatchesPerson(fileName, [candidate.fullName]),
+    );
+    if (hits.length !== 1 || hits[0]!.currentId !== person.currentId) continue;
+    const id = String(item.personExternalId ?? "").trim();
+    if (id) return id;
+  }
+
+  return null;
+};
 
 export const buildQuestionnairePresenceFromPeople = (
   people: QuestionnairePresencePerson[],
@@ -843,7 +978,6 @@ export const buildQuestionnairePresenceFromPeople = (
       .filter(Boolean),
   );
   const map: Record<string, true> = {};
-  for (const id of stored) map[id] = true;
   const unmatched: QuestionnairePresencePerson[] = [];
   for (const person of people) {
     if (stored.has(person.currentId)) {
@@ -871,11 +1005,11 @@ export const buildQuestionnairePresenceFromPeople = (
       if (!fileName) continue;
       const shortKey = nameTokensOf(fileName).slice(0, 2).join(" ");
       const candidates = rowsByShortName.get(shortKey) ?? [];
-      const hits = candidates.filter((person) =>
-        questionnaireFileMatchesPerson(fileName, [person.fullName]),
+      const hits = candidates.filter((candidate) =>
+        questionnaireFileMatchesPerson(fileName, [candidate.fullName]),
       );
       if (hits.length !== 1) continue;
-      map[hits[0].currentId] = true;
+      map[hits[0]!.currentId] = true;
     }
   }
   return map;
@@ -889,6 +1023,20 @@ export const buildQuestionnairePresenceMap = (
     buildQuestionnairePresencePeople(rows),
     items,
   );
+
+/** UI state: only personnel row ids, not orphan questionnaire keys from DB. */
+export const narrowQuestionnairePresenceForPeople = (
+  presence: Record<string, true> | null | undefined,
+  people: QuestionnairePresencePerson[],
+): Record<string, true> => {
+  if (!presence || typeof presence !== "object") return {};
+  const next: Record<string, true> = {};
+  for (const person of people) {
+    const id = String(person.currentId ?? "").trim();
+    if (id && presence[id]) next[id] = true;
+  }
+  return next;
+};
 
 export type OrphanAttachmentIdentity = {
   nameKey: string;

@@ -1,8 +1,9 @@
 import JSZip from "jszip";
 import type { UbdBasisOrderOption } from "./ubdBasisOrdersData";
 
+/** «дск» або «дск.» перед «від» — у полкових списках після «дск» часто стоїть крапка. */
 const BASIS_LINE_PATTERN =
-  /(?:№\s*)?(\d{4}\/[^/\s]+\/\d+\/?\/?дск)\s*від\s+(\d{1,2}[.\/-]\d{1,2}[.\/-]\d{2,4})/giu;
+  /(?:№\s*)?(\d{4}\/[^/\s]+\/\d+\/?\/?дск)\.?\s*від\s+(\d{1,2}[.\/-]\d{1,2}[.\/-]\d{2,4})/giu;
 
 export const normalizeImportedBasisNumber = (value: string) =>
   String(value ?? "")
@@ -23,7 +24,7 @@ export const parseBasisOrderLine = (
   const text = String(line ?? "").trim();
   if (!text) return null;
   const match = text.match(
-    /(?:№\s*)?(\d{4}\/[^/\s]+\/\d+\/?\/?дск)\s*від\s+(\d{1,2}[.\/-]\d{1,2}[.\/-]\d{2,4})/iu,
+    /(?:№\s*)?(\d{4}\/[^/\s]+\/\d+\/?\/?дск)\.?\s*від\s+(\d{1,2}[.\/-]\d{1,2}[.\/-]\d{2,4})/iu,
   );
   if (!match) return null;
   const number = normalizeImportedBasisNumber(match[1]);

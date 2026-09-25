@@ -149,12 +149,26 @@ export const normalizeUbdReadinessFields = (
   const basisDate = String(resolved.basisDate ?? "").trim();
   const basisNumber = String(resolved.basisNumber ?? "").trim();
   const taskPlace = String(resolved.taskPlace ?? "").trim();
+  const explicitFlag = resolved.basisNotReady as
+    | boolean
+    | string
+    | null
+    | undefined;
+
+  if (explicitFlag === false || explicitFlag === "false") {
+    return { ...resolved, basisNotReady: false };
+  }
 
   if (
     !isBlankDocumentInput(basisNumber) &&
     !isBlankDocumentInput(basisDate)
   ) {
-    return { ...resolved, basisNotReady: false };
+    const matches = ubdBasisDateMatchesTaskPeriod(
+      taskPeriod,
+      basisDate,
+      taskPlace,
+    );
+    return { ...resolved, basisNotReady: !matches };
   }
 
   return {
@@ -162,7 +176,7 @@ export const normalizeUbdReadinessFields = (
     basisNotReady: ubdBasisIsNotReady(
       taskPeriod,
       basisDate,
-      resolved.basisNotReady as boolean | string | null | undefined,
+      explicitFlag,
       taskPlace,
     ),
   };

@@ -161,6 +161,22 @@ describe("planDataCacheCleanup", () => {
     expect(deleted).not.toContain("personnel:questionnaires:meta");
   });
 
+  it("keeps staff list gaps session cache", () => {
+    const now = 1_000_000_000;
+    const deleted = planDataCacheCleanup(
+      [
+        {
+          key: "staff-list-gaps:session:v1",
+          savedAt: now,
+          formatVersion: DATA_CACHE_FORMAT_VERSION,
+        },
+      ],
+      now,
+    );
+
+    expect(deleted).not.toContain("staff-list-gaps:session:v1");
+  });
+
   it("keeps only the three newest sheet snapshots", () => {
     const entries = [1, 2, 3, 4, 5].map((savedAt) => ({
       key: `ejournal:sheet-rows:sheet:${savedAt}`,

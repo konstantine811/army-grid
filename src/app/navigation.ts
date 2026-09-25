@@ -11,6 +11,7 @@ export type AppPage =
   | "excelFill"
   | "excelLab"
   | "anketaData"
+  | "staffListGaps"
   | "preAnketa"
   | "socPassport"
   | "personnel"
@@ -27,6 +28,7 @@ export const USER_ALLOWED_PAGES: readonly AppPage[] = [
   "personnel",
   "bchs",
   "anketaData",
+  "staffListGaps",
   "preAnketa",
   "documents",
   "profile",
@@ -46,6 +48,7 @@ export const writeAreaForPage = (
     case "bchs":
       return "bchs";
     case "anketaData":
+    case "staffListGaps":
     case "preAnketa":
       return "anketaData";
     case "documents":
@@ -63,6 +66,7 @@ export const pagePaths: Record<AppPage, string> = {
   excelFill: "/excel-fill",
   excelLab: "/excel-lab",
   anketaData: "/anketa-data",
+  staffListGaps: "/staff-list-gaps",
   preAnketa: "/pre-anketa",
   socPassport: "/soc-passport",
   personnel: "/personnel",
@@ -98,6 +102,8 @@ const getPathname = (path: string) => {
 export const getPageFromPath = (path: string): AppPage => {
   const pathname = getPathname(path);
 
+  if (pathname === "/personnel-v2") return "personnel";
+  if (pathname === "/overview-v2") return "overview";
   return pathname.startsWith(`${pagePaths.documents}/`)
     ? "documents"
     : pathname.startsWith(`${pagePaths.personnel}/`)
@@ -242,22 +248,26 @@ export type { PersonnelFocusTarget };
 export const buildPersonnelRoute = ({
   rowId,
   externalId,
+  search,
 }: {
   rowId?: string;
   externalId?: string;
+  search?: string;
 }) => {
   const params = new URLSearchParams();
   const normalizedRowId = String(rowId ?? "").trim();
   const normalizedExternalId = String(externalId ?? "").trim();
+  const normalizedSearch = String(search ?? "").trim();
   if (normalizedRowId) params.set("rowId", normalizedRowId);
   if (normalizedExternalId) params.set("externalId", normalizedExternalId);
+  if (normalizedSearch) params.set("q", normalizedSearch);
 
   const query = params.toString();
   return query ? `${pagePaths.personnel}?${query}` : pagePaths.personnel;
 };
 
 export const openPersonnelPerson = (
-  target: { rowId?: string; externalId?: string },
+  target: { rowId?: string; externalId?: string; search?: string },
   options?: { newTab?: boolean },
 ) => {
   storePersonnelFocusTarget(target);
@@ -271,6 +281,7 @@ export const openPersonnelPerson = (
       detail: {
         rowId: String(target.rowId ?? "").trim(),
         externalId: String(target.externalId ?? "").trim(),
+        search: String(target.search ?? "").trim(),
       },
     }),
   );

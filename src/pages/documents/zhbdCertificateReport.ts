@@ -19,10 +19,14 @@ export const readStoredSelectedPersonFullPosition = () => {
 export const storeSelectedPersonFullPosition = (value: string) => {
   if (typeof window === "undefined") return;
   const text = value.trim();
-  if (text) {
-    window.localStorage.setItem(SELECTED_PERSON_FULL_POSITION_KEY, text);
-  } else {
-    window.localStorage.removeItem(SELECTED_PERSON_FULL_POSITION_KEY);
+  try {
+    if (text) {
+      window.localStorage.setItem(SELECTED_PERSON_FULL_POSITION_KEY, text);
+    } else {
+      window.localStorage.removeItem(SELECTED_PERSON_FULL_POSITION_KEY);
+    }
+  } catch {
+    // Quota must not block opening the document.
   }
 };
 

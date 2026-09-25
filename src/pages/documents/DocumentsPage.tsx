@@ -34,11 +34,13 @@ import {
   CacheKeys,
   fetchWithCache,
   jsonChanged,
+  peekDataCache,
   readDataCache,
 } from "../../data/idbDataCache";
 import {
   loadPersonnelDataset,
   rosterRowsFromDataset,
+  type PersonnelDataset,
 } from "../../data/personnelDataset";
 import { readWorkbookSnapshot } from "../../excelRoundTrip";
 import { buildDocumentRoute } from "../../app/navigation";
@@ -102,7 +104,11 @@ import {
   ubdBasisOrderOptionKey,
   ubdHasExactBasisForTaskPeriod,
 } from "./ubdBasisOrders";
-import { allBasisOrderOptions } from "./ubdBasisOrdersDirectory";
+import {
+  IMPORTED_BASIS_ORDERS_EVENT,
+  allBasisOrderOptions,
+  ensureImportedBasisOrdersHydrated,
+} from "./ubdBasisOrdersDirectory";
 import {
   documentBasisFieldHighlightClass,
   documentFieldLabelClass,
@@ -231,21 +237,13 @@ import {
   createLostMilitaryIdActWordBlob,
   createLostMilitaryIdKitZip,
 } from "./lostMilitaryIdWordExport";
+import {
+  findDocumentPersonRow,
+  readStoredSelectedDocumentMode,
+  readStoredSelectedPersonRow,
+} from "./selectedPersonStorage";
 
 dayjs.locale("uk");
-
-const SELECTED_PERSON_STORAGE_KEY = "army-grid:selected-person";
-
-const readStoredSelectedPersonRow = (): EjournalPreviewRow | null => {
-  try {
-    const raw = window.localStorage.getItem(SELECTED_PERSON_STORAGE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as EjournalPreviewRow;
-    return parsed && typeof parsed === "object" ? parsed : null;
-  } catch {
-    return null;
-  }
-};
 
 type DocumentMode =
   | "default"
@@ -2104,6 +2102,18 @@ export function DocumentsPage(_props: {
   const [ubdFields, setUbdFields] = useState<UbdReportFields>(() =>
     createUbdFields(null, buildPersonSummary(null)),
   );
+  const [importedBasisRevision, setImportedBasisRevision] = useState(0);
+  const basisOrderOptions = useMemo(() => {
+    void importedBasisRevision;
+    return allBasisOrderOptions();
+  }, [importedBasisRevision]);
+  useEffect(() => {
+    const refresh = () => setImportedBasisRevision((value) => value + 1);
+    window.addEventListener(IMPORTED_BASIS_ORDERS_EVENT, refresh);
+    void ensureImportedBasisOrdersHydrated();
+    return () =>
+      window.removeEventListener(IMPORTED_BASIS_ORDERS_EVENT, refresh);
+  }, []);
   const [form6Fields, setForm6Fields] = useState<Form6ReportFields>(() =>
     createForm6Fields(null, buildPersonSummary(null)),
   );
@@ -3230,9 +3240,17 @@ export function DocumentsPage(_props: {
   }, [questionnairePreviewUrl]);
 
   useEffect(() => {
-    const person = readStoredSelectedPersonRow();
+    const rowId =
+      new URLSearchParams(window.location.search).get("rowId")?.trim() || "";
+    const resolvePerson = (rows: EjournalPreviewRow[]) =>
+      findDocumentPersonRow(rows, requestedPersonId, rowId);
+    let person = readStoredSelectedPersonRow();
+    if (!person) {
+      const cached = peekDataCache<PersonnelDataset>(CacheKeys.personnelDataset);
+      if (cached?.rows?.length) person = resolvePerson(cached.rows);
+    }
     const savedMode =
-      window.localStorage.getItem("army-grid:selected-document-mode") ||
+      readStoredSelectedDocumentMode() ||
       (requestedDocumentType === "salary-power-attorney"
         ? "salaryPowerAttorney"
         : "default");
@@ -3275,8 +3293,7 @@ export function DocumentsPage(_props: {
                         : "default",
     );
 
-    if (!person || !isPersonDocumentMode) return;
-
+    const applyPerson = (person: EjournalPreviewRow) => {
     try {
       const nextSummary = buildPersonSummary(person);
       const nextPersonId = String(
@@ -3328,6 +3345,38 @@ export function DocumentsPage(_props: {
     } catch {
       setSelectedPerson(null);
     }
+    };
+
+    if (!isPersonDocumentMode) return;
+    if (person) {
+      applyPerson(person);
+      return;
+    }
+    if (!requestedPersonId) return;
+
+    let cancelled = false;
+    void loadPersonnelDataset()
+      .then((dataset) => {
+        if (cancelled) return;
+        const found = resolvePerson(dataset.rows);
+        if (!found) {
+          setDocumentMessage(
+            `Не знайшов дані службовця ID ${requestedPersonId}.`,
+          );
+          return;
+        }
+        applyPerson(found);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setDocumentMessage(
+            `Не знайшов дані службовця ID ${requestedPersonId}.`,
+          );
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [isPersonDocumentMode, requestedDocumentType, requestedPersonId]);
 
   const summary = useMemo(
@@ -7388,7 +7437,7 @@ export function DocumentsPage(_props: {
                         updateUbdBasisOrder(event.target.value)
                       }
                     >
-                      {!allBasisOrderOptions().some(
+                      {!basisOrderOptions.some(
                         (item) =>
                           item.number === ubdFields.basisNumber &&
                           item.date === ubdFields.basisDate,
@@ -7406,7 +7455,7 @@ export function DocumentsPage(_props: {
                           · збережене
                         </MenuItem>
                       ) : null}
-                      {allBasisOrderOptions().map((option) => (
+                      {basisOrderOptions.map((option) => (
                         <MenuItem
                           key={ubdBasisOrderOptionKey(option)}
                           value={ubdBasisOrderOptionKey(option)}
@@ -7697,7 +7746,7 @@ export function DocumentsPage(_props: {
                     updateForm6BasisOrder(event.target.value)
                   }
                 >
-                  {!allBasisOrderOptions().some(
+                  {!basisOrderOptions.some(
                     (item) =>
                       item.number === form6Fields.basisNumber &&
                       item.date === form6Fields.basisDate,
@@ -7715,7 +7764,7 @@ export function DocumentsPage(_props: {
                       · збережене
                     </MenuItem>
                   ) : null}
-                  {allBasisOrderOptions().map((option) => (
+                  {basisOrderOptions.map((option) => (
                     <MenuItem
                       key={`form6-${ubdBasisOrderOptionKey(option)}`}
                       value={ubdBasisOrderOptionKey(option)}

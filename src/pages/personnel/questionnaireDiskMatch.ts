@@ -128,19 +128,47 @@ export const isPlausibleDiskQuestionnaireMatch = (
 
   if (tokens.length === 1) {
     const token = tokens[0]!;
-    const call = normalizeDiskNamePart(callSign);
-    return (
-      diskNamePartsClose(token, person.surname) ||
-      diskNamePartsClose(token, person.firstName) ||
-      Boolean(call && diskNamePartsClose(token, call))
-    );
+    // Only surname-only files are shown for manual review — never callsign/first-name alone.
+    return diskNamePartsClose(token, person.surname);
   }
 
   const file = alignFileFio(person, parseDiskFileFio(fileName));
+  if (!diskNamePartsClose(person.surname, file.surname)) return false;
   if (partsConflict(person.firstName, file.firstName)) return false;
   if (partsConflict(person.patronymic, file.patronymic)) return false;
-  if (partsConflict(person.surname, file.surname)) return false;
   return true;
+};
+
+/** Safe for auto-save / auto-count: exact FIO or unique surname + given name in the file. */
+export const isStrictDiskQuestionnaireMatch = (
+  fullName: string,
+  fileName: string,
+) =>
+  isExactFioFileNameMatch(fullName, fileName) ||
+  isUniqueSurnameFirstFileNameMatch(fullName, fileName);
+
+const normalizeDuplicateFileName = (fileName: string) =>
+  String(fileName ?? "")
+    .normalize("NFC")
+    .trim()
+    .toLocaleLowerCase("uk-UA");
+
+export const pickStrictDiskQuestionnaireMatch = <
+  T extends { fileName: string; relativePath: string },
+>(
+  fullName: string,
+  matches: T[],
+): T | null => {
+  const strict = matches.filter((match) =>
+    isStrictDiskQuestionnaireMatch(fullName, match.fileName),
+  );
+  if (!strict.length) return null;
+  if (strict.length === 1) return strict[0]!;
+  const firstName = normalizeDuplicateFileName(strict[0]!.fileName);
+  const allSameName = strict.every(
+    (match) => normalizeDuplicateFileName(match.fileName) === firstName,
+  );
+  return allSameName ? strict[0]! : null;
 };
 
 export const isExactFioFileNameMatch = (fullName: string, fileName: string) => {

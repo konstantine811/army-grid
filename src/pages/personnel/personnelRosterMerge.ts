@@ -497,4 +497,39 @@ export const buildRosterOnlyPreviewState = (
   };
 };
 
+/**
+ * Список «У штаті» + архів.
+ * Якщо в кеші вже є картки ООС, лишаємо їхній id: фото лежить під ним, а не під рядком штатки.
+ */
+export const buildStaffScopePreview = (
+  rosterRows: EjournalPreviewRow[],
+  rosterSheet: BackendEjournalImportSheet | null | undefined = null,
+  cached?: {
+    rows: EjournalPreviewRow[];
+    columns?: DbPreviewState["columns"];
+    sheet?: BackendEjournalImportSheet | null;
+  } | null,
+): DbPreviewState | null => {
+  if (cached?.rows.length && rosterRows.length) {
+    const rows = mergeRosterRowsIntoPreview(cached, rosterRows).filter(
+      (row) => isPersonnelInStaffRoster(row) || isPersonnelFromArchive(row),
+    );
+    if (rows.length) {
+      const sheet = cached.sheet ?? rosterSheet ?? {
+        ...ROSTER_ONLY_SHEET_STUB,
+        rowCount: rows.length,
+      };
+      return {
+        sheet: { ...sheet, rowCount: rows.length },
+        columns: cached.columns ?? [],
+        rows,
+        total: rows.length,
+        offset: 0,
+        limit: rows.length,
+      };
+    }
+  }
+  return buildRosterOnlyPreviewState(rosterRows, rosterSheet);
+};
+
 export { extractBirthDateFromPersonName } from "./personnelUtils";

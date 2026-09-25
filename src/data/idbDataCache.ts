@@ -119,12 +119,14 @@ export const CacheKeys = {
   overview: "personnel:overview",
   documentsAll: "personnel:documents:meta:v4",
   questionnairesMeta: "personnel:questionnaires:meta",
-  questionnairePresencePrefix: "personnel:questionnaire-presence:v1:",
+  questionnairePresencePrefix: "personnel:questionnaire-presence:v2:",
+  questionnaireDiskPresencePrefix: "personnel:questionnaire-disk-presence:v1:",
   overviewAssetsPrefix: "personnel:overview-assets:v1:",
   overviewMergePrefix: "personnel:overview-merge:v1:",
   overviewStaffPrefix: "personnel:overview-staff:v1:",
   bchsMorningSnapshotPrefix: "personnel:bchs-morning-snapshot:v1:",
   personnelPhotoIndex: "personnel:photo-index:v1",
+  staffListGapsSession: "staff-list-gaps:session:v1",
 } as const;
 
 export const bchsMorningSnapshotCacheKey = (unitLabel: string) =>
@@ -188,6 +190,12 @@ export const questionnairePresenceCacheKey = (
   return `${CacheKeys.questionnairePresencePrefix}${datasetFingerprint}:${stamp}`;
 };
 
+export const questionnaireDiskPresenceCacheKey = (
+  datasetFingerprint: string,
+  scanCount: number,
+) =>
+  `${CacheKeys.questionnaireDiskPresencePrefix}${datasetFingerprint}:${scanCount}`;
+
 const isKnownCacheKey = (key: string) =>
   key === CacheKeys.ejournalImports ||
   key.startsWith("ejournal:sheet-rows:") ||
@@ -200,11 +208,13 @@ const isKnownCacheKey = (key: string) =>
   key === CacheKeys.documentsAll ||
   key === CacheKeys.questionnairesMeta ||
   key.startsWith(CacheKeys.questionnairePresencePrefix) ||
+  key.startsWith(CacheKeys.questionnaireDiskPresencePrefix) ||
   key.startsWith(CacheKeys.overviewAssetsPrefix) ||
   key.startsWith(CacheKeys.overviewMergePrefix) ||
   key.startsWith(CacheKeys.overviewStaffPrefix) ||
   key.startsWith(CacheKeys.bchsMorningSnapshotPrefix) ||
-  key === CacheKeys.personnelPhotoIndex;
+  key === CacheKeys.personnelPhotoIndex ||
+  key === CacheKeys.staffListGapsSession;
 
 export const planDataCacheCleanup = (
   entries: Array<Pick<CacheEntry, "key" | "savedAt" | "formatVersion">>,
@@ -440,6 +450,7 @@ export const invalidatePersonnelCaches = () =>
     CacheKeys.documentsAll,
     CacheKeys.questionnairesMeta,
     CacheKeys.questionnairePresencePrefix,
+    CacheKeys.questionnaireDiskPresencePrefix,
     CacheKeys.overviewAssetsPrefix,
     CacheKeys.overviewMergePrefix,
     CacheKeys.overviewStaffPrefix,

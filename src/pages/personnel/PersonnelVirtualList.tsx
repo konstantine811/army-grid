@@ -1,7 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { PersonSearchOutlinedIcon } from "@/components/sci/icons";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { isPersonPhotoDisplayOverride } from "./personAttachments";
+import {
+  isPersonPhotoDisplayOverride,
+  personPhotoThumbnailUrlForRow,
+} from "./personAttachments";
 import type { PersonnelRecord } from "./personnelUtils";
 
 export function PersonnelVirtualList({
@@ -25,10 +28,6 @@ export function PersonnelVirtualList({
 }) {
   const parentRef = useRef<HTMLDivElement | null>(null);
   const lastScrolledIdRef = useRef("");
-  const itemsKey = useMemo(
-    () => items.map((item) => item.row.__dbRowId ?? "").join("\u0000"),
-    [items],
-  );
   const rowVirtualizer = useVirtualizer({
     count: items.length,
     getScrollElement: () => parentRef.current,
@@ -47,16 +46,6 @@ export function PersonnelVirtualList({
   }, []);
   const virtualItems = rowVirtualizer.getVirtualItems();
 
-  useEffect(() => {
-    const parent = parentRef.current;
-    if (!parent) return;
-    parent.scrollTop = 0;
-    lastScrolledIdRef.current = "";
-    const frame = window.requestAnimationFrame(() => {
-      rowVirtualizerRef.current.measure();
-    });
-    return () => window.cancelAnimationFrame(frame);
-  }, [itemsKey]);
   const visiblePhotoIds = virtualItems
     .map((item) => items[item.index]?.summary.externalId ?? "")
     .filter(Boolean)
@@ -152,11 +141,13 @@ export function PersonnelVirtualList({
             (record.summary.externalId &&
               photoByExternalId[record.summary.externalId]) ||
             "";
+          const filePhoto = personPhotoThumbnailUrlForRow(record.row);
           const photo =
-            (isSelected &&
-              (localPhoto && isPersonPhotoDisplayOverride(localPhoto)
-                ? localPhoto
-                : selectedPhotoFullUrl)) ||
+            (localPhoto && isPersonPhotoDisplayOverride(localPhoto)
+              ? localPhoto
+              : "") ||
+            (isSelected ? selectedPhotoFullUrl : "") ||
+            filePhoto ||
             localPhoto ||
             "";
 
@@ -179,9 +170,11 @@ export function PersonnelVirtualList({
                     decoding="async"
                     loading="lazy"
                     src={photo}
-                    onLoad={() => {
+                    onLoad={(event) => {
+                      const row = event.currentTarget.closest("button");
+                      if (!row) return;
                       window.requestAnimationFrame(() => {
-                        rowVirtualizerRef.current.measure();
+                        rowVirtualizerRef.current.measureElement(row);
                       });
                     }}
                     onError={() => {

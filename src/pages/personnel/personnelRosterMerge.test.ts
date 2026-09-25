@@ -3,6 +3,7 @@ import type { EjournalPreviewRow } from "../ejournal/ejournalTypes";
 import {
   applyPersonnelMergeDelta,
   buildPersonnelMergeDelta,
+  buildStaffScopePreview,
   extractBirthDateFromPersonName,
   getRosterPersonBirthDate,
   combineRosterRowSources,
@@ -320,6 +321,37 @@ describe("mergeRosterRowsIntoPreview roster-only dedupe", () => {
       "КОРОТКОВ Віталій Юрійович",
     ]);
     expect(merged.every(isPersonnelInStaffRoster)).toBe(true);
+  });
+});
+
+describe("buildStaffScopePreview", () => {
+  it("keeps the OOS id used for photos and hides people outside the roster", () => {
+    const preview = buildStaffScopePreview(
+      [
+        rosterRow("ШЕВЧЕНКО Олександр Володимирович (07.09.1985)", {
+          birthDate: "07.09.1985",
+        }),
+      ],
+      null,
+      {
+        rows: [
+          oosRow("ШЕВЧЕНКО Олександр Володимирович", {
+            birthDate: "07.09.1985",
+            id: "2103004",
+          }),
+          oosRow("КРАВЧУК Богдан Сергійович", {
+            birthDate: "22.07.1992",
+            id: "2103182",
+          }),
+        ],
+        columns: [],
+        sheet: null,
+      },
+    );
+
+    expect(preview?.rows).toHaveLength(1);
+    expect(preview?.rows[0]?.id).toBe("2103004");
+    expect(isPersonnelInStaffRoster(preview?.rows[0])).toBe(true);
   });
 });
 

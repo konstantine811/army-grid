@@ -109,6 +109,7 @@ describe("runHeavyJobSync", () => {
           currentId: "p:коваль іван петрович:1990-01-01",
           lookupIds: ["p:коваль іван петрович:1990-01-01"],
           fullName: "КОВАЛЬ Іван Петрович",
+          callSign: "",
         },
       ],
       questionnaires: [

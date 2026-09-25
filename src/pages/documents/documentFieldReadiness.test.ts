@@ -111,14 +111,28 @@ describe("documentFieldReadiness", () => {
     expect(normalizeUbdReadinessFields(fields).basisNotReady).toBe(false);
   });
 
-  it("keeps journal highlight only with explicit basisNotReady on mismatch", () => {
+  it("marks UBD yellow when BR date does not match task period start", () => {
+    const fields = {
+      taskPeriod: "з 04.08.2026-02.09.2026",
+      taskPlace: "н.п. Шилівка",
+      basisNumber: "4862/ОКП/2292/дск",
+      basisDate: "06.08.2026",
+    };
+    expect(documentHasBasisDateMismatch("ubdReport", fields)).toBe(true);
+    expect(
+      documentBasisFieldHighlightClass("ubdReport", fields, "basisDate"),
+    ).toBe("document-field-warning");
+    expect(normalizeUbdReadinessFields(fields).basisNotReady).toBe(true);
+  });
+
+  it("keeps journal highlight when BR date does not match task period", () => {
     const fields = {
       taskPeriod: "з 04.08.2026-02.09.2026",
       basisNumber: "4862/ОКП/2292/дск",
       basisDate: "06.08.2026",
       basisNotReady: true,
     };
-    expect(documentHasBasisDateMismatch("ubdReport", fields)).toBe(false);
+    expect(documentHasBasisDateMismatch("ubdReport", fields)).toBe(true);
   });
   it("requires lost-ID movement locations", () => {
     expect(

@@ -25,6 +25,7 @@ import {
 import {
   LazyAnalyticsPage,
   LazyAnketaDataPage,
+  LazyStaffListGapsPage,
   LazyPreAnketaPage,
   LazyBchsPage,
   LazyDocumentsPage,
@@ -36,6 +37,7 @@ import {
   LazyPersonnelPage,
   LazySocPassportPage,
 } from "./app/lazyPages";
+import { storeSelectedPersonForDocuments } from "./pages/documents/selectedPersonStorage";
 import { storeSelectedPersonFullPosition } from "./pages/documents/zhbdCertificateReport";
 import {
   getPersonFullPositionTitle,
@@ -213,11 +215,7 @@ function App() {
           }
         : {}),
     };
-    window.localStorage.setItem(
-      "army-grid:selected-person",
-      JSON.stringify(rowForDocuments),
-    );
-    window.localStorage.setItem("army-grid:selected-document-mode", mode);
+    storeSelectedPersonForDocuments(rowForDocuments, mode);
     storeSelectedPersonFullPosition(fullPosition);
     applyRoute(
       pushAppRoute(
@@ -355,6 +353,15 @@ function App() {
         >
           <LazyPageBoundary>
             <LazyAnketaDataPage />
+          </LazyPageBoundary>
+        </AppPageSlot>
+        <AppPageSlot
+          page="staffListGaps"
+          activePage={activePage}
+          mountedPages={mountedPages}
+        >
+          <LazyPageBoundary>
+            <LazyStaffListGapsPage />
           </LazyPageBoundary>
         </AppPageSlot>
         <AppPageSlot

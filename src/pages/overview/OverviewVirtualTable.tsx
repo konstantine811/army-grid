@@ -9,7 +9,7 @@ import {
   useMaterialReactTable,
 } from "@/components/sci/SciDataTable";
 import type { BackendPersonnelOverviewRow } from "../../api";
-import { openPersonnelFromOverview } from "../../app/navigation";
+import { openPersonnelFromOverview, openPersonnelPerson } from "../../app/navigation";
 import { OVERVIEW_STAFF_COLUMN_HEADERS } from "./overviewStaffColumns";
 import {
   buildOverviewStaffSheetColumnDefs,
@@ -242,7 +242,14 @@ export function OverviewVirtualTable({
           : "Немає";
 
   const openPerson = (row: BackendPersonnelOverviewRow) => {
-    openPersonnelFromOverview({ externalId: row.externalId });
+    if (!row.externalId && !row.name.trim()) return;
+    openPersonnelPerson(
+      {
+        externalId: row.externalId,
+        search: row.name.trim(),
+      },
+      { newTab: true },
+    );
   };
 
   const openQuestionnaire = (row: BackendPersonnelOverviewRow) => {

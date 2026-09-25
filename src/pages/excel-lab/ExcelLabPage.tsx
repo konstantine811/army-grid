@@ -6,7 +6,7 @@ import {
   Stack,
   Typography,
 } from "@/components/sci/SciPrimitives";
-import { CloudUploadOutlinedIcon } from "@/components/sci/icons";
+import { CloudUploadOutlinedIcon, FileDownloadOutlinedIcon } from "@/components/sci/icons";
 import {
   buildExcelLabProcessedData,
   countEJOOSPeople,
@@ -20,7 +20,12 @@ import {
   parseStaffSheetExcelFile,
   type ExcelLabUploadedSources,
 } from "./parseUploadedExcel";
-import { collectVKData, describeCollectedVKData } from "./CollectVKData";
+import {
+  collectVKData,
+  describeCollectedVKData,
+  type CollectedVKData,
+} from "./CollectVKData";
+import { exportCollectVKExcel } from "./collectVKExcelExport";
 
 const isExcelFile = (file: File) =>
   /\.xlsx?$/i.test(file.name) ||
@@ -56,6 +61,10 @@ export function ExcelLabPage() {
   const [ejoosSummary, setEjoosSummary] = useState("");
   const [kspSummary, setKspSummary] = useState("");
   const [mergedSummary, setMergedSummary] = useState("");
+  const [collectedData, setCollectedData] = useState<CollectedVKData | null>(
+    null,
+  );
+  const [isExporting, setIsExporting] = useState(false);
   const [error, setError] = useState("");
   const [isStaffRunning, setIsStaffRunning] = useState(false);
   const [isMilitaryCardsRunning, setIsMilitaryCardsRunning] = useState(false);
@@ -185,13 +194,31 @@ export function ExcelLabPage() {
   const processCollectedData = () => {
     const processed = buildExcelLabProcessedData(uploadedSources);
     const collected = collectVKData(processed);
+    setCollectedData(collected);
     setMergedSummary(
       [
         describeExcelLabProcessedData(processed),
         describeCollectedVKData(collected),
-        "Повний результат — у console.log (F12 → Console).",
+        "Експорт у Excel — кнопка нижче (collectVKExcelExport.ts).",
       ].join("\n"),
     );
+  };
+
+  const exportCollectedData = async () => {
+    if (!collectedData) return;
+    setIsExporting(true);
+    setError("");
+    try {
+      await exportCollectVKExcel(collectedData);
+    } catch (cause) {
+      setError(
+        cause instanceof Error
+          ? cause.message
+          : "Не вдалося експортувати Excel.",
+      );
+    } finally {
+      setIsExporting(false);
+    }
   };
 
   const onFilePick =
@@ -424,13 +451,23 @@ export function ExcelLabPage() {
             </Typography>
             ).
           </Typography>
-          <Button
-            variant="contained"
-            disabled={loadedCount === 0}
-            onClick={processCollectedData}
-          >
-            Обробити дані ({loadedCount}/{EXCEL_LAB_SOURCE_COUNT})
-          </Button>
+          <Stack direction="row" spacing={1} sx={{ flexWrap: "wrap" }}>
+            <Button
+              variant="contained"
+              disabled={loadedCount === 0}
+              onClick={processCollectedData}
+            >
+              Обробити дані ({loadedCount}/{EXCEL_LAB_SOURCE_COUNT})
+            </Button>
+            <Button
+              variant="outlined"
+              disabled={!collectedData || isExporting}
+              startIcon={<FileDownloadOutlinedIcon />}
+              onClick={() => void exportCollectedData()}
+            >
+              {isExporting ? "Експортую…" : "Експорт у Excel"}
+            </Button>
+          </Stack>
           {mergedSummary ? (
             <Alert severity="success" sx={{ mt: 2 }}>
               <Typography

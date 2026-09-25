@@ -23,8 +23,10 @@ import { sanitizeFileName } from "../../shared/browserExport";
 import {
   isExactFioFileNameMatch,
   isPlausibleDiskQuestionnaireMatch,
+  isStrictDiskQuestionnaireMatch,
   isUniqueSurnameFirstFileNameMatch,
 } from "./questionnaireDiskMatch";
+import { downloadStaffQuestionnairesZip } from "./staffQuestionnairesZipExport";
 import { searchQuestionnairesOnDiskInBatches } from "./questionnaireDiskSearchBatch";
 
 type SearchPersonInput = {
@@ -124,6 +126,25 @@ export function QuestionnaireDiskSearchDialog({
   const [summary, setSummary] = useState("");
   const [rows, setRows] = useState<RowState[]>([]);
   const [filterMatchedOnly, setFilterMatchedOnly] = useState(true);
+  const [isBulkSaving, setIsBulkSaving] = useState(false);
+  const [isBulkZipping, setIsBulkZipping] = useState(false);
+
+  const pendingConfirmRows = useMemo(
+    () =>
+      rows.filter(
+        (row) =>
+          row.selectedPath &&
+          !row.confirmed &&
+          !row.confirming &&
+          row.missingQuestionnaire,
+      ),
+    [rows],
+  );
+
+  const zipCandidateRows = useMemo(
+    () => rows.filter((row) => row.selectedPath),
+    [rows],
+  );
 
   const visibleRows = useMemo(
     () =>
@@ -181,7 +202,7 @@ export function QuestionnaireDiskSearchDialog({
       }
       if (
         questionnaire.fileName &&
-        !isUniqueSurnameFirstFileNameMatch(row.fullName, questionnaire.fileName)
+        !isStrictDiskQuestionnaireMatch(row.fullName, questionnaire.fileName)
       ) {
         throw new Error(
           "Автофото пропущено: ПІБ у назві збереженої анкети не збігається з карткою.",
@@ -213,28 +234,23 @@ export function QuestionnaireDiskSearchDialog({
 
     for (const row of exactRows) {
       await yieldToBrowser();
-      const match = getAutoMatch(row, nextRows);
-      if (!match) continue;
       const autoConfirm = shouldAutoConfirm(row, nextRows);
       const wantsPhoto = shouldAutoExtractPhoto(row, nextRows);
+      const match = getAutoMatch(row, nextRows);
       const allowAutoPhoto =
         wantsPhoto && attemptedPhotos < MAX_AUTO_PHOTOS_PER_SEARCH;
       if (wantsPhoto && !allowAutoPhoto) skippedPhotos += 1;
-      patchRow(row.rowId, {
-        confirming: autoConfirm,
-        autoStatus: autoConfirm
-          ? "Автозбереження анкети…"
-          : allowAutoPhoto
-            ? "Анкета вже є. Автообробка фото…"
-            : row.autoStatus,
-        autoPhotoStatus: allowAutoPhoto
-          ? "Пошук обличчя в PDF…"
-          : wantsPhoto
-            ? "Автофото відкладено, щоб не перевантажувати пристрій."
-            : undefined,
-      });
 
       if (autoConfirm) {
+        if (!match) continue;
+        patchRow(row.rowId, {
+          confirming: true,
+          autoStatus: "Автозбереження анкети…",
+          autoPhotoStatus: allowAutoPhoto
+            ? "Після анкети — автообробка фото…"
+            : row.autoPhotoStatus,
+        });
+
         try {
           await api.confirmDiskQuestionnaire(
             row.externalId,
@@ -267,9 +283,14 @@ export function QuestionnaireDiskSearchDialog({
           });
           continue;
         }
+      } else if (wantsPhoto && allowAutoPhoto) {
+        patchRow(row.rowId, {
+          autoStatus: row.autoStatus ?? "Анкета вже є. Автообробка фото…",
+          autoPhotoStatus: "Пошук обличчя в PDF…",
+        });
       }
 
-      if (!row.missingPhoto || !allowAutoPhoto) continue;
+      if (!wantsPhoto || !allowAutoPhoto || !row.missingPhoto) continue;
       attemptedPhotos += 1;
 
       try {
@@ -468,6 +489,107 @@ export function QuestionnaireDiskSearchDialog({
     }
   };
 
+  const handleConfirmAll = async () => {
+    if (!pendingConfirmRows.length || isBulkSaving) return;
+    setIsBulkSaving(true);
+    setError("");
+    let saved = 0;
+    let failed = 0;
+
+    for (const row of pendingConfirmRows) {
+      await yieldToBrowser();
+      patchRow(row.rowId, { confirming: true });
+      try {
+        await api.confirmDiskQuestionnaire(
+          row.externalId,
+          row.selectedPath,
+          getQuestionnaireSaveFileName(row),
+          {
+            suppressErrorToast: true,
+            poolPriority: "normal",
+          },
+        );
+        saved += 1;
+        patchRow(row.rowId, {
+          confirmed: true,
+          confirming: false,
+          missingQuestionnaire: false,
+        });
+        onConfirmed(row.externalId);
+      } catch (err) {
+        failed += 1;
+        patchRow(row.rowId, { confirming: false, confirmed: false });
+        setError(
+          err instanceof Error
+            ? `Збережено ${saved}, помилка: ${err.message}`
+            : `Збережено ${saved}, далі не вдалося.`,
+        );
+        break;
+      }
+    }
+
+    setSummary((current) =>
+      [
+        current,
+        `Масово збережено анкет: ${saved}${
+          failed ? ` · не вдалося: ${failed}` : ""
+        }.`,
+      ]
+        .filter(Boolean)
+        .join(" · "),
+    );
+    setIsBulkSaving(false);
+  };
+
+  const handleDownloadMatchedZip = async () => {
+    if (!zipCandidateRows.length || isBulkZipping) return;
+    setIsBulkZipping(true);
+    setError("");
+
+    try {
+      const exportedAt = new Date().toISOString().slice(0, 10);
+      const people = zipCandidateRows.map((row) => ({
+        externalId: row.externalId,
+        name: row.fullName,
+        callSign: row.callSign,
+      }));
+      const pathByExternalId = new Map(
+        zipCandidateRows.map((row) => [row.externalId, row.selectedPath]),
+      );
+
+      const result = await downloadStaffQuestionnairesZip({
+        people,
+        fetchQuestionnaireBlob: async (externalId) => {
+          const relativePath = pathByExternalId.get(externalId);
+          if (!relativePath) return null;
+          return api.getDiskQuestionnaireFile(relativePath);
+        },
+        zipFileNamePrefix: `Анкети диск ${exportedAt} · ${people.length}`,
+        onPhase: (phase) => setSummary(phase),
+        isCancelled: () => false,
+      });
+
+      if (!result.downloaded) {
+        setError("Не вдалося зібрати жодного PDF.");
+        return;
+      }
+
+      setSummary(
+        result.partsDownloaded > 1
+          ? `ZIP з диска: ${result.exported} PDF у ${result.partsDownloaded} архівах. Розпакуйте в одну папку.`
+          : `ZIP з диска: ${result.exported} PDF · розпакуйте в одну папку.`,
+      );
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Не вдалося зібрати ZIP знайдених анкет.",
+      );
+    } finally {
+      setIsBulkZipping(false);
+    }
+  };
+
   return (
     <FloatingWindow
       open={open}
@@ -481,9 +603,39 @@ export function QuestionnaireDiskSearchDialog({
       className="questionnaire-disk-search-floating"
       bodyClassName="questionnaire-disk-search-content"
       footer={
-        <Button size="small" variant="outlined" onClick={onClose}>
-          Закрити
-        </Button>
+        <Stack direction="row" spacing={1} style={{ flexWrap: "wrap" }}>
+          <Button
+            size="small"
+            variant="contained"
+            disabled={
+              isSearching ||
+              isBulkSaving ||
+              !pendingConfirmRows.length
+            }
+            onClick={() => void handleConfirmAll()}
+          >
+            {isBulkSaving
+              ? "Збереження…"
+              : `Зберегти всі знайдені (${pendingConfirmRows.length})`}
+          </Button>
+          <Button
+            size="small"
+            variant="outlined"
+            disabled={
+              isSearching ||
+              isBulkZipping ||
+              !zipCandidateRows.length
+            }
+            onClick={() => void handleDownloadMatchedZip()}
+          >
+            {isBulkZipping
+              ? "ZIP…"
+              : `ZIP знайдених PDF (${zipCandidateRows.length})`}
+          </Button>
+          <Button size="small" variant="outlined" onClick={onClose}>
+            Закрити
+          </Button>
+        </Stack>
       }
     >
       <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>

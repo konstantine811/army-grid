@@ -3,7 +3,9 @@ import { api, type BackendPersonQuestionnaire } from "../../../api";
 import { subscribePersonnelAttachmentChanges } from "../../../shared/personnelAttachmentSync";
 import { CacheKeys, invalidateDataCache } from "../../../data/idbDataCache";
 import {
+  attachmentIdsMatch,
   collectPersonAttachmentLookupIds,
+  ensureQuestionnaireWithFile,
   loadPersonPhotoForRow,
   loadPersonQuestionnaireForRow,
   questionnaireFileMatchesPerson,
@@ -110,23 +112,50 @@ export function useAnketaPersonPanel(
           }),
         ]);
         if (epoch !== attachmentsEpochRef.current) return null;
-        const anketaName = String(row.fullName ?? "").trim();
-        const questionnaire = questionnaireResult.questionnaire;
-        const questionnaireOk = shouldAcceptQuestionnaireAttachment(
-          questionnaire,
-          lookupIds,
-          [anketaName, personMatch.summary.name],
-        );
-        setPhotoData(questionnaireOk ? photoResult.photoData : "");
-        setQuestionnaire(questionnaireOk ? questionnaire : null);
-        const resolvedExternalId =
+        const personnelId = personMatch.summary.externalId?.trim() || "";
+        let resolvedExternalId =
           questionnaireResult.resolvedExternalId ||
           photoResult.resolvedExternalId ||
-          personMatch.summary.externalId;
-        setAttachmentExternalId(resolvedExternalId);
-        return {
-          questionnaire: questionnaireResult.questionnaire,
+          personnelId;
+        let questionnaire = await ensureQuestionnaireWithFile(
+          questionnaireResult.questionnaire,
           resolvedExternalId,
+        );
+        if (
+          !questionnaire?.fileData?.trim() &&
+          personnelId &&
+          personnelId !== resolvedExternalId
+        ) {
+          questionnaire = await ensureQuestionnaireWithFile(null, personnelId);
+          if (questionnaire) resolvedExternalId = personnelId;
+        }
+        const anketaName = String(row.fullName ?? "").trim();
+        const questionnaireBelongsToPerson = Boolean(
+          questionnaire &&
+            personnelId &&
+            (attachmentIdsMatch(
+              String(questionnaire.personExternalId ?? ""),
+              personnelId,
+            ) ||
+              attachmentIdsMatch(resolvedExternalId, personnelId)),
+        );
+        const questionnaireOk =
+          questionnaireBelongsToPerson ||
+          shouldAcceptQuestionnaireAttachment(
+            questionnaire,
+            lookupIds,
+            [anketaName, personMatch.summary.name],
+          );
+        setPhotoData(questionnaireOk ? photoResult.photoData : "");
+        setQuestionnaire(questionnaireOk ? questionnaire : null);
+        const resolvedExternalIdFinal =
+          questionnaire?.personExternalId?.trim() ||
+          resolvedExternalId ||
+          personnelId;
+        setAttachmentExternalId(resolvedExternalIdFinal);
+        return {
+          questionnaire: questionnaireOk ? questionnaire : null,
+          resolvedExternalId: resolvedExternalIdFinal,
         };
       } finally {
         if (epoch === attachmentsEpochRef.current) {
@@ -318,7 +347,11 @@ export function useAnketaPersonPanel(
           { refreshIndex: true },
         );
         if (epoch !== attachmentsEpochRef.current) return;
-        const questionnaire = questionnaireResult.questionnaire;
+        let resolvedExternalId = questionnaireResult.resolvedExternalId;
+        const questionnaire = await ensureQuestionnaireWithFile(
+          questionnaireResult.questionnaire,
+          resolvedExternalId,
+        );
         const anketaName = String(row.fullName ?? "").trim();
         const questionnaireOk = shouldAcceptQuestionnaireAttachment(
           questionnaire,
@@ -327,7 +360,9 @@ export function useAnketaPersonPanel(
         );
         setPhotoData("");
         setQuestionnaire(questionnaireOk ? questionnaire : null);
-        setAttachmentExternalId(questionnaireResult.resolvedExternalId);
+        setAttachmentExternalId(
+          questionnaire?.personExternalId?.trim() || resolvedExternalId,
+        );
         if (
           questionnaireOk &&
           questionnaire &&
@@ -390,8 +425,7 @@ export function useAnketaPersonPanel(
       if (matchedAnketaRowId !== rowId) return;
       if (
         !shouldAutoOpenPreviewRef.current ||
-        !result?.questionnaire ||
-        !result.resolvedExternalId
+        !result?.questionnaire
       ) {
         return;
       }
@@ -405,7 +439,17 @@ export function useAnketaPersonPanel(
         anketaFullName: anketaRow.fullName,
         anketaBirthDate: anketaRow.birthDate,
       });
+      const personnelId = match.summary.externalId?.trim() || "";
+      const questionnaireBelongsToPerson = Boolean(
+        personnelId &&
+          (attachmentIdsMatch(
+            String(result.questionnaire.personExternalId ?? ""),
+            personnelId,
+          ) ||
+            attachmentIdsMatch(result.resolvedExternalId, personnelId)),
+      );
       if (
+        !questionnaireBelongsToPerson &&
         !shouldAcceptQuestionnaireAttachment(
           { ...result.questionnaire, fileName },
           lookupIds,
@@ -425,8 +469,13 @@ export function useAnketaPersonPanel(
         setPreviewOpen(true);
         return;
       }
+      const previewExternalId =
+        result.resolvedExternalId?.trim() ||
+        personnelId ||
+        String(result.questionnaire.personExternalId ?? "").trim();
+      if (!previewExternalId) return;
       void openPreviewForExternalId(
-        result.resolvedExternalId,
+        previewExternalId,
         name,
         match.summary.callSign ?? "",
         result.questionnaire?.fileName,

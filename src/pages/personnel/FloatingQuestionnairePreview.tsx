@@ -73,7 +73,6 @@ export function FloatingQuestionnairePreview({
 
   const startCrop = () => {
     if (!cropFile || !onSaveCrop) return;
-    setCropReady(false);
     setCropping(true);
   };
 
@@ -167,37 +166,36 @@ export function FloatingQuestionnairePreview({
         )
       }
     >
-      {cropping && cropFile ? (
-        <PhotoCropStage
-          ref={cropRef}
-          file={cropFile}
-          active={open && cropping}
-          compact
-          onSave={finishCrop}
-          onMessage={onCropMessage ?? onShareNotify ?? (() => undefined)}
-          onReadyChange={setCropReady}
-        />
-      ) : (
-        <>
-          {pendingFile || childrenHint ? (
-            <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-              {childrenHint ??
-                "Перевірте анкету. Можна вирізати фото прямо тут, потім зберегти."}
-            </Typography>
-          ) : null}
-          {previewUrl ? (
-            <iframe
-              className="questionnaire-preview-frame"
-              src={previewUrl}
-              title="Перегляд анкети PDF"
-            />
-          ) : (
-            <Typography variant="body2" color="text.secondary">
-              Немає PDF для перегляду.
-            </Typography>
-          )}
-        </>
-      )}
+      {cropping ? null : pendingFile || childrenHint ? (
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+          {childrenHint ??
+            "Перевірте анкету. Можна вирізати фото прямо тут, потім зберегти."}
+        </Typography>
+      ) : null}
+      <div className="questionnaire-preview-stack">
+        {previewUrl ? (
+          <iframe
+            className="questionnaire-preview-frame"
+            src={previewUrl}
+            title="Перегляд анкети PDF"
+          />
+        ) : (
+          <Typography variant="body2" color="text.secondary">
+            Немає PDF для перегляду.
+          </Typography>
+        )}
+        {cropFile && onSaveCrop ? (
+          <PhotoCropStage
+            ref={cropRef}
+            file={cropFile}
+            active={open}
+            compact
+            onSave={finishCrop}
+            onMessage={onCropMessage ?? onShareNotify ?? (() => undefined)}
+            onReadyChange={setCropReady}
+          />
+        ) : null}
+      </div>
     </FloatingWindow>
   );
 }

@@ -16,6 +16,13 @@ describe("ubdBasisOrdersImport", () => {
     });
   });
 
+  it("accepts a period after дск", () => {
+    expect(parseBasisOrderLine("№4862/ОКП/1643/дск. від 01.12.2025")).toEqual({
+      number: "4862/ОКП/1643/дск",
+      date: "01.12.2025",
+    });
+  });
+
   it("normalizes missing slash before дск", () => {
     expect(parseBasisOrderLine("№4862/ОКП/2357дск від 12.08.2026")).toEqual({
       number: "4862/ОКП/2357/дск",

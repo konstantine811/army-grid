@@ -6,8 +6,10 @@ import {
   buildOrphanAttachmentMigrationPairs,
   copyQuestionnaireBetweenPersonIds,
   buildQuestionnairePresenceMap,
+  narrowQuestionnairePresenceForPeople,
   collectPersonAttachmentLookupIds,
   collectPersonDocumentAliasIds,
+  ensureQuestionnaireWithFile,
   loadPersonDocumentsForRow,
   matchOrphanIdToPersonnelRow,
   parseOrphanAttachmentIdentityId,
@@ -113,7 +115,24 @@ describe("buildQuestionnairePresenceMap", () => {
     );
 
     expect(map["2163435"]).toBe(true);
-    expect(map[oldKey]).toBe(true);
+  });
+
+  it("narrows UI presence to personnel ids only", () => {
+    const row = personRow("Іванов Іван Петрович", { id: "2163435" });
+    const people = [
+      {
+        currentId: "2163435",
+        lookupIds: ["2163435"],
+        fullName: "Іванов Іван Петрович",
+        callSign: "",
+      },
+    ];
+    const map = narrowQuestionnairePresenceForPeople(
+      { "2163435": true, "legacy-only-key": true },
+      people,
+    );
+    expect(map).toEqual({ "2163435": true });
+    expect(map["legacy-only-key"]).toBeUndefined();
   });
 });
 
@@ -364,6 +383,30 @@ describe("personNameMatchesOrphanNameKey", () => {
   });
 });
 
+describe("ensureQuestionnaireWithFile", () => {
+  it("loads full PDF when only meta stub was found", async () => {
+    const getPersonQuestionnaire = vi
+      .spyOn(api, "getPersonQuestionnaire")
+      .mockResolvedValue({
+        personExternalId: "2163435",
+        fileName: "ГУГУЄВ Павло Сергійович.pdf",
+        fileData: "data:application/pdf;base64,QUJD",
+      } as never);
+
+    const full = await ensureQuestionnaireWithFile(
+      {
+        personExternalId: "2163435",
+        fileName: "ГУГУЄВ Павло Сергійович.pdf",
+      } as never,
+      "2163435",
+    );
+
+    expect(getPersonQuestionnaire).toHaveBeenCalledWith("2163435");
+    expect(full?.fileData).toContain("data:application/pdf");
+    getPersonQuestionnaire.mockRestore();
+  });
+});
+
 describe("shouldAcceptQuestionnaireAttachment", () => {
   it("accepts a questionnaire found by lookup id even when the filename differs", () => {
     expect(
@@ -457,6 +500,86 @@ describe("questionnaireFileMatchesPerson", () => {
         toExternalId: "2103825",
       }),
     ]);
+  });
+});
+
+describe("pickQuestionnaireDiskImportMatch", () => {
+  it("imports only strict PIB matches, not callsign-only files", async () => {
+    const { pickQuestionnaireDiskImportMatch } = await import("./personAttachments");
+    expect(
+      pickQuestionnaireDiskImportMatch(
+        "КЛУБАНЬ Володимир Вікторович",
+        "полтава",
+        [
+          { fileName: "Полтава.pdf", relativePath: "x/poltava.pdf" },
+          {
+            fileName: "КЛУБАНЬ Володимир Вікторович (Полтава).pdf",
+            relativePath: "y/kluban.pdf",
+          },
+        ],
+      ),
+    ).toEqual({
+      fileName: "КЛУБАНЬ Володимир Вікторович (Полтава).pdf",
+      relativePath: "y/kluban.pdf",
+    });
+  });
+});
+
+describe("mergeQuestionnaireDiskPresence", () => {
+  it("adds disk-only presence when a plausible Kingston match exists", async () => {
+    const { mergeQuestionnaireDiskPresence } = await import("./personAttachments");
+    const peopleById = new Map([
+      [
+        "2103001",
+        {
+          currentId: "2103001",
+          lookupIds: ["2103001"],
+          fullName: "КОВАЛЬ Іван Петрович",
+          callSign: "Кобра",
+        },
+      ],
+    ]);
+    const merged = mergeQuestionnaireDiskPresence(
+      {},
+      [
+        {
+          externalId: "2103001",
+          fullName: "КОВАЛЬ Іван Петрович",
+          callSign: "Кобра",
+          matches: [{ fileName: "КОВАЛЬ Іван Петрович.pdf", relativePath: "a/b.pdf" }],
+        },
+      ],
+      peopleById,
+    );
+    expect(merged["2103001"]).toBe(true);
+  });
+
+  it("ignores implausible disk matches", async () => {
+    const { mergeQuestionnaireDiskPresence } = await import("./personAttachments");
+    const peopleById = new Map([
+      [
+        "2103001",
+        {
+          currentId: "2103001",
+          lookupIds: ["2103001"],
+          fullName: "КОВАЛЬ Іван Петрович",
+          callSign: "",
+        },
+      ],
+    ]);
+    const merged = mergeQuestionnaireDiskPresence(
+      {},
+      [
+        {
+          externalId: "2103001",
+          fullName: "КОВАЛЬ Іван Петрович",
+          callSign: "",
+          matches: [{ fileName: "Сидоренко Петро.pdf", relativePath: "x/y.pdf" }],
+        },
+      ],
+      peopleById,
+    );
+    expect(merged["2103001"]).toBeUndefined();
   });
 });
 

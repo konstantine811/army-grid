@@ -175,18 +175,21 @@ export const PhotoCropStage = forwardRef<
     file?.type === "application/pdf" ||
     file?.name.toLowerCase().endsWith(".pdf");
   const ready = Boolean(previewPages.length) && !isPreparingPreview;
+  const onMessageRef = useRef(onMessage);
+  onMessageRef.current = onMessage;
 
   useEffect(() => {
     onReadyChange?.(ready);
   }, [onReadyChange, ready]);
 
   useEffect(() => {
-    if (!file || !active) {
+    if (!file) {
       setPreviewPages([]);
       setPdfPageCount(0);
       setIsPreparingPreview(false);
       return;
     }
+    if (!active) return;
 
     let cancelled = false;
     setIsPreparingPreview(true);
@@ -227,7 +230,7 @@ export const PhotoCropStage = forwardRef<
         if (!cancelled) {
           setPreviewPages([]);
           setPdfPageCount(0);
-          onMessage(
+          onMessageRef.current(
             error instanceof Error
               ? error.message
               : "Не вдалося підготувати файл для вирізання фото.",
@@ -243,7 +246,7 @@ export const PhotoCropStage = forwardRef<
     return () => {
       cancelled = true;
     };
-  }, [file, onMessage, active]);
+  }, [file, active]);
 
   const getPointerPosition = (event: PointerEvent<HTMLDivElement>) => {
     const innerRect = event.currentTarget.getBoundingClientRect();

@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   diskNamePartsClose,
   isPlausibleDiskQuestionnaireMatch,
+  isStrictDiskQuestionnaireMatch,
+  pickStrictDiskQuestionnaireMatch,
 } from "./questionnaireDiskMatch";
 
 describe("diskNamePartsClose", () => {
@@ -63,7 +65,7 @@ describe("isPlausibleDiskQuestionnaireMatch", () => {
     ).toBe(false);
   });
 
-  it("keeps a file that only has the surname or only the given name", () => {
+  it("keeps a file that only has the surname for manual review", () => {
     expect(
       isPlausibleDiskQuestionnaireMatch(
         "САВЧУК Євген Олександрович",
@@ -75,11 +77,28 @@ describe("isPlausibleDiskQuestionnaireMatch", () => {
         "САВЧУК Євген Олександрович",
         "Євген.pdf",
       ),
-    ).toBe(true);
+    ).toBe(false);
     expect(
       isPlausibleDiskQuestionnaireMatch(
         "САВЧУК Євген Олександрович",
         "Артем.pdf",
+      ),
+    ).toBe(false);
+  });
+
+  it("does not treat a callsign-only file as the person's questionnaire", () => {
+    expect(
+      isPlausibleDiskQuestionnaireMatch(
+        "КЛУБАНЬ Володимир Вікторович",
+        "Полтава.pdf",
+        "полтава",
+      ),
+    ).toBe(false);
+    expect(
+      isPlausibleDiskQuestionnaireMatch(
+        "СТЕПАНОВ Максим В'ячеславович",
+        "Макс.pdf",
+        "макс",
       ),
     ).toBe(false);
   });
@@ -101,16 +120,6 @@ describe("isPlausibleDiskQuestionnaireMatch", () => {
       isPlausibleDiskQuestionnaireMatch(
         "СТЕПАНОВ Максим В'ячеславович",
         "СТЕПАНОВ Максим.pdf",
-      ),
-    ).toBe(true);
-  });
-
-  it("keeps a single-token callsign file for manual review", () => {
-    expect(
-      isPlausibleDiskQuestionnaireMatch(
-        "СТЕПАНОВ Максим В'ячеславович",
-        "Макс.pdf",
-        "макс",
       ),
     ).toBe(true);
   });
@@ -140,5 +149,38 @@ describe("isPlausibleDiskQuestionnaireMatch", () => {
         "28 Нечев Юрій Валерійович_.pdf",
       ),
     ).toBe(true);
+  });
+});
+
+describe("isStrictDiskQuestionnaireMatch", () => {
+  it("accepts exact FIO and rejects another person with the same surname", () => {
+    const person = "КЛУБАНЬ Володимир Вікторович";
+    expect(
+      isStrictDiskQuestionnaireMatch(
+        person,
+        "КЛУБАНЬ Володимир Вікторович (Полтава).pdf",
+      ),
+    ).toBe(true);
+    expect(
+      isStrictDiskQuestionnaireMatch(person, "КЛУБАНЬ Іван Петрович.pdf"),
+    ).toBe(false);
+    expect(isStrictDiskQuestionnaireMatch(person, "Полтава.pdf")).toBe(false);
+  });
+
+  it("returns null when several different strict files match", () => {
+    const picked = pickStrictDiskQuestionnaireMatch(
+      "КЛУБАНЬ Володимир Вікторович",
+      [
+        {
+          fileName: "КЛУБАНЬ Володимир Вікторович (A).pdf",
+          relativePath: "a/a.pdf",
+        },
+        {
+          fileName: "КЛУБАНЬ Володимир Вікторович (B).pdf",
+          relativePath: "b/b.pdf",
+        },
+      ],
+    );
+    expect(picked).toBeNull();
   });
 });
