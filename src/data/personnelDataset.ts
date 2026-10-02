@@ -144,7 +144,6 @@ export const loadPersonnelDataset = async (
   };
 
   const tryServerDataset = async (fingerprint: string) => {
-    if (options.force) return null;
     try {
       const serverDataset = await api.getPersonnelDataset({
         fingerprint,
@@ -159,7 +158,6 @@ export const loadPersonnelDataset = async (
   };
 
   const tryRebuildServerDataset = async (fingerprint: string) => {
-    if (options.force) return null;
     try {
       const rebuilt = await api.rebuildPersonnelDataset({
         signal: options.signal,
@@ -230,13 +228,15 @@ export const loadPersonnelDataset = async (
       return cached;
     }
 
-    const serverHit =
+    const persistedServerDataset =
       bootstrapMeta?.dataset.available === false
         ? null
-        : (await tryServerDataset(fingerprintFromMeta)) ??
-          (options.force || !cached
-            ? await tryRebuildServerDataset(fingerprintFromMeta)
-            : null);
+        : await tryServerDataset(fingerprintFromMeta);
+    const serverHit =
+      persistedServerDataset ??
+      (options.force || !cached
+        ? await tryRebuildServerDataset(fingerprintFromMeta)
+        : null);
     if (serverHit) return serverHit;
     if (!options.force && cached) return cached;
 

@@ -481,6 +481,8 @@ export type BackendPersonnelOverviewRow = {
   fighterExitDate?: string
   fighterReturnDate?: string
   fighterTotalDays?: string
+  /** Сума днів усіх виходів зі «Статус бійців», не лише останнього. */
+  fighterAllDays?: string
   fighterStatus?: string
   validFrom: string | null
   days: number | null
@@ -1043,6 +1045,35 @@ export const api = {
       '/ejournals/personnel/questionnaires',
       { signal: options.signal, cache: 'no-store' },
     )
+  },
+
+  resolvePersonnelIdentities(
+    payload: {
+      people: Array<{
+        clientKey: string
+        fullName: string
+        birthDate?: string
+        ipn?: string
+        aliases: string[]
+      }>
+      attachments?: Array<{
+        personExternalId: string
+        fileName?: string | null
+      }>
+    },
+    signal?: AbortSignal,
+  ) {
+    return request<{
+      people: Array<{
+        clientKey: string
+        personId: string
+        aliasIds: string[]
+      }>
+    }>('/ejournals/personnel/identities/resolve', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      signal,
+    })
   },
 
   searchQuestionnairesOnDisk(payload: {

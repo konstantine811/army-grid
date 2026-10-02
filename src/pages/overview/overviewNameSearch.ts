@@ -173,6 +173,7 @@ export const buildOverviewRowSearchText = (
     fighterExitDate?: string;
     fighterReturnDate?: string;
     fighterTotalDays?: string;
+    fighterAllDays?: string;
     fighterStatus?: string;
     callSign?: string;
   },
@@ -189,6 +190,7 @@ export const buildOverviewRowSearchText = (
     row.fighterExitDate,
     row.fighterReturnDate,
     row.fighterTotalDays,
+    row.fighterAllDays,
     row.fighterStatus,
     row.callSign,
     documentLabels,

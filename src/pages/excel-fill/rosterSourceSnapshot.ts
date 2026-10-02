@@ -27,7 +27,12 @@ const ROSTER_COLUMN_KEY_ALIASES: Record<number, readonly string[]> = {
   31: ["column_31", "місце_перебування"],
   35: ["column_35", "місце_перебування_уточнення"],
   40: ["column_40", "місце_перебування_2"],
+  43: ["колонка_43", "roster__колонка_43"],
+  44: ["колонка_44", "roster__колонка_44"],
+  45: ["колонка_45", "roster__колонка_45"],
 };
+
+const ROSTER_COLUMNS_WITHOUT_LABEL_FALLBACK = new Set([35, 40, 43, 44, 45]);
 
 export const mapRosterLatestToPreviewRows = (
   latest: BackendPersonnelRosterLatest | null | undefined,
@@ -60,7 +65,7 @@ export const readRosterColumnValue = (
         return cellText(row[alias]);
       }
     }
-    if (columnNumber === 35 || columnNumber === 40) {
+    if (ROSTER_COLUMNS_WITHOUT_LABEL_FALLBACK.has(columnNumber)) {
       return "";
     }
   }

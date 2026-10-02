@@ -8,6 +8,7 @@ import {
   buildStaffOverviewRowsFromPersonnel,
   buildStaffOverviewRowsFromRoster,
   collectRosterUnitOptions,
+  dedupeOverviewRows,
   fillDownRosterUnitRows,
   mergeRosterRowsIntoOverview,
   overviewStatusFilterLabel,
@@ -476,6 +477,48 @@ describe("mergeRosterRowsIntoOverview", () => {
     expect(summary.listedPeople.map((person) => person.fullName)).toEqual([
       "Іванов Іван",
       "Петренко Петро",
+    ]);
+  });
+});
+
+describe("dedupeOverviewRows", () => {
+  it("keeps one row when the same person is listed with an empty unit and with ж", () => {
+    const emptyUnit = rosterRowToOverviewRow(
+      {
+        __dbRowId: "empty",
+        column_14: "КІЯНЕНКО Андрій Олександрович",
+      } as EjournalPreviewRow,
+      {},
+      { name: "КІЯНЕНКО Андрій Олександрович" },
+    );
+    const dittoUnit = rosterRowToOverviewRow(
+      {
+        __dbRowId: "ditto",
+        column_2: "ж",
+        column_14: "КІЯНЕНКО Андрій Олександрович",
+      } as EjournalPreviewRow,
+      {},
+      { name: "КІЯНЕНКО Андрій Олександрович" },
+    );
+    const other = rosterRowToOverviewRow(
+      {
+        __dbRowId: "other",
+        column_2: "Штаб",
+        column_14: "СТЕПАНОВ Максим В'ячеславович",
+      } as EjournalPreviewRow,
+      {},
+      { name: "СТЕПАНОВ Максим В'ячеславович" },
+    );
+
+    const rows = dedupeOverviewRows(
+      [emptyUnit, dittoUnit, other].filter(
+        (row): row is NonNullable<typeof row> => Boolean(row),
+      ),
+    );
+
+    expect(rows.map((row) => `${row.name} · ${row.unit}`)).toEqual([
+      "КІЯНЕНКО Андрій Олександрович · ж",
+      "СТЕПАНОВ Максим В'ячеславович · Штаб",
     ]);
   });
 });

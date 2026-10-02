@@ -22,6 +22,10 @@ import type {
 } from "../ejournal/ejournalTypes";
 import { readRosterColumnValue } from "../excel-fill/rosterSourceSnapshot";
 import {
+  MORNING_GENERAL_LIST_COLUMN_LABELS,
+  resolveMorningGeneralListColumnLabel,
+} from "./morningGeneralListColumnLabels";
+import {
   parseDbColumns,
   previewValueToDisplay,
 } from "../ejournal/ejournalUtils";
@@ -662,73 +666,11 @@ export const PERSON_SECTION_LABELS: Record<PersonFieldDef["section"], string> =
   };
 
 const isGenericRosterColumnKey = (key: string) =>
-  /^column_\d+(_\d+)?$/i.test(key.trim());
+  /^(?:column_\d+(?:_\d+)?|колонка[_\s]\d+)$/iu.test(key.trim());
 
-/**
- * Назви колонок «1.ОС Загальний список» за Excel-індексом (1-based).
- * У файлі частина колонок праворуч без заголовка, але з даними / списками.
- */
-export const MORNING_GENERAL_LIST_COLUMN_LABELS: Record<number, string> = {
-  1: "№",
-  2: "Підрозділ",
-  3: "Взвод",
-  4: "Відділення",
-  5: "Посада",
-  6: "ВОС",
-  7: "Повна посада",
-  8: "ШПК факт",
-  9: "Категорія складу",
-  10: "Анкета",
-  11: "Військовий квиток",
-  12: "Мобілізація/контракт",
-  13: "Звання",
-  14: "ПІБ",
-  15: "Позивний",
-  16: "Дата народження",
-  17: "Рік",
-  18: "Повних років",
-  19: "ІПН",
-  20: "Група крові",
-  21: "Статус",
-  22: "Тип В\\С",
-  23: "Статус БГ",
-  24: "БЗВП/БРЕЗ",
-  25: "Наявність БЗВП",
-  26: "Курс БЗВП",
-  27: "Відрядження (БРЕЗ)",
-  28: "Обмеження",
-  29: "В якому підрозділі",
-  31: "Місце перебування",
-  32: "Примітки",
-  33: "Напрямок",
-  34: "Примітка 3",
-  // Колонки без заголовка в Excel (часто списки / дублікаты значень)
-  37: "Статус",
-  38: "Тип В\\С",
-  39: "БЗВП/БРЕЗ",
-  40: "Місце перебування",
-  41: "Обмеження",
-  42: "Статус БГ",
-};
-
-const parseGenericRosterColumnNumber = (key: string) => {
-  const match = key.trim().match(/^column_(\d+)(?:_\d+)?$/i);
-  if (!match) return null;
-  const number = Number(match[1]);
-  return Number.isFinite(number) && number > 0 ? number : null;
-};
-
-export const resolveMorningGeneralListColumnLabel = (
-  sourceKey: string,
-  fallback = "",
-) => {
-  const columnNumber = parseGenericRosterColumnNumber(sourceKey);
-  if (columnNumber != null) {
-    const known = MORNING_GENERAL_LIST_COLUMN_LABELS[columnNumber];
-    if (known) return known;
-    return fallback || `Колонка ${columnNumber}`;
-  }
-  return fallback;
+export {
+  MORNING_GENERAL_LIST_COLUMN_LABELS,
+  resolveMorningGeneralListColumnLabel,
 };
 
 /** Повна посада з ранкового (`повна_посада` / `roster__повна_посада`) або коротка посада. */
@@ -1195,8 +1137,11 @@ export const resolvePersonPositionTitle = (row: EjournalPreviewRow | null) => {
   );
 };
 
-/** Місце перебування зі Штатки (col 31/40) або дислокація з ООС. */
+/** Місце перебування зі Штатки (col 43, інакше 31/40) або дислокація з ООС. */
 export const resolvePersonStayPlace = (row: EjournalPreviewRow | null) => {
+  const fromColumn43 = readRosterColumnValue(row, 43).trim();
+  if (fromColumn43) return fromColumn43;
+
   const fromStay =
     getPersonFieldValue(row, ["місце_перебування"]) ||
     getPersonFieldValue(row, ["перебування"]);
@@ -1248,6 +1193,9 @@ export const inferRosterFieldLabel = (
     return "Дата народження";
   }
   if (lowerKey.includes("позив")) return "Позивний";
+  if (lowerKey.replace(/-/g, "").includes("ксть") && lowerKey.includes("виход")) {
+    return "К-сть виходів";
+  }
 
   const displayed = formatExcelDateDisplay(value).trim();
   if (looksLikePersonBirthDate(displayed)) return "Дата народження";

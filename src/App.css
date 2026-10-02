@@ -1282,6 +1282,7 @@
   width: 100%;
 }
 
+.personnel-v2-staff-row,
 button.personnel-v2-staff-row {
   position: absolute;
   top: 0;
@@ -1301,6 +1302,19 @@ button.personnel-v2-staff-row {
   border: 1px solid rgba(242, 238, 225, 0.12);
   border-radius: 8px;
   cursor: pointer;
+}
+
+.personnel-v2-staff-row {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  cursor: default;
+}
+
+.personnel-v2-staff-row strong {
+  color: #f2eee1;
+  font-size: 14px;
 }
 
 button.personnel-v2-staff-row.is-selected {

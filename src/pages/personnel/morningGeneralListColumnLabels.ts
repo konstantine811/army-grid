@@ -37,6 +37,7 @@ export const MORNING_GENERAL_LIST_COLUMN_LABELS: Record<number, string> = {
   33: "Напрямок",
   34: "Примітка 3",
   35: "Місце перебування (уточнення)",
+  36: "Дата останнього повернення",
   // Колонки без заголовка в Excel (часто списки / дублікаты значень)
   37: "Статус",
   38: "Тип В\\С",
@@ -44,10 +45,13 @@ export const MORNING_GENERAL_LIST_COLUMN_LABELS: Record<number, string> = {
   40: "Місце перебування",
   41: "Обмеження",
   42: "Статус БГ",
+  43: "Місце перебування",
+  44: "Обмеження",
+  45: "Статус БГ",
 };
 
 const parseGenericRosterColumnNumber = (key: string) => {
-  const match = key.trim().match(/^column_(\d+)(?:_\d+)?$/i);
+  const match = key.trim().match(/^(?:column|колонка)_(\d+)(?:_\d+)?$/iu);
   if (!match) return null;
   const number = Number(match[1]);
   return Number.isFinite(number) && number > 0 ? number : null;

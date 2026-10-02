@@ -101,6 +101,7 @@ import {
   buildRosterOnlyOverview,
   buildStaffOverviewRowsFromPersonnel,
   buildStaffOverviewRowsFromRoster,
+  dedupeOverviewRows,
   fillDownRosterUnitRows,
   summarizeNovaStaffForUnits,
   summarizeStaffFromRoster,
@@ -902,10 +903,13 @@ export function OverviewPage({ active = true }: { active?: boolean }) {
 
   const sourceRows = useMemo(() => {
     if (!data) return [] as BackendPersonnelOverviewRow[];
-    if (source === "staff") return personnelOverviewRows;
-    return source === "ejoos"
-      ? data.rows.filter((row) => row.fromEjoos)
-      : data.rows;
+    const rows =
+      source === "staff"
+        ? personnelOverviewRows
+        : source === "ejoos"
+          ? data.rows.filter((row) => row.fromEjoos)
+          : data.rows;
+    return dedupeOverviewRows(rows);
   }, [data, personnelOverviewRows, source]);
 
   const staffSummary = useMemo(

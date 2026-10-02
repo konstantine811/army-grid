@@ -35,6 +35,7 @@ import {
   LazyOverviewPage,
   LazyPageBoundary,
   LazyPersonnelPage,
+  LazyPersonnelV2Page,
   LazySocPassportPage,
 } from "./app/lazyPages";
 import { storeSelectedPersonForDocuments } from "./pages/documents/selectedPersonStorage";
@@ -401,6 +402,18 @@ function App() {
             hint="Спочатку завантажую Штатку, тому проміжний список ООС не показується."
           >
             <LazyPersonnelPage onOpenDocuments={openDocumentsForPerson} />
+          </LazyPageBoundary>
+        </AppPageSlot>
+        <AppPageSlot
+          page="personnelV2"
+          activePage={activePage}
+          mountedPages={mountedPages}
+        >
+          <LazyPageBoundary
+            status="ЗАВАНТАЖЕННЯ ШТАТКИ"
+            hint="Читаю Загальний список і готую список осіб."
+          >
+            <LazyPersonnelV2Page active={activePage === "personnelV2"} />
           </LazyPageBoundary>
         </AppPageSlot>
         <AppPageSlot

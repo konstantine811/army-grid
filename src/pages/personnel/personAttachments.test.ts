@@ -17,6 +17,9 @@ import {
   personNameMatchesOrphanNameKey,
   personPhotoThumbnailUrlForRow,
   questionnaireFileMatchesPerson,
+  rememberPersonnelIdentityLinks,
+  rememberQuestionnairePhotoAliases,
+  resolvePersonPhotoStorageIdForRow,
   shouldAcceptQuestionnaireAttachment,
 } from "./personAttachments";
 import {
@@ -96,6 +99,21 @@ describe("collectPersonAttachmentLookupIds", () => {
       buildPersonIdentityFingerprint("ШЕВЧЕНКО Олександр Володимирович"),
     );
   });
+
+  it("keeps the callsign photo key when the card also has a birth date", () => {
+    const callKey = buildPersonIdentityFingerprint(
+      "БАБЧЕНКО Олег Володимирович",
+      "",
+      "Шеф",
+    );
+    const row = personRow("БАБЧЕНКО Олег Володимирович", {
+      birthDate: "16.08.1988",
+      id: "2103111",
+      позивний: "Шеф",
+    });
+
+    expect(collectPersonAttachmentLookupIds(row)).toContain(callKey);
+  });
 });
 
 describe("buildQuestionnairePresenceMap", () => {
@@ -115,6 +133,26 @@ describe("buildQuestionnairePresenceMap", () => {
     );
 
     expect(map["2163435"]).toBe(true);
+  });
+
+  it("counts a PDF stored under the callsign key when the card already has a birth date", () => {
+    const storedId = buildPersonIdentityFingerprint(
+      "ФЕДЕРКО Богдан Сергійович",
+      "",
+      "музикант",
+    );
+    const row = personRow("ФЕДЕРКО Богдан Сергійович", {
+      id: "2103999",
+      birthDate: "01.02.1990",
+      позивний: "музикант",
+    });
+
+    const map = buildQuestionnairePresenceMap(
+      [row],
+      [{ personExternalId: storedId, fileName: "" }],
+    );
+
+    expect(map["2103999"]).toBe(true);
   });
 
   it("narrows UI presence to personnel ids only", () => {
@@ -622,5 +660,63 @@ describe("personPhotoThumbnailUrlForRow", () => {
     expect(url).toBe("http://test/photo?thumbnail=1");
     expect(urlSpy).toHaveBeenCalledWith("2103004", { thumbnail: true });
     urlSpy.mockRestore();
+  });
+
+  it("finds a numeric photo through the questionnaire file stored under the birth key", () => {
+    const birthKey = buildPersonIdentityFingerprint(
+      "БАБЧЕНКО Олег Володимирович",
+      "16.08.1972",
+    );
+    rememberQuestionnairePhotoAliases(
+      [
+        {
+          personExternalId: "4246",
+          fileName: "БАБЧЕНКО Олег Володимирович (шеф).pdf",
+        },
+        {
+          personExternalId: birthKey,
+          fileName: "БАБЧЕНКО Олег Володимирович (шеф).pdf",
+        },
+      ],
+      new Set(["4246"]),
+    );
+
+    expect(
+      resolvePersonPhotoStorageIdForRow(
+        personRow("БАБЧЕНКО Олег Володимирович", {
+          birthDate: "16.08.1972",
+          id: "",
+          позивний: "Шеф",
+        }),
+        undefined,
+        new Set(["4246"]),
+      ),
+    ).toBe("4246");
+  });
+
+  it("finds a photo saved under an old number after the permanent id is known", () => {
+    const birthKey = buildPersonIdentityFingerprint(
+      "БАБЧЕНКО Олег Володимирович",
+      "16.08.1972",
+    );
+    rememberPersonnelIdentityLinks([
+      {
+        personId: "pid_babchenko",
+        aliasIds: ["4246", birthKey],
+      },
+    ]);
+
+    const row = personRow("БАБЧЕНКО Олег Володимирович", {
+      birthDate: "16.08.1972",
+      id: "",
+      позивний: "Шеф",
+    });
+
+    expect(collectPersonAttachmentLookupIds(row)).toEqual(
+      expect.arrayContaining(["4246", "pid_babchenko"]),
+    );
+    expect(
+      resolvePersonPhotoStorageIdForRow(row, undefined, new Set(["4246"])),
+    ).toBe("4246");
   });
 });

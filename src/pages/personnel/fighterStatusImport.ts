@@ -28,6 +28,10 @@ export const FIGHTER_STATUS_FIELDS = [
     label: "Статус бійців · Днів",
   },
   {
+    key: "fighter_status_all_days",
+    label: "Статус бійців · Усього днів",
+  },
+  {
     key: "fighter_status_value",
     label: "Статус бійців · Статус (200/300/500)",
   },
@@ -53,6 +57,7 @@ export const FIGHTER_STATUS_FIELD_KEYS = {
   exitDate: "fighter_status_exit_date",
   returnDate: "fighter_status_return_date",
   totalDays: "fighter_status_total_days",
+  allDays: "fighter_status_all_days",
   status: "fighter_status_value",
   weapon: "fighter_status_weapon",
   communication: "fighter_status_communication",
@@ -177,16 +182,75 @@ export const buildFighterStatusValues = (
   };
 };
 
+type FighterStatusValues = ReturnType<typeof buildFighterStatusValues>;
+
+const fighterStatusMoment = (values: FighterStatusValues) => {
+  const date =
+    parseFighterStatusDate(values.fighter_status_exit_date) ??
+    parseFighterStatusDate(values.fighter_status_return_date) ??
+    parseFighterStatusDate(values.fighter_status_entry_date);
+  return date?.getTime() ?? Number.NEGATIVE_INFINITY;
+};
+
+const fighterStatusPeriodKey = (values: FighterStatusValues) =>
+  [
+    values.fighter_status_exit_date,
+    values.fighter_status_return_date,
+    values.fighter_status_entry_date,
+  ].join("|");
+
+const sumFighterStatusDays = (
+  records: Array<{ values: FighterStatusValues; order: number }>,
+) => {
+  const seen = new Set<string>();
+  let total = 0;
+  let counted = false;
+  for (const record of records) {
+    const period = fighterStatusPeriodKey(record.values);
+    const key = period === "||" ? `row:${record.order}` : period;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const days = Number(record.values.fighter_status_total_days);
+    if (!Number.isFinite(days) || days < 0) continue;
+    total += days;
+    counted = true;
+  }
+  return counted ? String(total) : "";
+};
+
+const aggregateFighterStatusRecords = (
+  records: Array<{ values: FighterStatusValues; order: number }>,
+) => {
+  let latest = records[0];
+  for (const record of records.slice(1)) {
+    const latestMoment = fighterStatusMoment(latest.values);
+    const nextMoment = fighterStatusMoment(record.values);
+    if (
+      nextMoment > latestMoment ||
+      (nextMoment === latestMoment && record.order > latest.order)
+    ) {
+      latest = record;
+    }
+  }
+  return {
+    ...latest.values,
+    fighter_status_all_days: sumFighterStatusDays(records),
+  };
+};
+
 export const buildFighterStatusAdditions = (statusSheet: ExcelSheetSnapshot) => {
   const columns = buildImportColumns(statusSheet);
   const indexes = resolveFighterStatusColumnIndexes(columns);
 
   if (indexes.nameIndex < 0) return new Map<string, Record<string, unknown>>();
 
-  const additions = new Map<string, Record<string, unknown>>();
+  const byName = new Map<
+    string,
+    Array<{ values: FighterStatusValues; order: number; callSign: string }>
+  >();
   statusSheet.rows
     .filter((row) => hasRowData(row.values))
-    .forEach((row) => {
+    .forEach((row, order) => {
       const name = readStatusCell(row, indexes.nameIndex);
       if (!name) return;
 
@@ -195,16 +259,38 @@ export const buildFighterStatusAdditions = (statusSheet: ExcelSheetSnapshot) => 
       if (!hasStatusData) return;
 
       const nameKey = normalizeRosterMatchText(name);
-      additions.set(`name:${nameKey}`, values);
-
-      const callSign = readStatusCell(row, indexes.callSignIndex);
-      if (callSign) {
-        additions.set(
-          `name-call:${nameKey}:${normalizeRosterMatchText(callSign)}`,
-          values,
-        );
-      }
+      const bucket = byName.get(nameKey) ?? [];
+      bucket.push({
+        values,
+        order,
+        callSign: normalizeRosterMatchText(
+          readStatusCell(row, indexes.callSignIndex),
+        ),
+      });
+      byName.set(nameKey, bucket);
     });
+
+  const additions = new Map<string, Record<string, unknown>>();
+  for (const [nameKey, records] of byName) {
+    const callSigns = [
+      ...new Set(records.map((record) => record.callSign).filter(Boolean)),
+    ];
+    if (callSigns.length <= 1) {
+      const aggregated = aggregateFighterStatusRecords(records);
+      additions.set(`name:${nameKey}`, aggregated);
+      if (callSigns[0]) {
+        additions.set(`name-call:${nameKey}:${callSigns[0]}`, aggregated);
+      }
+      continue;
+    }
+    for (const callSign of callSigns) {
+      const own = records.filter((record) => record.callSign === callSign);
+      additions.set(
+        `name-call:${nameKey}:${callSign}`,
+        aggregateFighterStatusRecords(own),
+      );
+    }
+  }
 
   return additions;
 };
@@ -384,6 +470,7 @@ export const getFighterStatusFieldTone = (
     case "fighter_status_entry_date":
       return "entry";
     case "fighter_status_total_days":
+    case "fighter_status_all_days":
       return "days";
     case "fighter_status_value":
       return "status";
@@ -410,6 +497,7 @@ export const getRosterFighterStatusOverviewFields = (row: EjournalPreviewRow) =>
     fighterExitDate,
     fighterReturnDate,
     fighterTotalDays: resolveFighterStatusTotalDays(row),
+    fighterAllDays: getFighterStatusDirectValue(row, "fighter_status_all_days"),
     fighterStatus: getFighterStatusDirectValue(row, "fighter_status_value"),
     fighterWeapon: getFighterStatusDirectValue(row, "fighter_status_weapon"),
     fighterCommunication: getFighterStatusDirectValue(

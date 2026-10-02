@@ -355,16 +355,61 @@ const pushNameAttachmentLookupIds = (
     );
     const withBirth = buildPersonIdentityFingerprint(variant, birthDate);
     if (withBirth) ids.add(withBirth);
+    const callSignKey = buildPersonIdentityFingerprint(variant, "", callSign);
+    if (callSign.trim() && callSignKey.includes(":c:")) ids.add(callSignKey);
     if (!birthDate || includeLooseKeys) {
       const withoutBirth = buildPersonIdentityFingerprint(variant);
       if (withoutBirth) ids.add(withoutBirth);
-      const withCallSign = buildPersonIdentityFingerprint(variant, "", callSign);
-      if (withCallSign) ids.add(withCallSign);
     }
   }
 };
 
 const lookupIdsByRow = new WeakMap<EjournalPreviewRow, string[]>();
+
+type PersonnelIdentityLink = {
+  personId: string;
+  aliasIds: string[];
+};
+
+const personnelIdentityByAlias = new Map<string, PersonnelIdentityLink>();
+
+export const rememberPersonnelIdentityLinks = (
+  links: Array<{ personId: string; aliasIds?: string[] }>,
+) => {
+  personnelIdentityByAlias.clear();
+  for (const link of links) {
+    const personId = String(link.personId ?? "").trim();
+    if (!personId) continue;
+    const record: PersonnelIdentityLink = {
+      personId,
+      aliasIds: (link.aliasIds ?? []).map((alias) => alias.trim()).filter(Boolean),
+    };
+    personnelIdentityByAlias.set(personId, record);
+    for (const alias of record.aliasIds) {
+      personnelIdentityByAlias.set(alias, record);
+    }
+  }
+};
+
+const expandPersonnelIdentityLookupIds = (ids: string[]) => {
+  if (!personnelIdentityByAlias.size) return ids;
+  const next = new Set(ids);
+  for (const id of ids) {
+    const link = personnelIdentityByAlias.get(id);
+    if (!link) continue;
+    next.add(link.personId);
+    for (const alias of link.aliasIds) next.add(alias);
+  }
+  return [...next];
+};
+
+export const resolveCanonicalPersonId = (ids: readonly string[]) => {
+  for (const id of ids) {
+    const link = personnelIdentityByAlias.get(id);
+    if (link?.personId) return link.personId;
+  }
+  return "";
+};
 
 const hasAttachmentLookupHints = (hints?: PersonAttachmentLookupHints) =>
   Boolean(
@@ -387,7 +432,7 @@ export const collectPersonAttachmentLookupIds = (
   const includeLooseKeys = Boolean(options?.includeLooseKeys);
   if (row && !hasAttachmentLookupHints(hints) && !includeLooseKeys) {
     const cached = lookupIdsByRow.get(row);
-    if (cached) return cached;
+    if (cached) return expandPersonnelIdentityLookupIds(cached);
   }
 
   const ids = new Set<string>();
@@ -435,7 +480,7 @@ export const collectPersonAttachmentLookupIds = (
   if (row && !hasAttachmentLookupHints(hints) && !includeLooseKeys) {
     lookupIdsByRow.set(row, collected);
   }
-  return collected;
+  return expandPersonnelIdentityLookupIds(collected);
 };
 
 export const loadPersonPhotoForRow = async (
@@ -553,6 +598,46 @@ export const collectPersonnelListPhotoUpdates = (
   return updates;
 };
 
+/**
+ * Фото часто лежить під числовим id ООС, а анкета того ж файлу — ще й під
+ * fingerprint. Пов’язуємо їх за однаковою назвою файлу.
+ */
+const photoAliasByAttachmentId = new Map<string, string>();
+
+const attachmentFileKey = (fileName: string | null | undefined) =>
+  String(fileName ?? "")
+    .trim()
+    .toLocaleLowerCase("uk-UA")
+    .replace(/\s+/g, " ");
+
+export const rememberQuestionnairePhotoAliases = (
+  items: Array<{ personExternalId?: string | null; fileName?: string | null }>,
+  photoIds: Set<string>,
+) => {
+  photoAliasByAttachmentId.clear();
+  if (!photoIds.size) return;
+
+  const idsByFile = new Map<string, string[]>();
+  for (const item of items) {
+    const id = String(item.personExternalId ?? "").trim();
+    const fileKey = attachmentFileKey(item.fileName);
+    if (!id || !fileKey) continue;
+    const list = idsByFile.get(fileKey) ?? [];
+    list.push(id);
+    idsByFile.set(fileKey, list);
+  }
+
+  for (const ids of idsByFile.values()) {
+    const photoId =
+      ids.find((id) => photoIds.has(id) && /^\d+$/.test(id)) ??
+      ids.find((id) => photoIds.has(id));
+    if (!photoId) continue;
+    for (const id of ids) {
+      if (id !== photoId) photoAliasByAttachmentId.set(id, photoId);
+    }
+  }
+};
+
 /** DB / filesystem key under which the photo is stored (may differ from roster externalId). */
 export const resolvePersonPhotoStorageIdForRow = (
   row: EjournalPreviewRow | null,
@@ -561,8 +646,13 @@ export const resolvePersonPhotoStorageIdForRow = (
 ) => {
   const ids = availableIds ?? peekAvailablePersonPhotoIds();
   if (!ids?.size) return "";
-  for (const id of collectPersonAttachmentLookupIds(row, hints)) {
+  const lookupIds = collectPersonAttachmentLookupIds(row, hints);
+  for (const id of lookupIds) {
     if (ids.has(id)) return id;
+  }
+  for (const id of lookupIds) {
+    const alias = photoAliasByAttachmentId.get(id);
+    if (alias && ids.has(alias)) return alias;
   }
   return "";
 };
@@ -572,6 +662,10 @@ export const resolvePersonPhotoStorageIdForSave = (
   row: EjournalPreviewRow | null,
   fallbackExternalId = "",
 ) => {
+  const lookupIds = collectPersonAttachmentLookupIds(row);
+  const canonical = resolveCanonicalPersonId(lookupIds);
+  if (canonical) return canonical;
+
   const fromIndex = resolvePersonPhotoStorageIdForRow(row);
   if (fromIndex) return fromIndex;
 
@@ -866,6 +960,7 @@ export type QuestionnairePresencePerson = {
   lookupIds: string[];
   fullName: string;
   callSign: string;
+  birthDate: string;
 };
 
 export type QuestionnaireDiskScanPerson = {
@@ -887,6 +982,7 @@ export const buildQuestionnairePresencePeople = (
       lookupIds: collectPersonAttachmentLookupIds(row),
       fullName: getPersonDisplayName(row),
       callSign: resolvePersonCallSign(row),
+      birthDate: resolvePersonBirthDate(row),
     }];
   });
 
@@ -968,6 +1064,24 @@ export const resolveStoredQuestionnaireExternalId = (
   return null;
 };
 
+const orphanIdentityMatchesPresencePerson = (
+  parsed: OrphanAttachmentIdentity,
+  person: QuestionnairePresencePerson,
+) => {
+  if (!personNameMatchesOrphanNameKey(person.fullName, parsed.nameKey)) {
+    return false;
+  }
+  if (parsed.birthKey) {
+    const birth = normalizePersonBirthKey(person.birthDate);
+    return Boolean(birth) && birth === parsed.birthKey;
+  }
+  if (parsed.callKey) {
+    const call = normalizeAttachmentNameKey(person.callSign);
+    return Boolean(call) && call === normalizeAttachmentNameKey(parsed.callKey);
+  }
+  return true;
+};
+
 export const buildQuestionnairePresenceFromPeople = (
   people: QuestionnairePresencePerson[],
   items: Array<{ personExternalId?: string | null; fileName?: string | null }>,
@@ -989,6 +1103,31 @@ export const buildQuestionnairePresenceFromPeople = (
       continue;
     }
     unmatched.push(person);
+  }
+
+  if (unmatched.length && items.length) {
+    const claimed = new Set<string>();
+    for (const item of items) {
+      const parsed = parseOrphanAttachmentIdentityId(
+        String(item.personExternalId ?? ""),
+      );
+      if (!parsed) continue;
+      const hits = unmatched.filter(
+        (person) =>
+          !claimed.has(person.currentId) &&
+          orphanIdentityMatchesPresencePerson(parsed, person),
+      );
+      if (hits.length !== 1) continue;
+      claimed.add(hits[0]!.currentId);
+      map[hits[0]!.currentId] = true;
+    }
+    if (claimed.size) {
+      const stillUnmatched = unmatched.filter(
+        (person) => !claimed.has(person.currentId),
+      );
+      unmatched.length = 0;
+      unmatched.push(...stillUnmatched);
+    }
   }
 
   if (unmatched.length && items.length) {

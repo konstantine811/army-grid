@@ -35,6 +35,7 @@ export const PersonnelListPanel = memo(
       questionnairePresenceStatus: "loading" | "ready" | "error";
       isLoading: boolean;
       selectedRowId: string;
+      photoIndexReady?: number;
       photoByExternalId: Record<string, string>;
       selectedPhotoFullUrl?: string;
       keyboardEnabled: boolean;
@@ -54,6 +55,7 @@ export const PersonnelListPanel = memo(
       questionnairePresenceStatus,
       isLoading,
       selectedRowId,
+      photoIndexReady = 0,
       photoByExternalId,
       selectedPhotoFullUrl = "",
       keyboardEnabled,
@@ -169,6 +171,7 @@ export const PersonnelListPanel = memo(
           <PersonnelVirtualList
             items={filteredPersonnel}
             selectedRowId={selectedRowId}
+            photoIndexReady={photoIndexReady}
             photoByExternalId={photoByExternalId}
             selectedPhotoFullUrl={selectedPhotoFullUrl}
             onNeedPhotos={onNeedPhotos}

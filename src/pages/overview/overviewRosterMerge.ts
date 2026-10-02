@@ -39,6 +39,73 @@ import { buildStaffSheetColumnsRecord } from "./overviewStaffSheetColumns";
 
 const normalizeRosterText = normalizeRosterMatchText;
 
+const isPlaceholderOverviewUnit = (unit: string) => {
+  const text = unit.trim().toLocaleLowerCase("uk-UA");
+  return !text || text === "—" || text === "–" || text === "-" || text === "ж";
+};
+
+const overviewRowScore = (row: BackendPersonnelOverviewRow) => {
+  let score = 0;
+  const unit = row.unit.trim().toLocaleLowerCase("uk-UA");
+  if (!isPlaceholderOverviewUnit(row.unit)) score += 8;
+  else if (unit === "ж") score += 2;
+  if (row.inStaff) score += 2;
+  if (row.rank.trim()) score += 1;
+  if (row.positionTitle.trim()) score += 1;
+  if (row.externalId.trim().startsWith("pid_")) score += 2;
+  return score;
+};
+
+const stableOverviewPid = (row: BackendPersonnelOverviewRow) => {
+  const id = row.externalId.trim();
+  return id.startsWith("pid_") ? id : "";
+};
+
+/** Одна особа з двох джерел (порожній підрозділ і «ж») не має стояти двома рядками. */
+export const dedupeOverviewRows = (
+  rows: BackendPersonnelOverviewRow[],
+): BackendPersonnelOverviewRow[] => {
+  const groups = new Map<string, BackendPersonnelOverviewRow[]>();
+  for (const row of rows) {
+    const key = normalizeRosterText(row.name);
+    if (!key) continue;
+    const list = groups.get(key);
+    if (list) list.push(row);
+    else groups.set(key, [row]);
+  }
+
+  const seen = new Set<string>();
+  const result: BackendPersonnelOverviewRow[] = [];
+  for (const row of rows) {
+    const key = normalizeRosterText(row.name);
+    if (!key) {
+      result.push(row);
+      continue;
+    }
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const group = groups.get(key) ?? [row];
+    const pids = [...new Set(group.map(stableOverviewPid).filter(Boolean))];
+    if (pids.length > 1) {
+      for (const pid of pids) {
+        const matches = group.filter((item) => stableOverviewPid(item) === pid);
+        result.push(
+          matches.reduce((best, item) =>
+            overviewRowScore(item) > overviewRowScore(best) ? item : best,
+          ),
+        );
+      }
+      continue;
+    }
+    result.push(
+      group.reduce((best, item) =>
+        overviewRowScore(item) > overviewRowScore(best) ? item : best,
+      ),
+    );
+  }
+  return result;
+};
+
 const applyStaffRosterStatus = (
   rosterRow: EjournalPreviewRow,
   rosterLabels: Record<string, string>,
@@ -330,7 +397,7 @@ export const buildStaffOverviewRowsFromRoster = (
     if (overviewRow) result.push(overviewRow);
   });
 
-  return result;
+  return dedupeOverviewRows(result);
 };
 
 /** Режим «Штатка» в Огляді: усі зведені картки, які видно в Особовому складі. */
@@ -360,7 +427,7 @@ export const buildStaffOverviewRowsFromPersonnel = (
     if (overviewRow) result.push(overviewRow);
   }
 
-  return result;
+  return dedupeOverviewRows(result);
 };
 
 /** Унікальні підрозділи зі Штатки (col 2) для фільтра Огляду. */

@@ -47,6 +47,22 @@ const withArchiveMarker = (
   };
 };
 
+/** Чи є в наборі числові id ООС, під якими лежать фото й анкети. */
+export const datasetCarriesSpreadsheetPersonIds = (
+  rows: EjournalPreviewRow[] | null | undefined,
+  minimum = 50,
+) => {
+  if (!rows?.length) return false;
+  let found = 0;
+  for (const row of rows) {
+    if (/^\d{3,}$/.test(getPersonExternalId(row))) {
+      found += 1;
+      if (found >= minimum) return true;
+    }
+  }
+  return false;
+};
+
 /** Особа зі штатки / ранкового «Загального списку», не лише з ЕЖООС. Архів — окремий таб. */
 export const isPersonnelInStaffRoster = (
   row: EjournalPreviewRow | null | undefined,
@@ -236,18 +252,23 @@ export const mergeRosterRowsIntoPreview = (
     if (nameKey) pushIndexed(rosterByName, nameKey, row);
   });
 
+  const pickUnusedRosterRow = (
+    rows: EjournalPreviewRow[] | undefined,
+    preferredBirth = "",
+  ) => pickBestRow(rows?.filter((row) => !usedRosterRows.has(row)), preferredBirth);
+
   const pickRosterForPreviewRow = (base: EjournalPreviewRow) => {
     const spreadsheetId = getPersonExternalId(base);
     const birth = normalizePersonBirthKey(resolvePersonBirthDate(base));
     const nameKey = normalizeRosterText(getPersonDisplayName(base));
-    const byId = pickBestRow(rosterById.get(spreadsheetId), birth);
+    const byId = pickUnusedRosterRow(rosterById.get(spreadsheetId), birth);
     if (byId) return byId;
 
     const rnokpp = compactRnokpp(
       getPersonFieldValue(base, ["рнокпп_за_наявності"]) ||
         getPersonFieldValue(base, ["рнокпп"]),
     );
-    const byRnokpp = pickBestRow(rosterByRnokpp.get(rnokpp), birth);
+    const byRnokpp = pickUnusedRosterRow(rosterByRnokpp.get(rnokpp), birth);
     if (byRnokpp) {
       const rosterNameKey = normalizeRosterText(getRosterPersonName(byRnokpp));
       // ІПН у старих картках може належати іншій людині. Не склеюємо
@@ -259,7 +280,7 @@ export const mergeRosterRowsIntoPreview = (
     }
 
     if (nameKey && birth) {
-      const byNameBirth = pickBestRow(
+      const byNameBirth = pickUnusedRosterRow(
         rosterByNameBirth.get(`${nameKey}|${birth}`),
         birth,
       );
@@ -267,14 +288,16 @@ export const mergeRosterRowsIntoPreview = (
     }
 
     const nameHits = rosterByName.get(nameKey) ?? [];
-    const nameMatch = pickBestRow(nameHits, birth);
-    if (
-      nameMatch &&
-      nameHits.length === 1 &&
-      birthsCompatible(birth, getRosterPersonBirthDate(nameMatch))
-    ) {
+    const unusedNameHits = nameHits.filter((row) => !usedRosterRows.has(row));
+    const nameMatch = pickBestRow(unusedNameHits, birth);
+    if (!nameMatch || unusedNameHits.length !== 1) return undefined;
+    if (birthsCompatible(birth, getRosterPersonBirthDate(nameMatch))) {
       return nameMatch;
     }
+    // Картка вже зі штатки, і в новому файлі це ПІБ одне. Дата могла
+    // записатися інакше (08.06.1992 і 92.06.2008) — не заводимо другу особу.
+    // Однофамілець з ООС і іншою датою лишається окремо.
+    if (/^roster:/i.test(String(base.__dbRowId ?? ""))) return nameMatch;
     return undefined;
   };
 
@@ -464,6 +487,39 @@ export const combineRosterRowSources = (
   return merged;
 };
 
+const rosterListOrder = (row: EjournalPreviewRow) => {
+  const value = Number(row.__rosterOrder ?? row.__rowNumber);
+  // 0 is the first row of the staff file. Only a missing number goes last.
+  return Number.isFinite(value) && value >= 0 ? value : Number.MAX_SAFE_INTEGER;
+};
+
+/** «У штаті» йде як у файлі Штатки: Кіяненко на першому рядку лишається першим. */
+export const sortPersonnelRowsByRosterOrder = (rows: EjournalPreviewRow[]) =>
+  [...rows].sort((left, right) => rosterListOrder(left) - rosterListOrder(right));
+
+const directStaffColumn = (row: EjournalPreviewRow, columnNumber: number) =>
+  String(
+    row[`column_${columnNumber}`] ?? row[`roster__column_${columnNumber}`] ?? "",
+  ).trim();
+
+/**
+ * Порожній бланк штатки: те саме ПІБ уже є в рядку з колонкою ПІБ,
+ * а цей дубль не має ні колонки ПІБ, ні посади.
+ */
+export const dropEmptyStaffBlankRows = (rows: EjournalPreviewRow[]) => {
+  const namedOnStaffLine = new Set(
+    rows
+      .filter((row) => directStaffColumn(row, 14))
+      .map((row) => normalizeRosterText(getPersonDisplayName(row)))
+      .filter(Boolean),
+  );
+  return rows.filter((row) => {
+    if (directStaffColumn(row, 14) || directStaffColumn(row, 5)) return true;
+    const name = normalizeRosterText(getPersonDisplayName(row));
+    return !name || !namedOnStaffLine.has(name);
+  });
+};
+
 const ROSTER_ONLY_SHEET_STUB: BackendEjournalImportSheet = {
   id: "roster-only",
   batchId: "roster-only",
@@ -481,7 +537,11 @@ export const buildRosterOnlyPreviewState = (
   sheet: BackendEjournalImportSheet | null | undefined = null,
 ): DbPreviewState | null => {
   if (!rosterRows.length) return null;
-  const rows = mergeRosterRowsIntoPreview({ rows: [] }, rosterRows);
+  const rows = sortPersonnelRowsByRosterOrder(
+    dropEmptyStaffBlankRows(
+      mergeRosterRowsIntoPreview({ rows: [] }, rosterRows),
+    ),
+  );
   if (!rows.length) return null;
   const activeSheet = sheet ?? {
     ...ROSTER_ONLY_SHEET_STUB,
@@ -511,8 +571,12 @@ export const buildStaffScopePreview = (
   } | null,
 ): DbPreviewState | null => {
   if (cached?.rows.length && rosterRows.length) {
-    const rows = mergeRosterRowsIntoPreview(cached, rosterRows).filter(
-      (row) => isPersonnelInStaffRoster(row) || isPersonnelFromArchive(row),
+    const rows = sortPersonnelRowsByRosterOrder(
+      dropEmptyStaffBlankRows(
+        mergeRosterRowsIntoPreview(cached, rosterRows).filter(
+          (row) => isPersonnelInStaffRoster(row) || isPersonnelFromArchive(row),
+        ),
+      ),
     );
     if (rows.length) {
       const sheet = cached.sheet ?? rosterSheet ?? {

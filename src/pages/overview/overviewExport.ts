@@ -42,6 +42,7 @@ const CENTERED_COLUMN_IDS = new Set([
   "fighterExitDate",
   "fighterReturnDate",
   "fighterTotalDays",
+  "fighterAllDays",
   "fighterStatus",
   "updatedAt",
 ]);
@@ -58,6 +59,7 @@ const overviewExportColumnWidth = (columnId: string) => {
   if (columnId === "fighterExitDate") return 15;
   if (columnId === "fighterReturnDate") return 17;
   if (columnId === "fighterTotalDays") return 10;
+  if (columnId === "fighterAllDays") return 12;
   if (columnId === "fighterStatus") return 16;
   if (columnId === "updatedAt") return 18;
   if (/^staff_\d+$/.test(columnId)) return 18;

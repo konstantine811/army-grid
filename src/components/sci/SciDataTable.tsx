@@ -1672,6 +1672,8 @@ function normalizeFilter(value: unknown) {
 
 function parseSortDate(value: string) {
   const text = value.trim();
+  // Date.parse("39") дає 2039 рік, і дні виходів сортуються не як числа.
+  if (/^-?\d+(?:[.,]\d+)?$/.test(text)) return null;
   const dotted = text.match(
     /^(\d{1,2})[.\/-](\d{1,2})[.\/-](\d{2,4})(?:[,\s]+(\d{1,2}):(\d{2}))?/,
   );
@@ -1692,7 +1694,7 @@ function parseSortDate(value: string) {
   return Number.isFinite(iso) ? iso : null;
 }
 
-function compareSortValues(left: string, right: string) {
+export function compareSortValues(left: string, right: string) {
   const leftDate = parseSortDate(left);
   const rightDate = parseSortDate(right);
   if (leftDate != null && rightDate != null && leftDate !== rightDate) {

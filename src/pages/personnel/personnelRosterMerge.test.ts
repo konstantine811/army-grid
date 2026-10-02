@@ -4,6 +4,8 @@ import {
   applyPersonnelMergeDelta,
   buildPersonnelMergeDelta,
   buildStaffScopePreview,
+  datasetCarriesSpreadsheetPersonIds,
+  dropEmptyStaffBlankRows,
   extractBirthDateFromPersonName,
   getRosterPersonBirthDate,
   combineRosterRowSources,
@@ -169,6 +171,46 @@ describe("mergeRosterRowsIntoPreview", () => {
     const merged = mergeRosterRowsIntoPreview(preview, roster);
     expect(merged).toHaveLength(1);
     expect(merged[0][`${ROSTER_FIELD_PREFIX}column_19`]).toBe("3129609236");
+  });
+
+  it("does not add a second card when the only staff row has a different birth text", () => {
+    const preview = {
+      rows: [
+        oosRow("КІЯНЕНКО Андрій Олександрович", {
+          birthDate: "08.06.1992",
+          __dbRowId: "roster:p:кіяненко",
+        }),
+      ],
+    };
+    const roster = [
+      rosterRow("КІЯНЕНКО Андрій Олександрович", {
+        birthDate: "92.06.2008",
+        __dbRowId: "excel-row-2",
+      }),
+    ];
+
+    const merged = mergeRosterRowsIntoPreview(preview, roster);
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0]?.__dbRowId).toBe("roster:p:кіяненко");
+    expect(merged.filter(isPersonnelInStaffRoster)).toHaveLength(1);
+  });
+
+  it("uses one staff row for only one duplicated OOS card", () => {
+    const preview = {
+      rows: [
+        oosRow("ПЕТРЕНКО Іван Петрович", { id: "oos-1" }),
+        oosRow("ПЕТРЕНКО Іван Петрович", { id: "oos-2" }),
+      ],
+    };
+    const roster = [rosterRow("ПЕТРЕНКО Іван Петрович")];
+
+    const merged = mergeRosterRowsIntoPreview(preview, roster);
+    const staffRows = merged.filter(isPersonnelInStaffRoster);
+
+    expect(merged).toHaveLength(2);
+    expect(staffRows).toHaveLength(1);
+    expect(staffRows[0]?.id).toBe("oos-1");
   });
 
   it("merges by ІПН even if штатка ПІБ has a dirty date, and drops the extra card", () => {
@@ -352,6 +394,73 @@ describe("buildStaffScopePreview", () => {
     expect(preview?.rows).toHaveLength(1);
     expect(preview?.rows[0]?.id).toBe("2103004");
     expect(isPersonnelInStaffRoster(preview?.rows[0])).toBe(true);
+  });
+
+  it("drops an empty duplicate when the staff line already has that name", () => {
+    const rows = dropEmptyStaffBlankRows([
+      oosRow("КІЯНЕНКО Андрій Олександрович", {
+        id: "12",
+        column_14: "КІЯНЕНКО Андрій Олександрович",
+        column_5: "Командир батальйону",
+      }),
+      {
+        __dbRowId: "roster:p:кіяненко",
+        прізвище: "КІЯНЕНКО Андрій Олександрович",
+        ПІБ: "КІЯНЕНКО Андрій Олександрович",
+      } as EjournalPreviewRow,
+    ]);
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.id).toBe("12");
+  });
+
+  it("lists the staff sheet order, so the first roster row stays first", () => {
+    const preview = buildStaffScopePreview(
+      [
+        rosterRow("КІЯНЕНКО Андрій Олександрович", {
+          __rosterOrder: 0,
+          __rowNumber: 2,
+        }),
+        rosterRow("БАБЧЕНКО Олег Володимирович", {
+          __rosterOrder: 2,
+          __rowNumber: 4,
+        }),
+      ],
+      null,
+      {
+        rows: [
+          oosRow("БАБЧЕНКО Олег Володимирович", { id: "4246" }),
+          oosRow("КІЯНЕНКО Андрій Олександрович", { id: "12" }),
+        ],
+        columns: [],
+        sheet: null,
+      },
+    );
+
+    expect(preview?.rows.map((row) => row.id)).toEqual(["12", "4246"]);
+  });
+});
+
+describe("datasetCarriesSpreadsheetPersonIds", () => {
+  it("accepts OOS person numbers and ignores fingerprint-only rows", () => {
+    expect(
+      datasetCarriesSpreadsheetPersonIds(
+        [oosRow("БАБЧЕНКО Олег Володимирович", { id: "4246" })],
+        1,
+      ),
+    ).toBe(true);
+    expect(
+      datasetCarriesSpreadsheetPersonIds(
+        [
+          {
+            __dbRowId: "roster:babchenko",
+            id: "p:бабченко олег володимирович:1972-08-16",
+            прізвище: "БАБЧЕНКО Олег Володимирович",
+          } as EjournalPreviewRow,
+        ],
+        1,
+      ),
+    ).toBe(false);
   });
 });
 

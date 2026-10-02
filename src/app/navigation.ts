@@ -15,6 +15,7 @@ export type AppPage =
   | "preAnketa"
   | "socPassport"
   | "personnel"
+  | "personnelV2"
   | "documents"
   | "documentSettings"
   | "usersAccess"
@@ -26,6 +27,7 @@ export type BchsAnalyticsTab = "overview" | "comparison" | "combat" | "supplemen
 export const USER_ALLOWED_PAGES: readonly AppPage[] = [
   "overview",
   "personnel",
+  "personnelV2",
   "bchs",
   "anketaData",
   "staffListGaps",
@@ -44,6 +46,7 @@ export const writeAreaForPage = (
 ): "personnel" | "bchs" | "anketaData" | "documents" | null => {
   switch (page) {
     case "personnel":
+    case "personnelV2":
       return "personnel";
     case "bchs":
       return "bchs";
@@ -70,6 +73,7 @@ export const pagePaths: Record<AppPage, string> = {
   preAnketa: "/pre-anketa",
   socPassport: "/soc-passport",
   personnel: "/personnel",
+  personnelV2: "/personnel-v2",
   documents: "/documents",
   documentSettings: "/document-settings",
   usersAccess: "/users-access",
@@ -102,7 +106,6 @@ const getPathname = (path: string) => {
 export const getPageFromPath = (path: string): AppPage => {
   const pathname = getPathname(path);
 
-  if (pathname === "/personnel-v2") return "personnel";
   if (pathname === "/overview-v2") return "overview";
   return pathname.startsWith(`${pagePaths.documents}/`)
     ? "documents"

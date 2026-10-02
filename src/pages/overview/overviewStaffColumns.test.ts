@@ -38,6 +38,7 @@ describe("OVERVIEW_STAFF_COLUMN_HEADERS", () => {
     expect(OVERVIEW_STAFF_COLUMN_HEADERS.fighterTotalDays).toBe(
       FIGHTER_STATUS_FALLBACK_HEADERS[8],
     );
+    expect(OVERVIEW_STAFF_COLUMN_HEADERS.fighterAllDays).toBe("Усього днів");
     expect(OVERVIEW_STAFF_COLUMN_HEADERS.fighterStatus).toBe(
       "Статус 200/300/500",
     );

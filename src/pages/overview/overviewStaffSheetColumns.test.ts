@@ -13,7 +13,7 @@ describe("overviewStaffSheetColumns", () => {
     expect(OVERVIEW_STAFF_SHEET_COLUMN_DEFS.length).toBe(
       STAFF_SHEET_EXPORT_COLUMN_NUMBERS.length +
         FIGHTER_STATUS_FIELDS.length -
-        13,
+        14,
     );
     expect(
       OVERVIEW_STAFF_SHEET_COLUMN_DEFS.some(
@@ -28,6 +28,11 @@ describe("overviewStaffSheetColumns", () => {
     expect(
       OVERVIEW_STAFF_SHEET_COLUMN_DEFS.some(
         (column) => column.fighterKey === "fighter_status_value",
+      ),
+    ).toBe(false);
+    expect(
+      OVERVIEW_STAFF_SHEET_COLUMN_DEFS.some(
+        (column) => column.fighterKey === "fighter_status_all_days",
       ),
     ).toBe(false);
     expect(
@@ -52,6 +57,7 @@ describe("overviewStaffSheetColumns", () => {
       column_14: "Іванов І.І.",
       fighter_status_exit_date: "01.01.2026",
       fighter_status_return_date: "10.01.2026",
+      fighter_status_all_days: "40",
     });
 
     expect(record.staff_2).toBe("1 рота");
@@ -59,6 +65,7 @@ describe("overviewStaffSheetColumns", () => {
     expect(record.staff_14).toBe("Іванов І.І.");
     expect(record.staff_fighter_fighter_status_exit_date).toBe("01.01.2026");
     expect(record.staff_fighter_fighter_status_total_days).toBe("9");
+    expect(record.staff_fighter_fighter_status_all_days).toBe("40");
   });
 
   it("uses roster column labels for headers", () => {

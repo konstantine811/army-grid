@@ -31,6 +31,7 @@ const OVERVIEW_PRIMARY_FIGHTER_FIELDS = new Set<FighterStatusFieldKey>([
   "fighter_status_exit_date",
   "fighter_status_return_date",
   "fighter_status_total_days",
+  "fighter_status_all_days",
   "fighter_status_value",
 ]);
 const OVERVIEW_PRIORITY_ROSTER_COLUMNS = [31, 35, 32] as const;

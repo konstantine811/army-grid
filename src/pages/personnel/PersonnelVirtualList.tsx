@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
 import { PersonSearchOutlinedIcon } from "@/components/sci/icons";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
@@ -11,6 +11,7 @@ export function PersonnelVirtualList({
   items,
   selectedRowId,
   photoByExternalId,
+  photoIndexReady = 0,
   selectedPhotoFullUrl = "",
   onNeedPhotos,
   onSelect,
@@ -20,6 +21,7 @@ export function PersonnelVirtualList({
   items: PersonnelRecord[];
   selectedRowId: string;
   photoByExternalId: Record<string, string>;
+  photoIndexReady?: number;
   selectedPhotoFullUrl?: string;
   onNeedPhotos?: (externalIds: string[]) => void;
   onSelect: (rowId: string) => void;
@@ -38,6 +40,15 @@ export function PersonnelVirtualList({
   });
   const rowVirtualizerRef = useRef(rowVirtualizer);
   rowVirtualizerRef.current = rowVirtualizer;
+
+  useLayoutEffect(() => {
+    // Filtering/reordering keeps the same virtualizer instance. Its cached
+    // measurements belong to the previous item indices and otherwise leave
+    // the filtered cards at their old vertical positions.
+    rowVirtualizer.measure();
+    rowVirtualizer.scrollToOffset(0);
+  }, [items, rowVirtualizer]);
+
   const measureVirtualRow = useCallback((node: Element | null) => {
     if (!node) return;
     requestAnimationFrame(() => {
@@ -54,7 +65,7 @@ export function PersonnelVirtualList({
   useEffect(() => {
     if (!visiblePhotoIds) return;
     onNeedPhotos?.(visiblePhotoIds.split("\u0000"));
-  }, [onNeedPhotos, visiblePhotoIds]);
+  }, [onNeedPhotos, photoIndexReady, visiblePhotoIds]);
 
   useEffect(() => {
     if (!selectedRowId || items.length === 0) return;

@@ -16,5 +16,6 @@ export const OVERVIEW_STAFF_COLUMN_HEADERS = {
   fighterExitDate: FIGHTER_STATUS_FALLBACK_HEADERS[6],
   fighterReturnDate: FIGHTER_STATUS_FALLBACK_HEADERS[7],
   fighterTotalDays: FIGHTER_STATUS_FALLBACK_HEADERS[8],
+  fighterAllDays: "Усього днів",
   fighterStatus: "Статус 200/300/500",
 } as const;

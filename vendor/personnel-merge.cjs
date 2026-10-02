@@ -9837,6 +9837,223 @@ function getColumnLabel(index) {
   return label;
 }
 
+// src/pages/personnel/morningGeneralListColumnLabels.ts
+var MORNING_GENERAL_LIST_COLUMN_LABELS = {
+  1: "\u2116",
+  2: "\u041F\u0456\u0434\u0440\u043E\u0437\u0434\u0456\u043B",
+  3: "\u0412\u0437\u0432\u043E\u0434",
+  4: "\u0412\u0456\u0434\u0434\u0456\u043B\u0435\u043D\u043D\u044F",
+  5: "\u041F\u043E\u0441\u0430\u0434\u0430",
+  6: "\u0412\u041E\u0421",
+  7: "\u041F\u043E\u0432\u043D\u0430 \u043F\u043E\u0441\u0430\u0434\u0430",
+  8: "\u0428\u041F\u041A \u0444\u0430\u043A\u0442",
+  9: "\u041A\u0430\u0442\u0435\u0433\u043E\u0440\u0456\u044F \u0441\u043A\u043B\u0430\u0434\u0443",
+  10: "\u0410\u043D\u043A\u0435\u0442\u0430",
+  11: "\u0412\u0456\u0439\u0441\u044C\u043A\u043E\u0432\u0438\u0439 \u043A\u0432\u0438\u0442\u043E\u043A",
+  12: "\u041C\u043E\u0431\u0456\u043B\u0456\u0437\u0430\u0446\u0456\u044F/\u043A\u043E\u043D\u0442\u0440\u0430\u043A\u0442",
+  13: "\u0417\u0432\u0430\u043D\u043D\u044F",
+  14: "\u041F\u0406\u0411",
+  15: "\u041F\u043E\u0437\u0438\u0432\u043D\u0438\u0439",
+  16: "\u0414\u0430\u0442\u0430 \u043D\u0430\u0440\u043E\u0434\u0436\u0435\u043D\u043D\u044F",
+  17: "\u0420\u0456\u043A",
+  18: "\u041F\u043E\u0432\u043D\u0438\u0445 \u0440\u043E\u043A\u0456\u0432",
+  19: "\u0406\u041F\u041D",
+  20: "\u0413\u0440\u0443\u043F\u0430 \u043A\u0440\u043E\u0432\u0456",
+  21: "\u0421\u0442\u0430\u0442\u0443\u0441",
+  22: "\u0422\u0438\u043F \u0412\\\u0421",
+  23: "\u0421\u0442\u0430\u0442\u0443\u0441 \u0411\u0413",
+  24: "\u0411\u0417\u0412\u041F/\u0411\u0420\u0415\u0417",
+  25: "\u041D\u0430\u044F\u0432\u043D\u0456\u0441\u0442\u044C \u0411\u0417\u0412\u041F",
+  26: "\u041A\u0443\u0440\u0441 \u0411\u0417\u0412\u041F",
+  27: "\u0412\u0456\u0434\u0440\u044F\u0434\u0436\u0435\u043D\u043D\u044F (\u0411\u0420\u0415\u0417)",
+  28: "\u041E\u0431\u043C\u0435\u0436\u0435\u043D\u043D\u044F",
+  29: "\u0412 \u044F\u043A\u043E\u043C\u0443 \u043F\u0456\u0434\u0440\u043E\u0437\u0434\u0456\u043B\u0456",
+  31: "\u041C\u0456\u0441\u0446\u0435 \u043F\u0435\u0440\u0435\u0431\u0443\u0432\u0430\u043D\u043D\u044F",
+  32: "\u041F\u0440\u0438\u043C\u0456\u0442\u043A\u0438",
+  33: "\u041D\u0430\u043F\u0440\u044F\u043C\u043E\u043A",
+  34: "\u041F\u0440\u0438\u043C\u0456\u0442\u043A\u0430 3",
+  35: "\u041C\u0456\u0441\u0446\u0435 \u043F\u0435\u0440\u0435\u0431\u0443\u0432\u0430\u043D\u043D\u044F (\u0443\u0442\u043E\u0447\u043D\u0435\u043D\u043D\u044F)",
+  // Колонки без заголовка в Excel (часто списки / дублікаты значень)
+  37: "\u0421\u0442\u0430\u0442\u0443\u0441",
+  38: "\u0422\u0438\u043F \u0412\\\u0421",
+  39: "\u0411\u0417\u0412\u041F/\u0411\u0420\u0415\u0417",
+  40: "\u041C\u0456\u0441\u0446\u0435 \u043F\u0435\u0440\u0435\u0431\u0443\u0432\u0430\u043D\u043D\u044F",
+  41: "\u041E\u0431\u043C\u0435\u0436\u0435\u043D\u043D\u044F",
+  42: "\u0421\u0442\u0430\u0442\u0443\u0441 \u0411\u0413"
+};
+
+// src/pages/ejournal/ejournalUtils.ts
+var isEjournalColumn = (value) => Boolean(
+  value && typeof value === "object" && "key" in value && "label" in value
+);
+var parseDbColumns = (columns) => {
+  if (!Array.isArray(columns)) return [];
+  return columns.filter(isEjournalColumn).map((column, index) => ({
+    key: String(column.key || `column_${index + 1}`),
+    label: String(column.label ?? ""),
+    order: Number.isFinite(column.order) ? Number(column.order) : index,
+    originalIndex: typeof column.originalIndex === "number" ? column.originalIndex : void 0,
+    letter: column.letter ? String(column.letter) : void 0
+  })).sort((left, right) => left.order - right.order);
+};
+var previewValueToDisplay = (value) => value instanceof Date || typeof value === "string" || typeof value === "number" || typeof value === "boolean" || value === null || value === void 0 ? valueToDisplay(value) : JSON.stringify(value);
+
+// src/pages/excel-fill/rosterSourceSnapshot.ts
+var cellText = (value) => String(value ?? "").trim();
+var normalizeKey = (value) => value.replace(/[ʼ’']/g, "").replace(/[()]/g, " ").replace(/\s+/g, " ").trim().toLocaleLowerCase("uk-UA");
+var labelHasClarification = (normalized) => normalized.includes("\u0443\u0442\u043E\u0447\u043D");
+var ROSTER_COLUMN_KEY_ALIASES = {
+  31: ["column_31", "\u043C\u0456\u0441\u0446\u0435_\u043F\u0435\u0440\u0435\u0431\u0443\u0432\u0430\u043D\u043D\u044F"],
+  35: ["column_35", "\u043C\u0456\u0441\u0446\u0435_\u043F\u0435\u0440\u0435\u0431\u0443\u0432\u0430\u043D\u043D\u044F_\u0443\u0442\u043E\u0447\u043D\u0435\u043D\u043D\u044F"],
+  40: ["column_40", "\u043C\u0456\u0441\u0446\u0435_\u043F\u0435\u0440\u0435\u0431\u0443\u0432\u0430\u043D\u043D\u044F_2"]
+};
+var readRosterColumnValue = (row, columnNumber) => {
+  if (!row) return "";
+  const direct = cellText(row[`column_${columnNumber}`]);
+  if (direct) return direct;
+  const rosterPrefixed = cellText(row[`roster__column_${columnNumber}`]);
+  if (rosterPrefixed) return rosterPrefixed;
+  const aliases = ROSTER_COLUMN_KEY_ALIASES[columnNumber];
+  if (aliases) {
+    for (const alias of aliases) {
+      if (Object.prototype.hasOwnProperty.call(row, alias)) {
+        return cellText(row[alias]);
+      }
+    }
+    if (columnNumber === 35 || columnNumber === 40) {
+      return "";
+    }
+  }
+  const label = MORNING_GENERAL_LIST_COLUMN_LABELS[columnNumber];
+  if (!label) return "";
+  const wanted = normalizeKey(label);
+  const wantedClarification = labelHasClarification(wanted);
+  for (const [key, value] of Object.entries(row)) {
+    if (key.startsWith("__")) continue;
+    const bare = key.replace(/^roster__/i, "");
+    if (/^column_\d+$/i.test(bare)) continue;
+    const keyNorm = normalizeKey(bare).replace(/_/g, " ");
+    if (keyNorm === wanted) {
+      return cellText(value);
+    }
+  }
+  for (const [key, value] of Object.entries(row)) {
+    if (key.startsWith("__")) continue;
+    const bare = key.replace(/^roster__/i, "");
+    if (/^column_\d+$/i.test(bare)) continue;
+    const keyNorm = normalizeKey(bare).replace(/_/g, " ");
+    const keyClarification = labelHasClarification(keyNorm);
+    if (wantedClarification !== keyClarification) continue;
+    if (keyNorm.includes(wanted) || wanted.includes(keyNorm)) {
+      const text = cellText(value);
+      if (text) return text;
+    }
+  }
+  return "";
+};
+
+// src/pages/personnel/fighterStatusImport.ts
+var FIGHTER_STATUS_FIELDS = [
+  {
+    key: "fighter_status_direction",
+    label: "\u0421\u0442\u0430\u0442\u0443\u0441 \u0431\u0456\u0439\u0446\u0456\u0432 \xB7 \u041D\u0430\u043F\u0440\u044F\u043C\u043E\u043A"
+  },
+  {
+    key: "fighter_status_entry_date",
+    label: "\u0421\u0442\u0430\u0442\u0443\u0441 \u0431\u0456\u0439\u0446\u0456\u0432 \xB7 \u0414\u0430\u0442\u0430 \u0437\u0430\u0445\u043E\u0434\u0443"
+  },
+  {
+    key: "fighter_status_exit_date",
+    label: "\u0421\u0442\u0430\u0442\u0443\u0441 \u0431\u0456\u0439\u0446\u0456\u0432 \xB7 \u0414\u0430\u0442\u0430 \u0432\u0438\u0445\u043E\u0434\u0443"
+  },
+  {
+    key: "fighter_status_return_date",
+    label: "\u0421\u0442\u0430\u0442\u0443\u0441 \u0431\u0456\u0439\u0446\u0456\u0432 \xB7 \u0414\u0430\u0442\u0430 \u043F\u043E\u0432\u0435\u0440\u043D\u0435\u043D\u043D\u044F"
+  },
+  {
+    key: "fighter_status_total_days",
+    label: "\u0421\u0442\u0430\u0442\u0443\u0441 \u0431\u0456\u0439\u0446\u0456\u0432 \xB7 \u0414\u043D\u0456\u0432"
+  },
+  {
+    key: "fighter_status_value",
+    label: "\u0421\u0442\u0430\u0442\u0443\u0441 \u0431\u0456\u0439\u0446\u0456\u0432 \xB7 \u0421\u0442\u0430\u0442\u0443\u0441 (200/300/500)"
+  },
+  {
+    key: "fighter_status_weapon",
+    label: "\u0421\u0442\u0430\u0442\u0443\u0441 \u0431\u0456\u0439\u0446\u0456\u0432 \xB7 \u0417\u0431\u0440\u043E\u044F"
+  },
+  {
+    key: "fighter_status_communication",
+    label: "\u0421\u0442\u0430\u0442\u0443\u0441 \u0431\u0456\u0439\u0446\u0456\u0432 \xB7 \u0417\u0430\u0441\u043E\u0431\u0438 \u0437\u0432'\u044F\u0437\u043A\u0443"
+  },
+  {
+    key: "fighter_status_note",
+    label: "\u0421\u0442\u0430\u0442\u0443\u0441 \u0431\u0456\u0439\u0446\u0456\u0432 \xB7 \u041F\u0440\u0438\u043C\u0456\u0442\u043A\u0430"
+  }
+];
+var normalizeRosterMatchText = (value) => valueToDisplay(value).replace(/[ʼ’']/g, "").replace(/\([^)]*\)/g, " ").replace(/[.,;:№#"/\\|()[\]{}]+/g, " ").replace(/\s+/g, " ").trim().toLocaleLowerCase("uk-UA");
+var getFighterStatusDirectValue = (row, key) => {
+  if (!row) return "";
+  const rosterKey = `roster__${key}`;
+  const direct = row[key] ?? row[rosterKey];
+  return formatValueForDisplay(direct);
+};
+var parseFighterStatusDate = (value) => {
+  const match = String(value ?? "").trim().match(/^(\d{1,2})[.\/-](\d{1,2})[.\/-](\d{2,4})$/);
+  if (!match) return null;
+  const day = Number(match[1]);
+  const month = Number(match[2]);
+  let year = Number(match[3]);
+  if (year < 100) year += year >= 50 ? 1900 : 2e3;
+  if (day < 1 || day > 31 || month < 1 || month > 12 || year < 1900) {
+    return null;
+  }
+  const date = new Date(year, month - 1, day);
+  return Number.isNaN(date.getTime()) ? null : date;
+};
+var diffFighterStatusDays = (exitDate, returnDate) => {
+  const from = parseFighterStatusDate(exitDate);
+  const to = parseFighterStatusDate(returnDate);
+  if (!from || !to) return "";
+  const days = Math.round((to.getTime() - from.getTime()) / 864e5);
+  return Number.isFinite(days) ? String(days) : "";
+};
+var resolveFighterStatusTotalDays = (row) => {
+  const exitDate = getFighterStatusDirectValue(row, "fighter_status_exit_date");
+  const returnDate = getFighterStatusDirectValue(
+    row,
+    "fighter_status_return_date"
+  );
+  const computed = diffFighterStatusDays(exitDate, returnDate);
+  if (computed) return computed;
+  const stored = getFighterStatusDirectValue(row, "fighter_status_total_days");
+  return /^\d{1,4}$/.test(stored) ? stored : "";
+};
+var getRosterFighterStatusOverviewFields = (row) => {
+  const fighterExitDate = getFighterStatusDirectValue(
+    row,
+    "fighter_status_exit_date"
+  );
+  const fighterReturnDate = getFighterStatusDirectValue(
+    row,
+    "fighter_status_return_date"
+  );
+  return {
+    fighterDirection: getFighterStatusDirectValue(row, "fighter_status_direction"),
+    fighterEntryDate: getFighterStatusDirectValue(row, "fighter_status_entry_date"),
+    fighterExitDate,
+    fighterReturnDate,
+    fighterTotalDays: resolveFighterStatusTotalDays(row),
+    fighterStatus: getFighterStatusDirectValue(row, "fighter_status_value"),
+    fighterWeapon: getFighterStatusDirectValue(row, "fighter_status_weapon"),
+    fighterCommunication: getFighterStatusDirectValue(
+      row,
+      "fighter_status_communication"
+    ),
+    fighterNote: getFighterStatusDirectValue(row, "fighter_status_note")
+  };
+};
+
 // node_modules/zustand/esm/vanilla.mjs
 var createStoreImpl = (createState) => {
   let state;
@@ -9920,12 +10137,16 @@ var CacheKeys = {
   overview: "personnel:overview",
   documentsAll: "personnel:documents:meta:v4",
   questionnairesMeta: "personnel:questionnaires:meta",
-  questionnairePresencePrefix: "personnel:questionnaire-presence:v1:",
+  questionnairePresencePrefix: "personnel:questionnaire-presence:v2:",
+  questionnaireDiskPresencePrefix: "personnel:questionnaire-disk-presence:v1:",
   overviewAssetsPrefix: "personnel:overview-assets:v1:",
   overviewMergePrefix: "personnel:overview-merge:v1:",
-  personnelPhotoIndex: "personnel:photo-index:v1"
+  overviewStaffPrefix: "personnel:overview-staff:v1:",
+  bchsMorningSnapshotPrefix: "personnel:bchs-morning-snapshot:v1:",
+  personnelPhotoIndex: "personnel:photo-index:v1",
+  staffListGapsSession: "staff-list-gaps:session:v1"
 };
-var isKnownCacheKey = (key) => key === CacheKeys.ejournalImports || key.startsWith("ejournal:sheet-rows:") || key === CacheKeys.rosterLatest || key === CacheKeys.anketaCreatedPersonnel || key === CacheKeys.staffSheetImport || key === CacheKeys.staffSheetVkIndex || key === CacheKeys.personnelDataset || key === CacheKeys.overview || key === CacheKeys.documentsAll || key === CacheKeys.questionnairesMeta || key.startsWith(CacheKeys.questionnairePresencePrefix) || key.startsWith(CacheKeys.overviewAssetsPrefix) || key.startsWith(CacheKeys.overviewMergePrefix) || key === CacheKeys.personnelPhotoIndex;
+var isKnownCacheKey = (key) => key === CacheKeys.ejournalImports || key.startsWith("ejournal:sheet-rows:") || key === CacheKeys.rosterLatest || key === CacheKeys.anketaCreatedPersonnel || key === CacheKeys.staffSheetImport || key === CacheKeys.staffSheetVkIndex || key === CacheKeys.personnelDataset || key === CacheKeys.overview || key === CacheKeys.documentsAll || key === CacheKeys.questionnairesMeta || key.startsWith(CacheKeys.questionnairePresencePrefix) || key.startsWith(CacheKeys.questionnaireDiskPresencePrefix) || key.startsWith(CacheKeys.overviewAssetsPrefix) || key.startsWith(CacheKeys.overviewMergePrefix) || key.startsWith(CacheKeys.overviewStaffPrefix) || key.startsWith(CacheKeys.bchsMorningSnapshotPrefix) || key === CacheKeys.personnelPhotoIndex || key === CacheKeys.staffListGapsSession;
 var planDataCacheCleanup = (entries, now = Date.now()) => {
   const toDelete = /* @__PURE__ */ new Set();
   const sheetSnapshots = [];
@@ -10056,1367 +10277,6 @@ var photoRequestPool = new ApiRequestPool(12);
 
 // src/performance/performanceMonitor.ts
 var LARGE_RESPONSE_BYTES = 2 * 1024 * 1024;
-
-// src/pages/excel-fill/rosterSourceSnapshot.ts
-var cellText = (value) => String(value ?? "").trim();
-var normalizeKey = (value) => value.replace(/[ʼ’']/g, "").replace(/\s+/g, " ").trim().toLocaleLowerCase("uk-UA");
-var readRosterColumnValue = (row, columnNumber) => {
-  const direct = cellText(row[`column_${columnNumber}`]);
-  if (direct) return direct;
-  const rosterPrefixed = cellText(row[`roster__column_${columnNumber}`]);
-  if (rosterPrefixed) return rosterPrefixed;
-  const label = MORNING_GENERAL_LIST_COLUMN_LABELS[columnNumber];
-  if (!label) return "";
-  const wanted = normalizeKey(label);
-  for (const [key, value] of Object.entries(row)) {
-    if (key.startsWith("__")) continue;
-    const bare = key.replace(/^roster__/i, "");
-    if (/^column_\d+$/i.test(bare)) continue;
-    const keyNorm = normalizeKey(bare).replace(/_/g, " ");
-    if (keyNorm === wanted) {
-      const text = cellText(value);
-      if (text) return text;
-    }
-  }
-  for (const [key, value] of Object.entries(row)) {
-    if (key.startsWith("__")) continue;
-    const bare = key.replace(/^roster__/i, "");
-    if (/^column_\d+$/i.test(bare)) continue;
-    const keyNorm = normalizeKey(bare).replace(/_/g, " ");
-    if (keyNorm.includes(wanted) || wanted.includes(keyNorm)) {
-      const text = cellText(value);
-      if (text) return text;
-    }
-  }
-  return "";
-};
-
-// src/pages/personnel/personAttachments.ts
-var normalizeAttachmentNameKey = (value) => String(value ?? "").replace(/[ʼ’']/g, "").replace(/\([^)]*\)/g, " ").replace(/[.,;:№#"/\\|()[\]{}]+/g, " ").replace(/\s+/g, " ").trim().toLocaleLowerCase("uk-UA");
-var pushLegacyAttachmentLookupIds = (ids, name, birthDate = "", callSign = "", includeLooseKeys = false) => {
-  const nameKey = normalizeAttachmentNameKey(name);
-  if (!nameKey || nameKey === "\u043E\u0441\u043E\u0431\u0430 \u043D\u0435 \u0432\u0438\u0431\u0440\u0430\u043D\u0430") return;
-  const birthKey = normalizePersonBirthKey(birthDate);
-  if (birthKey) ids.add(`name-birth:${nameKey}:${birthKey}`);
-  if (!birthKey || includeLooseKeys) {
-    ids.add(`name:${nameKey}`);
-    const callSignKey = normalizeAttachmentNameKey(callSign);
-    if (callSignKey) {
-      ids.add(`name-call:${nameKey}:${callSignKey}`);
-    }
-  }
-};
-var FILE_NAME_NOISE = /* @__PURE__ */ new Set([
-  "pdf",
-  "\u0430\u043D\u043A\u0435\u0442\u0430",
-  "\u0430\u043D\u043A\u0435\u0442\u0438",
-  "questionnaire",
-  "\u043E\u043F\u0438\u0442\u0443\u0432\u0430\u043B\u044C\u043D\u0438\u043A",
-  "\u0441\u043A\u0430\u043D",
-  "scan"
-]);
-var nameTokensOf = (value) => normalizeAttachmentNameKey(String(value ?? "").replace(/\.pdf$/i, "")).split(" ").filter((token) => token.length > 1 && !FILE_NAME_NOISE.has(token));
-var nameTokensMatchFileName = (fullName, fileName) => {
-  const personTokens = nameTokensOf(fullName);
-  const fileTokens = nameTokensOf(fileName);
-  if (personTokens.length < 2 || fileTokens.length < 2) return false;
-  const shared = Math.min(personTokens.length, fileTokens.length);
-  for (let index = 0; index < shared; index += 1) {
-    if (personTokens[index] !== fileTokens[index]) return false;
-  }
-  return true;
-};
-var questionnaireFileMatchesPerson = (fileName, names) => {
-  const normalizedNames = names.map((name) => String(name ?? "").trim()).filter(Boolean);
-  if (!normalizedNames.length) return true;
-  const text = String(fileName ?? "").trim();
-  if (!text || /^questionnaire\.pdf$/i.test(text)) return true;
-  return normalizedNames.some((name) => nameTokensMatchFileName(name, text));
-};
-var collectNameLookupVariants = (name) => {
-  const trimmed = String(name ?? "").trim();
-  const tokens = normalizeAttachmentNameKey(trimmed).split(" ").filter(Boolean);
-  const variants = [];
-  const push = (value) => {
-    const text = value.trim();
-    if (!text || variants.includes(text)) return;
-    variants.push(text);
-  };
-  if (trimmed) push(trimmed);
-  if (tokens.length >= 2) push(tokens.slice(0, 2).join(" "));
-  return variants;
-};
-var pushNameAttachmentLookupIds = (ids, name, birthDate = "", callSign = "", includeLooseKeys = false) => {
-  for (const variant of collectNameLookupVariants(name)) {
-    pushLegacyAttachmentLookupIds(
-      ids,
-      variant,
-      birthDate,
-      callSign,
-      includeLooseKeys
-    );
-    const withBirth = buildPersonIdentityFingerprint(variant, birthDate);
-    if (withBirth) ids.add(withBirth);
-    if (!birthDate || includeLooseKeys) {
-      const withoutBirth = buildPersonIdentityFingerprint(variant);
-      if (withoutBirth) ids.add(withoutBirth);
-      const withCallSign = buildPersonIdentityFingerprint(variant, "", callSign);
-      if (withCallSign) ids.add(withCallSign);
-    }
-  }
-};
-var lookupIdsByRow = /* @__PURE__ */ new WeakMap();
-var hasAttachmentLookupHints = (hints) => Boolean(
-  hints?.anketaExternalId?.trim() || hints?.anketaFullName?.trim() || hints?.anketaBirthDate?.trim()
-);
-var collectPersonAttachmentLookupIds = (row, hints, options) => {
-  const includeLooseKeys = Boolean(options?.includeLooseKeys);
-  if (row && !hasAttachmentLookupHints(hints) && !includeLooseKeys) {
-    const cached = lookupIdsByRow.get(row);
-    if (cached) return cached;
-  }
-  const ids = /* @__PURE__ */ new Set();
-  for (const candidate of collectPersonExternalIdCandidates(row)) {
-    ids.add(candidate);
-  }
-  const push = (value) => {
-    const text = String(value ?? "").trim();
-    if (text && text !== "0") ids.add(text);
-  };
-  push(hints?.anketaExternalId);
-  const personnelName2 = getPersonDisplayName(row);
-  const anketaName = String(hints?.anketaFullName ?? "").trim();
-  const personnelBirth2 = resolvePersonBirthDate(row);
-  const anketaBirth = String(hints?.anketaBirthDate ?? "").trim();
-  const callSign = resolvePersonCallSign(row);
-  for (const name of [personnelName2, anketaName]) {
-    if (!name) continue;
-    const birth = name === personnelName2 ? personnelBirth2 : anketaBirth;
-    const variantCallSign = name === personnelName2 ? callSign : "";
-    pushNameAttachmentLookupIds(
-      ids,
-      name,
-      birth,
-      variantCallSign,
-      includeLooseKeys
-    );
-    if (includeLooseKeys) {
-      const nameKey = normalizeAttachmentNameKey(name);
-      if (nameKey) {
-        ids.add(`roster:${nameKey}`);
-        ids.add(`roster:${name.trim()}`);
-      }
-    }
-  }
-  const primary = resolvePersonIdentityKey(row);
-  if (primary) ids.add(primary);
-  const collected = [...ids];
-  if (row && !hasAttachmentLookupHints(hints) && !includeLooseKeys) {
-    lookupIdsByRow.set(row, collected);
-  }
-  return collected;
-};
-var parseOrphanAttachmentIdentityId = (id) => {
-  const raw = String(id ?? "").trim();
-  if (!raw) return null;
-  const takeNameBirth = (body) => {
-    const birthMatch = body.match(/:(\d{4}-\d{2}-\d{2})$/);
-    if (birthMatch) {
-      const nameKey2 = body.slice(0, -birthMatch[0].length).trim();
-      return nameKey2 ? { nameKey: nameKey2, birthKey: birthMatch[1] } : null;
-    }
-    const callIdx = body.lastIndexOf(":c:");
-    if (callIdx > 0) {
-      const nameKey2 = body.slice(0, callIdx).trim();
-      const callKey = body.slice(callIdx + 3).trim();
-      return nameKey2 ? { nameKey: nameKey2, callKey } : null;
-    }
-    const nameKey = body.trim();
-    return nameKey ? { nameKey } : null;
-  };
-  if (raw.startsWith("p:")) return takeNameBirth(raw.slice(2));
-  if (raw.startsWith("name-birth:")) return takeNameBirth(raw.slice("name-birth:".length));
-  if (raw.startsWith("name-call:")) {
-    const body = raw.slice("name-call:".length);
-    const sep = body.lastIndexOf(":");
-    if (sep <= 0) return null;
-    const nameKey = body.slice(0, sep).trim();
-    const callKey = body.slice(sep + 1).trim();
-    return nameKey ? { nameKey, callKey } : null;
-  }
-  if (raw.startsWith("name:")) {
-    const nameKey = raw.slice(5).trim();
-    return nameKey ? { nameKey } : null;
-  }
-  if (raw.startsWith("roster:")) {
-    const rest = raw.slice("roster:".length).trim();
-    if (!rest) return null;
-    if (/^[a-z0-9_-]+$/i.test(rest) && !/[а-яіїєґ]/i.test(rest)) return null;
-    const nameKey = normalizeAttachmentNameKey(rest);
-    return nameKey ? { nameKey } : null;
-  }
-  return null;
-};
-var personNameMatchesOrphanNameKey = (personName, orphanNameKey) => {
-  const personKey = normalizeAttachmentNameKey(personName);
-  const orphanKey = normalizeAttachmentNameKey(orphanNameKey);
-  if (!personKey || !orphanKey) return false;
-  if (personKey === orphanKey) return true;
-  const personTokens = personKey.split(" ").filter(Boolean);
-  const orphanTokens = orphanKey.split(" ").filter(Boolean);
-  if (personTokens.length < 2 || orphanTokens.length < 2) return false;
-  const shared = Math.min(personTokens.length, orphanTokens.length);
-  for (let index = 0; index < shared; index += 1) {
-    if (personTokens[index] !== orphanTokens[index]) return false;
-  }
-  return true;
-};
-
-// src/pages/personnel/personnelUtils.ts
-var ROSTER_FIELD_PREFIX = "roster__";
-var isLikelyBirthDateToken = (value) => {
-  const text = String(value ?? "").trim();
-  if (!text) return false;
-  if (/\d{1,2}[.\/-]\d{1,2}[.\/-]\d{2,4}/.test(text)) return true;
-  if (/р\.?\s*н\.?/i.test(text)) return true;
-  if (/^\d{1,2}\s+\S+\s+\d{4}/.test(text)) return true;
-  return false;
-};
-var rosterSourceKey = (key) => key.startsWith(ROSTER_FIELD_PREFIX) ? key.slice(ROSTER_FIELD_PREFIX.length) : key;
-var CUID_VALUE_RE = /^c[a-z0-9]{20,}$/i;
-var UUID_VALUE_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-var isUnstablePersonExternalId = (value) => {
-  const raw = String(value ?? "").trim();
-  if (!raw || raw === "0" || raw === "-" || raw === "null" || raw === "undefined" || raw === "[object Object]") {
-    return true;
-  }
-  if (raw.startsWith("{") || raw.startsWith("[")) return true;
-  if (/^roster:/i.test(raw)) return true;
-  if (CUID_VALUE_RE.test(raw) || UUID_VALUE_RE.test(raw)) return true;
-  if (/^\d{4}-\d{2}-\d{2}/.test(raw)) return true;
-  if (isLikelyBirthDateToken(raw)) return true;
-  return false;
-};
-var isPersonSpreadsheetIdFieldKey = (key) => {
-  if (!key || key.startsWith("__")) return false;
-  const source = rosterSourceKey(key).toLowerCase();
-  if (source.includes("\u0434\u0430\u0442\u0430") || source.includes("\u043D\u0430\u0440\u043E\u0434") || source.includes("\u043D\u0430\u043A\u0430\u0437")) {
-    return false;
-  }
-  if (source === "id" || source === "\u0456\u0434" || source === "externalid" || source === "external_id") {
-    return true;
-  }
-  return source.includes("\u0437\u043E\u0432\u043D\u0456\u0448\u043D") || /(^|_)id$/i.test(source);
-};
-var personSpreadsheetIdKeyRank = (key) => {
-  const rosterPenalty = key.startsWith(ROSTER_FIELD_PREFIX) ? 1 : 0;
-  const source = rosterSourceKey(key).toLowerCase();
-  const exact = source === "id" || source === "\u0456\u0434" || source === "externalid" || source === "external_id";
-  return (exact ? 0 : 2) + rosterPenalty;
-};
-var readPersonIdFieldValue = (value) => {
-  const raw = previewValueToDisplay(value).trim();
-  if (!raw || raw === "[object Object]" || raw === "null" || raw === "undefined") {
-    return "";
-  }
-  if (raw.startsWith("{") || raw.startsWith("[")) {
-    try {
-      const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        const nested = parsed.text ?? parsed.value ?? parsed.id ?? parsed.result;
-        if (nested != null && nested !== "") return String(nested).trim();
-      }
-    } catch {
-      return "";
-    }
-    return "";
-  }
-  return raw;
-};
-var personSpreadsheetIdCache = /* @__PURE__ */ new WeakMap();
-var getPersonExternalId = (row) => {
-  if (!row) return "";
-  const cached = personSpreadsheetIdCache.get(row);
-  if (cached !== void 0) return cached;
-  const keys = Object.keys(row).filter(isPersonSpreadsheetIdFieldKey).sort((left, right) => personSpreadsheetIdKeyRank(left) - personSpreadsheetIdKeyRank(right));
-  let resolved = "";
-  for (const key of keys) {
-    const raw = readPersonIdFieldValue(row[key]);
-    if (!raw || isUnstablePersonExternalId(raw)) continue;
-    resolved = raw;
-    break;
-  }
-  personSpreadsheetIdCache.set(row, resolved);
-  return resolved;
-};
-var formatMultilineText = (value) => previewValueToDisplay(value).replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
-var formatExcelDateDisplay = (value) => {
-  if (value == null || value === "") return "";
-  if (value instanceof Date && !Number.isNaN(value.getTime())) {
-    return new Intl.DateTimeFormat("uk-UA").format(value);
-  }
-  const text = previewValueToDisplay(value).trim();
-  if (!text) return "";
-  const asNumber = Number(String(text).replace(",", "."));
-  if (Number.isFinite(asNumber) && asNumber > 2e4 && asNumber < 8e4 && !/[./-]/.test(text)) {
-    const date = new Date(Math.round((asNumber - 25569) * 86400 * 1e3));
-    if (!Number.isNaN(date.getTime())) {
-      return new Intl.DateTimeFormat("uk-UA").format(date);
-    }
-  }
-  return text;
-};
-var personFieldKeyCache = /* @__PURE__ */ new WeakMap();
-var resolvePersonFieldKey = (row, keyParts) => {
-  if (!row || keyParts.length === 0) return "";
-  const cacheKey = keyParts.join("\0");
-  let cached = personFieldKeyCache.get(row);
-  if (!cached) {
-    cached = /* @__PURE__ */ new Map();
-    personFieldKeyCache.set(row, cached);
-  }
-  const hit = cached.get(cacheKey);
-  if (hit !== void 0) return hit;
-  const keys = Object.keys(row).filter((key) => !key.startsWith("__"));
-  const parts = keyParts.map((part) => part.toLowerCase());
-  let resolved = "";
-  if (parts.length === 1) {
-    const exact = keys.find((key) => key.toLowerCase() === parts[0]);
-    if (exact) resolved = exact;
-  }
-  if (!resolved) {
-    const joined = parts.join("_");
-    const joinedExact = keys.find((key) => key.toLowerCase() === joined);
-    if (joinedExact) resolved = joinedExact;
-  }
-  if (!resolved) {
-    const matches = keys.filter((key) => {
-      const normalized = key.toLowerCase();
-      if (!parts.includes("\u043F\u043E\u0432\u043D\u0430") && (normalized.includes("\u043F\u043E\u0432\u043D\u0430") || normalized.includes("\u043F\u043E\u0432\u043D_"))) {
-        return false;
-      }
-      return parts.every((part) => normalized.includes(part));
-    });
-    if (matches.length > 0) {
-      resolved = matches.sort((left, right) => {
-        const leftStarts = left.toLowerCase().startsWith(parts[0] ?? "") ? 0 : 1;
-        const rightStarts = right.toLowerCase().startsWith(parts[0] ?? "") ? 0 : 1;
-        if (leftStarts !== rightStarts) return leftStarts - rightStarts;
-        return left.length - right.length;
-      })[0] ?? "";
-    }
-  }
-  cached.set(cacheKey, resolved);
-  return resolved;
-};
-var getPersonFieldValue = (row, keyParts) => {
-  const key = resolvePersonFieldKey(row, keyParts);
-  return key ? previewValueToDisplay(row?.[key]) : "";
-};
-var resolvePersonDisplayNameFromRoster = (row) => {
-  if (!row) return "";
-  const direct = cleanPersonDisplayName(readRosterColumnValue(row, 14));
-  if (direct) return direct;
-  for (const [key, value] of Object.entries(row)) {
-    if (!key.startsWith(ROSTER_FIELD_PREFIX)) continue;
-    const bare = key.slice(ROSTER_FIELD_PREFIX.length);
-    if (!/^column_14$/i.test(bare) && bare.toLocaleLowerCase("uk-UA") !== "\u043F\u0456\u0431" && !bare.toLocaleLowerCase("uk-UA").includes("\u043F\u0456\u0431")) {
-      continue;
-    }
-    const text = cleanPersonDisplayName(previewValueToDisplay(value));
-    if (text) return text;
-  }
-  return "";
-};
-var getPersonDisplayName = (row) => {
-  const fromOos = cleanPersonDisplayName(
-    getPersonFieldValue(row, ["\u043F\u0440\u0456\u0437\u0432\u0438\u0449\u0435"]) || getPersonFieldValue(row, ["\u043F\u0456\u0431"])
-  );
-  const fromRoster = resolvePersonDisplayNameFromRoster(row);
-  if (fromOos && fromOos.length >= 5 && !/^(прізвище|піб|особа|№)\b/i.test(fromOos)) {
-    return fromOos;
-  }
-  return fromRoster || fromOos;
-};
-var isGenericRosterColumnKey = (key) => /^column_\d+(_\d+)?$/i.test(key.trim());
-var MORNING_GENERAL_LIST_COLUMN_LABELS = {
-  1: "\u2116",
-  2: "\u041F\u0456\u0434\u0440\u043E\u0437\u0434\u0456\u043B",
-  3: "\u0412\u0437\u0432\u043E\u0434",
-  4: "\u0412\u0456\u0434\u0434\u0456\u043B\u0435\u043D\u043D\u044F",
-  5: "\u041F\u043E\u0441\u0430\u0434\u0430",
-  6: "\u0412\u041E\u0421",
-  7: "\u041F\u043E\u0432\u043D\u0430 \u043F\u043E\u0441\u0430\u0434\u0430",
-  8: "\u0428\u041F\u041A \u0444\u0430\u043A\u0442",
-  9: "\u041A\u0430\u0442\u0435\u0433\u043E\u0440\u0456\u044F \u0441\u043A\u043B\u0430\u0434\u0443",
-  10: "\u0410\u043D\u043A\u0435\u0442\u0430",
-  11: "\u0412\u0456\u0439\u0441\u044C\u043A\u043E\u0432\u0438\u0439 \u043A\u0432\u0438\u0442\u043E\u043A",
-  12: "\u041C\u043E\u0431\u0456\u043B\u0456\u0437\u0430\u0446\u0456\u044F/\u043A\u043E\u043D\u0442\u0440\u0430\u043A\u0442",
-  13: "\u0417\u0432\u0430\u043D\u043D\u044F",
-  14: "\u041F\u0406\u0411",
-  15: "\u041F\u043E\u0437\u0438\u0432\u043D\u0438\u0439",
-  16: "\u0414\u0430\u0442\u0430 \u043D\u0430\u0440\u043E\u0434\u0436\u0435\u043D\u043D\u044F",
-  17: "\u0420\u0456\u043A",
-  18: "\u041F\u043E\u0432\u043D\u0438\u0445 \u0440\u043E\u043A\u0456\u0432",
-  19: "\u0406\u041F\u041D",
-  20: "\u0413\u0440\u0443\u043F\u0430 \u043A\u0440\u043E\u0432\u0456",
-  21: "\u0421\u0442\u0430\u0442\u0443\u0441",
-  22: "\u0422\u0438\u043F \u0412\\\u0421",
-  23: "\u0421\u0442\u0430\u0442\u0443\u0441 \u0411\u0413",
-  24: "\u0411\u0417\u0412\u041F/\u0411\u0420\u0415\u0417",
-  25: "\u041D\u0430\u044F\u0432\u043D\u0456\u0441\u0442\u044C \u0411\u0417\u0412\u041F",
-  26: "\u041A\u0443\u0440\u0441 \u0411\u0417\u0412\u041F",
-  27: "\u0412\u0456\u0434\u0440\u044F\u0434\u0436\u0435\u043D\u043D\u044F (\u0411\u0420\u0415\u0417)",
-  28: "\u041E\u0431\u043C\u0435\u0436\u0435\u043D\u043D\u044F",
-  29: "\u0412 \u044F\u043A\u043E\u043C\u0443 \u043F\u0456\u0434\u0440\u043E\u0437\u0434\u0456\u043B\u0456",
-  31: "\u041C\u0456\u0441\u0446\u0435 \u043F\u0435\u0440\u0435\u0431\u0443\u0432\u0430\u043D\u043D\u044F",
-  32: "\u041F\u0440\u0438\u043C\u0456\u0442\u043A\u0438",
-  33: "\u041D\u0430\u043F\u0440\u044F\u043C\u043E\u043A",
-  34: "\u041F\u0440\u0438\u043C\u0456\u0442\u043A\u0430 3",
-  // Колонки без заголовка в Excel (часто списки / дублікаты значень)
-  37: "\u0421\u0442\u0430\u0442\u0443\u0441",
-  38: "\u0422\u0438\u043F \u0412\\\u0421",
-  39: "\u0411\u0417\u0412\u041F/\u0411\u0420\u0415\u0417",
-  40: "\u041C\u0456\u0441\u0446\u0435 \u043F\u0435\u0440\u0435\u0431\u0443\u0432\u0430\u043D\u043D\u044F",
-  41: "\u041E\u0431\u043C\u0435\u0436\u0435\u043D\u043D\u044F",
-  42: "\u0421\u0442\u0430\u0442\u0443\u0441 \u0411\u0413"
-};
-var parseGenericRosterColumnNumber = (key) => {
-  const match = key.trim().match(/^column_(\d+)(?:_\d+)?$/i);
-  if (!match) return null;
-  const number = Number(match[1]);
-  return Number.isFinite(number) && number > 0 ? number : null;
-};
-var resolveMorningGeneralListColumnLabel = (sourceKey, fallback = "") => {
-  const columnNumber = parseGenericRosterColumnNumber(sourceKey);
-  if (columnNumber != null) {
-    const known = MORNING_GENERAL_LIST_COLUMN_LABELS[columnNumber];
-    if (known) return known;
-    return fallback || `\u041A\u043E\u043B\u043E\u043D\u043A\u0430 ${columnNumber}`;
-  }
-  return fallback;
-};
-var getPersonFullPositionTitle = (row) => {
-  if (!row) return "";
-  const read = (value) => previewValueToDisplay(value).trim();
-  const explicit = read(row.__zhbdFullPosition);
-  if (explicit) return explicit;
-  const keyNorm = (key) => rosterSourceKey(key).toLocaleLowerCase("uk-UA").replace(/[\s-]+/g, "_");
-  let shortFallback = "";
-  for (const [key, raw] of Object.entries(row)) {
-    if (key.startsWith("__") && key !== "__zhbdFullPosition") continue;
-    const text = read(raw);
-    if (!text) continue;
-    const norm = keyNorm(key);
-    if (norm === "\u043F\u043E\u0432\u043D\u0430_\u043F\u043E\u0441\u0430\u0434\u0430" || norm.endsWith("_\u043F\u043E\u0432\u043D\u0430_\u043F\u043E\u0441\u0430\u0434\u0430") || norm.includes("\u043F\u043E\u0432\u043D\u0430") && norm.includes("\u043F\u043E\u0441\u0430\u0434\u0430")) {
-      return text;
-    }
-    if (!shortFallback && (norm === "\u043F\u043E\u0441\u0430\u0434\u0430" || norm.endsWith("_\u043F\u043E\u0441\u0430\u0434\u0430") || /^column_5(_|$)/i.test(rosterSourceKey(key))) && !norm.includes("\u043F\u043E\u0432\u043D\u0430") && !norm.includes("\u0456\u043D\u0434\u0435\u043A\u0441") && !norm.includes("\u043F\u0440\u0438\u0439\u043D\u044F\u0442\u0442\u044F") && !norm.includes("\u043D\u0430\u043A\u0430\u0437\u0443")) {
-      shortFallback = text;
-    }
-  }
-  return shortFallback || getPersonFieldValue(row, ["\u0447\u0438\u043C", "\u0437\u0430\u0439\u043C\u0430\u0454\u0442\u044C\u0441\u044F"]).trim();
-};
-var RANK_CATEGORY_VALUE_RE = /^(оф|сер[жh]|солд)\.?$/i;
-var RANK_TITLE_VALUE_RE = /(рекрут|солдат|матрос|сержант|старшина|прапорщик|лейтенант|капітан|майор|підполковник|полковник|генерал)/i;
-var GENERIC_ENLISTED_RANK_RE = /^(солдат|матрос|рекрут)$/i;
-var isPersonnelRankCategoryValue = (value) => RANK_CATEGORY_VALUE_RE.test(
-  value.trim().toLocaleLowerCase("uk-UA").replace(/\s+/g, "")
-);
-var looksLikePersonnelRankTitle = (value) => {
-  const text = value.trim();
-  if (!text || isPersonnelRankCategoryValue(text)) return false;
-  return RANK_TITLE_VALUE_RE.test(text.toLocaleLowerCase("uk-UA"));
-};
-var shouldSkipRankSourceKey = (sourceKey) => {
-  const lower = sourceKey.toLocaleLowerCase("uk-UA");
-  if (lower.includes("fighter_status_")) return true;
-  if (lower.includes("\u043D\u0430\u043A\u0430\u0437")) return true;
-  if (lower.includes("\u0448\u043F\u043A")) return true;
-  if (lower.includes("\u043F\u043E\u0441\u0430")) return true;
-  if (lower.includes("\u043A\u0430\u0442\u0435\u0433\u043E\u0440")) return true;
-  return false;
-};
-var isPreferredRankSourceKey = (sourceKey) => {
-  const lower = sourceKey.toLocaleLowerCase("uk-UA");
-  return lower.includes("\u0437\u0432\u0430\u043D\u043D\u044F") || /^column_13(_|$)/.test(lower) || lower === "m";
-};
-var scorePersonnelRankCandidate = (value, sourceKey, fromRoster) => {
-  if (!looksLikePersonnelRankTitle(value)) return Number.NEGATIVE_INFINITY;
-  const lowerKey = sourceKey.toLocaleLowerCase("uk-UA");
-  const lowerValue = value.trim().toLocaleLowerCase("uk-UA");
-  let score = 10;
-  if (lowerKey.includes("\u0437\u0432\u0430\u043D\u043D\u044F")) score += 25;
-  if (/^column_13(_|$)/.test(lowerKey) || lowerKey === "m") score += 20;
-  if (fromRoster) score += 8;
-  if (/молодший|старший|головний|штаб/.test(lowerValue)) score += 8;
-  if (GENERIC_ENLISTED_RANK_RE.test(lowerValue)) score -= 12;
-  score += Math.min(value.trim().length, 24);
-  return score;
-};
-var pickBestRankCandidate = (row, preferredKeysOnly) => {
-  let best = "";
-  let bestScore = Number.NEGATIVE_INFINITY;
-  for (const [key, raw] of Object.entries(row)) {
-    if (key.startsWith("__")) continue;
-    const sourceKey = rosterSourceKey(key);
-    if (shouldSkipRankSourceKey(sourceKey)) continue;
-    if (preferredKeysOnly && !isPreferredRankSourceKey(sourceKey)) continue;
-    const value = previewValueToDisplay(raw).trim();
-    if (!value) continue;
-    const fromRoster = key.startsWith(ROSTER_FIELD_PREFIX) || isGenericRosterColumnKey(sourceKey);
-    const score = scorePersonnelRankCandidate(value, sourceKey, fromRoster);
-    if (score > bestScore) {
-      bestScore = score;
-      best = value;
-    }
-  }
-  return best;
-};
-var resolvePersonRankTitle = (row) => {
-  if (!row) return "";
-  const preferred = pickBestRankCandidate(row, true);
-  if (preferred) return preferred;
-  const fallbackTitle = pickBestRankCandidate(row, false);
-  if (fallbackTitle) return fallbackTitle;
-  const fallback = previewValueToDisplay(
-    row[resolvePersonFieldKey(row, ["\u0437\u0432\u0430\u043D\u043D\u044F"])]
-  ).trim();
-  if (fallback && !isPersonnelRankCategoryValue(fallback)) return fallback;
-  return "";
-};
-var extractBirthYear = (value) => {
-  const match = value.match(/(\d{1,2})[.\/-](\d{1,2})[.\/-](\d{2,4})/);
-  if (!match) {
-    const yearOnly = value.trim().match(/^(19|20)\d{2}$/);
-    if (yearOnly) return Number(value.trim());
-    return null;
-  }
-  let year = Number(match[3]);
-  if (year < 100) year += year >= 50 ? 1900 : 2e3;
-  return Number.isFinite(year) ? year : null;
-};
-var looksLikePersonBirthDate = (value) => {
-  const text = String(value ?? "").trim();
-  if (!text || !isLikelyBirthDateToken(text)) return false;
-  const year = extractBirthYear(text);
-  if (year == null) return true;
-  return year >= 1955 && year <= 2008;
-};
-var collectRosterFieldEntries = (row) => {
-  if (!row) return [];
-  return Object.entries(row).filter(([key]) => key.startsWith(ROSTER_FIELD_PREFIX)).map(([key, raw]) => ({
-    sourceKey: key.slice(ROSTER_FIELD_PREFIX.length),
-    value: formatExcelDateDisplay(raw).trim()
-  })).filter((entry) => entry.value);
-};
-var resolvePersonBirthDate = (row) => {
-  const fromOos = formatExcelDateDisplay(
-    getPersonFieldValue(row, ["\u0434\u0430\u0442\u0430_\u043D\u0430\u0440\u043E\u0434\u0436\u0435\u043D\u043D\u044F"])
-  ).trim();
-  if (fromOos && looksLikePersonBirthDate(fromOos)) return fromOos;
-  const fromId = formatExcelDateDisplay(
-    getPersonFieldValue(row, ["id"])
-  ).trim();
-  if (fromId && looksLikePersonBirthDate(fromId)) return fromId;
-  const rosterEntries = collectRosterFieldEntries(row);
-  const isBirthDateKey = (sourceKey) => {
-    const lowerKey = sourceKey.toLocaleLowerCase("uk-UA");
-    if (lowerKey.includes("\u043D\u0430\u0440\u043E\u0434")) return true;
-    if (/column_16(_|$)/i.test(sourceKey)) return true;
-    const mapped = resolveMorningGeneralListColumnLabel(sourceKey)?.toLocaleLowerCase("uk-UA").replace(/_/g, " ");
-    return Boolean(mapped && mapped.includes("\u043D\u0430\u0440\u043E\u0434"));
-  };
-  const isYearKey = (sourceKey) => {
-    const lowerKey = sourceKey.toLocaleLowerCase("uk-UA");
-    if (lowerKey === "\u0440\u0456\u043A" || lowerKey.includes("\u0440\u0456\u043A")) return true;
-    if (/column_17(_|$)/i.test(sourceKey)) return true;
-    const mapped = resolveMorningGeneralListColumnLabel(sourceKey)?.toLocaleLowerCase("uk-UA").replace(/_/g, " ");
-    return mapped === "\u0440\u0456\u043A" || mapped === "\u0440\u0456\u043A \u043D\u0430\u0440\u043E\u0434\u0436\u0435\u043D\u043D\u044F";
-  };
-  for (const entry of rosterEntries) {
-    if (!isBirthDateKey(entry.sourceKey)) continue;
-    if (looksLikePersonBirthDate(entry.value)) return entry.value;
-  }
-  for (const entry of rosterEntries) {
-    if (!isYearKey(entry.sourceKey)) continue;
-    if (looksLikePersonBirthDate(entry.value)) return entry.value;
-  }
-  for (const entry of rosterEntries) {
-    if (!isGenericRosterColumnKey(entry.sourceKey)) continue;
-    if (looksLikePersonBirthDate(entry.value)) return entry.value;
-  }
-  return "";
-};
-var inferRosterFieldLabel = (sourceKey, value, rosterLabels) => {
-  const storedLabel = rosterLabels[sourceKey]?.trim() ?? "";
-  if (storedLabel && !isGenericRosterColumnKey(storedLabel)) return storedLabel;
-  const fromMorningMap = resolveMorningGeneralListColumnLabel(sourceKey);
-  if (fromMorningMap && !isGenericRosterColumnKey(fromMorningMap)) {
-    return fromMorningMap;
-  }
-  const lowerKey = sourceKey.toLocaleLowerCase("uk-UA");
-  if (lowerKey.includes("\u043D\u0430\u0440\u043E\u0434") && lowerKey.includes("\u0434\u0430\u0442\u0430")) {
-    return "\u0414\u0430\u0442\u0430 \u043D\u0430\u0440\u043E\u0434\u0436\u0435\u043D\u043D\u044F";
-  }
-  if (lowerKey.includes("\u043F\u043E\u0437\u0438\u0432")) return "\u041F\u043E\u0437\u0438\u0432\u043D\u0438\u0439";
-  const displayed = formatExcelDateDisplay(value).trim();
-  if (looksLikePersonBirthDate(displayed)) return "\u0414\u0430\u0442\u0430 \u043D\u0430\u0440\u043E\u0434\u0436\u0435\u043D\u043D\u044F";
-  if (fromMorningMap) return fromMorningMap;
-  return storedLabel || sourceKey;
-};
-var resolvePersonRosterStatus = (row, rosterLabels = {}) => {
-  if (!row) return "";
-  for (const [key, raw] of Object.entries(row)) {
-    if (key.startsWith("__") || key.includes("fighter_status_")) continue;
-    const displayed = previewValueToDisplay(raw).trim();
-    if (!displayed) continue;
-    const sourceKey = rosterSourceKey(key);
-    const label = inferRosterFieldLabel(sourceKey, displayed, rosterLabels).trim().toLocaleLowerCase("uk-UA").replace(/_/g, " ");
-    if (label === "\u0441\u0442\u0430\u0442\u0443\u0441") return displayed;
-  }
-  for (const columnNumber of [21, 37]) {
-    const displayed = previewValueToDisplay(
-      row[`column_${columnNumber}`] ?? row[`${ROSTER_FIELD_PREFIX}column_${columnNumber}`]
-    ).trim();
-    if (displayed) return displayed;
-  }
-  return "";
-};
-var classifyOverviewStatusFromRoster = (status) => {
-  const displayed = String(status ?? "").replace(/\s+/g, " ").trim();
-  const normalized = displayed.replace(/[ʼ’']/g, "").toLocaleLowerCase("uk-UA");
-  if (normalized.includes("\u0432\u0456\u0434\u0440\u044F\u0434")) {
-    return { status: "BUSINESS_TRIP", statusLabel: displayed || "\u0412\u0456\u0434\u0440\u044F\u0434\u0436\u0435\u043D\u043D\u044F" };
-  }
-  if (normalized.includes("\u0432\u0456\u0434\u043F\u0443\u0441\u0442")) {
-    return { status: "LEAVE", statusLabel: displayed || "\u0412\u0456\u0434\u043F\u0443\u0441\u0442\u043A\u0430" };
-  }
-  if (normalized.includes("\u043B\u0456\u043A\u0443") || normalized.includes("\u0448\u043F\u0438\u0442")) {
-    return { status: "MEDICAL", statusLabel: displayed || "\u041B\u0456\u043A\u0443\u0432\u0430\u043D\u043D\u044F" };
-  }
-  if (normalized.includes("\u0441\u0437\u0447")) {
-    return { status: "AWOL", statusLabel: displayed || "\u0421\u0417\u0427" };
-  }
-  if (normalized.includes("\u0431\u0435\u0437\u0432") || normalized.includes("\u0437\u043D\u0438\u043A")) {
-    return { status: "MISSING", statusLabel: displayed || "\u0411\u0435\u0437\u0432\u0456\u0441\u0442\u0438" };
-  }
-  if (normalized.includes("\u0437\u0430\u0433\u0438\u0431") || normalized.includes("\u043F\u043E\u043C\u0435\u0440") || /(?:^|\D)200(?:\D|$)/.test(normalized)) {
-    return { status: "DEAD", statusLabel: displayed || "\u0417\u0430\u0433\u0438\u0431\u043B\u0456" };
-  }
-  return { status: "ON_DUTY", statusLabel: displayed || "\u041D\u0430 \u0441\u043B\u0443\u0436\u0431\u0456" };
-};
-var isLikelyCallSignToken = (value) => {
-  const text = String(value ?? "").trim();
-  if (!text || text.length < 2 || text.length > 32) return false;
-  if (isLikelyBirthDateToken(text)) return false;
-  if (/^\d+$/.test(text)) return false;
-  const words = text.split(/\s+/).filter(Boolean);
-  if (words.length > 3) return false;
-  return /[a-zа-яіїєґ]/i.test(text);
-};
-var extractPersonCallSign = (...sources) => {
-  for (const source of sources) {
-    const text = String(source ?? "").trim();
-    if (!text) continue;
-    const labeled = text.match(/позивн\w*\s*[:\-–—]?\s*([^\s,;|/)]+)/i);
-    if (labeled?.[1] && isLikelyCallSignToken(labeled[1])) {
-      return labeled[1].trim();
-    }
-    const parenMatches = [...text.matchAll(/\(([^)]+)\)/g)];
-    for (const match of parenMatches) {
-      const candidate = match[1]?.trim() ?? "";
-      if (isLikelyCallSignToken(candidate)) return candidate;
-    }
-  }
-  return "";
-};
-var collectPersonCallSignFieldValues = (row) => {
-  if (!row) return [];
-  const values = /* @__PURE__ */ new Set();
-  for (const [key, raw] of Object.entries(row)) {
-    if (key.startsWith("__")) continue;
-    if (!key.toLocaleLowerCase("uk-UA").includes("\u043F\u043E\u0437\u0438\u0432")) continue;
-    const displayed = previewValueToDisplay(raw).trim();
-    if (displayed) values.add(displayed);
-  }
-  return [...values];
-};
-var resolveDirectCallSignValue = (value) => {
-  const text = value.trim();
-  if (!text) return "";
-  const extracted = extractPersonCallSign(text);
-  if (extracted) return extracted;
-  return isLikelyCallSignToken(text) ? text : "";
-};
-var resolvePersonCallSign = (row) => {
-  for (const fieldValue of collectPersonCallSignFieldValues(row)) {
-    const resolved = resolveDirectCallSignValue(fieldValue);
-    if (resolved) return resolved;
-  }
-  if (row) {
-    const fromColumn = resolveDirectCallSignValue(
-      previewValueToDisplay(row.column_15).trim() || previewValueToDisplay(row.roster__column_15).trim() || previewValueToDisplay(row["\u041F\u043E\u0437\u0438\u0432\u043D\u0438\u0439"]).trim() || previewValueToDisplay(row["\u043F\u043E\u0437\u0438\u0432\u043D\u0438\u0439"]).trim() || previewValueToDisplay(row["roster__\u041F\u043E\u0437\u0438\u0432\u043D\u0438\u0439"]).trim() || previewValueToDisplay(row["roster__\u043F\u043E\u0437\u0438\u0432\u043D\u0438\u0439"]).trim()
-    );
-    if (fromColumn) return fromColumn;
-  }
-  const additionalInfo = formatMultilineText(
-    getPersonFieldValue(row, ["\u0434\u043E\u0434\u0430\u0442\u043A\u043E\u0432\u0430_\u0456\u043D\u0444\u043E\u0440\u043C\u0430\u0446\u0456\u044F"])
-  );
-  return extractPersonCallSign(
-    getPersonFieldValue(row, ["\u043F\u0440\u0456\u0437\u0432\u0438\u0449\u0435"]),
-    additionalInfo
-  );
-};
-var normalizePersonIdentityText = (value) => previewValueToDisplay(value).replace(/[ʼ’']/g, "").replace(/\([^)]*\)/g, " ").replace(/[.,;:№#"/\\|()[\]{}]+/g, " ").replace(/\s+/g, " ").trim().toLocaleLowerCase("uk-UA");
-var normalizePersonBirthKey = (value) => {
-  const text = formatExcelDateDisplay(value).trim();
-  if (!text) return "";
-  const dotted = text.match(/(\d{1,2})[.\/-](\d{1,2})[.\/-](\d{2,4})/);
-  if (dotted) {
-    let year = Number(dotted[3]);
-    if (year < 100) year += year >= 50 ? 1900 : 2e3;
-    const month = String(dotted[2]).padStart(2, "0");
-    const day = String(dotted[1]).padStart(2, "0");
-    if (!Number.isFinite(year)) return "";
-    return `${year}-${month}-${day}`;
-  }
-  const iso = text.match(/^(\d{4})-(\d{2})-(\d{2})/);
-  if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
-  return "";
-};
-var buildPersonIdentityFingerprint = (name, birthDate = "", callSign = "") => {
-  const nameKey = normalizePersonIdentityText(name);
-  if (!nameKey || nameKey === "\u043E\u0441\u043E\u0431\u0430 \u043D\u0435 \u0432\u0438\u0431\u0440\u0430\u043D\u0430") return "";
-  const birthKey = normalizePersonBirthKey(birthDate);
-  if (birthKey) return `p:${nameKey}:${birthKey}`;
-  const callKey = normalizePersonIdentityText(callSign);
-  if (callKey) return `p:${nameKey}:c:${callKey}`;
-  return `p:${nameKey}`;
-};
-var personIdentityKeyCache = /* @__PURE__ */ new WeakMap();
-var resolvePersonIdentityKey = (row) => {
-  if (!row) return "";
-  const cached = personIdentityKeyCache.get(row);
-  if (cached !== void 0) return cached;
-  try {
-    const spreadsheetId = getPersonExternalId(row);
-    if (spreadsheetId) {
-      personIdentityKeyCache.set(row, spreadsheetId);
-      return spreadsheetId;
-    }
-    const name = getPersonDisplayName(row);
-    const result = buildPersonIdentityFingerprint(
-      name,
-      resolvePersonBirthDate(row),
-      resolvePersonCallSign(row)
-    );
-    personIdentityKeyCache.set(row, result);
-    return result;
-  } catch {
-    personIdentityKeyCache.set(row, "");
-    return "";
-  }
-};
-var collectPersonExternalIdCandidates = (row) => {
-  if (!row) return [];
-  const values = /* @__PURE__ */ new Set();
-  const push = (value) => {
-    const text = String(value ?? "").trim();
-    if (text && text !== "0") values.add(text);
-  };
-  for (const key of Object.keys(row)) {
-    if (key === "__dbRowId" || isPersonSpreadsheetIdFieldKey(key)) {
-      push(readPersonIdFieldValue(row[key]));
-    }
-  }
-  push(row.__dbRowId);
-  const name = getPersonFieldValue(row, ["\u043F\u0440\u0456\u0437\u0432\u0438\u0449\u0435"]) || getPersonFieldValue(row, ["\u043F\u0456\u0431"]);
-  const nameKey = normalizePersonIdentityText(name);
-  const spreadsheetId = getPersonExternalId(row);
-  const birthKey = normalizePersonBirthKey(resolvePersonBirthDate(row));
-  const callSignKey = normalizePersonIdentityText(resolvePersonCallSign(row));
-  if (nameKey) {
-    if (birthKey) {
-      push(`name-birth:${nameKey}:${birthKey}`);
-    } else {
-      push(`roster:${nameKey}`);
-      push(`roster:${String(name).trim()}`);
-      push(`name:${nameKey}`);
-      if (callSignKey) push(`name-call:${nameKey}:${callSignKey}`);
-    }
-  }
-  if (callSignKey && !birthKey) push(`call:${callSignKey}`);
-  if (spreadsheetId) push(`roster:${spreadsheetId}`);
-  const identityKey = resolvePersonIdentityKey(row);
-  if (identityKey) push(identityKey);
-  return [...values];
-};
-var PERSONNEL_STATUS_AS_NAME_RE = /(?:^|\s)(?:вибув|відсутн|виключ|перевед|знят|загиб|зникл|тимчасово|розпоряджен|командир(?:а)?\s+в(?:ійськової)?\s*ч(?:астини)?|в\s+розпоряджен)(?:\s|$)/i;
-var cleanPersonDisplayName = (value) => String(value ?? "").replace(/\([^)]*(?:р\.?\s*н\.?|народ)[^)]*\)/gi, " ").replace(/\([^)]*\d{1,2}[.\/-]\d{1,2}[.\/-]\d{2,4}[^)]*\)/g, " ").replace(/\s+/g, " ").trim();
-var looksLikePersonnelName = (value) => {
-  const text = cleanPersonDisplayName(value);
-  if (!text || text.length < 5) return false;
-  if (text === "\u041E\u0441\u043E\u0431\u0430 \u043D\u0435 \u0432\u0438\u0431\u0440\u0430\u043D\u0430" || text === "-") return false;
-  if (/^\d+([.,]\d+)?$/.test(text)) return false;
-  if (/^(прізвище|піб|особа|№)\b/i.test(text)) return false;
-  if (/^(управління|рота|взвод|батальйон|група|відділення|штаб)\b/i.test(text)) {
-    return false;
-  }
-  if (PERSONNEL_STATUS_AS_NAME_RE.test(text)) return false;
-  const parts = text.split(/\s+/).filter(Boolean);
-  if (parts.length < 2 || parts.length > 8) return false;
-  return parts.every((part) => /^[\p{L}][\p{L}'ʼ’\-]*$/u.test(part));
-};
-var isLikelyPersonnelRow = (row) => {
-  if (!row.__dbRowId) return false;
-  const fromOos = cleanPersonDisplayName(
-    getPersonFieldValue(row, ["\u043F\u0440\u0456\u0437\u0432\u0438\u0449\u0435"]) || getPersonFieldValue(row, ["\u043F\u0456\u0431"])
-  );
-  const fromRoster = resolvePersonDisplayNameFromRoster(row);
-  return looksLikePersonnelName(fromOos) || looksLikePersonnelName(fromRoster);
-};
-var findEjournalPersonnelSheet = (imports) => {
-  for (const item of imports) {
-    const oosSheet = item.sheets.find((sheet) => /2\.\s*оос/i.test(sheet.name)) ?? item.sheets.find((sheet) => /оос/i.test(sheet.name));
-    if (oosSheet) return oosSheet;
-  }
-  return void 0;
-};
-
-// src/pages/ejournal/ejournalUtils.ts
-var isEjournalColumn = (value) => Boolean(
-  value && typeof value === "object" && "key" in value && "label" in value
-);
-var parseDbColumns = (columns) => {
-  if (!Array.isArray(columns)) return [];
-  return columns.filter(isEjournalColumn).map((column, index) => ({
-    key: String(column.key || `column_${index + 1}`),
-    label: String(column.label ?? ""),
-    order: Number.isFinite(column.order) ? Number(column.order) : index,
-    originalIndex: typeof column.originalIndex === "number" ? column.originalIndex : void 0,
-    letter: column.letter ? String(column.letter) : void 0
-  })).sort((left, right) => left.order - right.order);
-};
-var previewValueToDisplay = (value) => value instanceof Date || typeof value === "string" || typeof value === "number" || typeof value === "boolean" || value === null || value === void 0 ? valueToDisplay(value) : JSON.stringify(value);
-
-// src/pages/personnel/fighterStatusImport.ts
-var FIGHTER_STATUS_FIELDS = [
-  {
-    key: "fighter_status_direction",
-    label: "\u0421\u0442\u0430\u0442\u0443\u0441 \u0431\u0456\u0439\u0446\u0456\u0432 \xB7 \u041D\u0430\u043F\u0440\u044F\u043C\u043E\u043A"
-  },
-  {
-    key: "fighter_status_entry_date",
-    label: "\u0421\u0442\u0430\u0442\u0443\u0441 \u0431\u0456\u0439\u0446\u0456\u0432 \xB7 \u0414\u0430\u0442\u0430 \u0437\u0430\u0445\u043E\u0434\u0443"
-  },
-  {
-    key: "fighter_status_exit_date",
-    label: "\u0421\u0442\u0430\u0442\u0443\u0441 \u0431\u0456\u0439\u0446\u0456\u0432 \xB7 \u0414\u0430\u0442\u0430 \u0432\u0438\u0445\u043E\u0434\u0443"
-  },
-  {
-    key: "fighter_status_return_date",
-    label: "\u0421\u0442\u0430\u0442\u0443\u0441 \u0431\u0456\u0439\u0446\u0456\u0432 \xB7 \u0414\u0430\u0442\u0430 \u043F\u043E\u0432\u0435\u0440\u043D\u0435\u043D\u043D\u044F"
-  },
-  {
-    key: "fighter_status_total_days",
-    label: "\u0421\u0442\u0430\u0442\u0443\u0441 \u0431\u0456\u0439\u0446\u0456\u0432 \xB7 \u0414\u043D\u0456\u0432"
-  },
-  {
-    key: "fighter_status_value",
-    label: "\u0421\u0442\u0430\u0442\u0443\u0441 \u0431\u0456\u0439\u0446\u0456\u0432 \xB7 \u0421\u0442\u0430\u0442\u0443\u0441 (200/300/500)"
-  },
-  {
-    key: "fighter_status_weapon",
-    label: "\u0421\u0442\u0430\u0442\u0443\u0441 \u0431\u0456\u0439\u0446\u0456\u0432 \xB7 \u0417\u0431\u0440\u043E\u044F"
-  },
-  {
-    key: "fighter_status_communication",
-    label: "\u0421\u0442\u0430\u0442\u0443\u0441 \u0431\u0456\u0439\u0446\u0456\u0432 \xB7 \u0417\u0430\u0441\u043E\u0431\u0438 \u0437\u0432'\u044F\u0437\u043A\u0443"
-  },
-  {
-    key: "fighter_status_note",
-    label: "\u0421\u0442\u0430\u0442\u0443\u0441 \u0431\u0456\u0439\u0446\u0456\u0432 \xB7 \u041F\u0440\u0438\u043C\u0456\u0442\u043A\u0430"
-  }
-];
-var normalizeRosterMatchText = (value) => valueToDisplay(value).replace(/[ʼ’']/g, "").replace(/\([^)]*\)/g, " ").replace(/[.,;:№#"/\\|()[\]{}]+/g, " ").replace(/\s+/g, " ").trim().toLocaleLowerCase("uk-UA");
-var getFighterStatusDirectValue = (row, key) => {
-  if (!row) return "";
-  const rosterKey = `roster__${key}`;
-  const direct = row[key] ?? row[rosterKey];
-  return formatValueForDisplay(direct);
-};
-var parseFighterStatusDate = (value) => {
-  const match = String(value ?? "").trim().match(/^(\d{1,2})[.\/-](\d{1,2})[.\/-](\d{2,4})$/);
-  if (!match) return null;
-  const day = Number(match[1]);
-  const month = Number(match[2]);
-  let year = Number(match[3]);
-  if (year < 100) year += year >= 50 ? 1900 : 2e3;
-  if (day < 1 || day > 31 || month < 1 || month > 12 || year < 1900) {
-    return null;
-  }
-  const date = new Date(year, month - 1, day);
-  return Number.isNaN(date.getTime()) ? null : date;
-};
-var diffFighterStatusDays = (exitDate, returnDate) => {
-  const from = parseFighterStatusDate(exitDate);
-  const to = parseFighterStatusDate(returnDate);
-  if (!from || !to) return "";
-  const days = Math.round((to.getTime() - from.getTime()) / 864e5);
-  return Number.isFinite(days) ? String(days) : "";
-};
-var resolveFighterStatusTotalDays = (row) => {
-  const exitDate = getFighterStatusDirectValue(row, "fighter_status_exit_date");
-  const returnDate = getFighterStatusDirectValue(
-    row,
-    "fighter_status_return_date"
-  );
-  const computed = diffFighterStatusDays(exitDate, returnDate);
-  if (computed) return computed;
-  const stored = getFighterStatusDirectValue(row, "fighter_status_total_days");
-  return /^\d{1,4}$/.test(stored) ? stored : "";
-};
-var getRosterFighterStatusOverviewFields = (row) => {
-  const fighterExitDate = getFighterStatusDirectValue(
-    row,
-    "fighter_status_exit_date"
-  );
-  const fighterReturnDate = getFighterStatusDirectValue(
-    row,
-    "fighter_status_return_date"
-  );
-  return {
-    fighterDirection: getFighterStatusDirectValue(row, "fighter_status_direction"),
-    fighterEntryDate: getFighterStatusDirectValue(row, "fighter_status_entry_date"),
-    fighterExitDate,
-    fighterReturnDate,
-    fighterTotalDays: resolveFighterStatusTotalDays(row),
-    fighterStatus: getFighterStatusDirectValue(row, "fighter_status_value"),
-    fighterWeapon: getFighterStatusDirectValue(row, "fighter_status_weapon"),
-    fighterCommunication: getFighterStatusDirectValue(
-      row,
-      "fighter_status_communication"
-    ),
-    fighterNote: getFighterStatusDirectValue(row, "fighter_status_note")
-  };
-};
-
-// src/pages/personnel/staffSheetArchiveMarker.ts
-var ROSTER_ARCHIVE_FLAG_KEY = "__rosterArchive";
-var ROSTER_ARCHIVE_SOURCE_KEY = "\u0434\u0436\u0435\u0440\u0435\u043B\u043E";
-var ROSTER_ARCHIVE_SOURCE_VALUE = "\u0410\u0440\u0445\u0456\u0432";
-var isPersonnelFromArchive = (row) => {
-  if (!row) return false;
-  if (row[ROSTER_ARCHIVE_FLAG_KEY] === true) return true;
-  if (row[ROSTER_ARCHIVE_FLAG_KEY] === "true") return true;
-  const source = String(
-    row[ROSTER_ARCHIVE_SOURCE_KEY] ?? row[`roster__${ROSTER_ARCHIVE_SOURCE_KEY}`] ?? ""
-  ).trim().toLocaleLowerCase("uk-UA");
-  return source.includes("\u0430\u0440\u0445\u0456\u0432");
-};
-
-// src/pages/personnel/personnelRosterMerge.ts
-var ROSTER_FIELD_PREFIX2 = "roster__";
-var normalizeRosterText = normalizeRosterMatchText;
-var withArchiveMarker = (target, rosterRow) => {
-  const orderedTarget = {
-    ...target,
-    __rosterOrder: rosterRow.__rosterOrder ?? rosterRow.__rowNumber ?? Number.MAX_SAFE_INTEGER
-  };
-  if (!isPersonnelFromArchive(rosterRow)) return orderedTarget;
-  return {
-    ...orderedTarget,
-    [ROSTER_ARCHIVE_FLAG_KEY]: true,
-    [ROSTER_ARCHIVE_SOURCE_KEY]: ROSTER_ARCHIVE_SOURCE_VALUE,
-    [`${ROSTER_FIELD_PREFIX2}${ROSTER_ARCHIVE_SOURCE_KEY}`]: ROSTER_ARCHIVE_SOURCE_VALUE
-  };
-};
-var isPersonnelInStaffRoster = (row) => {
-  if (!row) return false;
-  if (isPersonnelFromArchive(row)) return false;
-  if (/^roster:/i.test(String(row.__dbRowId ?? ""))) return true;
-  return Object.keys(row).some((key) => key.startsWith(ROSTER_FIELD_PREFIX2));
-};
-var getRosterValue = (row, keyParts) => {
-  const key = Object.keys(row).find(
-    (item) => keyParts.every((part) => item.toLocaleLowerCase("uk-UA").includes(part))
-  );
-  return key ? valueToDisplay(row[key]).trim() : "";
-};
-var getRosterUnit = (row) => readRosterColumnValue(row, 2).trim();
-var getRosterPersonName = (row) => {
-  const candidates = [
-    getRosterValue(row, ["\u043F\u0456\u0431"]),
-    getRosterValue(row, ["\u043F\u0440\u0456\u0437\u0432\u0438\u0449\u0435"]),
-    readRosterColumnValue(row, 14),
-    readRosterColumnValue(row, 13),
-    String(row.fullName ?? "").trim()
-  ].map((value) => cleanPersonDisplayName(value)).filter(Boolean);
-  return candidates.find((value) => looksLikePersonnelName(value)) || candidates[0] || "";
-};
-var extractBirthDateFromPersonName = (name) => {
-  const text = String(name ?? "");
-  const match = text.match(
-    /(\d{1,2}[.\/-]\d{1,2}[.\/-]\d{2,4})/
-  );
-  if (!match || !looksLikePersonBirthDate(match[1])) return "";
-  return normalizePersonBirthKey(match[1]);
-};
-var compactRnokpp = (value) => {
-  const digits = String(value ?? "").replace(/\D/g, "");
-  return digits.length >= 8 ? digits : "";
-};
-var getRosterPersonBirthDate = (row) => {
-  const fromColumn = getRosterValue(row, ["\u0434\u0430\u0442\u0430", "\u043D\u0430\u0440\u043E\u0434"]) || readRosterColumnValue(row, 16);
-  if (fromColumn && looksLikePersonBirthDate(fromColumn)) {
-    return normalizePersonBirthKey(fromColumn);
-  }
-  const rawName = getRosterValue(row, ["\u043F\u0456\u0431"]) || getRosterValue(row, ["\u043F\u0440\u0456\u0437\u0432\u0438\u0449\u0435"]) || readRosterColumnValue(row, 14);
-  return extractBirthDateFromPersonName(String(rawName));
-};
-var getRosterPersonRnokpp = (row) => compactRnokpp(
-  getRosterValue(row, ["\u0440\u043D\u043E\u043A\u043F\u043F"]) || getRosterValue(row, ["\u0456\u043F\u043D"]) || readRosterColumnValue(row, 19)
-);
-var pushIndexed = (map, key, row) => {
-  if (!key) return;
-  const list = map.get(key);
-  if (list) list.push(row);
-  else map.set(key, [row]);
-};
-var pickBestRow = (rows, preferredBirth = "") => {
-  if (!rows?.length) return void 0;
-  if (rows.length === 1) return rows[0];
-  if (preferredBirth) {
-    const matching = rows.filter(
-      (row) => getRosterPersonBirthDate(row) === preferredBirth
-    );
-    if (matching.length) return matching[0];
-  }
-  const births = new Set(rows.map((row) => getRosterPersonBirthDate(row)));
-  const rnokpps = new Set(
-    rows.map((row) => getRosterPersonRnokpp(row)).filter(Boolean)
-  );
-  if (births.size <= 1 && rnokpps.size <= 1) return rows[0];
-  return void 0;
-};
-var birthsCompatible = (left, right) => !left || !right || left === right;
-var getRosterAdditions = (rosterRow) => Object.fromEntries(
-  Object.entries(rosterRow).filter(
-    ([key, value]) => !key.startsWith("__") && valueToDisplay(value).trim()
-  ).map(([key, value]) => [`${ROSTER_FIELD_PREFIX2}${key}`, value])
-);
-var stripRosterEnrichment = (row) => Object.fromEntries(
-  Object.entries(row).filter(
-    ([key]) => !key.startsWith(ROSTER_FIELD_PREFIX2) && !key.startsWith("fighter_status_")
-  )
-);
-var buildRosterOnlyPersonnelRow = (rosterRow) => {
-  const name = getRosterPersonName(rosterRow);
-  const identityKey = resolvePersonIdentityKey({
-    ...rosterRow,
-    \u043F\u0440\u0456\u0437\u0432\u0438\u0449\u0435: name,
-    \u041F\u0406\u0411: name
-  });
-  const rowKey = identityKey || normalizeRosterText(name);
-  const archive = isPersonnelFromArchive(rosterRow);
-  return withArchiveMarker(
-    {
-      __dbRowId: archive ? `roster:archive:${rowKey}` : `roster:${rowKey}`,
-      __rowNumber: rosterRow.__rowNumber,
-      id: identityKey,
-      \u043F\u0440\u0456\u0437\u0432\u0438\u0449\u0435: name,
-      \u041F\u0406\u0411: name,
-      \u0437\u0432\u0430\u043D\u043D\u044F: resolvePersonRankTitle(rosterRow),
-      \u0417\u0432\u0430\u043D\u043D\u044F: resolvePersonRankTitle(rosterRow),
-      \u043F\u043E\u0437\u0438\u0432\u043D\u0438\u0439: getRosterValue(rosterRow, ["\u043F\u043E\u0437\u0438\u0432"]),
-      \u041F\u043E\u0437\u0438\u0432\u043D\u0438\u0439: getRosterValue(rosterRow, ["\u043F\u043E\u0437\u0438\u0432"]),
-      \u0456\u043D\u0434\u0435\u043A\u0441_\u043F\u043E\u0441\u0430\u0434\u0438: getRosterValue(rosterRow, ["\u0456\u043D\u0434\u0435\u043A\u0441", "\u043F\u043E\u0441\u0430\u0434\u0438"]),
-      "\u0406\u043D\u0434\u0435\u043A\u0441 \u043F\u043E\u0441\u0430\u0434\u0438": getRosterValue(rosterRow, ["\u0456\u043D\u0434\u0435\u043A\u0441", "\u043F\u043E\u0441\u0430\u0434\u0438"]),
-      \u043C\u0456\u0441\u0446\u0435_\u0434\u0438\u0441\u043B\u043E\u043A\u0430\u0446\u0456\u0457: getRosterValue(rosterRow, ["\u043F\u0435\u0440\u0435\u0431\u0443\u0432\u0430\u043D\u043D\u044F"]),
-      "\u041C\u0456\u0441\u0446\u0435 \u0434\u0438\u0441\u043B\u043E\u043A\u0430\u0446\u0456\u0457": getRosterValue(rosterRow, ["\u043F\u0435\u0440\u0435\u0431\u0443\u0432\u0430\u043D\u043D\u044F"]),
-      ...getRosterAdditions(rosterRow)
-    },
-    rosterRow
-  );
-};
-var mergeRosterRowsIntoPreview = (preview, rosterRows) => {
-  if (!rosterRows.length) return preview.rows;
-  const rosterById = /* @__PURE__ */ new Map();
-  const rosterByRnokpp = /* @__PURE__ */ new Map();
-  const rosterByNameBirth = /* @__PURE__ */ new Map();
-  const rosterByName = /* @__PURE__ */ new Map();
-  const usedRosterRows = /* @__PURE__ */ new Set();
-  rosterRows.forEach((row) => {
-    const id = getPersonExternalId(row);
-    const name = getRosterPersonName(row);
-    const nameKey = normalizeRosterText(name);
-    const birth = getRosterPersonBirthDate(row);
-    const rnokpp = getRosterPersonRnokpp(row);
-    if (id) pushIndexed(rosterById, id, row);
-    if (rnokpp) pushIndexed(rosterByRnokpp, rnokpp, row);
-    if (nameKey && birth) pushIndexed(rosterByNameBirth, `${nameKey}|${birth}`, row);
-    if (nameKey) pushIndexed(rosterByName, nameKey, row);
-  });
-  const pickRosterForPreviewRow = (base) => {
-    const spreadsheetId = getPersonExternalId(base);
-    const birth = normalizePersonBirthKey(resolvePersonBirthDate(base));
-    const nameKey = normalizeRosterText(getPersonDisplayName(base));
-    const byId = pickBestRow(rosterById.get(spreadsheetId), birth);
-    if (byId) return byId;
-    const rnokpp = compactRnokpp(
-      getPersonFieldValue(base, ["\u0440\u043D\u043E\u043A\u043F\u043F_\u0437\u0430_\u043D\u0430\u044F\u0432\u043D\u043E\u0441\u0442\u0456"]) || getPersonFieldValue(base, ["\u0440\u043D\u043E\u043A\u043F\u043F"])
-    );
-    const byRnokpp = pickBestRow(rosterByRnokpp.get(rnokpp), birth);
-    if (byRnokpp) {
-      const rosterNameKey = normalizeRosterText(getRosterPersonName(byRnokpp));
-      if (!nameKey || !rosterNameKey || nameKey === rosterNameKey) {
-        return byRnokpp;
-      }
-    }
-    if (nameKey && birth) {
-      const byNameBirth = pickBestRow(
-        rosterByNameBirth.get(`${nameKey}|${birth}`),
-        birth
-      );
-      if (byNameBirth) return byNameBirth;
-    }
-    const nameHits = rosterByName.get(nameKey) ?? [];
-    const nameMatch = pickBestRow(nameHits, birth);
-    if (nameMatch && nameHits.length === 1 && birthsCompatible(birth, getRosterPersonBirthDate(nameMatch))) {
-      return nameMatch;
-    }
-    return void 0;
-  };
-  const mergedRows = preview.rows.map((row) => {
-    try {
-      const base = stripRosterEnrichment(row);
-      const rosterRow = pickRosterForPreviewRow(base);
-      if (!rosterRow) return base;
-      usedRosterRows.add(rosterRow);
-      return withArchiveMarker(
-        { ...base, ...getRosterAdditions(rosterRow) },
-        rosterRow
-      );
-    } catch {
-      return stripRosterEnrichment(row);
-    }
-  });
-  const usedNameKeys = new Set(
-    [...usedRosterRows].map((row) => normalizeRosterText(getRosterPersonName(row)))
-  );
-  const usedRnokpp = new Set(
-    [...usedRosterRows].map((row) => getRosterPersonRnokpp(row)).filter(Boolean)
-  );
-  const rosterOnlyIdentityKey = (nameKey, birth, rnokpp) => nameKey && birth ? `${nameKey}|${birth}` : rnokpp ? `${rnokpp}|${nameKey || birth}` : nameKey || birth;
-  const seenExtraKeys = /* @__PURE__ */ new Set();
-  const rosterOnlyRows = rosterRows.filter((row) => !usedRosterRows.has(row)).filter((row) => getRosterPersonName(row)).filter((row) => {
-    const nameKey = normalizeRosterText(getRosterPersonName(row));
-    const rnokpp = getRosterPersonRnokpp(row);
-    const birth = getRosterPersonBirthDate(row);
-    if (rnokpp && usedRnokpp.has(rnokpp)) {
-      const usedWithRnokpp = [...usedRosterRows].filter(
-        (item) => getRosterPersonRnokpp(item) === rnokpp
-      );
-      const usedNameKeysForRnokpp = usedWithRnokpp.map(
-        (item) => normalizeRosterText(getRosterPersonName(item))
-      );
-      if (!nameKey || usedNameKeysForRnokpp.some(
-        (usedNameKey) => !usedNameKey || usedNameKey === nameKey
-      )) {
-        return false;
-      }
-    }
-    if (usedNameKeys.has(nameKey)) {
-      const usedWithName = [...usedRosterRows].filter(
-        (item) => normalizeRosterText(getRosterPersonName(item)) === nameKey
-      );
-      const usedBirths = usedWithName.map(getRosterPersonBirthDate);
-      if (usedBirths.some((item) => birthsCompatible(item, birth))) {
-        return false;
-      }
-    }
-    const extraKey = rosterOnlyIdentityKey(nameKey, birth, rnokpp);
-    if (seenExtraKeys.has(extraKey)) return false;
-    seenExtraKeys.add(extraKey);
-    return true;
-  }).flatMap((row) => {
-    try {
-      return [buildRosterOnlyPersonnelRow(row)];
-    } catch {
-      return [];
-    }
-  });
-  return [...mergedRows, ...rosterOnlyRows];
-};
-var ROSTER_ONLY_SHEET_STUB = {
-  id: "roster-only",
-  batchId: "roster-only",
-  name: "1.\u041E\u0421 \u0417\u0430\u0433\u0430\u043B\u044C\u043D\u0438\u0439 \u0441\u043F\u0438\u0441\u043E\u043A \xB7 \u0428\u0442\u0430\u0442\u043A\u0430",
-  sheetIndex: 0,
-  columnCount: 0,
-  rowCount: 0,
-  createdAt: "",
-  updatedAt: ""
-};
-var buildRosterOnlyPreviewState = (rosterRows, sheet = null) => {
-  if (!rosterRows.length) return null;
-  const rows = mergeRosterRowsIntoPreview({ rows: [] }, rosterRows);
-  if (!rows.length) return null;
-  const activeSheet = sheet ?? {
-    ...ROSTER_ONLY_SHEET_STUB,
-    rowCount: rows.length
-  };
-  return {
-    sheet: activeSheet,
-    columns: [],
-    rows,
-    total: rows.length,
-    offset: 0,
-    limit: rows.length
-  };
-};
-
-// src/pages/personnel/rosterRowFill.ts
-var fillDownRosterUnitRows = (rows) => {
-  let currentUnit = "";
-  return rows.map((row) => {
-    const unit = readRosterColumnValue(row, 2).trim();
-    if (unit) {
-      currentUnit = unit;
-      return row;
-    }
-    const isPositionRow = [5, 8, 13, 14].some(
-      (columnNumber) => readRosterColumnValue(row, columnNumber).trim()
-    );
-    if (!currentUnit || !isPositionRow) return row;
-    return { ...row, column_2: currentUnit };
-  });
-};
-
-// src/data/personnelDatasetCore.ts
-var sheetStamp = (sheet) => sheet ? `${sheet.updatedAt ?? ""}|${sheet.rowCount}|${sheet.columnCount}` : "";
-var buildPersonnelDatasetVersion = (sheet, roster) => ({
-  oosSheetId: sheet?.id ?? "",
-  oosStamp: sheetStamp(sheet),
-  rosterImportId: roster?.importId ?? "",
-  rosterSheetUpdatedAt: roster?.sheet?.updatedAt ?? "",
-  rosterRowCount: roster?.sheet?.rowCount ?? roster?.rows?.length ?? 0
-});
-var DATASET_FINGERPRINT_SEP = "";
-var personnelDatasetFingerprint = (version) => [
-  version.oosSheetId,
-  version.oosStamp,
-  version.rosterImportId,
-  version.rosterSheetUpdatedAt,
-  version.rosterRowCount
-].join(DATASET_FINGERPRINT_SEP);
-var rosterRowsFromPersonnelLatest = (latest) => {
-  if (!latest?.sheet || !Array.isArray(latest.rows)) {
-    return [];
-  }
-  return fillDownRosterUnitRows(
-    latest.rows.map((row, rosterOrder) => ({
-      __dbRowId: row.id,
-      __rowNumber: row.excelRowNumber,
-      __rosterOrder: rosterOrder,
-      ...row.values && typeof row.values === "object" && !Array.isArray(row.values) ? row.values : {}
-    }))
-  );
-};
-var sortPersonnelRowsByRosterOrder = (rows) => rows.map((row, sourceOrder) => ({ row, sourceOrder })).sort((left, right) => {
-  const leftOrder = Number(left.row.__rosterOrder);
-  const rightOrder = Number(right.row.__rosterOrder);
-  const leftInRoster = Number.isFinite(leftOrder);
-  const rightInRoster = Number.isFinite(rightOrder);
-  if (leftInRoster && rightInRoster) {
-    return leftOrder - rightOrder || left.sourceOrder - right.sourceOrder;
-  }
-  if (leftInRoster) return -1;
-  if (rightInRoster) return 1;
-  return left.sourceOrder - right.sourceOrder;
-}).map(({ row }) => row);
-var normalizePersonnelDatasetName = (value) => value.replace(/\(\s*\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\s*р\.?\s*н\.?\s*\)/gi, "").replace(/[ʼ’']/g, "'").replace(/\s+/g, " ").trim().toLocaleLowerCase("uk-UA");
-var personnelDatasetDedupeKey = (row) => {
-  const name = normalizePersonnelDatasetName(getPersonDisplayName(row));
-  const birthDate = normalizePersonBirthKey(resolvePersonBirthDate(row));
-  if (name && birthDate) return `name-birth:${name}|${birthDate}`;
-  const externalId = getPersonExternalId(row).trim();
-  return externalId ? `id:${externalId}` : "";
-};
-var hasDatasetValue = (value) => value != null && String(value).trim() !== "";
-var mergeDuplicatePersonnelRows = (primary, duplicate) => {
-  const merged = { ...primary };
-  Object.entries(duplicate).forEach(([key, value]) => {
-    if (!hasDatasetValue(merged[key]) && hasDatasetValue(value)) {
-      merged[key] = value;
-    }
-  });
-  const primaryOrder = Number(primary.__rosterOrder);
-  const duplicateOrder = Number(duplicate.__rosterOrder);
-  if (Number.isFinite(duplicateOrder) && (!Number.isFinite(primaryOrder) || duplicateOrder < primaryOrder)) {
-    merged.__rosterOrder = duplicateOrder;
-  }
-  return merged;
-};
-var dedupePersonnelDatasetRows = (rows) => {
-  const result = [];
-  const indexByKey = /* @__PURE__ */ new Map();
-  rows.forEach((row) => {
-    const key = personnelDatasetDedupeKey(row);
-    if (!key) {
-      result.push(row);
-      return;
-    }
-    const existingIndex = indexByKey.get(key);
-    if (existingIndex == null) {
-      indexByKey.set(key, result.length);
-      result.push(row);
-      return;
-    }
-    result[existingIndex] = mergeDuplicatePersonnelRows(
-      result[existingIndex],
-      row
-    );
-  });
-  return result;
-};
-var rosterMetadata = (latest) => {
-  const columns = parseDbColumns(latest?.sheet?.columns);
-  return {
-    rosterColumns: columns,
-    rosterLabels: Object.fromEntries(
-      columns.map((column) => [
-        column.key,
-        column.label?.trim() || resolveMorningGeneralListColumnLabel(column.key) || column.key
-      ])
-    ),
-    rosterUpdatedAt: latest?.sheet?.updatedAt ?? latest?.createdAt ?? null
-  };
-};
-var buildPersonnelDatasetSync = (preview, roster, version) => {
-  const resolvedVersion = version ?? buildPersonnelDatasetVersion(preview?.sheet ?? null, roster);
-  const rosterRows = rosterRowsFromPersonnelLatest(roster);
-  const fallback = buildRosterOnlyPreviewState(rosterRows, roster?.sheet ?? null);
-  const base = preview ?? fallback;
-  const mergedRows = base && rosterRows.length ? mergeRosterRowsIntoPreview(base, rosterRows) : base?.rows ?? [];
-  const rows = dedupePersonnelDatasetRows(
-    sortPersonnelRowsByRosterOrder(mergedRows)
-  );
-  const metadata = rosterMetadata(roster);
-  return {
-    rows,
-    sheet: base?.sheet ?? roster?.sheet ?? null,
-    columns: base?.columns ?? [],
-    total: rows.length,
-    rosterRows,
-    ...metadata,
-    version: resolvedVersion,
-    fingerprint: personnelDatasetFingerprint(resolvedVersion),
-    mergedAt: Date.now(),
-    complete: true
-  };
-};
 
 // src/pages/bchs/bchsCalc.ts
 var BCHS_PIB_FILL_VALUE_KEY = "__pibFill";
@@ -11658,6 +10518,128 @@ var extractBchsAwayPeopleFromDbRows = (rows, columns) => {
   }));
 };
 
+// src/pages/ejournal/ejoosRules.ts
+var EJOOS_TIMESHEET_CODES = [
+  "+",
+  "\u0432\u0434\u0440",
+  "\u0432\u0456\u0434",
+  "\u0412\u041F",
+  "\u043B\u0456\u043A",
+  "\u041B\u041F",
+  "\u0412\u041B\u041A",
+  "\u0421\u0417\u0427",
+  "\u0417\u0411",
+  "\u043F\u043E\u043B",
+  "\u0437\u0430\u0433",
+  "\u043F\u043E\u043C"
+];
+
+// src/pages/ejournal/ejoosTimesheetText.ts
+var KNOWN_ABSENCE_CODES = new Set(
+  EJOOS_TIMESHEET_CODES.filter((code) => code !== "+").map(
+    (code) => code.toLocaleLowerCase("uk-UA")
+  )
+);
+KNOWN_ABSENCE_CODES.add("\u043B\u043A");
+
+// src/pages/ejournal/ejoosOosText.ts
+var OOS_LAST_DATA_COLUMN = 33;
+var OOS_DATA_COLUMNS = Array.from(
+  { length: OOS_LAST_DATA_COLUMN },
+  (_, index) => index + 1
+);
+
+// src/pages/ejournal/ejoosExcludedColumns.ts
+var OOS_TO_EXCLUDED_BASE = [
+  [1, 1],
+  // A→A звання
+  [2, 2],
+  // B→B ПІБ
+  [3, 3],
+  // C→C ID
+  [4, 4],
+  // D→D індекс / історія посад
+  [5, 5],
+  // E→E дати прийняття посад
+  [7, 6],
+  // G→F звідки прибув
+  [8, 7],
+  // H→G дата зарахування
+  [9, 8],
+  // I→H наказ про зарахування: дата
+  [10, 9],
+  // J→I наказ про зарахування: номер
+  [11, 10],
+  // K→J наказ на посаду: номер
+  [12, 11],
+  // L→K наказ на посаду: дата
+  [15, 12],
+  // O→L наказ на останнє звання: дата
+  [16, 13],
+  // P→M наказ на останнє звання: номер
+  [19, 14],
+  // S→N вид служби
+  [20, 15],
+  // T→O початок контракту
+  [21, 16],
+  // U→P закінчення контракту
+  [22, 17],
+  // V→Q РНОКПП
+  [24, 18],
+  // X→R документ: номер
+  [25, 19],
+  // Y→S документ: тип
+  [26, 20],
+  // Z→T дата народження
+  [27, 21],
+  // AA→U місце народження
+  [28, 22],
+  // AB→V стать
+  [30, 23],
+  // AD→W ким призваний
+  [29, 24],
+  // AC→X коли призваний
+  [31, 25],
+  // AE→Y освіта
+  [32, 26],
+  // AF→Z родичі
+  [33, 27]
+  // AG→AA додаткова інформація
+];
+var OOS_TO_EXCLUDED_ALL = [
+  ...OOS_TO_EXCLUDED_BASE
+];
+var EXCLUDED_TO_OOS_BASE = OOS_TO_EXCLUDED_BASE.map(
+  ([oosCol, exclCol]) => [exclCol, oosCol]
+);
+var EXCLUDED_VLOOKUP_COLUMNS_1BASED = [
+  ...new Set(OOS_TO_EXCLUDED_BASE.map(([, excl]) => excl))
+];
+var EXCEL_EPOCH_UTC = Date.UTC(1899, 11, 30);
+
+// src/pages/personnel/rosterRowFill.ts
+var isRosterStaffLineRow = (row) => [5, 8, 13, 14].some(
+  (columnNumber) => readRosterColumnValue(row, columnNumber).trim()
+);
+var rosterBattalionFromRow = (row) => readRosterColumnValue(row, 1).trim().toLowerCase().replace(/ё/g, "\u0435");
+var fillDownRosterUnitRows = (rows) => {
+  let currentUnit = "";
+  return rows.map((row) => {
+    const battalion = rosterBattalionFromRow(row);
+    if (battalion === "\u0441\u0442\u0430\u0440\u0430") {
+      currentUnit = "";
+      return row;
+    }
+    const unit = readRosterColumnValue(row, 2).trim();
+    if (unit) {
+      currentUnit = unit;
+      return row;
+    }
+    if (!currentUnit || !isRosterStaffLineRow(row)) return row;
+    return { ...row, column_2: currentUnit };
+  });
+};
+
 // src/pages/excel-fill/staffSheet.ts
 var STAFF_SHEET_ROSTER_COLUMNS = [
   1,
@@ -11713,7 +10695,7 @@ var OVERVIEW_PRIMARY_FIGHTER_FIELDS = /* @__PURE__ */ new Set([
   "fighter_status_total_days",
   "fighter_status_value"
 ]);
-var OVERVIEW_PRIORITY_ROSTER_COLUMNS = [31, 32];
+var OVERVIEW_PRIORITY_ROSTER_COLUMNS = [31, 35, 32];
 var duplicateRosterLabels = (() => {
   const counts = /* @__PURE__ */ new Map();
   for (const columnNumber of STAFF_SHEET_EXPORT_COLUMN_NUMBERS) {
@@ -11728,6 +10710,7 @@ var duplicateRosterLabels = (() => {
 var rosterColumnHeader = (columnNumber) => {
   const label = MORNING_GENERAL_LIST_COLUMN_LABELS[columnNumber]?.trim() ?? "";
   if (!label) return `\u041A\u043E\u043B\u043E\u043D\u043A\u0430 ${columnNumber}`;
+  if (columnNumber === 35) return "\u041C\u0456\u0441\u0446\u0435 \u043F\u0435\u0440\u0435\u0431\u0443\u0432\u0430\u043D\u043D\u044F (\u0443\u0442\u043E\u0447\u043D\u0435\u043D\u043D\u044F)";
   if (duplicateRosterLabels.has(label)) {
     return `${label} (\u043A\u043E\u043B. ${columnNumber})`;
   }
@@ -11766,12 +10749,16 @@ var OVERVIEW_STAFF_SHEET_COLUMN_DEFS = [
     fighterKey: field.key
   }))
 ];
-var DEFAULT_OVERVIEW_STAFF_COLUMN_VISIBILITY = Object.fromEntries(
-  OVERVIEW_STAFF_SHEET_COLUMN_DEFS.map((column) => [
-    column.id,
-    column.columnNumber === 31 || column.columnNumber === 32
-  ])
-);
+var DEFAULT_OVERVIEW_STAFF_COLUMN_VISIBILITY = {
+  questionnaire: false,
+  documents: false,
+  ...Object.fromEntries(
+    OVERVIEW_STAFF_SHEET_COLUMN_DEFS.map((column) => [
+      column.id,
+      column.columnNumber === 31 || column.columnNumber === 35 || column.columnNumber === 32
+    ])
+  )
+};
 var staffSheetColumnsCache = /* @__PURE__ */ new WeakMap();
 var buildStaffSheetColumnsRecord = (rosterRow) => {
   if (!rosterRow) return {};
@@ -11792,7 +10779,7 @@ var buildStaffSheetColumnsRecord = (rosterRow) => {
 };
 
 // src/pages/overview/overviewRosterMerge.ts
-var normalizeRosterText2 = normalizeRosterMatchText;
+var normalizeRosterText = normalizeRosterMatchText;
 var applyStaffRosterStatus = (rosterRow, rosterLabels) => {
   const mapped = classifyOverviewStatusFromRoster(
     resolvePersonRosterStatus(rosterRow, rosterLabels)
@@ -11854,9 +10841,11 @@ var rosterRowToOverviewRow = (rosterRow, rosterLabels = {}, options = {}) => {
   const fallbackKey = String(
     rosterRow.__dbRowId || rosterRow.__rowNumber || ""
   ).trim();
-  const rowKey = identityKey || (name ? normalizeRosterText2(name) : "") || fallbackKey;
+  const rowKey = identityKey || (name ? normalizeRosterText(name) : "") || fallbackKey;
   if (!rowKey) return null;
   const staffStatus = applyStaffRosterStatus(rosterRow, rosterLabels);
+  const fighterFields = getRosterFighterStatusOverviewFields(rosterRow);
+  const touchDate = fighterFields.fighterExitDate || fighterFields.fighterReturnDate || fighterFields.fighterEntryDate || "";
   const stableRowId = fallbackKey ? `roster:row:${fallbackKey}` : options.rowIndex != null ? `roster:${rowKey}:i${options.rowIndex}` : `roster:${rowKey}`;
   return {
     id: stableRowId,
@@ -11867,17 +10856,17 @@ var rosterRowToOverviewRow = (rosterRow, rosterLabels = {}, options = {}) => {
     status: staffStatus.staffStatus,
     statusLabel: staffStatus.staffStatusLabel,
     positionTitle: getPersonFullPositionTitle(rosterRow),
-    validFrom: null,
+    validFrom: fighterFields.fighterExitDate || fighterFields.fighterEntryDate || null,
     days: null,
-    plannedReturn: null,
+    plannedReturn: fighterFields.fighterReturnDate || null,
     place: "",
-    updatedAt: "",
+    updatedAt: touchDate,
     inStaff: options.inStaff !== false,
     inNovaStaff: options.inNovaStaff === true,
     battalion: options.battalion,
     fromEjoos: false,
     ...staffStatus,
-    ...getRosterFighterStatusOverviewFields(rosterRow),
+    ...fighterFields,
     staffSheetColumns: buildStaffSheetColumnsRecord(rosterRow)
   };
 };
@@ -11976,14 +10965,14 @@ var mergeRosterRowsIntoOverview = (overview, rosterRows, rosterLabels = {}, colu
     const name = getRosterPersonName(row);
     if (id) rosterById.set(id, row);
     if (name) {
-      const key = normalizeRosterText2(name);
+      const key = normalizeRosterText(name);
       const list = rosterByName.get(key);
       if (list) list.push(row);
       else rosterByName.set(key, [row]);
     }
   });
   const takeRosterByName = (name) => {
-    const list = rosterByName.get(normalizeRosterText2(name));
+    const list = rosterByName.get(normalizeRosterText(name));
     if (!list?.length) return void 0;
     const unused = list.find((row) => !usedRosterRows.has(row));
     return unused ?? list[0];
@@ -12054,22 +11043,44 @@ var mergeRosterRowsIntoOverview = (overview, rosterRows, rosterLabels = {}, colu
   };
 };
 
-// src/pages/overview/overviewMergeCache.ts
-var overviewStamp = (overview) => [
-  overview.importId ?? "no-import",
-  overview.rows.length,
-  ...overview.rows.slice(0, 5).map((row) => String(row.id ?? row.externalId ?? "").trim()).filter(Boolean)
-].join(":");
-var overviewMergeFingerprint = (overview, rosterFingerprint, rosterRows = []) => {
-  const rosterStamp = rosterFingerprint.trim() || `${rosterRows.length}:${String(rosterRows[0]?.__dbRowId ?? "").trim()}`;
-  return `overview-merge:v1:${overviewStamp(overview)}:${rosterStamp}`;
-};
-
 // src/pages/personnel/personPhonesStore.ts
 var PERSON_PHONES_DOCUMENT_TYPE = "personPhones";
 
+// src/pages/personnel/personnelSearch.ts
+var LATIN_TO_CYRILLIC = {
+  A: "\u0410",
+  a: "\u0430",
+  B: "\u0412",
+  b: "\u0432",
+  C: "\u0421",
+  c: "\u0441",
+  E: "\u0415",
+  e: "\u0435",
+  H: "\u041D",
+  h: "\u043D",
+  I: "\u0406",
+  K: "\u041A",
+  k: "\u043A",
+  M: "\u041C",
+  m: "\u043C",
+  O: "\u041E",
+  o: "\u043E",
+  P: "\u0420",
+  p: "\u0440",
+  T: "\u0422",
+  t: "\u0442",
+  X: "\u0425",
+  x: "\u0445",
+  Y: "\u0423",
+  y: "\u0443"
+};
+var normalizeLatinHomoglyphs = (value) => [...value].map((char) => LATIN_TO_CYRILLIC[char] ?? char).join("");
+var normalizePersonSearchKeyboard = (value) => normalizeLatinHomoglyphs(value).replace(/[иіi]/giu, "\u0456");
+
 // src/pages/overview/overviewNameSearch.ts
-var normalizeOverviewName = (value) => normalizeRosterMatchText(value).replace(/[ьъ]/g, "").replace(/ё/g, "\u0435").replace(/[`´]/g, "").replace(/-/g, " ").replace(/\s+/g, " ").trim();
+var normalizeOverviewName = (value) => normalizePersonSearchKeyboard(
+  normalizeRosterMatchText(value).replace(/[ьъ]/g, "").replace(/ё/g, "\u0435").replace(/[`´]/g, "").replace(/-/g, " ").replace(/\s+/g, " ").trim()
+);
 
 // src/pages/overview/overviewPersonnelAssets.ts
 var stripNameNoise = (value) => String(value ?? "").replace(/\d{1,2}[.\/-]\d{1,2}[.\/-]\d{2,4}\s*(?:р\.?\s*н\.?)?/gi, " ").replace(/\([^)]*\)/g, " ");
@@ -12271,6 +11282,1313 @@ var applyPersonnelIdentityAssetsToOverview = (overviewRows, personnelIdentities,
     questionnaireSourceIds,
     documents: documentsOut
   };
+};
+
+// src/pages/personnel/staffSheetArchiveMarker.ts
+var ROSTER_ARCHIVE_FLAG_KEY = "__rosterArchive";
+var ROSTER_ARCHIVE_SOURCE_KEY = "\u0434\u0436\u0435\u0440\u0435\u043B\u043E";
+var ROSTER_ARCHIVE_SOURCE_VALUE = "\u0410\u0440\u0445\u0456\u0432";
+var isPersonnelFromArchive = (row) => {
+  if (!row) return false;
+  if (row[ROSTER_ARCHIVE_FLAG_KEY] === true) return true;
+  if (row[ROSTER_ARCHIVE_FLAG_KEY] === "true") return true;
+  const source = String(
+    row[ROSTER_ARCHIVE_SOURCE_KEY] ?? row[`roster__${ROSTER_ARCHIVE_SOURCE_KEY}`] ?? ""
+  ).trim().toLocaleLowerCase("uk-UA");
+  return source.includes("\u0430\u0440\u0445\u0456\u0432");
+};
+
+// src/pages/anketa-data/staffSheetExportWorkbook.ts
+var STAFF_SHEET_EXPORT_MAX_COLUMN = Math.max(
+  ...STAFF_SHEET_EXPORT_COLUMN_NUMBERS,
+  46
+);
+
+// src/pages/personnel/personAttachments.ts
+var normalizeAttachmentNameKey = (value) => String(value ?? "").replace(/[ʼ’']/g, "").replace(/\([^)]*\)/g, " ").replace(/[.,;:№#"/\\|()[\]{}]+/g, " ").replace(/\s+/g, " ").trim().toLocaleLowerCase("uk-UA");
+var pushLegacyAttachmentLookupIds = (ids, name, birthDate = "", callSign = "", includeLooseKeys = false) => {
+  const nameKey = normalizeAttachmentNameKey(name);
+  if (!nameKey || nameKey === "\u043E\u0441\u043E\u0431\u0430 \u043D\u0435 \u0432\u0438\u0431\u0440\u0430\u043D\u0430") return;
+  const birthKey = normalizePersonBirthKey(birthDate);
+  if (birthKey) ids.add(`name-birth:${nameKey}:${birthKey}`);
+  if (!birthKey || includeLooseKeys) {
+    ids.add(`name:${nameKey}`);
+    const callSignKey = normalizeAttachmentNameKey(callSign);
+    if (callSignKey) {
+      ids.add(`name-call:${nameKey}:${callSignKey}`);
+    }
+  }
+};
+var FILE_NAME_NOISE = /* @__PURE__ */ new Set([
+  "pdf",
+  "\u0430\u043D\u043A\u0435\u0442\u0430",
+  "\u0430\u043D\u043A\u0435\u0442\u0438",
+  "questionnaire",
+  "\u043E\u043F\u0438\u0442\u0443\u0432\u0430\u043B\u044C\u043D\u0438\u043A",
+  "\u0441\u043A\u0430\u043D",
+  "scan"
+]);
+var stripQuestionnaireFileNamePrefixTokens = (tokens) => {
+  let start = 0;
+  while (start < tokens.length) {
+    const token = tokens[start];
+    if (/^\d+$/.test(token) || FILE_NAME_NOISE.has(token)) {
+      start += 1;
+      continue;
+    }
+    break;
+  }
+  return tokens.slice(start);
+};
+var nameTokensOf = (value) => stripQuestionnaireFileNamePrefixTokens(
+  normalizeAttachmentNameKey(String(value ?? "").replace(/\.pdf$/i, "")).split(" ").filter((token) => token.length > 1 && !FILE_NAME_NOISE.has(token))
+);
+var nameTokensMatchFileName = (fullName, fileName) => {
+  const personTokens = nameTokensOf(fullName);
+  const fileTokens = nameTokensOf(fileName);
+  if (personTokens.length < 2 || fileTokens.length < 2) return false;
+  const shared = Math.min(personTokens.length, fileTokens.length);
+  for (let index = 0; index < shared; index += 1) {
+    if (personTokens[index] !== fileTokens[index]) return false;
+  }
+  return true;
+};
+var questionnaireFileMatchesPerson = (fileName, names) => {
+  const normalizedNames = names.map((name) => String(name ?? "").trim()).filter(Boolean);
+  if (!normalizedNames.length) return true;
+  const text = String(fileName ?? "").trim();
+  if (!text || /^questionnaire\.pdf$/i.test(text)) return true;
+  return normalizedNames.some((name) => nameTokensMatchFileName(name, text));
+};
+var collectNameLookupVariants = (name) => {
+  const trimmed = String(name ?? "").trim();
+  const tokens = normalizeAttachmentNameKey(trimmed).split(" ").filter(Boolean);
+  const variants = [];
+  const push = (value) => {
+    const text = value.trim();
+    if (!text || variants.includes(text)) return;
+    variants.push(text);
+  };
+  if (trimmed) push(trimmed);
+  if (tokens.length >= 2) push(tokens.slice(0, 2).join(" "));
+  return variants;
+};
+var pushNameAttachmentLookupIds = (ids, name, birthDate = "", callSign = "", includeLooseKeys = false) => {
+  for (const variant of collectNameLookupVariants(name)) {
+    pushLegacyAttachmentLookupIds(
+      ids,
+      variant,
+      birthDate,
+      callSign,
+      includeLooseKeys
+    );
+    const withBirth = buildPersonIdentityFingerprint(variant, birthDate);
+    if (withBirth) ids.add(withBirth);
+    if (!birthDate || includeLooseKeys) {
+      const withoutBirth = buildPersonIdentityFingerprint(variant);
+      if (withoutBirth) ids.add(withoutBirth);
+      const withCallSign = buildPersonIdentityFingerprint(variant, "", callSign);
+      if (withCallSign) ids.add(withCallSign);
+    }
+  }
+};
+var lookupIdsByRow = /* @__PURE__ */ new WeakMap();
+var hasAttachmentLookupHints = (hints) => Boolean(
+  hints?.anketaExternalId?.trim() || hints?.anketaFullName?.trim() || hints?.anketaBirthDate?.trim()
+);
+var collectPersonAttachmentLookupIds = (row, hints, options) => {
+  const includeLooseKeys = Boolean(options?.includeLooseKeys);
+  if (row && !hasAttachmentLookupHints(hints) && !includeLooseKeys) {
+    const cached = lookupIdsByRow.get(row);
+    if (cached) return cached;
+  }
+  const ids = /* @__PURE__ */ new Set();
+  for (const candidate of collectPersonExternalIdCandidates(row)) {
+    ids.add(candidate);
+  }
+  const push = (value) => {
+    const text = String(value ?? "").trim();
+    if (text && text !== "0") ids.add(text);
+  };
+  push(hints?.anketaExternalId);
+  const personnelName2 = getPersonDisplayName(row);
+  const anketaName = String(hints?.anketaFullName ?? "").trim();
+  const personnelBirth2 = resolvePersonBirthDate(row);
+  const anketaBirth = String(hints?.anketaBirthDate ?? "").trim();
+  const callSign = resolvePersonCallSign(row);
+  for (const name of [personnelName2, anketaName]) {
+    if (!name) continue;
+    const birth = name === personnelName2 ? personnelBirth2 : anketaBirth;
+    const variantCallSign = name === personnelName2 ? callSign : "";
+    pushNameAttachmentLookupIds(
+      ids,
+      name,
+      birth,
+      variantCallSign,
+      includeLooseKeys
+    );
+    if (includeLooseKeys) {
+      const nameKey = normalizeAttachmentNameKey(name);
+      if (nameKey) {
+        ids.add(`roster:${nameKey}`);
+        ids.add(`roster:${name.trim()}`);
+      }
+    }
+  }
+  const primary = resolvePersonIdentityKey(row);
+  if (primary) ids.add(primary);
+  const collected = [...ids];
+  if (row && !hasAttachmentLookupHints(hints) && !includeLooseKeys) {
+    lookupIdsByRow.set(row, collected);
+  }
+  return collected;
+};
+var parseOrphanAttachmentIdentityId = (id) => {
+  const raw = String(id ?? "").trim();
+  if (!raw) return null;
+  const takeNameBirth = (body) => {
+    const birthMatch = body.match(/:(\d{4}-\d{2}-\d{2})$/);
+    if (birthMatch) {
+      const nameKey2 = body.slice(0, -birthMatch[0].length).trim();
+      return nameKey2 ? { nameKey: nameKey2, birthKey: birthMatch[1] } : null;
+    }
+    const callIdx = body.lastIndexOf(":c:");
+    if (callIdx > 0) {
+      const nameKey2 = body.slice(0, callIdx).trim();
+      const callKey = body.slice(callIdx + 3).trim();
+      return nameKey2 ? { nameKey: nameKey2, callKey } : null;
+    }
+    const nameKey = body.trim();
+    return nameKey ? { nameKey } : null;
+  };
+  if (raw.startsWith("p:")) return takeNameBirth(raw.slice(2));
+  if (raw.startsWith("name-birth:")) return takeNameBirth(raw.slice("name-birth:".length));
+  if (raw.startsWith("name-call:")) {
+    const body = raw.slice("name-call:".length);
+    const sep = body.lastIndexOf(":");
+    if (sep <= 0) return null;
+    const nameKey = body.slice(0, sep).trim();
+    const callKey = body.slice(sep + 1).trim();
+    return nameKey ? { nameKey, callKey } : null;
+  }
+  if (raw.startsWith("name:")) {
+    const nameKey = raw.slice(5).trim();
+    return nameKey ? { nameKey } : null;
+  }
+  if (raw.startsWith("roster:")) {
+    const rest = raw.slice("roster:".length).trim();
+    if (!rest) return null;
+    if (/^[a-z0-9_-]+$/i.test(rest) && !/[а-яіїєґ]/i.test(rest)) return null;
+    const nameKey = normalizeAttachmentNameKey(rest);
+    return nameKey ? { nameKey } : null;
+  }
+  return null;
+};
+var personNameMatchesOrphanNameKey = (personName, orphanNameKey) => {
+  const personKey = normalizeAttachmentNameKey(personName);
+  const orphanKey = normalizeAttachmentNameKey(orphanNameKey);
+  if (!personKey || !orphanKey) return false;
+  if (personKey === orphanKey) return true;
+  const personTokens = personKey.split(" ").filter(Boolean);
+  const orphanTokens = orphanKey.split(" ").filter(Boolean);
+  if (personTokens.length < 2 || orphanTokens.length < 2) return false;
+  const shared = Math.min(personTokens.length, orphanTokens.length);
+  for (let index = 0; index < shared; index += 1) {
+    if (personTokens[index] !== orphanTokens[index]) return false;
+  }
+  return true;
+};
+
+// src/pages/personnel/personnelUtils.ts
+var ROSTER_FIELD_PREFIX = "roster__";
+var isLikelyBirthDateToken = (value) => {
+  const text = String(value ?? "").trim();
+  if (!text) return false;
+  if (/\d{1,2}[.\/-]\d{1,2}[.\/-]\d{2,4}/.test(text)) return true;
+  if (/р\.?\s*н\.?/i.test(text)) return true;
+  if (/^\d{1,2}\s+\S+\s+\d{4}/.test(text)) return true;
+  return false;
+};
+var rosterSourceKey = (key) => key.startsWith(ROSTER_FIELD_PREFIX) ? key.slice(ROSTER_FIELD_PREFIX.length) : key;
+var CUID_VALUE_RE = /^c[a-z0-9]{20,}$/i;
+var UUID_VALUE_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+var isUnstablePersonExternalId = (value) => {
+  const raw = String(value ?? "").trim();
+  if (!raw || raw === "0" || raw === "-" || raw === "null" || raw === "undefined" || raw === "[object Object]") {
+    return true;
+  }
+  if (raw.startsWith("{") || raw.startsWith("[")) return true;
+  if (/^roster:/i.test(raw)) return true;
+  if (CUID_VALUE_RE.test(raw) || UUID_VALUE_RE.test(raw)) return true;
+  if (/^\d{4}-\d{2}-\d{2}/.test(raw)) return true;
+  if (isLikelyBirthDateToken(raw)) return true;
+  return false;
+};
+var isPersonSpreadsheetIdFieldKey = (key) => {
+  if (!key || key.startsWith("__")) return false;
+  const source = rosterSourceKey(key).toLowerCase();
+  if (source.includes("\u0434\u0430\u0442\u0430") || source.includes("\u043D\u0430\u0440\u043E\u0434") || source.includes("\u043D\u0430\u043A\u0430\u0437")) {
+    return false;
+  }
+  if (source === "id" || source === "\u0456\u0434" || source === "externalid" || source === "external_id") {
+    return true;
+  }
+  return source.includes("\u0437\u043E\u0432\u043D\u0456\u0448\u043D") || /(^|_)id$/i.test(source);
+};
+var personSpreadsheetIdKeyRank = (key) => {
+  const rosterPenalty = key.startsWith(ROSTER_FIELD_PREFIX) ? 1 : 0;
+  const source = rosterSourceKey(key).toLowerCase();
+  const exact = source === "id" || source === "\u0456\u0434" || source === "externalid" || source === "external_id";
+  return (exact ? 0 : 2) + rosterPenalty;
+};
+var readPersonIdFieldValue = (value) => {
+  const raw = previewValueToDisplay(value).trim();
+  if (!raw || raw === "[object Object]" || raw === "null" || raw === "undefined") {
+    return "";
+  }
+  if (raw.startsWith("{") || raw.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        const nested = parsed.text ?? parsed.value ?? parsed.id ?? parsed.result;
+        if (nested != null && nested !== "") return String(nested).trim();
+      }
+    } catch {
+      return "";
+    }
+    return "";
+  }
+  return raw;
+};
+var personSpreadsheetIdCache = /* @__PURE__ */ new WeakMap();
+var getPersonExternalId = (row) => {
+  if (!row) return "";
+  const cached = personSpreadsheetIdCache.get(row);
+  if (cached !== void 0) return cached;
+  const keys = Object.keys(row).filter(isPersonSpreadsheetIdFieldKey).sort(
+    (left, right) => personSpreadsheetIdKeyRank(left) - personSpreadsheetIdKeyRank(right)
+  );
+  let resolved = "";
+  for (const key of keys) {
+    const raw = readPersonIdFieldValue(row[key]);
+    if (!raw || isUnstablePersonExternalId(raw)) continue;
+    resolved = raw;
+    break;
+  }
+  personSpreadsheetIdCache.set(row, resolved);
+  return resolved;
+};
+var formatMultilineText = (value) => previewValueToDisplay(value).replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
+var formatExcelDateDisplay = (value) => {
+  if (value == null || value === "") return "";
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return new Intl.DateTimeFormat("uk-UA").format(value);
+  }
+  const text = previewValueToDisplay(value).trim();
+  if (!text) return "";
+  const asNumber = Number(String(text).replace(",", "."));
+  if (Number.isFinite(asNumber) && asNumber > 2e4 && asNumber < 8e4 && !/[./-]/.test(text)) {
+    const date = new Date(Math.round((asNumber - 25569) * 86400 * 1e3));
+    if (!Number.isNaN(date.getTime())) {
+      return new Intl.DateTimeFormat("uk-UA").format(date);
+    }
+  }
+  return text;
+};
+var personFieldKeyCache = /* @__PURE__ */ new WeakMap();
+var resolvePersonFieldKey = (row, keyParts) => {
+  if (!row || keyParts.length === 0) return "";
+  const cacheKey = keyParts.join("\0");
+  let cached = personFieldKeyCache.get(row);
+  if (!cached) {
+    cached = /* @__PURE__ */ new Map();
+    personFieldKeyCache.set(row, cached);
+  }
+  const hit = cached.get(cacheKey);
+  if (hit !== void 0) return hit;
+  const keys = Object.keys(row).filter((key) => !key.startsWith("__"));
+  const parts = keyParts.map((part) => part.toLowerCase());
+  let resolved = "";
+  if (parts.length === 1) {
+    const exact = keys.find((key) => key.toLowerCase() === parts[0]);
+    if (exact) resolved = exact;
+  }
+  if (!resolved) {
+    const joined = parts.join("_");
+    const joinedExact = keys.find((key) => key.toLowerCase() === joined);
+    if (joinedExact) resolved = joinedExact;
+  }
+  if (!resolved) {
+    const matches = keys.filter((key) => {
+      const normalized = key.toLowerCase();
+      if (!parts.includes("\u043F\u043E\u0432\u043D\u0430") && (normalized.includes("\u043F\u043E\u0432\u043D\u0430") || normalized.includes("\u043F\u043E\u0432\u043D_"))) {
+        return false;
+      }
+      return parts.every((part) => normalized.includes(part));
+    });
+    if (matches.length > 0) {
+      resolved = matches.sort((left, right) => {
+        const leftStarts = left.toLowerCase().startsWith(parts[0] ?? "") ? 0 : 1;
+        const rightStarts = right.toLowerCase().startsWith(parts[0] ?? "") ? 0 : 1;
+        if (leftStarts !== rightStarts) return leftStarts - rightStarts;
+        return left.length - right.length;
+      })[0] ?? "";
+    }
+  }
+  cached.set(cacheKey, resolved);
+  return resolved;
+};
+var getPersonFieldValue = (row, keyParts) => {
+  const key = resolvePersonFieldKey(row, keyParts);
+  return key ? previewValueToDisplay(row?.[key]) : "";
+};
+var resolvePersonDisplayNameFromRoster = (row) => {
+  if (!row) return "";
+  const rawDirect = readRosterColumnValue(row, 14).replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim();
+  if (rawDirect) {
+    const formatted = formatPersonDisplayName(rawDirect);
+    if (formatted) return formatted;
+  }
+  for (const [key, value] of Object.entries(row)) {
+    if (!key.startsWith(ROSTER_FIELD_PREFIX)) continue;
+    const bare = key.slice(ROSTER_FIELD_PREFIX.length);
+    if (!/^column_14$/i.test(bare) && bare.toLocaleLowerCase("uk-UA") !== "\u043F\u0456\u0431" && !bare.toLocaleLowerCase("uk-UA").includes("\u043F\u0456\u0431")) {
+      continue;
+    }
+    const text = formatPersonDisplayName(previewValueToDisplay(value));
+    if (text) return text;
+  }
+  return "";
+};
+var getPersonDisplayName = (row) => {
+  const fromRoster = resolvePersonDisplayNameFromRoster(row);
+  const rosterRaw = readRosterColumnValue(row, 14);
+  if (fromRoster && extractBirthDateFromPersonName(rosterRaw || fromRoster)) {
+    return fromRoster;
+  }
+  const fromOos = cleanPersonDisplayName(
+    getPersonFieldValue(row, ["\u043F\u0440\u0456\u0437\u0432\u0438\u0449\u0435"]) || getPersonFieldValue(row, ["\u043F\u0456\u0431"])
+  );
+  if (fromOos && fromOos.length >= 5 && !/^(прізвище|піб|особа|№)\b/i.test(fromOos)) {
+    return fromOos;
+  }
+  return fromRoster || fromOos;
+};
+var isGenericRosterColumnKey = (key) => /^column_\d+(_\d+)?$/i.test(key.trim());
+var MORNING_GENERAL_LIST_COLUMN_LABELS2 = {
+  1: "\u2116",
+  2: "\u041F\u0456\u0434\u0440\u043E\u0437\u0434\u0456\u043B",
+  3: "\u0412\u0437\u0432\u043E\u0434",
+  4: "\u0412\u0456\u0434\u0434\u0456\u043B\u0435\u043D\u043D\u044F",
+  5: "\u041F\u043E\u0441\u0430\u0434\u0430",
+  6: "\u0412\u041E\u0421",
+  7: "\u041F\u043E\u0432\u043D\u0430 \u043F\u043E\u0441\u0430\u0434\u0430",
+  8: "\u0428\u041F\u041A \u0444\u0430\u043A\u0442",
+  9: "\u041A\u0430\u0442\u0435\u0433\u043E\u0440\u0456\u044F \u0441\u043A\u043B\u0430\u0434\u0443",
+  10: "\u0410\u043D\u043A\u0435\u0442\u0430",
+  11: "\u0412\u0456\u0439\u0441\u044C\u043A\u043E\u0432\u0438\u0439 \u043A\u0432\u0438\u0442\u043E\u043A",
+  12: "\u041C\u043E\u0431\u0456\u043B\u0456\u0437\u0430\u0446\u0456\u044F/\u043A\u043E\u043D\u0442\u0440\u0430\u043A\u0442",
+  13: "\u0417\u0432\u0430\u043D\u043D\u044F",
+  14: "\u041F\u0406\u0411",
+  15: "\u041F\u043E\u0437\u0438\u0432\u043D\u0438\u0439",
+  16: "\u0414\u0430\u0442\u0430 \u043D\u0430\u0440\u043E\u0434\u0436\u0435\u043D\u043D\u044F",
+  17: "\u0420\u0456\u043A",
+  18: "\u041F\u043E\u0432\u043D\u0438\u0445 \u0440\u043E\u043A\u0456\u0432",
+  19: "\u0406\u041F\u041D",
+  20: "\u0413\u0440\u0443\u043F\u0430 \u043A\u0440\u043E\u0432\u0456",
+  21: "\u0421\u0442\u0430\u0442\u0443\u0441",
+  22: "\u0422\u0438\u043F \u0412\\\u0421",
+  23: "\u0421\u0442\u0430\u0442\u0443\u0441 \u0411\u0413",
+  24: "\u0411\u0417\u0412\u041F/\u0411\u0420\u0415\u0417",
+  25: "\u041D\u0430\u044F\u0432\u043D\u0456\u0441\u0442\u044C \u0411\u0417\u0412\u041F",
+  26: "\u041A\u0443\u0440\u0441 \u0411\u0417\u0412\u041F",
+  27: "\u0412\u0456\u0434\u0440\u044F\u0434\u0436\u0435\u043D\u043D\u044F (\u0411\u0420\u0415\u0417)",
+  28: "\u041E\u0431\u043C\u0435\u0436\u0435\u043D\u043D\u044F",
+  29: "\u0412 \u044F\u043A\u043E\u043C\u0443 \u043F\u0456\u0434\u0440\u043E\u0437\u0434\u0456\u043B\u0456",
+  31: "\u041C\u0456\u0441\u0446\u0435 \u043F\u0435\u0440\u0435\u0431\u0443\u0432\u0430\u043D\u043D\u044F",
+  32: "\u041F\u0440\u0438\u043C\u0456\u0442\u043A\u0438",
+  33: "\u041D\u0430\u043F\u0440\u044F\u043C\u043E\u043A",
+  34: "\u041F\u0440\u0438\u043C\u0456\u0442\u043A\u0430 3",
+  // Колонки без заголовка в Excel (часто списки / дублікаты значень)
+  37: "\u0421\u0442\u0430\u0442\u0443\u0441",
+  38: "\u0422\u0438\u043F \u0412\\\u0421",
+  39: "\u0411\u0417\u0412\u041F/\u0411\u0420\u0415\u0417",
+  40: "\u041C\u0456\u0441\u0446\u0435 \u043F\u0435\u0440\u0435\u0431\u0443\u0432\u0430\u043D\u043D\u044F",
+  41: "\u041E\u0431\u043C\u0435\u0436\u0435\u043D\u043D\u044F",
+  42: "\u0421\u0442\u0430\u0442\u0443\u0441 \u0411\u0413"
+};
+var parseGenericRosterColumnNumber = (key) => {
+  const match = key.trim().match(/^column_(\d+)(?:_\d+)?$/i);
+  if (!match) return null;
+  const number = Number(match[1]);
+  return Number.isFinite(number) && number > 0 ? number : null;
+};
+var resolveMorningGeneralListColumnLabel2 = (sourceKey, fallback = "") => {
+  const columnNumber = parseGenericRosterColumnNumber(sourceKey);
+  if (columnNumber != null) {
+    const known = MORNING_GENERAL_LIST_COLUMN_LABELS2[columnNumber];
+    if (known) return known;
+    return fallback || `\u041A\u043E\u043B\u043E\u043D\u043A\u0430 ${columnNumber}`;
+  }
+  return fallback;
+};
+var looksLikePositionDateValue = (value) => /^\d{1,2}[./-]\d{1,2}[./-]\d{2,4}(?:\s*р(?:ок(?:у)?)?\.?)?$/iu.test(
+  value.trim()
+);
+var looksLikeNumericPositionValue = (value) => {
+  const text = value.trim();
+  if (!text || looksLikePositionDateValue(text)) return false;
+  return /^\d+(?:[.,]\d+)?$/.test(text);
+};
+var isUnusablePositionTitle = (value) => {
+  const text = value.trim();
+  return !text || looksLikePositionDateValue(text) || looksLikeNumericPositionValue(text);
+};
+var readPersonPlatoonValue = (row) => {
+  const candidates = [
+    getPersonFieldValue(row, ["\u0432\u0437\u0432\u043E\u0434"]).trim(),
+    readRosterColumnValue(row, 3).trim()
+  ];
+  for (const text of candidates) {
+    if (text && !isUnusablePositionTitle(text)) return text;
+  }
+  return "";
+};
+var resolvePositionTitleCandidate = (row, text) => {
+  const trimmed = text.trim();
+  if (!trimmed) return "";
+  if (isUnusablePositionTitle(trimmed)) {
+    return readPersonPlatoonValue(row);
+  }
+  return trimmed;
+};
+var getPersonFullPositionTitle = (row) => {
+  if (!row) return "";
+  const read = (value) => previewValueToDisplay(value).trim();
+  const explicit = resolvePositionTitleCandidate(row, read(row.__zhbdFullPosition));
+  if (explicit) return explicit;
+  const keyNorm = (key) => rosterSourceKey(key).toLocaleLowerCase("uk-UA").replace(/[\s-]+/g, "_");
+  let shortFallback = "";
+  for (const [key, raw] of Object.entries(row)) {
+    if (key.startsWith("__") && key !== "__zhbdFullPosition") continue;
+    const text = read(raw);
+    if (!text) continue;
+    const norm2 = keyNorm(key);
+    if (norm2 === "\u043F\u043E\u0432\u043D\u0430_\u043F\u043E\u0441\u0430\u0434\u0430" || norm2.endsWith("_\u043F\u043E\u0432\u043D\u0430_\u043F\u043E\u0441\u0430\u0434\u0430") || norm2.includes("\u043F\u043E\u0432\u043D\u0430") && norm2.includes("\u043F\u043E\u0441\u0430\u0434\u0430")) {
+      const resolved = resolvePositionTitleCandidate(row, text);
+      if (resolved) return resolved;
+      continue;
+    }
+    if (!shortFallback && (norm2 === "\u043F\u043E\u0441\u0430\u0434\u0430" || norm2.endsWith("_\u043F\u043E\u0441\u0430\u0434\u0430") || /^column_5(_|$)/i.test(rosterSourceKey(key))) && !norm2.includes("\u043F\u043E\u0432\u043D\u0430") && !norm2.includes("\u0456\u043D\u0434\u0435\u043A\u0441") && !norm2.includes("\u043F\u0440\u0438\u0439\u043D\u044F\u0442\u0442\u044F") && !norm2.includes("\u043D\u0430\u043A\u0430\u0437\u0443")) {
+      const resolved = resolvePositionTitleCandidate(row, text);
+      if (resolved) shortFallback = resolved;
+    }
+  }
+  const tail = shortFallback || resolvePositionTitleCandidate(
+    row,
+    getPersonFieldValue(row, ["\u0447\u0438\u043C", "\u0437\u0430\u0439\u043C\u0430\u0454\u0442\u044C\u0441\u044F"]).trim()
+  );
+  return tail || readPersonPlatoonValue(row);
+};
+var RANK_CATEGORY_VALUE_RE = /^(оф|сер[жh]|солд)\.?$/i;
+var RANK_TITLE_VALUE_RE = /(рекрут|рядов|солдат|матрос|сержант|старшина|прапорщик|лейтенант|капітан|майор|підполковник|полковник|генерал)/i;
+var GENERIC_ENLISTED_RANK_RE = /^(солдат|матрос|рекрут)$/i;
+var isPersonnelRankCategoryValue = (value) => RANK_CATEGORY_VALUE_RE.test(
+  value.trim().toLocaleLowerCase("uk-UA").replace(/\s+/g, "")
+);
+var looksLikePersonnelRankTitle = (value) => {
+  const text = value.trim();
+  if (!text || isPersonnelRankCategoryValue(text)) return false;
+  return RANK_TITLE_VALUE_RE.test(text.toLocaleLowerCase("uk-UA"));
+};
+var shouldSkipRankSourceKey = (sourceKey) => {
+  const lower = sourceKey.toLocaleLowerCase("uk-UA");
+  if (lower.includes("fighter_status_")) return true;
+  if (lower.includes("\u043D\u0430\u043A\u0430\u0437")) return true;
+  if (lower.includes("\u0448\u043F\u043A")) return true;
+  if (lower.includes("\u043F\u043E\u0441\u0430")) return true;
+  if (lower.includes("\u043A\u0430\u0442\u0435\u0433\u043E\u0440")) return true;
+  return false;
+};
+var isPreferredRankSourceKey = (sourceKey) => {
+  const lower = sourceKey.toLocaleLowerCase("uk-UA");
+  return lower.includes("\u0437\u0432\u0430\u043D\u043D\u044F") || /^column_13(_|$)/.test(lower) || lower === "m";
+};
+var scorePersonnelRankCandidate = (value, sourceKey, fromRoster) => {
+  if (!looksLikePersonnelRankTitle(value)) return Number.NEGATIVE_INFINITY;
+  const lowerKey = sourceKey.toLocaleLowerCase("uk-UA");
+  const lowerValue = value.trim().toLocaleLowerCase("uk-UA");
+  let score = 10;
+  if (lowerKey.includes("\u0437\u0432\u0430\u043D\u043D\u044F")) score += 25;
+  if (/^column_13(_|$)/.test(lowerKey) || lowerKey === "m") score += 20;
+  if (fromRoster) score += 8;
+  if (/молодший|старший|головний|штаб/.test(lowerValue)) score += 8;
+  if (GENERIC_ENLISTED_RANK_RE.test(lowerValue)) score -= 12;
+  score += Math.min(value.trim().length, 24);
+  return score;
+};
+var pickBestRankCandidate = (row, preferredKeysOnly) => {
+  let best = "";
+  let bestScore = Number.NEGATIVE_INFINITY;
+  for (const [key, raw] of Object.entries(row)) {
+    if (key.startsWith("__")) continue;
+    const sourceKey = rosterSourceKey(key);
+    if (shouldSkipRankSourceKey(sourceKey)) continue;
+    if (preferredKeysOnly && !isPreferredRankSourceKey(sourceKey)) continue;
+    const value = previewValueToDisplay(raw).trim();
+    if (!value) continue;
+    const fromRoster = key.startsWith(ROSTER_FIELD_PREFIX) || isGenericRosterColumnKey(sourceKey);
+    const score = scorePersonnelRankCandidate(value, sourceKey, fromRoster);
+    if (score > bestScore) {
+      bestScore = score;
+      best = value;
+    }
+  }
+  return best;
+};
+var resolvePersonRankTitle = (row) => {
+  if (!row) return "";
+  const preferred = pickBestRankCandidate(row, true);
+  if (preferred) return preferred;
+  const fallbackTitle = pickBestRankCandidate(row, false);
+  if (fallbackTitle) return fallbackTitle;
+  const fallback = previewValueToDisplay(
+    row[resolvePersonFieldKey(row, ["\u0437\u0432\u0430\u043D\u043D\u044F"])]
+  ).trim();
+  if (fallback && !isPersonnelRankCategoryValue(fallback)) return fallback;
+  return "";
+};
+var extractBirthYear = (value) => {
+  const match = value.match(/(\d{1,2})[.\/-](\d{1,2})[.\/-](\d{2,4})/);
+  if (!match) {
+    const yearOnly = value.trim().match(/^(19|20)\d{2}$/);
+    if (yearOnly) return Number(value.trim());
+    return null;
+  }
+  let year = Number(match[3]);
+  if (year < 100) year += year >= 50 ? 1900 : 2e3;
+  return Number.isFinite(year) ? year : null;
+};
+var looksLikePersonBirthDate = (value) => {
+  const text = String(value ?? "").trim();
+  if (!text || !isLikelyBirthDateToken(text)) return false;
+  const year = extractBirthYear(text);
+  if (year == null) return true;
+  return year >= 1955 && year <= 2008;
+};
+var collectRosterFieldEntries = (row) => {
+  if (!row) return [];
+  return Object.entries(row).filter(([key]) => key.startsWith(ROSTER_FIELD_PREFIX)).map(([key, raw]) => ({
+    sourceKey: key.slice(ROSTER_FIELD_PREFIX.length),
+    value: formatExcelDateDisplay(raw).trim()
+  })).filter((entry) => entry.value);
+};
+var pickResolvedPersonBirthDate = (raw) => {
+  const text = formatExcelDateDisplay(raw).trim();
+  if (!text || !looksLikePersonBirthDate(text)) return "";
+  return formatPersonBirthDateDisplay(text);
+};
+var rowHasRosterStaffFields = (row) => Object.keys(row).some((key) => key.startsWith(ROSTER_FIELD_PREFIX));
+var resolveStaffSheetBirthDateColumn = (row) => pickResolvedPersonBirthDate(readRosterColumnValue(row, 16));
+var resolvePersonBirthDate = (row) => {
+  if (!row) return "";
+  const fromStaffColumn = resolveStaffSheetBirthDateColumn(row);
+  if (fromStaffColumn && rowHasRosterStaffFields(row)) {
+    return fromStaffColumn;
+  }
+  const fromOos = pickResolvedPersonBirthDate(
+    getPersonFieldValue(row, ["\u0434\u0430\u0442\u0430_\u043D\u0430\u0440\u043E\u0434\u0436\u0435\u043D\u043D\u044F"])
+  );
+  if (fromOos) return fromOos;
+  const fromId = pickResolvedPersonBirthDate(getPersonFieldValue(row, ["id"]));
+  if (fromId) return fromId;
+  if (fromStaffColumn) return fromStaffColumn;
+  const fromRosterColumn = pickResolvedPersonBirthDate(
+    readRosterColumnValue(row, 16)
+  );
+  if (fromRosterColumn) return fromRosterColumn;
+  const rosterEntries = collectRosterFieldEntries(row);
+  const isBirthDateKey = (sourceKey) => {
+    const lowerKey = sourceKey.toLocaleLowerCase("uk-UA");
+    if (lowerKey.includes("\u043D\u0430\u0440\u043E\u0434")) return true;
+    if (/column_16(_|$)/i.test(sourceKey)) return true;
+    const mapped = resolveMorningGeneralListColumnLabel2(sourceKey)?.toLocaleLowerCase("uk-UA").replace(/_/g, " ");
+    return Boolean(mapped && mapped.includes("\u043D\u0430\u0440\u043E\u0434"));
+  };
+  const isYearKey = (sourceKey) => {
+    const lowerKey = sourceKey.toLocaleLowerCase("uk-UA");
+    if (lowerKey === "\u0440\u0456\u043A" || lowerKey.includes("\u0440\u0456\u043A")) return true;
+    if (/column_17(_|$)/i.test(sourceKey)) return true;
+    const mapped = resolveMorningGeneralListColumnLabel2(sourceKey)?.toLocaleLowerCase("uk-UA").replace(/_/g, " ");
+    return mapped === "\u0440\u0456\u043A" || mapped === "\u0440\u0456\u043A \u043D\u0430\u0440\u043E\u0434\u0436\u0435\u043D\u043D\u044F";
+  };
+  for (const entry of rosterEntries) {
+    if (!isBirthDateKey(entry.sourceKey)) continue;
+    const picked = pickResolvedPersonBirthDate(entry.value);
+    if (picked) return picked;
+  }
+  for (const entry of rosterEntries) {
+    if (!isYearKey(entry.sourceKey)) continue;
+    const picked = pickResolvedPersonBirthDate(entry.value);
+    if (picked) return picked;
+  }
+  for (const entry of rosterEntries) {
+    if (!isGenericRosterColumnKey(entry.sourceKey)) continue;
+    const picked = pickResolvedPersonBirthDate(entry.value);
+    if (picked) return picked;
+  }
+  for (const source of [
+    readRosterColumnValue(row, 14),
+    getPersonFieldValue(row, ["\u043F\u0440\u0456\u0437\u0432\u0438\u0449\u0435"]),
+    getPersonFieldValue(row, ["\u043F\u0456\u0431"])
+  ]) {
+    const picked = pickResolvedPersonBirthDate(source);
+    if (picked) return picked;
+  }
+  return "";
+};
+var inferRosterFieldLabel = (sourceKey, value, rosterLabels) => {
+  const storedLabel = rosterLabels[sourceKey]?.trim() ?? "";
+  if (storedLabel && !isGenericRosterColumnKey(storedLabel)) return storedLabel;
+  const fromMorningMap = resolveMorningGeneralListColumnLabel2(sourceKey);
+  if (fromMorningMap && !isGenericRosterColumnKey(fromMorningMap)) {
+    return fromMorningMap;
+  }
+  const lowerKey = sourceKey.toLocaleLowerCase("uk-UA");
+  if (lowerKey.includes("\u043D\u0430\u0440\u043E\u0434") && lowerKey.includes("\u0434\u0430\u0442\u0430")) {
+    return "\u0414\u0430\u0442\u0430 \u043D\u0430\u0440\u043E\u0434\u0436\u0435\u043D\u043D\u044F";
+  }
+  if (lowerKey.includes("\u043F\u043E\u0437\u0438\u0432")) return "\u041F\u043E\u0437\u0438\u0432\u043D\u0438\u0439";
+  const displayed = formatExcelDateDisplay(value).trim();
+  if (looksLikePersonBirthDate(displayed)) return "\u0414\u0430\u0442\u0430 \u043D\u0430\u0440\u043E\u0434\u0436\u0435\u043D\u043D\u044F";
+  if (fromMorningMap) return fromMorningMap;
+  return storedLabel || sourceKey;
+};
+var resolvePersonRosterStatus = (row, rosterLabels = {}) => {
+  if (!row) return "";
+  for (const [key, raw] of Object.entries(row)) {
+    if (key.startsWith("__") || key.includes("fighter_status_")) continue;
+    const displayed = previewValueToDisplay(raw).trim();
+    if (!displayed) continue;
+    const sourceKey = rosterSourceKey(key);
+    const label = inferRosterFieldLabel(sourceKey, displayed, rosterLabels).trim().toLocaleLowerCase("uk-UA").replace(/_/g, " ");
+    if (label === "\u0441\u0442\u0430\u0442\u0443\u0441") return displayed;
+  }
+  for (const columnNumber of [21, 37]) {
+    const displayed = previewValueToDisplay(
+      row[`column_${columnNumber}`] ?? row[`${ROSTER_FIELD_PREFIX}column_${columnNumber}`]
+    ).trim();
+    if (displayed) return displayed;
+  }
+  return "";
+};
+var classifyOverviewStatusFromRoster = (status) => {
+  const displayed = String(status ?? "").replace(/\s+/g, " ").trim();
+  const normalized = displayed.replace(/[ʼ’']/g, "").toLocaleLowerCase("uk-UA");
+  if (normalized.includes("\u0432\u0456\u0434\u0440\u044F\u0434")) {
+    return { status: "BUSINESS_TRIP", statusLabel: displayed || "\u0412\u0456\u0434\u0440\u044F\u0434\u0436\u0435\u043D\u043D\u044F" };
+  }
+  if (normalized.includes("\u0432\u0456\u0434\u043F\u0443\u0441\u0442")) {
+    return { status: "LEAVE", statusLabel: displayed || "\u0412\u0456\u0434\u043F\u0443\u0441\u0442\u043A\u0430" };
+  }
+  if (normalized.includes("\u043B\u0456\u043A\u0443") || normalized.includes("\u0448\u043F\u0438\u0442")) {
+    return { status: "MEDICAL", statusLabel: displayed || "\u041B\u0456\u043A\u0443\u0432\u0430\u043D\u043D\u044F" };
+  }
+  if (normalized.includes("\u0441\u0437\u0447") || normalized.includes("\u043D\u0435 \u0432 \u0441\u0442\u0440")) {
+    return { status: "AWOL", statusLabel: displayed || "\u0421\u0417\u0427" };
+  }
+  if (normalized.includes("\u0431\u0435\u0437\u0432") || normalized.includes("\u0437\u043D\u0438\u043A")) {
+    return { status: "MISSING", statusLabel: displayed || "\u0411\u0435\u0437\u0432\u0456\u0441\u0442\u0438" };
+  }
+  if (normalized.includes("\u0437\u0430\u0433\u0438\u0431") || normalized.includes("\u043F\u043E\u043C\u0435\u0440") || /(?:^|\D)200(?:\D|$)/.test(normalized)) {
+    return { status: "DEAD", statusLabel: displayed || "\u0417\u0430\u0433\u0438\u0431\u043B\u0456" };
+  }
+  return { status: "ON_DUTY", statusLabel: displayed || "\u041D\u0430 \u0441\u043B\u0443\u0436\u0431\u0456" };
+};
+var isLikelyCallSignToken = (value) => {
+  const text = String(value ?? "").trim();
+  if (!text || text.length < 2 || text.length > 32) return false;
+  if (isLikelyBirthDateToken(text)) return false;
+  if (/^\d+$/.test(text)) return false;
+  const words = text.split(/\s+/).filter(Boolean);
+  if (words.length > 3) return false;
+  return /[a-zа-яіїєґ]/i.test(text);
+};
+var extractPersonCallSign = (...sources) => {
+  for (const source of sources) {
+    const text = String(source ?? "").trim();
+    if (!text) continue;
+    const labeled = text.match(/позивн\w*\s*[:\-–—]?\s*([^\s,;|/)]+)/i);
+    if (labeled?.[1] && isLikelyCallSignToken(labeled[1])) {
+      return labeled[1].trim();
+    }
+    const parenMatches = [...text.matchAll(/\(([^)]+)\)/g)];
+    for (const match of parenMatches) {
+      const candidate = match[1]?.trim() ?? "";
+      if (isLikelyCallSignToken(candidate)) return candidate;
+    }
+  }
+  return "";
+};
+var collectPersonCallSignFieldValues = (row) => {
+  if (!row) return [];
+  const values = /* @__PURE__ */ new Set();
+  for (const [key, raw] of Object.entries(row)) {
+    if (key.startsWith("__")) continue;
+    if (!key.toLocaleLowerCase("uk-UA").includes("\u043F\u043E\u0437\u0438\u0432")) continue;
+    const displayed = previewValueToDisplay(raw).trim();
+    if (displayed) values.add(displayed);
+  }
+  return [...values];
+};
+var resolveDirectCallSignValue = (value) => {
+  const text = value.trim();
+  if (!text) return "";
+  const extracted = extractPersonCallSign(text);
+  if (extracted) return extracted;
+  return isLikelyCallSignToken(text) ? text : "";
+};
+var resolvePersonCallSign = (row) => {
+  for (const fieldValue of collectPersonCallSignFieldValues(row)) {
+    const resolved = resolveDirectCallSignValue(fieldValue);
+    if (resolved) return resolved;
+  }
+  if (row) {
+    const fromColumn = resolveDirectCallSignValue(
+      previewValueToDisplay(row.column_15).trim() || previewValueToDisplay(row.roster__column_15).trim() || previewValueToDisplay(row["\u041F\u043E\u0437\u0438\u0432\u043D\u0438\u0439"]).trim() || previewValueToDisplay(row["\u043F\u043E\u0437\u0438\u0432\u043D\u0438\u0439"]).trim() || previewValueToDisplay(row["roster__\u041F\u043E\u0437\u0438\u0432\u043D\u0438\u0439"]).trim() || previewValueToDisplay(row["roster__\u043F\u043E\u0437\u0438\u0432\u043D\u0438\u0439"]).trim()
+    );
+    if (fromColumn) return fromColumn;
+  }
+  const additionalInfo = formatMultilineText(
+    getPersonFieldValue(row, ["\u0434\u043E\u0434\u0430\u0442\u043A\u043E\u0432\u0430_\u0456\u043D\u0444\u043E\u0440\u043C\u0430\u0446\u0456\u044F"])
+  );
+  return extractPersonCallSign(
+    getPersonFieldValue(row, ["\u043F\u0440\u0456\u0437\u0432\u0438\u0449\u0435"]),
+    additionalInfo
+  );
+};
+var normalizePersonIdentityText = (value) => previewValueToDisplay(value).replace(/[ʼ’']/g, "").replace(/\([^)]*\)/g, " ").replace(/[.,;:№#"/\\|()[\]{}]+/g, " ").replace(/\s+/g, " ").trim().toLocaleLowerCase("uk-UA");
+var extractBirthDateFromPersonName = (name) => {
+  const text = String(name ?? "");
+  const match = text.match(/(\d{1,2}[.\/-]\d{1,2}[.\/-]\d{2,4})/);
+  if (!match || !looksLikePersonBirthDate(match[1])) return "";
+  return normalizePersonBirthKey(match[1]);
+};
+var normalizePersonBirthKey = (value) => {
+  const text = formatExcelDateDisplay(value).trim();
+  if (!text) return "";
+  const dotted = text.match(/(\d{1,2})[.\/-](\d{1,2})[.\/-](\d{2,4})/);
+  if (dotted) {
+    let year = Number(dotted[3]);
+    if (year < 100) year += year >= 50 ? 1900 : 2e3;
+    const month = String(dotted[2]).padStart(2, "0");
+    const day = String(dotted[1]).padStart(2, "0");
+    if (!Number.isFinite(year)) return "";
+    return `${year}-${month}-${day}`;
+  }
+  const iso = text.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
+  return "";
+};
+var formatPersonBirthDateDisplay = (value) => {
+  const key = normalizePersonBirthKey(value);
+  if (!key) return formatExcelDateDisplay(value).trim();
+  const [year, month, day] = key.split("-");
+  return `${day}.${month}.${year}`;
+};
+var buildPersonIdentityFingerprint = (name, birthDate = "", callSign = "") => {
+  const nameKey = normalizePersonIdentityText(name);
+  if (!nameKey || nameKey === "\u043E\u0441\u043E\u0431\u0430 \u043D\u0435 \u0432\u0438\u0431\u0440\u0430\u043D\u0430") return "";
+  const birthKey = normalizePersonBirthKey(birthDate);
+  if (birthKey) return `p:${nameKey}:${birthKey}`;
+  const callKey = normalizePersonIdentityText(callSign);
+  if (callKey) return `p:${nameKey}:c:${callKey}`;
+  return `p:${nameKey}`;
+};
+var personIdentityKeyCache = /* @__PURE__ */ new WeakMap();
+var resolvePersonIdentityKey = (row) => {
+  if (!row) return "";
+  const cached = personIdentityKeyCache.get(row);
+  if (cached !== void 0) return cached;
+  try {
+    const spreadsheetId = getPersonExternalId(row);
+    if (spreadsheetId) {
+      personIdentityKeyCache.set(row, spreadsheetId);
+      return spreadsheetId;
+    }
+    const name = getPersonDisplayName(row);
+    const result = buildPersonIdentityFingerprint(
+      name,
+      resolvePersonBirthDate(row),
+      resolvePersonCallSign(row)
+    );
+    personIdentityKeyCache.set(row, result);
+    return result;
+  } catch {
+    personIdentityKeyCache.set(row, "");
+    return "";
+  }
+};
+var collectPersonExternalIdCandidates = (row) => {
+  if (!row) return [];
+  const values = /* @__PURE__ */ new Set();
+  const push = (value) => {
+    const text = String(value ?? "").trim();
+    if (text && text !== "0") values.add(text);
+  };
+  for (const key of Object.keys(row)) {
+    if (key === "__dbRowId" || isPersonSpreadsheetIdFieldKey(key)) {
+      push(readPersonIdFieldValue(row[key]));
+    }
+  }
+  push(row.__dbRowId);
+  const name = getPersonFieldValue(row, ["\u043F\u0440\u0456\u0437\u0432\u0438\u0449\u0435"]) || getPersonFieldValue(row, ["\u043F\u0456\u0431"]);
+  const nameKey = normalizePersonIdentityText(name);
+  const spreadsheetId = getPersonExternalId(row);
+  const birthKey = normalizePersonBirthKey(resolvePersonBirthDate(row));
+  const callSignKey = normalizePersonIdentityText(resolvePersonCallSign(row));
+  if (nameKey) {
+    if (birthKey) {
+      push(`name-birth:${nameKey}:${birthKey}`);
+    } else {
+      push(`roster:${nameKey}`);
+      push(`roster:${String(name).trim()}`);
+      push(`name:${nameKey}`);
+      if (callSignKey) push(`name-call:${nameKey}:${callSignKey}`);
+    }
+  }
+  if (callSignKey && !birthKey) push(`call:${callSignKey}`);
+  if (spreadsheetId) push(`roster:${spreadsheetId}`);
+  const identityKey = resolvePersonIdentityKey(row);
+  if (identityKey) push(identityKey);
+  return [...values];
+};
+var PERSONNEL_STATUS_AS_NAME_RE = /(?:^|\s)(?:вибув|відсутн|виключ|перевед|знят|загиб|зникл|тимчасово|розпоряджен|командир(?:а)?\s+в(?:ійськової)?\s*ч(?:астини)?|в\s+розпоряджен)(?:\s|$)/i;
+var cleanPersonDisplayName = (value) => String(value ?? "").replace(/\([^)]*(?:р\.?\s*н\.?|народ)[^)]*\)/gi, " ").replace(/\([^)]*\d{1,2}[.\/-]\d{1,2}[.\/-]\d{2,4}[^)]*\)/g, " ").replace(/\s+/g, " ").trim();
+var formatPersonDisplayName = (value) => {
+  const text = String(value ?? "").replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  if (extractBirthDateFromPersonName(text)) return text;
+  return cleanPersonDisplayName(text);
+};
+var looksLikePersonnelName = (value) => {
+  const text = cleanPersonDisplayName(value);
+  if (!text || text.length < 5) return false;
+  if (text === "\u041E\u0441\u043E\u0431\u0430 \u043D\u0435 \u0432\u0438\u0431\u0440\u0430\u043D\u0430" || text === "-") return false;
+  if (/^\d+([.,]\d+)?$/.test(text)) return false;
+  if (/^(прізвище|піб|особа|№)\b/i.test(text)) return false;
+  if (/^(управління|рота|взвод|батальйон|група|відділення|штаб)\b/i.test(text)) {
+    return false;
+  }
+  if (PERSONNEL_STATUS_AS_NAME_RE.test(text)) return false;
+  const parts = text.split(/\s+/).filter(Boolean);
+  if (parts.length < 2 || parts.length > 8) return false;
+  return parts.every((part) => /^[\p{L}][\p{L}'ʼ’\-]*$/u.test(part));
+};
+var isLikelyPersonnelRow = (row) => {
+  if (!row.__dbRowId) return false;
+  const fromOos = cleanPersonDisplayName(
+    getPersonFieldValue(row, ["\u043F\u0440\u0456\u0437\u0432\u0438\u0449\u0435"]) || getPersonFieldValue(row, ["\u043F\u0456\u0431"])
+  );
+  const fromRoster = resolvePersonDisplayNameFromRoster(row);
+  return looksLikePersonnelName(fromOos) || looksLikePersonnelName(fromRoster);
+};
+var findEjournalPersonnelSheet = (imports) => {
+  for (const item of imports) {
+    const oosSheet = item.sheets.find((sheet) => /2\.\s*оос/i.test(sheet.name)) ?? item.sheets.find((sheet) => /оос/i.test(sheet.name));
+    if (oosSheet) return oosSheet;
+  }
+  return void 0;
+};
+
+// src/pages/personnel/personnelRosterMerge.ts
+var ROSTER_FIELD_PREFIX2 = "roster__";
+var normalizeRosterText2 = normalizeRosterMatchText;
+var withArchiveMarker = (target, rosterRow) => {
+  const orderedTarget = {
+    ...target,
+    __rosterOrder: rosterRow.__rosterOrder ?? rosterRow.__rowNumber ?? Number.MAX_SAFE_INTEGER
+  };
+  if (!isPersonnelFromArchive(rosterRow)) return orderedTarget;
+  return {
+    ...orderedTarget,
+    [ROSTER_ARCHIVE_FLAG_KEY]: true,
+    [ROSTER_ARCHIVE_SOURCE_KEY]: ROSTER_ARCHIVE_SOURCE_VALUE,
+    [`${ROSTER_FIELD_PREFIX2}${ROSTER_ARCHIVE_SOURCE_KEY}`]: ROSTER_ARCHIVE_SOURCE_VALUE
+  };
+};
+var isPersonnelInStaffRoster = (row) => {
+  if (!row) return false;
+  if (isPersonnelFromArchive(row)) return false;
+  if (/^roster:/i.test(String(row.__dbRowId ?? ""))) return true;
+  return Object.keys(row).some((key) => key.startsWith(ROSTER_FIELD_PREFIX2));
+};
+var getRosterValue = (row, keyParts) => {
+  const key = Object.keys(row).find(
+    (item) => keyParts.every((part) => item.toLocaleLowerCase("uk-UA").includes(part))
+  );
+  return key ? valueToDisplay(row[key]).trim() : "";
+};
+var getRosterUnit = (row) => readRosterColumnValue(row, 2).trim();
+var getRosterPersonName = (row) => {
+  const candidates = [
+    getRosterValue(row, ["\u043F\u0456\u0431"]),
+    getRosterValue(row, ["\u043F\u0440\u0456\u0437\u0432\u0438\u0449\u0435"]),
+    readRosterColumnValue(row, 14),
+    readRosterColumnValue(row, 13),
+    String(row.fullName ?? "").trim()
+  ].map((value) => cleanPersonDisplayName(value)).filter(Boolean);
+  return candidates.find((value) => looksLikePersonnelName(value)) || candidates[0] || "";
+};
+var compactRnokpp = (value) => {
+  const digits = String(value ?? "").replace(/\D/g, "");
+  return digits.length >= 8 ? digits : "";
+};
+var getRosterPersonBirthDate = (row) => {
+  const fromColumn = getRosterValue(row, ["\u0434\u0430\u0442\u0430", "\u043D\u0430\u0440\u043E\u0434"]) || readRosterColumnValue(row, 16);
+  if (fromColumn && looksLikePersonBirthDate(fromColumn)) {
+    return normalizePersonBirthKey(fromColumn);
+  }
+  const rawName = getRosterValue(row, ["\u043F\u0456\u0431"]) || getRosterValue(row, ["\u043F\u0440\u0456\u0437\u0432\u0438\u0449\u0435"]) || readRosterColumnValue(row, 14);
+  return extractBirthDateFromPersonName(String(rawName));
+};
+var getRosterPersonRnokpp = (row) => compactRnokpp(
+  getRosterValue(row, ["\u0440\u043D\u043E\u043A\u043F\u043F"]) || getRosterValue(row, ["\u0456\u043F\u043D"]) || readRosterColumnValue(row, 19)
+);
+var pushIndexed = (map, key, row) => {
+  if (!key) return;
+  const list = map.get(key);
+  if (list) list.push(row);
+  else map.set(key, [row]);
+};
+var pickBestRow = (rows, preferredBirth = "") => {
+  if (!rows?.length) return void 0;
+  if (rows.length === 1) return rows[0];
+  if (preferredBirth) {
+    const matching = rows.filter(
+      (row) => getRosterPersonBirthDate(row) === preferredBirth
+    );
+    if (matching.length) return matching[0];
+  }
+  const births = new Set(rows.map((row) => getRosterPersonBirthDate(row)));
+  const rnokpps = new Set(
+    rows.map((row) => getRosterPersonRnokpp(row)).filter(Boolean)
+  );
+  if (births.size <= 1 && rnokpps.size <= 1) return rows[0];
+  return void 0;
+};
+var birthsCompatible = (left, right) => !left || !right || left === right;
+var getRosterAdditions = (rosterRow) => Object.fromEntries(
+  Object.entries(rosterRow).filter(
+    ([key, value]) => !key.startsWith("__") && valueToDisplay(value).trim()
+  ).map(([key, value]) => [`${ROSTER_FIELD_PREFIX2}${key}`, value])
+);
+var stripRosterEnrichment = (row) => Object.fromEntries(
+  Object.entries(row).filter(
+    ([key]) => !key.startsWith(ROSTER_FIELD_PREFIX2) && !key.startsWith("fighter_status_")
+  )
+);
+var buildRosterOnlyPersonnelRow = (rosterRow) => {
+  const name = getRosterPersonName(rosterRow);
+  const identityKey = resolvePersonIdentityKey({
+    ...rosterRow,
+    \u043F\u0440\u0456\u0437\u0432\u0438\u0449\u0435: name,
+    \u041F\u0406\u0411: name
+  });
+  const rowKey = identityKey || normalizeRosterText2(name);
+  const archive = isPersonnelFromArchive(rosterRow);
+  return withArchiveMarker(
+    {
+      __dbRowId: archive ? `roster:archive:${rowKey}` : `roster:${rowKey}`,
+      __rowNumber: rosterRow.__rowNumber,
+      id: identityKey,
+      \u043F\u0440\u0456\u0437\u0432\u0438\u0449\u0435: name,
+      \u041F\u0406\u0411: name,
+      \u0437\u0432\u0430\u043D\u043D\u044F: resolvePersonRankTitle(rosterRow),
+      \u0417\u0432\u0430\u043D\u043D\u044F: resolvePersonRankTitle(rosterRow),
+      \u043F\u043E\u0437\u0438\u0432\u043D\u0438\u0439: getRosterValue(rosterRow, ["\u043F\u043E\u0437\u0438\u0432"]),
+      \u041F\u043E\u0437\u0438\u0432\u043D\u0438\u0439: getRosterValue(rosterRow, ["\u043F\u043E\u0437\u0438\u0432"]),
+      \u0456\u043D\u0434\u0435\u043A\u0441_\u043F\u043E\u0441\u0430\u0434\u0438: getRosterValue(rosterRow, ["\u0456\u043D\u0434\u0435\u043A\u0441", "\u043F\u043E\u0441\u0430\u0434\u0438"]),
+      "\u0406\u043D\u0434\u0435\u043A\u0441 \u043F\u043E\u0441\u0430\u0434\u0438": getRosterValue(rosterRow, ["\u0456\u043D\u0434\u0435\u043A\u0441", "\u043F\u043E\u0441\u0430\u0434\u0438"]),
+      \u043C\u0456\u0441\u0446\u0435_\u0434\u0438\u0441\u043B\u043E\u043A\u0430\u0446\u0456\u0457: getRosterValue(rosterRow, ["\u043F\u0435\u0440\u0435\u0431\u0443\u0432\u0430\u043D\u043D\u044F"]),
+      "\u041C\u0456\u0441\u0446\u0435 \u0434\u0438\u0441\u043B\u043E\u043A\u0430\u0446\u0456\u0457": getRosterValue(rosterRow, ["\u043F\u0435\u0440\u0435\u0431\u0443\u0432\u0430\u043D\u043D\u044F"]),
+      ...getRosterAdditions(rosterRow)
+    },
+    rosterRow
+  );
+};
+var mergeRosterRowsIntoPreview = (preview, rosterRows) => {
+  if (!rosterRows.length) return preview.rows;
+  const rosterById = /* @__PURE__ */ new Map();
+  const rosterByRnokpp = /* @__PURE__ */ new Map();
+  const rosterByNameBirth = /* @__PURE__ */ new Map();
+  const rosterByName = /* @__PURE__ */ new Map();
+  const usedRosterRows = /* @__PURE__ */ new Set();
+  rosterRows.forEach((row) => {
+    const id = getPersonExternalId(row);
+    const name = getRosterPersonName(row);
+    const nameKey = normalizeRosterText2(name);
+    const birth = getRosterPersonBirthDate(row);
+    const rnokpp = getRosterPersonRnokpp(row);
+    if (id) pushIndexed(rosterById, id, row);
+    if (rnokpp) pushIndexed(rosterByRnokpp, rnokpp, row);
+    if (nameKey && birth) pushIndexed(rosterByNameBirth, `${nameKey}|${birth}`, row);
+    if (nameKey) pushIndexed(rosterByName, nameKey, row);
+  });
+  const pickUnusedRosterRow = (rows, preferredBirth = "") => pickBestRow(rows?.filter((row) => !usedRosterRows.has(row)), preferredBirth);
+  const pickRosterForPreviewRow = (base) => {
+    const spreadsheetId = getPersonExternalId(base);
+    const birth = normalizePersonBirthKey(resolvePersonBirthDate(base));
+    const nameKey = normalizeRosterText2(getPersonDisplayName(base));
+    const byId = pickUnusedRosterRow(rosterById.get(spreadsheetId), birth);
+    if (byId) return byId;
+    const rnokpp = compactRnokpp(
+      getPersonFieldValue(base, ["\u0440\u043D\u043E\u043A\u043F\u043F_\u0437\u0430_\u043D\u0430\u044F\u0432\u043D\u043E\u0441\u0442\u0456"]) || getPersonFieldValue(base, ["\u0440\u043D\u043E\u043A\u043F\u043F"])
+    );
+    const byRnokpp = pickUnusedRosterRow(rosterByRnokpp.get(rnokpp), birth);
+    if (byRnokpp) {
+      const rosterNameKey = normalizeRosterText2(getRosterPersonName(byRnokpp));
+      if (!nameKey || !rosterNameKey || nameKey === rosterNameKey) {
+        return byRnokpp;
+      }
+    }
+    if (nameKey && birth) {
+      const byNameBirth = pickUnusedRosterRow(
+        rosterByNameBirth.get(`${nameKey}|${birth}`),
+        birth
+      );
+      if (byNameBirth) return byNameBirth;
+    }
+    const nameHits = rosterByName.get(nameKey) ?? [];
+    const unusedNameHits = nameHits.filter((row) => !usedRosterRows.has(row));
+    const nameMatch = pickBestRow(unusedNameHits, birth);
+    if (nameMatch && unusedNameHits.length === 1 && birthsCompatible(birth, getRosterPersonBirthDate(nameMatch))) {
+      return nameMatch;
+    }
+    return void 0;
+  };
+  const mergedRows = preview.rows.map((row) => {
+    try {
+      const base = stripRosterEnrichment(row);
+      const rosterRow = pickRosterForPreviewRow(base);
+      if (!rosterRow) return base;
+      usedRosterRows.add(rosterRow);
+      return withArchiveMarker(
+        { ...base, ...getRosterAdditions(rosterRow) },
+        rosterRow
+      );
+    } catch {
+      return stripRosterEnrichment(row);
+    }
+  });
+  const usedNameKeys = new Set(
+    [...usedRosterRows].map((row) => normalizeRosterText2(getRosterPersonName(row)))
+  );
+  const usedRnokpp = new Set(
+    [...usedRosterRows].map((row) => getRosterPersonRnokpp(row)).filter(Boolean)
+  );
+  const rosterOnlyIdentityKey = (nameKey, birth, rnokpp) => nameKey && birth ? `${nameKey}|${birth}` : rnokpp ? `${rnokpp}|${nameKey || birth}` : nameKey || birth;
+  const seenExtraKeys = /* @__PURE__ */ new Set();
+  const rosterOnlyRows = rosterRows.filter((row) => !usedRosterRows.has(row)).filter((row) => getRosterPersonName(row)).filter((row) => {
+    const nameKey = normalizeRosterText2(getRosterPersonName(row));
+    const rnokpp = getRosterPersonRnokpp(row);
+    const birth = getRosterPersonBirthDate(row);
+    if (rnokpp && usedRnokpp.has(rnokpp)) {
+      const usedWithRnokpp = [...usedRosterRows].filter(
+        (item) => getRosterPersonRnokpp(item) === rnokpp
+      );
+      const usedNameKeysForRnokpp = usedWithRnokpp.map(
+        (item) => normalizeRosterText2(getRosterPersonName(item))
+      );
+      if (!nameKey || usedNameKeysForRnokpp.some(
+        (usedNameKey) => !usedNameKey || usedNameKey === nameKey
+      )) {
+        return false;
+      }
+    }
+    if (usedNameKeys.has(nameKey)) {
+      const usedWithName = [...usedRosterRows].filter(
+        (item) => normalizeRosterText2(getRosterPersonName(item)) === nameKey
+      );
+      const usedBirths = usedWithName.map(getRosterPersonBirthDate);
+      if (usedBirths.some((item) => birthsCompatible(item, birth))) {
+        return false;
+      }
+    }
+    const extraKey = rosterOnlyIdentityKey(nameKey, birth, rnokpp);
+    if (seenExtraKeys.has(extraKey)) return false;
+    seenExtraKeys.add(extraKey);
+    return true;
+  }).flatMap((row) => {
+    try {
+      return [buildRosterOnlyPersonnelRow(row)];
+    } catch {
+      return [];
+    }
+  });
+  return [...mergedRows, ...rosterOnlyRows];
+};
+var ROSTER_ONLY_SHEET_STUB = {
+  id: "roster-only",
+  batchId: "roster-only",
+  name: "1.\u041E\u0421 \u0417\u0430\u0433\u0430\u043B\u044C\u043D\u0438\u0439 \u0441\u043F\u0438\u0441\u043E\u043A \xB7 \u0428\u0442\u0430\u0442\u043A\u0430",
+  sheetIndex: 0,
+  columnCount: 0,
+  rowCount: 0,
+  createdAt: "",
+  updatedAt: ""
+};
+var buildRosterOnlyPreviewState = (rosterRows, sheet = null) => {
+  if (!rosterRows.length) return null;
+  const rows = mergeRosterRowsIntoPreview({ rows: [] }, rosterRows);
+  if (!rows.length) return null;
+  const activeSheet = sheet ?? {
+    ...ROSTER_ONLY_SHEET_STUB,
+    rowCount: rows.length
+  };
+  return {
+    sheet: activeSheet,
+    columns: [],
+    rows,
+    total: rows.length,
+    offset: 0,
+    limit: rows.length
+  };
+};
+
+// src/data/personnelDatasetCore.ts
+var sheetStamp = (sheet) => sheet ? `${sheet.updatedAt ?? ""}|${sheet.rowCount}|${sheet.columnCount}` : "";
+var buildPersonnelDatasetVersion = (sheet, roster) => ({
+  oosSheetId: sheet?.id ?? "",
+  oosStamp: sheetStamp(sheet),
+  rosterImportId: roster?.importId ?? "",
+  rosterSheetUpdatedAt: roster?.sheet?.updatedAt ?? "",
+  rosterRowCount: roster?.sheet?.rowCount ?? roster?.rows?.length ?? 0
+});
+var DATASET_FINGERPRINT_SEP = "";
+var personnelDatasetFingerprint = (version) => [
+  version.oosSheetId,
+  version.oosStamp,
+  version.rosterImportId,
+  version.rosterSheetUpdatedAt,
+  version.rosterRowCount
+].join(DATASET_FINGERPRINT_SEP);
+var rosterRowsFromPersonnelLatest = (latest) => {
+  if (!latest?.sheet || !Array.isArray(latest.rows)) {
+    return [];
+  }
+  return fillDownRosterUnitRows(
+    latest.rows.map((row, rosterOrder) => ({
+      __dbRowId: row.id,
+      __rowNumber: row.excelRowNumber,
+      __rosterOrder: rosterOrder,
+      ...row.values && typeof row.values === "object" && !Array.isArray(row.values) ? row.values : {}
+    }))
+  );
+};
+var sortPersonnelRowsByRosterOrder = (rows) => rows.map((row, sourceOrder) => ({ row, sourceOrder })).sort((left, right) => {
+  const leftOrder = Number(left.row.__rosterOrder);
+  const rightOrder = Number(right.row.__rosterOrder);
+  const leftInRoster = Number.isFinite(leftOrder);
+  const rightInRoster = Number.isFinite(rightOrder);
+  if (leftInRoster && rightInRoster) {
+    return leftOrder - rightOrder || left.sourceOrder - right.sourceOrder;
+  }
+  if (leftInRoster) return -1;
+  if (rightInRoster) return 1;
+  return left.sourceOrder - right.sourceOrder;
+}).map(({ row }) => row);
+var normalizePersonnelDatasetName = (value) => value.replace(/\(\s*\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\s*р\.?\s*н\.?\s*\)/gi, "").replace(/[ʼ’']/g, "'").replace(/\s+/g, " ").trim().toLocaleLowerCase("uk-UA");
+var personnelDatasetDedupeKey = (row) => {
+  const name = normalizePersonnelDatasetName(getPersonDisplayName(row));
+  const birthDate = normalizePersonBirthKey(resolvePersonBirthDate(row));
+  if (name && birthDate) return `name-birth:${name}|${birthDate}`;
+  const externalId = getPersonExternalId(row).trim();
+  return externalId ? `id:${externalId}` : "";
+};
+var hasDatasetValue = (value) => value != null && String(value).trim() !== "";
+var mergeDuplicatePersonnelRows = (primary, duplicate) => {
+  const merged = { ...primary };
+  Object.entries(duplicate).forEach(([key, value]) => {
+    if (!hasDatasetValue(merged[key]) && hasDatasetValue(value)) {
+      merged[key] = value;
+    }
+  });
+  const primaryOrder = Number(primary.__rosterOrder);
+  const duplicateOrder = Number(duplicate.__rosterOrder);
+  if (Number.isFinite(duplicateOrder) && (!Number.isFinite(primaryOrder) || duplicateOrder < primaryOrder)) {
+    merged.__rosterOrder = duplicateOrder;
+  }
+  return merged;
+};
+var dedupePersonnelDatasetRows = (rows) => {
+  const result = [];
+  const indexByKey = /* @__PURE__ */ new Map();
+  rows.forEach((row) => {
+    const key = personnelDatasetDedupeKey(row);
+    if (!key) {
+      result.push(row);
+      return;
+    }
+    const existingIndex = indexByKey.get(key);
+    if (existingIndex == null) {
+      indexByKey.set(key, result.length);
+      result.push(row);
+      return;
+    }
+    result[existingIndex] = mergeDuplicatePersonnelRows(
+      result[existingIndex],
+      row
+    );
+  });
+  return result;
+};
+var rosterMetadata = (latest) => {
+  const columns = parseDbColumns(latest?.sheet?.columns);
+  return {
+    rosterColumns: columns,
+    rosterLabels: Object.fromEntries(
+      columns.map((column) => [
+        column.key,
+        column.label?.trim() || resolveMorningGeneralListColumnLabel2(column.key) || column.key
+      ])
+    ),
+    rosterUpdatedAt: latest?.sheet?.updatedAt ?? latest?.createdAt ?? null
+  };
+};
+var buildPersonnelDatasetSync = (preview, roster, version) => {
+  const resolvedVersion = version ?? buildPersonnelDatasetVersion(preview?.sheet ?? null, roster);
+  const rosterRows = rosterRowsFromPersonnelLatest(roster);
+  const fallback = buildRosterOnlyPreviewState(rosterRows, roster?.sheet ?? null);
+  const base = preview ?? fallback;
+  const mergedRows = base && rosterRows.length ? mergeRosterRowsIntoPreview(base, rosterRows) : base?.rows ?? [];
+  const rows = dedupePersonnelDatasetRows(
+    sortPersonnelRowsByRosterOrder(mergedRows)
+  );
+  const metadata = rosterMetadata(roster);
+  return {
+    rows,
+    sheet: base?.sheet ?? roster?.sheet ?? null,
+    columns: base?.columns ?? [],
+    total: rows.length,
+    rosterRows,
+    ...metadata,
+    version: resolvedVersion,
+    fingerprint: personnelDatasetFingerprint(resolvedVersion),
+    mergedAt: Date.now(),
+    complete: true
+  };
+};
+
+// src/pages/overview/overviewMergeCache.ts
+var overviewStamp = (overview) => [
+  overview.importId ?? "no-import",
+  overview.rows.length,
+  ...overview.rows.slice(0, 5).map((row) => String(row.id ?? row.externalId ?? "").trim()).filter(Boolean)
+].join(":");
+var overviewMergeFingerprint = (overview, rosterFingerprint, rosterRows = []) => {
+  const rosterStamp = rosterFingerprint.trim() || `${rosterRows.length}:${String(rosterRows[0]?.__dbRowId ?? "").trim()}`;
+  return `overview-merge:v1:${overviewStamp(overview)}:${rosterStamp}`;
 };
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {

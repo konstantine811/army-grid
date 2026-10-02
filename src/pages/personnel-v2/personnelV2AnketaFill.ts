@@ -18,6 +18,7 @@ import {
   extractPhones,
   formatPersonFieldValue,
   formatUaPhoneDisplay,
+  pickPreferredPersonRank,
   resolvePersonFieldKey,
   type PersonFieldDef,
 } from "../personnel/personnelUtils";
@@ -79,10 +80,16 @@ export const loadPersonnelV2AnketaRows = async () => {
 export const indexPersonnelV2AnketaRows = (
   rows: AnketaRow[],
 ): PersonnelV2AnketaIndex => {
+  const counts = new Map<string, number>();
+  for (const row of rows) {
+    const id = text(row.externalId);
+    if (!id) continue;
+    counts.set(id, (counts.get(id) ?? 0) + 1);
+  }
   const byExternalId = new Map<string, AnketaRow>();
   for (const row of rows) {
     const id = text(row.externalId);
-    if (!id || byExternalId.has(id)) continue;
+    if (!id || counts.get(id) !== 1) continue;
     byExternalId.set(id, row);
   }
   return { lookup: buildAnketaRowLookup(rows), byExternalId };
@@ -136,8 +143,13 @@ export const summaryPreferringAnketa = (
     ...summary,
     ...fromAnketa,
     name: summary.name || fromAnketa.name,
+    rank:
+      pickPreferredPersonRank(summary.rank, fromAnketa.rank) ||
+      summary.rank ||
+      fromAnketa.rank,
     callSign: summary.callSign,
     positionTitle: summary.positionTitle,
+    location: fromAnketa.location || summary.location,
     phones: fromAnketa.phones.length ? fromAnketa.phones : summary.phones,
     phonesDisplay: fromAnketa.phones.length
       ? fromAnketa.phonesDisplay

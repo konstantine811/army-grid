@@ -431,6 +431,12 @@ export function OverviewVirtualTable({
         filterVariant: "number-range",
       },
       {
+        accessorKey: "fighterAllDays",
+        header: OVERVIEW_STAFF_COLUMN_HEADERS.fighterAllDays,
+        size: 130,
+        filterVariant: "number-range",
+      },
+      {
         accessorKey: "fighterStatus",
         header: OVERVIEW_STAFF_COLUMN_HEADERS.fighterStatus,
         size: 150,

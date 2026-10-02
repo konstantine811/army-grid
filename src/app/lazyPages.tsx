@@ -13,6 +13,13 @@ export const LazyOverviewPage = lazy(() =>
 ) as LazyExoticComponent<
   (props: { active?: boolean }) => React.ReactElement
 >;
+export const LazyPersonnelV2Page = lazy(() =>
+  import("../pages/personnel-v2/PersonnelV2Page").then((m) => ({
+    default: m.PersonnelV2Page,
+  })),
+) as LazyExoticComponent<
+  (props: { active?: boolean }) => React.ReactElement
+>;
 export const LazyAnalyticsPage = lazy(() =>
   import("../pages/analytics/AnalyticsPage").then((m) => ({
     default: m.AnalyticsPage,

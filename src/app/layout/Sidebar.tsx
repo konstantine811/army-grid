@@ -20,6 +20,11 @@ import { isUserAllowedPage, type AppPage } from "../navigation";
 const navItems: Array<{ label: string; page?: AppPage; icon: ReactNode; adminOnly?: boolean }> = [
   { label: "Огляд", page: "overview", icon: <DashboardOutlinedIcon /> },
   { label: "Особовий склад", page: "personnel", icon: <PersonSearchOutlinedIcon /> },
+  {
+    label: "Особовий склад (новий)",
+    page: "personnelV2",
+    icon: <PersonSearchOutlinedIcon />,
+  },
   { label: "ЕЖООС", page: "ejournal", icon: <TableChartOutlinedIcon /> },
   { label: "Заповнення Excel", page: "excelFill", icon: <SyncAltOutlinedIcon /> },
   {
